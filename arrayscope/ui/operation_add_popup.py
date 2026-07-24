@@ -54,6 +54,10 @@ class OperationAddPopup(EditBubble):
         parent=None,
     ) -> None:
         super().__init__(parent, icon_name=None)
+        # See OperationParamsPopup: a Qt.Popup auto-closes on focus loss, so keep
+        # the object alive on close rather than letting WA_DeleteOnClose delete
+        # it while a caller still references it.
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._entries = tuple(entries)
         self._by_id = {entry.id: entry for entry in self._entries}
         self._fixed_axis = fixed_axis

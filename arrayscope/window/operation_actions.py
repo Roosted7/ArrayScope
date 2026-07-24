@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtGui, QtWidgets
@@ -13,15 +15,20 @@ from arrayscope.io.numpy_save import save_derived_array
 from arrayscope.operations import fft_backend
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import LARGE_MATERIALIZE_BYTES
+from arrayscope.operations.parameter_forms import build_parameter_form
 from arrayscope.operations.recipes import dumps_recipe, load_recipe_steps, save_recipe
 from arrayscope.operations.registry import (
     all_operations,
     get_operation_entry,
     operation_id_for,
+    operation_parameter_value,
 )
 from arrayscope.ui.command_palette import CommandPaletteDialog, PaletteCommand
 from arrayscope.ui.file_dialogs import get_open_file_name, get_save_file_name
-from arrayscope.ui.icons import set_action_icon
+from arrayscope.ui.icons import material_icon, set_action_icon
+from arrayscope.ui.operation_add_popup import OperationAddPopup
+from arrayscope.ui.operation_listing import build_operation_listing
+from arrayscope.ui.operation_params_popup import OperationParamsPopup
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
 
@@ -77,39 +84,35 @@ class OperationActionsMixin:
         if dim >= self.data.ndim:
             return
 
+        # The axis is fixed by the chip, so a parameterized op anchors its
+        # stage-2 popup just above the chip's "+" button (this global point).
+        anchor = widget.mapToGlobal(pos)
         menu = QtWidgets.QMenu(self)
-        profile_action = menu.addAction("Use as profile axis")
-        set_action_icon(profile_action, "show_chart")
-        profile_action.setEnabled(not self.singleton[dim])
-        profile_action.triggered.connect(
-            lambda checked=False, dim=dim: self.set_profile_axis_from_menu(dim)
-        )
-        live_profile_action = menu.addAction("Live profile from this axis")
-        set_action_icon(live_profile_action, "monitor_heart")
-        live_profile_action.setCheckable(True)
-        live_profile_action.setChecked(
-            self.widgets["buttons"]["display"]["live_profile"].isChecked()
-            and dim in getattr(self, "profile_axes", ())
-        )
-        live_profile_action.setEnabled(not self.singleton[dim])
-        live_profile_action.triggered.connect(
-            lambda checked=False, dim=dim: self._set_live_profile_for_axis_from_menu(
-                dim, bool(checked)
-            )
-        )
-        menu.addSeparator()
-        for entry in all_operations():
+        sections = build_operation_listing(all_operations())
+        main_sections = [section for section in sections if not section.is_more]
+        more_sections = [section for section in sections if section.is_more]
+        for section in main_sections:
+            menu.addSection(section.title)
+            self._add_operation_menu_actions(menu, section.entries, dim, anchor)
+        if more_sections:
+            more_menu = menu.addMenu(material_icon("more_horiz"), "More…")
+            for section in more_sections:
+                more_menu.addSection(section.title)
+                self._add_operation_menu_actions(more_menu, section.entries, dim, anchor)
+
+        menu.exec(widget.mapToGlobal(pos))
+
+    def _add_operation_menu_actions(self, menu, entries, dim, anchor):
+        for entry in entries:
             action = menu.addAction(entry.label)
             set_action_icon(action, _operation_icon_name(entry.id))
             action.setData(entry.id)
             action.setEnabled(self._operation_entry_enabled(entry, dim))
             action.triggered.connect(
-                lambda checked=False, operation_id=entry.id, dim=dim: self.request_operation(
-                    operation_id, dim
+                lambda checked=False, operation_id=entry.id, dim=dim, anchor=anchor: (
+                    self.request_operation(operation_id, dim, anchor=anchor)
                 )
             )
-
-        menu.exec(widget.mapToGlobal(pos))
 
     def _enable_live_profile_for_axis(self, dim):
         self.set_profile_axes_exactly((dim,))
@@ -146,16 +149,70 @@ class OperationActionsMixin:
             return self._current_is_complex() and self.data.shape[dim] == 1
         return True
 
+    def _operation_entry_enabled_anywhere(self, entry):
+        """Whether ``entry`` could apply to *some* axis (dock add, no fixed dim)."""
+
+        if entry.id in {"mean", "rss", "sum", "max", "min"} and self.data.ndim <= 1:
+            return False
+        if entry.id == "combine_real_imag":
+            return (not self._current_is_complex()) and 2 in tuple(self.data.shape)
+        if entry.id == "split_complex":
+            return self._current_is_complex() and 1 in tuple(self.data.shape)
+        return True
+
     def _append_operation(self, operation_id, dim=None):
         return self.request_operation(operation_id, dim)
 
-    def request_operation(self, operation_id, dim=None):
+    def request_operation(self, operation_id, dim=None, *, anchor=None):
+        """Add ``operation_id`` on axis ``dim``.
+
+        A parameterless op is committed immediately. A parameterized op opens
+        the (non-modal) parameter popup anchored at ``anchor`` (cursor position
+        by default); its confirm commits the collected values. No nested event
+        loop -- the append happens in the popup's accept callback.
+        """
+
         try:
-            parameters = self._collect_operation_parameters(operation_id, dim)
-            if parameters is None:
-                return
+            entry = get_operation_entry(operation_id)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Operation Error", f"Failed to apply operation:\n{e}"
+            )
+            return None
+        form = build_parameter_form(entry, shape=self.data.shape, axis=dim)
+        if form is None:
+            return self._commit_operation(operation_id, dim)
+
+        popup = OperationParamsPopup(
+            entry,
+            form,
+            lambda values, operation_id=operation_id, dim=dim: self._commit_operation(
+                operation_id, dim, parameters=values
+            ),
+            parent=self,
+        )
+        self._store_operation_popup("_operation_params_popup", popup)
+        popup.open_at(anchor if anchor is not None else QtGui.QCursor.pos())
+        return None
+
+    def _store_operation_popup(self, attr, popup):
+        """Keep one live popup per slot, reaping the prior one.
+
+        The op popups opt out of WA_DeleteOnClose (so an auto-close on focus
+        loss cannot delete an object a caller still references), so retire the
+        previous popup explicitly instead of letting hidden popups pile up.
+        """
+
+        previous = getattr(self, attr, None)
+        if previous is not None:
+            with contextlib.suppress(RuntimeError):
+                previous.deleteLater()
+        setattr(self, attr, popup)
+
+    def _commit_operation(self, operation_id, dim=None, parameters=None):
+        try:
             self.operation_coordinator.append_operation(
-                operation_id, axis=dim, parameters=parameters
+                operation_id, axis=dim, parameters=parameters or {}
             )
             if dim is not None:
                 self._last_operation_axis = int(dim)
@@ -164,68 +221,30 @@ class OperationActionsMixin:
             QtWidgets.QMessageBox.warning(
                 self, "Operation Error", f"Failed to apply operation:\n{e}"
             )
-            return
+            return None
 
         self.render(reason="operation", force_autolevel=True)
         return True
 
-    def _collect_operation_parameters(self, operation_id, dim):
-        if operation_id != "crop":
-            return {}
-
-        axis_size = self.data.shape[dim]
-        return self._crop_parameters_dialog(dim, axis_size)
-
-    def _crop_parameters_dialog(self, dim, axis_size, *, start=0, stop=None):
-        stop = axis_size if stop is None else stop
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Crop Axis")
-        layout = QtWidgets.QVBoxLayout()
-        layout.addWidget(QtWidgets.QLabel(f"dim {dim} [0, {axis_size})"))
-        start_spin = QtWidgets.QSpinBox(minimum=0, maximum=axis_size, value=int(start))
-        stop_spin = QtWidgets.QSpinBox(minimum=0, maximum=axis_size, value=int(stop))
-        preview = QtWidgets.QLabel()
-        form = QtWidgets.QFormLayout()
-        form.addRow("Start", start_spin)
-        form.addRow("Stop", stop_spin)
-        form.addRow("Output length", preview)
-        layout.addLayout(form)
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok
-            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
-        )
-        layout.addWidget(buttons)
-        dialog.setLayout(layout)
-
-        def sync():
-            valid = start_spin.value() <= stop_spin.value()
-            preview.setText(str(max(0, stop_spin.value() - start_spin.value())))
-            buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setEnabled(valid)
-
-        start_spin.valueChanged.connect(lambda _value: sync())
-        stop_spin.valueChanged.connect(lambda _value: sync())
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        sync()
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return None
-        return {"start": start_spin.value(), "stop": stop_spin.value()}
-
-    def open_operation_adder(self, search=False):
+    def open_operation_adder(self, search=False, anchor=None):
         if search:
             return self.open_command_palette()
-        entries = tuple(all_operations())
-        labels = [entry.label for entry in entries]
-        label, ok = QtWidgets.QInputDialog.getItem(
-            self, "Add Operation", "Operation", labels, 0, False
+        popup = OperationAddPopup(
+            tuple(all_operations()),
+            axis_choices=self._axis_choices(),
+            default_axis=self._default_operation_axis(),
+            is_enabled=self._operation_entry_enabled_anywhere,
+            on_accept=lambda op_id, axis, anchor=anchor: self.request_operation(
+                op_id, axis, anchor=anchor
+            ),
+            on_needs_parameters=lambda op_id, axis, anchor=anchor: self.request_operation(
+                op_id, axis, anchor=anchor
+            ),
+            parent=self,
         )
-        if not ok:
-            return None
-        entry = entries[labels.index(label)]
-        axis = self._choose_operation_axis(entry) if entry.requires_axis else None
-        if entry.requires_axis and axis is None:
-            return None
-        return self.request_operation(entry.id, axis)
+        self._store_operation_popup("_operation_add_popup", popup)
+        popup.open_at(anchor if anchor is not None else QtGui.QCursor.pos(), place="below")
+        return None
 
     def open_command_palette(self):
         commands = [
@@ -310,25 +329,6 @@ class OperationActionsMixin:
             self.inspection_dock.set_current_tool(tool)
         self._on_inspection_tool_changed(tool)
         self._show_inspection_dock()
-
-    def _choose_operation_axis(self, entry):
-        choices = self._axis_choices()
-        if not choices:
-            return None
-        default = self._default_operation_axis()
-        labels = [label for label, _axis in choices]
-        default_index = 0
-        if default is not None:
-            for index, (_label, axis) in enumerate(choices):
-                if axis == default:
-                    default_index = index
-                    break
-        label, ok = QtWidgets.QInputDialog.getItem(
-            self, entry.label, "Axis", labels, default_index, False
-        )
-        if not ok:
-            return None
-        return choices[labels.index(label)][1]
 
     def _axis_choices(self):
         choices = []
@@ -523,37 +523,33 @@ class OperationActionsMixin:
             return
         self.render(reason="operation-enabled", force_autolevel=True)
 
-    def edit_operation(self, index):
+    def edit_operation(self, index, anchor=None):
+        """Re-edit any parameterized operation via the shared params popup."""
+
         if index is None or index < 0 or index >= len(self.document.steps):
             return
-        step = self.document.steps[index]
-        operation = step.operation
-        if type(operation).__name__ != "Crop":
+        operation = self.document.steps[index].operation
+        try:
+            operation_id = operation_id_for(operation)
+            entry = get_operation_entry(operation_id)
+        except Exception:
             return
-        axis_size = self.base_data.shape[operation.axis]
-        from arrayscope.ui.bubbles import EditBubble
+        if not entry.parameters:
+            return
+        axis = getattr(operation, "axis", None)
+        form = build_parameter_form(entry, shape=self.base_data.shape, axis=axis)
+        if form is None:
+            return
+        # Seed the form with the operation's current values so the popup opens
+        # showing what is in effect, not the defaults.
+        for name, value in operation_parameter_values(operation, entry).items():
+            if value is not None:
+                form.set_value(name, value)
 
-        bubble = EditBubble(self, icon_name="crop")
-        bubble.content_layout.addWidget(QtWidgets.QLabel("start"))
-        start_spin = QtWidgets.QSpinBox(bubble)
-        start_spin.setRange(0, max(0, axis_size - 1))
-        start_spin.setValue(int(operation.start))
-        bubble.add_widget(start_spin)
-        bubble.content_layout.addWidget(QtWidgets.QLabel("stop"))
-        stop_spin = QtWidgets.QSpinBox(bubble)
-        stop_spin.setRange(1, axis_size)
-        stop_spin.setValue(int(operation.stop if operation.stop is not None else axis_size))
-        bubble.add_widget(stop_spin)
-
-        def _apply():
-            start = int(start_spin.value())
-            stop = int(stop_spin.value())
-            if stop <= start:
-                show_status_message(self, "Crop stop must be greater than start.", timeout=2500)
-                return
+        def _apply(values, index=index, operation_id=operation_id, axis=axis):
             try:
                 self.operation_coordinator.replace_operation(
-                    index, "crop", axis=operation.axis, parameters={"start": start, "stop": stop}
+                    index, operation_id, axis=axis, parameters=values
                 )
                 self._set_document(self.operation_coordinator.document)
             except Exception as e:
@@ -561,8 +557,9 @@ class OperationActionsMixin:
                 return
             self.render(reason="operation-edit", force_autolevel=True)
 
-        bubble.add_confirm(_apply)
-        bubble.open_at(QtGui.QCursor.pos(), focus_widget=start_spin)
+        popup = OperationParamsPopup(entry, form, _apply, parent=self)
+        self._store_operation_popup("_operation_params_popup", popup)
+        popup.open_at(anchor if anchor is not None else QtGui.QCursor.pos())
 
     def change_operation_axis(self, index, axis):
         """Re-target an existing operation onto another dimension."""
@@ -792,6 +789,21 @@ class OperationActionsMixin:
                 self.layout_manager.set_managed_dock_visible(
                     self.profile_dock, True, reason="view-recipe"
                 )
+
+
+def operation_parameter_values(operation, entry) -> dict:
+    """Current parameter values of ``operation`` keyed by declared name.
+
+    Built-in operations store each parameter as an attribute (``Crop.start``);
+    a :class:`~arrayscope.operations.plugins.PluginOperation` keeps them in its
+    opaque ``params`` mapping. Uses the registry's normalizer so the params
+    popup can seed from any op's live values.
+    """
+
+    return {
+        parameter.name: operation_parameter_value(operation, parameter.name)
+        for parameter in entry.parameters
+    }
 
 
 def _operation_icon_name(operation_id):

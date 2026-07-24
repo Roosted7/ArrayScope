@@ -9,7 +9,12 @@ prefer_pyside6()
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from arrayscope.operations.registry import describe_operation, get_operation_entry, operation_id_for
+from arrayscope.operations.registry import (
+    describe_operation,
+    get_operation_entry,
+    operation_id_for,
+    operation_parameter_value,
+)
 from arrayscope.ui.docks.common import StandardDockWidget, add_size_grip, configure_standard_dock
 from arrayscope.ui.icons import material_icon, set_button_icon
 
@@ -27,6 +32,15 @@ def _operation_name(operation) -> str:
     return label
 
 
+def _operation_has_parameters(operation) -> bool:
+    """Whether ``operation`` exposes editable parameters (so it gets a pencil)."""
+    try:
+        entry = get_operation_entry(operation_id_for(operation))
+    except Exception:
+        return False
+    return bool(entry.parameters)
+
+
 def _operation_params_text(operation) -> str:
     """Editable parameters line (the axis already shows in the d-chip)."""
     try:
@@ -34,7 +48,7 @@ def _operation_params_text(operation) -> str:
     except Exception:
         return ""
     return " · ".join(
-        f"{parameter.name}={getattr(operation, parameter.name, '?')}"
+        f"{parameter.name}={operation_parameter_value(operation, parameter.name)}"
         for parameter in entry.parameters
     )
 
@@ -260,9 +274,7 @@ class OperationStackDock(StandardDockWidget):
         self.delete_button.clicked.connect(
             lambda: self._on_delete_selected(self.current_operation_index())
         )
-        self.add_button.clicked.connect(
-            lambda: self._on_add_operation() if self._on_add_operation is not None else None
-        )
+        self.add_button.clicked.connect(self._request_add_operation)
         self.palette_button.clicked.connect(
             lambda: (
                 self._on_add_operation(search=True) if self._on_add_operation is not None else None
@@ -287,6 +299,14 @@ class OperationStackDock(StandardDockWidget):
         )
         configure_standard_dock(self, min_size=(300, 260))
         self._footer_compact = False
+
+    def _request_add_operation(self):
+        """Open the add popup anchored just below the "Add operation" button."""
+
+        if self._on_add_operation is None:
+            return
+        anchor = self.add_button.mapToGlobal(QtCore.QPoint(0, self.add_button.height()))
+        self._on_add_operation(anchor=anchor)
 
     def _sync_footer_compaction(self):
         """Collapse footer button text to icons when the dock gets narrow."""
@@ -450,7 +470,7 @@ class OperationStackDock(StandardDockWidget):
         set_button_icon(edit, "edit", tooltip="Edit operation")
         edit.setFixedSize(24, 24)
         # Only operations with editable parameters get the button at all.
-        edit.setVisible(type(operation).__name__ == "Crop")
+        edit.setVisible(_operation_has_parameters(operation))
         edit.clicked.connect(
             lambda _checked=False, index=index: (
                 self._on_edit_operation(index) if self._on_edit_operation is not None else None
@@ -553,7 +573,7 @@ class OperationStackDock(StandardDockWidget):
         ):
             axis_menu.menuAction().setEnabled(False)
         edit_action = menu.addAction(material_icon("edit"), "Edit parameters…")
-        edit_action.setEnabled(type(operation).__name__ == "Crop")
+        edit_action.setEnabled(_operation_has_parameters(operation))
         menu.addSeparator()
         move_up_action = menu.addAction(material_icon("arrow_upward"), "Move up")
         move_down_action = menu.addAction(material_icon("arrow_downward"), "Move down")

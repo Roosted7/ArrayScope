@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from pyqtgraph.Qt import QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.operations.parameter_forms import ParameterForm
 from arrayscope.operations.registry import OperationEntry
@@ -52,6 +52,13 @@ class OperationParamsPopup(EditBubble):
         parent=None,
     ) -> None:
         super().__init__(parent, icon_name=None)
+        # A Qt.Popup auto-closes on focus loss; with WA_DeleteOnClose that would
+        # delete the C++ object out from under callers still holding a Python
+        # reference (and, headless, it auto-closes the instant it is shown over
+        # an active window). Keep the object alive on close -- the owning window
+        # is the natural parent and reaps it, and callers deleteLater the prior
+        # popup when opening a new one.
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._entry = entry
         self._form = form
         self._on_accept = on_accept
