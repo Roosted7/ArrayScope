@@ -334,9 +334,7 @@ def test_changes_shape_wrapper_is_skipped_with_problem(tmp_path):
 
     assert "user:grow" not in {entry.id for entry in registry.all_operations()}
     problems = library.user_operation_problems()
-    assert any(
-        "shape-changing" in message and "grow.json" in path for path, message in problems
-    )
+    assert any("shape-changing" in message and "grow.json" in path for path, message in problems)
 
 
 def test_import_custom_operation_rejects_changes_shape(tmp_path):

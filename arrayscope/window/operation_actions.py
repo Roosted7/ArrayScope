@@ -121,26 +121,16 @@ class OperationActionsMixin:
         self._show_operation_context_menu(widget.rect().bottomLeft(), widget, dim)
 
     def _operation_entry_enabled(self, entry, dim):
-        if dim >= self.data.ndim:
-            return False
-        if entry.id in {"mean", "rss", "sum", "max", "min"} and self.data.ndim <= 1:
-            return False
-        if entry.id == "combine_real_imag":
-            return (not self._current_is_complex()) and self.data.shape[dim] == 2
-        if entry.id == "split_complex":
-            return self._current_is_complex() and self.data.shape[dim] == 1
-        return True
+        return _operation_enabled_for(
+            entry, self.data.ndim, self._current_is_complex(), self.data.shape, dim
+        )
 
     def _operation_entry_enabled_anywhere(self, entry):
         """Whether ``entry`` could apply to *some* axis (dock add, no fixed dim)."""
 
-        if entry.id in {"mean", "rss", "sum", "max", "min"} and self.data.ndim <= 1:
-            return False
-        if entry.id == "combine_real_imag":
-            return (not self._current_is_complex()) and 2 in tuple(self.data.shape)
-        if entry.id == "split_complex":
-            return self._current_is_complex() and 1 in tuple(self.data.shape)
-        return True
+        return _operation_enabled_for(
+            entry, self.data.ndim, self._current_is_complex(), self.data.shape, None
+        )
 
     def _append_operation(self, operation_id, dim=None):
         return self.request_operation(operation_id, dim)
@@ -771,6 +761,29 @@ class OperationActionsMixin:
                 self.layout_manager.set_managed_dock_visible(
                     self.profile_dock, True, reason="view-recipe"
                 )
+
+
+_REDUCTION_OPERATION_IDS = frozenset({"mean", "rss", "sum", "max", "min"})
+
+
+def _operation_enabled_for(entry, ndim, is_complex, shape, dim) -> bool:
+    """Per-id axis-gating rules shared by the fixed-axis and any-axis checks.
+
+    ``dim`` is the axis the op would target, or ``None`` to ask whether the op
+    could apply on *some* axis (the dock add flow, before an axis is chosen).
+    """
+
+    if dim is not None and dim >= ndim:
+        return False
+    if entry.id in _REDUCTION_OPERATION_IDS and ndim <= 1:
+        return False
+    if entry.id == "combine_real_imag":
+        has_pair_axis = shape[dim] == 2 if dim is not None else 2 in tuple(shape)
+        return (not is_complex) and has_pair_axis
+    if entry.id == "split_complex":
+        has_singleton_axis = shape[dim] == 1 if dim is not None else 1 in tuple(shape)
+        return is_complex and has_singleton_axis
+    return True
 
 
 def operation_parameter_values(operation, entry) -> dict:
