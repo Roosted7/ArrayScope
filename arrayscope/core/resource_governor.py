@@ -130,6 +130,18 @@ _PRESENTATION_UPLOAD_CHANNELS = frozenset(
     }
 )
 
+# Cap on how many recent UI-work observations `diagnostics()` exposes.  The
+# in-memory feedback deque stays 4096 deep for the latency controller and the
+# profiling harness (which reads `_recent_ui_work_observations` directly);
+# this bound only governs serialized diagnostic evidence.
+_DIAGNOSTIC_UI_OBSERVATION_LIMIT = 64
+
+
+def _deque_tail(values: deque, limit: int) -> tuple:
+    if len(values) <= limit:
+        return tuple(values)
+    return tuple(values)[-limit:]
+
 
 @dataclass
 class ResourceGovernor:
@@ -435,7 +447,14 @@ class ResourceGovernor:
                 self._lane_decisions[lane] for lane in ComputeLane if lane in self._lane_decisions
             ),
             feedback_channels=tuple(feedback_channels),
-            recent_ui_work_observations=tuple(self._recent_ui_work_observations),
+            # Diagnostics snapshots serialize this tuple verbatim into JSONL
+            # at 2 Hz; exposing the full 4096-deep feedback deque grew field
+            # snapshot lines from ~1 KB to ~2 MB (2026-07-24).  The feedback
+            # loop keeps the full deque (profile tooling reads it directly);
+            # serialized evidence is bounded to the recent tail.
+            recent_ui_work_observations=tuple(
+                _deque_tail(self._recent_ui_work_observations, _DIAGNOSTIC_UI_OBSERVATION_LIMIT)
+            ),
             recent_over_warning_callbacks=tuple(self._recent_over_warning_callbacks),
             telemetry_source="n/a" if cpu is None else cpu.source,
             system_cpu_percent=None if cpu is None else cpu.system_cpu_percent,
