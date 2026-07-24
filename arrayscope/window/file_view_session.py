@@ -694,24 +694,11 @@ class FileViewSessionMixin:
 
 
 def _file_view_session_config_dir() -> Path:
-    def scoped_for_application(base: Path) -> Path:
-        application_name = str(Qt.QtCore.QCoreApplication.applicationName() or "")
-        if application_name and application_name != "ArrayScope" and base.name != application_name:
-            return base / application_name
-        return base
+    # Behavior-preserving thin wrapper over the shared resolver (extracted so
+    # user-defined operations land in the same scoped config directory).
+    from arrayscope.app.user_dirs import user_config_directory
 
-    try:
-        settings_path = Path(Qt.QtCore.QSettings().fileName())
-        if str(settings_path):
-            return scoped_for_application(settings_path.parent)
-    except Exception:
-        pass
-    location = Qt.QtCore.QStandardPaths.writableLocation(
-        Qt.QtCore.QStandardPaths.StandardLocation.AppConfigLocation
-    )
-    if not location:
-        location = Qt.QtCore.QDir.homePath()
-    return scoped_for_application(Path(location))
+    return user_config_directory()
 
 
 def _normalize_saved_view_range(view_range):

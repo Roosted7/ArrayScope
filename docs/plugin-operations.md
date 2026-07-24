@@ -378,3 +378,120 @@ green.
   calibration semantics and would *change dimensionality*. It is deferred (mirroring the
   sigpy ESPIRiT deferral) rather than forced through the unary pipeline — correctness over
   coverage. The cfl-handoff + subprocess + cancellation mechanism is proven via `bart:fft`.
+
+## User-defined operations (no packaging required)
+
+A plugin op (above) ships in a pip package with an entry point. That is the
+right vehicle for a *distributable* operation, but it is heavy for the common
+case: "I have a one-off Python function on disk and I want to run it as a view
+stage." **User-defined operations** are that lighter path. They live entirely in
+the user's config directory — no `pip install`, no entry point — and are managed
+at runtime through `arrayscope.operations.library`.
+
+### Where they live
+
+User ops are stored next to the user's session config, in the `operations/`
+subdirectory of `arrayscope.app.user_dirs.user_config_directory()` (resolved via
+`arrayscope.operations.library.user_operations_directory()`). Each op is one
+wrapper JSON `<slug>.json`; an *imported* op also has its copied code file
+`<slug>.py` alongside it.
+
+### Wrapper schema
+
+```json
+{
+  "format": "arrayscope-operation",
+  "version": 1,
+  "id": "user:<slug>",
+  "label": "Human label",
+  "description": "One-line summary (from the docstring by default).",
+  "group": "User",
+  "icon": "extension",
+  "runtime": "python",
+  "source": {
+    "mode": "import",
+    "path": "<slug>.py",
+    "callable": "my_function"
+  },
+  "requires_axis": true,
+  "changes_shape": false,
+  "parameters": [
+    {"name": "amount", "label": "Amount", "kind": "int", "default": 1}
+  ]
+}
+```
+
+The id **must** be namespaced `user:<slug>`, so a user op can never shadow a
+built-in (`crop`) or a pack op (`sigpy:soft_thresh`). Everything else is
+auto-filled on import from an `ast` introspection of the target function, so a
+user rarely writes this JSON by hand.
+
+`runtime` values `"shell"`, `"julia"` and `"matlab"` are **reserved**: they are
+parsed (schema future-proofing) but not executed today. A wrapper that declares
+one is skipped with a clear "runtime not yet supported" problem recorded (see
+the no-crash guarantee below); only `"python"` runs.
+
+### Import vs. link
+
+- **import** (`mode: "import"`, the default): the `.py` file is *copied* into the
+  ops directory. The op is self-contained — deleting or editing the original file
+  has no effect. This is the safe default for "capture this function".
+- **link** (`mode: "link"`): the wrapper stores the **absolute** path to the
+  original `.py`, which is imported live. Editing that file is picked up
+  automatically: the import is cached by `(path, mtime)`, so a saved edit (bumped
+  mtime) triggers a fresh import on the next use. This is the "I'm actively
+  iterating on this function" mode.
+
+### The call contract (how your function is invoked)
+
+Your function receives the array as its **first positional argument**. Beyond
+that the library adapts to your signature — introspected from the live function,
+so a link-mode edit that changes the signature is honored:
+
+- `axis` is passed **only if** your function declares an `axis` parameter (or
+  `**kwargs`). A function with an `axis` param sets `requires_axis` on import.
+- each declared parameter is passed **by name**, only if your function accepts
+  that name (or `**kwargs`).
+
+So `f(data)`, `f(data, axis)`, `f(data, **params)` and `f(data, axis, **params)`
+all work without you writing any glue. Parameter `kind` (`int`/`float`) is guessed
+from the annotation, then the default value, falling back to `float`.
+
+A user op is **Tier-1 OPAQUE** (whole-array). It makes no region/windowable
+claim, so it never touches the Tier-2 conformance gate — its output is shape- and
+dtype-preserving by default (declare `changes_shape` if it reduces/reshapes).
+
+### Managing them (the public API the manager UI builds on)
+
+`arrayscope.operations.library` is Qt-free and is the whole surface the operation
+manager UI drives:
+
+- `introspect_python_source(path) -> list[CallableInfo]` — list a file's
+  top-level functions **without importing or executing** it (pure `ast`). It
+  works even on a file that would fail to import (a top-level `raise`, a missing
+  dependency), so the manager can still offer its callables.
+- `import_custom_operation(py_path, callable_name, *, link=False, label=None, …)
+  -> str` — auto-fill the wrapper from introspection, write it (copying the code
+  for import mode), refresh, and return the new `user:<slug>` id.
+- `remove_user_operation(id, *, delete_files=True)`,
+  `update_user_operation(id, **wrapper_fields)`.
+- `refresh_user_operations()` — re-scan the directory and re-register. The app
+  calls this at startup (as it does for the colormap library) so recipes that
+  reference a `user:` op resolve.
+- `grouped_operations(*, include_hidden=False)`, `set_operation_hidden`,
+  `hidden_operations`, `reset_operation`, `apply_library_layout`, `reset_layout`,
+  `effective_common_ids`, `effective_more_groups`, and `add_library_listener` /
+  `remove_library_listener` (listeners are notified on every mutation and
+  self-heal dead Qt listeners).
+
+### The no-crash guarantee
+
+A broken user op **never** breaks startup or any registry enumeration. A wrapper
+with bad JSON, a missing/`syntax-error` code file, a missing callable, or a
+reserved runtime is caught, logged, and **skipped** — the rest of the library
+loads normally. The reason it was skipped is retrievable via
+`user_operation_problems() -> list[(file, message)]`, so the manager UI can show
+the failure instead of the op silently vanishing. Because registry code never
+scans the ops directory itself (the library owns the scan and drives
+`register_user_operation`), one user's broken file can never fail an unrelated
+machine's `all_operations()` or the non-crash smoke harness.

@@ -258,6 +258,55 @@ def register_pack_operation(spec) -> None:
     _PACK_SPECS[operation_id] = spec
 
 
+# User-defined operations (see arrayscope.operations.library).
+#
+# A *user op* is a third registration source parallel to the first-party packs
+# above.  It is authored by the end user (a wrapper JSON + a python file next to
+# their session config), so -- unlike a first-party pack -- registry code never
+# scans disk for them itself: that would let one broken user file fail every
+# ``all_operations()`` enumeration (including the smoke harness) on an unrelated
+# machine.  Instead ``arrayscope.operations.library.refresh_user_operations``
+# owns the disk scan and drives registration here via
+# :func:`register_user_operation`, exactly the way a pack drives
+# :func:`register_pack_operation`.  Ids must live in the ``user:`` namespace, so
+# a user op can never shadow a built-in or a pack op.  Because the specs are the
+# same ``PluginOperationSpec`` objects the packs use, a user op flows through the
+# identical ``PluginOperation`` materialization / recipe round-trip path.
+_USER_SPECS: dict[str, object] = {}
+
+_USER_NAMESPACE_PREFIX = "user:"
+
+
+def register_user_operation(spec) -> None:
+    """Register one user-defined operation spec (``user:`` namespace, no shadow).
+
+    Called by :func:`arrayscope.operations.library.refresh_user_operations`.
+    The id must live in the ``user:`` namespace and must not shadow a built-in
+    -- the same collision safety the pack / entry-point paths enforce.
+    """
+
+    operation_id = spec.id
+    if not operation_id.startswith(_USER_NAMESPACE_PREFIX):
+        raise ValueError(
+            f"user operation id {operation_id!r} must start with {_USER_NAMESPACE_PREFIX!r}"
+        )
+    if operation_id in OPERATION_REGISTRY:
+        raise ValueError(f"user operation id {operation_id!r} shadows a built-in operation")
+    _USER_SPECS[operation_id] = spec
+
+
+def unregister_user_operation(operation_id: str) -> None:
+    """Drop a single user-op registration (used when a wrapper is removed)."""
+
+    _USER_SPECS.pop(operation_id, None)
+
+
+def _reset_user_operations() -> None:
+    """Clear all user-op registration (the library re-drives it on refresh)."""
+
+    _USER_SPECS.clear()
+
+
 def load_operation_packs() -> None:
     """Import first-party packs and let them register (idempotent, lazy).
 
@@ -324,6 +373,7 @@ def all_operations() -> tuple[OperationEntry, ...]:
     return (
         *OPERATION_REGISTRY.values(),
         *(_pack_operation_entry(spec) for spec in _PACK_SPECS.values()),
+        *(_pack_operation_entry(spec) for spec in _USER_SPECS.values()),
     )
 
 
@@ -336,6 +386,10 @@ def get_operation_entry(operation_id: str) -> OperationEntry:
     pack_spec = _PACK_SPECS.get(operation_id)
     if pack_spec is not None:
         return _pack_operation_entry(pack_spec)
+
+    user_spec = _USER_SPECS.get(operation_id)
+    if user_spec is not None:
+        return _pack_operation_entry(user_spec)
 
     from arrayscope.operations import plugins
 
@@ -354,12 +408,12 @@ def create_operation(operation_id: str, axis=None, parameters: Mapping[str, obje
         from arrayscope.operations import plugins
 
         load_operation_packs()
-        pack_spec = _PACK_SPECS.get(operation_id)
-        if pack_spec is not None:
+        spec = _PACK_SPECS.get(operation_id) or _USER_SPECS.get(operation_id)
+        if spec is not None:
             # Prime the plugin spec cache so PluginOperation resolution (create,
             # region-honor adjudication, recipe round-trip) works with no entry
             # point.  Re-primed each call -> robust to ``_reset_plugin_cache``.
-            plugins._SPEC_CACHE[operation_id] = pack_spec
+            plugins._SPEC_CACHE[operation_id] = spec
             return plugins.create_plugin_operation(operation_id, axis=axis, parameters=parameters)
 
         if plugins.is_plugin_operation_id(operation_id):
