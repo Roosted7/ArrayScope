@@ -99,13 +99,52 @@ def make_roll():
 | `build` | `None` | `build(axis, params) -> fn` for parametric ops. |
 | `output_shape` | identity | Adapter `output_shape(shape, axis, params) -> shape`. |
 | `output_dtype` | identity | Adapter `output_dtype(input_dtype) -> dtype`. |
-| `parameters` | `()` | Tuple of `OperationParameter(name, label, kind="int")`. |
+| `parameters` | `()` | Tuple of `OperationParameter` (see below). |
 | `requires_axis` | `False` | Whether the op takes an axis. |
 | `changes_shape` | `False` | Whether output shape differs from input. |
+| `group` | `"Other"` | Taxonomy group for menus/palettes (see `DEFAULT_GROUP_ORDER`). |
+| `description` | `""` | One-line summary shown in tooltips / the operation manager. |
+| `icon` | `"data_array"` | Material icon name the UI renders for this op. |
 
 The shape/dtype adapter must be honest: if `fn` drops a row, `output_shape`
 must return the reduced shape. ArrayScope predicts the derived-view shape from
 the adapter without running `fn`.
+
+### Parameter metadata
+
+`OperationParameter` carries the metadata a UI form renders from and that
+`create_operation` / `create_plugin_operation` coerce against:
+
+| field | default | meaning |
+| --- | --- | --- |
+| `name` | — | Keyword the op's `build`/constructor receives. |
+| `label` | — | Human-readable field label. |
+| `kind` | `"int"` | `"int"` or `"float"`; the value is coerced to it. |
+| `default` | `None` | Seed value. **A missing parameter that declares a default is filled from it**; a missing parameter *without* a default still raises, so recipes/CLI never silently drop a required value. |
+| `minimum` / `maximum` | `None` | Inclusive bounds used to seed and validate the form field. |
+| `step` | `None` | Suggested increment for a spinbox. |
+| `description` | `""` | One-line help text shown beside the field. |
+
+The Qt-free form model (`arrayscope.operations.parameter_forms`) turns an
+`OperationEntry` plus the current array context (shape + axis) into a
+`ParameterForm` of bounded, typed fields with read-only derived info lines
+(e.g. crop's *Output length*) and cross-field interdependence (editing crop
+`start` nudges `stop` to keep `start < stop`). Ops that need context-awareness
+register a small provider keyed by op id; every other parameterized op gets a
+default form derived purely from this metadata. Because the form is headless it
+is unit-tested without a display, and any UI surface renders the same fields
+from the same source of truth.
+
+### Non-crash smoke guarantee
+
+`tests/operations/test_all_operations_smoke.py` iterates **every** operation
+`all_operations()` exposes — built-ins and installed packs — builds each from
+its parameter form, and round-trips it through `output_shape` / `output_dtype`
+/ `capabilities` / `apply` on a real float32 and complex64 array, asserting the
+produced shape and dtype match the predictions. A new op that declares a
+parameter it never handles, whose `apply` crashes, or whose adapter lies about
+the output fails CI here without a hand-written per-op test, and the failure
+message names the offending op id.
 
 ## Recipes round-trip
 
