@@ -431,6 +431,186 @@ def test_montage_prefetch_candidates_bias_ahead_of_scroll_direction():
     assert reverse == (1, 0, 3, 4)
 
 
+def test_predicted_future_tiles_lead_the_scroll_beyond_the_window():
+    """Speculation targets indices about to arrive, not the resident window.
+
+    The montage plan only ever holds the current index window, so warming the
+    next step's incoming tiles requires synthetic tiles for source indices just
+    past the window boundary along the scroll direction. They carry no grid
+    slot (montage_index == -1) because they warm only the window-independent
+    display cache, never the grid-keyed GPU residency.
+    """
+
+    from types import SimpleNamespace
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.window.montage_prefetch import _predicted_future_tiles
+
+    state = ViewState.from_shape((2, 2, 12)).with_montage_axis(
+        2, columns=3, indices=tuple(range(3, 9)), text="3:9"
+    )
+    plan = make_montage_plan(
+        state, axis=2, indices=tuple(range(3, 9)), tile_shape=(2, 2), columns=3
+    )
+    session = SimpleNamespace(plan=plan, montage_axis=2, view_state=state)
+
+    forward = _predicted_future_tiles(session, 1, limit=3)
+    reverse = _predicted_future_tiles(session, -1, limit=3)
+
+    # Forward: the three indices just above the window's max (8) -> 9, 10, 11,
+    # clamped at the axis size (12).
+    assert tuple(t.source_index for t in forward) == (9, 10, 11)
+    # Reverse: the three below the window's min (3) -> 2, 1, 0.
+    assert tuple(t.source_index for t in reverse) == (2, 1, 0)
+    # None of them overlap the resident window, and all are grid-less.
+    assert all(t.montage_index == -1 for t in forward + reverse)
+    assert all(t.source_index not in set(range(3, 9)) for t in forward + reverse)
+    # No direction -> nothing to predict.
+    assert _predicted_future_tiles(session, 0, limit=3) == ()
+
+
+def test_future_index_prefetch_key_matches_the_later_in_window_demand(qtbot):
+    """A prefetched future tile is a byte-identical HIT once it scrolls in.
+
+    Requirement: the speculative store must land under the exact key the real
+    demand later computes. This drives the true store/lookup round-trip through
+    the evaluator so a key-format drift between speculation and demand fails
+    here, where it is cheap to diagnose.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.operations.evaluator import EvaluationResult
+    from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.montage_prefetch import _predicted_future_tiles
+
+    win = ArrayScopeWindow(np.arange(3 * 4 * 12, dtype=np.float32).reshape(3, 4, 12))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.request_operation("reverse", 0)
+        state = win.view_state.with_montage_axis(2, columns=3, indices=tuple(range(6)), text="0:6")
+        win._set_view_state(state)
+        win.render(reason="test-future-key")
+        qtbot.waitUntil(
+            lambda: win.renderer._frame_session is not None,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+        session = win.renderer._frame_session
+
+        future = _predicted_future_tiles(session, 1, limit=1)
+        assert future, "a mid-axis window must have an index ahead of it"
+        tile = future[0]
+        assert tile.source_index == 6  # just past window max (5)
+
+        # Store exactly as the prefetch completion does: a real display image
+        # wrapped in an EvaluationResult, keyed by the future tile.
+        image = np.full(tuple(session.plan.tile_shape), 7.0, dtype=np.float32)
+        from arrayscope.display.slice_engine import make_image_from_slab
+        from arrayscope.operations.slabs import request_for_image
+
+        request = request_for_image(tile.view_state)
+        display_image = make_image_from_slab(image, request, colormap_lut=session.colormap_lut)
+        result = EvaluationResult(
+            value=display_image, eval_ms=0.0, slab_shape=image.shape, slab_nbytes=image.nbytes
+        )
+        win.operation_evaluator.store_montage_tile_result(
+            tile,
+            montage_axis=session.montage_axis,
+            colormap_lut=session.colormap_lut,
+            result=result,
+        )
+
+        # The later demand, when index 6 scrolls into the window, computes its
+        # key from tile_state_for_slice(axis, 6) -- the same value the store
+        # used. It MUST be a hit.
+        demand_state = win.view_state.tile_state_for_slice(2, 6)
+        hit = win.operation_evaluator.cached_montage_tile(
+            demand_state,
+            montage_axis=2,
+            source_index=6,
+            colormap_lut=session.colormap_lut,
+        )
+        assert hit is not None, "prefetched future-index key must match the later demand key"
+    finally:
+        win.close()
+
+
+def test_busy_visible_permits_a_speculative_share_toward_the_prediction(qtbot, monkeypatch):
+    """A busy visible phase no longer starves the speculative lane.
+
+    Red-first: pre-fix, a busy montage returned ``blocked_visible_busy`` and
+    scheduled nothing. The guaranteed share now submits a tiny, direction-led
+    prefetch on the SPECULATIVE_RESIDENCY lane -- strictly below visible work
+    (non-visible lane, so the kernel ready-heap ranks it after every visible
+    task) and carrying a positive expected value so it may run under backlog
+    without the kernel ever preferring it to a visible task.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.core.frame_targets import WorkStart
+    from arrayscope.core.prefetch_policy import SliceScrubMomentum
+    from arrayscope.kernel import Lane as WorkLane
+    from arrayscope.kernel.task import VISIBLE_LANES
+    from arrayscope.window import ArrayScopeWindow, montage_prefetch
+
+    win = ArrayScopeWindow(np.arange(3 * 4 * 16, dtype=np.float32).reshape(3, 4, 16))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        win.request_operation("reverse", 0)
+        state = win.view_state.with_montage_axis(2, columns=3, indices=tuple(range(6)), text="0:6")
+        win._set_view_state(state)
+        win.render(reason="test-busy-share")
+        qtbot.waitUntil(
+            lambda: win.renderer._frame_session is not None,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+        session = win.renderer._frame_session
+
+        # A confident forward scrub.
+        momentum = SliceScrubMomentum()
+        for step, index in enumerate((0, 1, 2, 3)):
+            momentum.observe(index, now=0.1 * step)
+        win.renderer._montage_prefetch_momentum = momentum
+        assert momentum.plan().direction == 1
+
+        captured = {}
+
+        def capture_prefetch(_evaluate, *, on_done, work_item=None, **_kwargs):
+            captured["work_item"] = work_item
+            return WorkStart(True)
+
+        # Force the busy predicate and a resolvable shared stage; leave the
+        # real _predicted_future_tiles / gate logic under test.
+        monkeypatch.setattr(montage_prefetch, "_interaction_active", lambda _owner: False)
+        monkeypatch.setattr(montage_prefetch, "_busy", lambda _owner, _session: True)
+        monkeypatch.setattr(
+            montage_prefetch,
+            "_stage_for_tile",
+            lambda _owner, _session, _tile: (object(), object(), object()),
+        )
+        monkeypatch.setattr(win.operation_evaluator, "cached_montage_tile", lambda *_a, **_k: None)
+        monkeypatch.setattr(win.prefetch_evaluation_controller, "start_prefetch", capture_prefetch)
+
+        decisions = montage_prefetch.schedule_near_viewport_montage_prefetch(win.renderer, session)
+
+        share = [d for d in decisions if d.decision == "scheduled_speculative_share"]
+        assert share, f"busy visible must still grant a speculative share, got {decisions}"
+        # The share targets an index ahead of the window (a future arrival),
+        # not a resident tile.
+        assert all(d.source_index >= 6 for d in share)
+        item = captured["work_item"]
+        assert item.lane == WorkLane.SPECULATIVE_RESIDENCY
+        assert item.lane not in VISIBLE_LANES
+        assert item.expected_value > 0.0
+        # Supersession keyed on the data identity (source index), so distinct
+        # predicted arrivals never collapse into one latest-only survivor.
+        assert item.supersession_key[-1] == share[0].source_index
+    finally:
+        win.close()
+
+
 def test_montage_index_window_observation_reuses_scrub_momentum(monkeypatch):
     from types import SimpleNamespace
 

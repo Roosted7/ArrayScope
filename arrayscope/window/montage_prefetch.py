@@ -13,6 +13,7 @@ from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry
 from arrayscope.display.model.tile_priority import MontageTilePriorityQueue
+from arrayscope.display.montage import MontageTile
 from arrayscope.display.pyramid import (
     LodPageCache,
     LodPagePlan,
@@ -84,11 +85,13 @@ def schedule_near_viewport_montage_prefetch(
                 ),
             ),
         )
-    if _busy(window, session):
-        return _record(
-            window,
-            (MontagePrefetchDecision(None, None, "blocked_visible_busy", "visible work is busy"),),
-        )
+    # Visible work owning the lanes no longer hard-stops speculation.  The
+    # kernel's SPECULATIVE_RESIDENCY lane already ranks strictly below every
+    # visible task and is capped by the optional-work quota, so a small
+    # GUARANTEED share can warm the direction-predicted next indices without
+    # materially delaying visible completions.  Idle keeps its wider batch and
+    # background preview walk; busy takes the narrow, prediction-only share.
+    busy = _busy(window, session)
     if not window._frame_session_is_current(session):
         return _record(window, (MontagePrefetchDecision(None, None, "stale", "session is stale"),))
     if not session.document.enabled_operations:
@@ -103,19 +106,38 @@ def schedule_near_viewport_montage_prefetch(
                 ),
             ),
         )
+    direction = _montage_prefetch_direction(window)
+    speculative_share = False
     preview_walk_only = False
-    if window.win.operation_evaluator._display_cache.bytes_used > int(
+    near_capacity = window.win.operation_evaluator._display_cache.bytes_used > int(
         window.win.operation_evaluator._display_cache.max_bytes * 0.8
-    ):
-        # Background preview walk (ADR 0050): a full display cache used to
-        # stop speculation for the rest of the stack.  When the retained
-        # preview level is active, keep walking never-visited indices in
-        # preview-only mode — evaluate, pin the tiny preview plane, discard
-        # the native result — so every index floors instantly forever while
-        # the display cache stays untouched.
-        if _preview_cache_active(session):
-            preview_walk_only = True
-        else:
+    )
+    if busy:
+        # A busy visible phase only earns speculation when the scrub has a
+        # confident direction — that is the one thing we can predict cheaply,
+        # and it bounds the share to the handful of tiles about to scroll in.
+        if not direction:
+            return _record(
+                window,
+                (
+                    MontagePrefetchDecision(
+                        None, None, "blocked_visible_busy", "visible work is busy"
+                    ),
+                ),
+            )
+        share = _speculative_share_limit(window)
+        if share <= 0:
+            return _record(
+                window,
+                (
+                    MontagePrefetchDecision(
+                        None, None, "blocked_visible_busy", "visible work is busy"
+                    ),
+                ),
+            )
+        if near_capacity:
+            # Warming a speculative tile must never evict a visible-path entry,
+            # so a near-full display cache yields the whole busy share.
             return _record(
                 window,
                 (
@@ -124,8 +146,29 @@ def schedule_near_viewport_montage_prefetch(
                     ),
                 ),
             )
-    if max_tiles is None:
-        max_tiles = _owner_prefetch_batch_limit(window)
+        speculative_share = True
+        max_tiles = share if max_tiles is None else min(int(max_tiles), share)
+    else:
+        if near_capacity:
+            # Background preview walk (ADR 0050): a full display cache used to
+            # stop speculation for the rest of the stack.  When the retained
+            # preview level is active, keep walking never-visited indices in
+            # preview-only mode — evaluate, pin the tiny preview plane, discard
+            # the native result — so every index floors instantly forever while
+            # the display cache stays untouched.
+            if _preview_cache_active(session):
+                preview_walk_only = True
+            else:
+                return _record(
+                    window,
+                    (
+                        MontagePrefetchDecision(
+                            None, None, "blocked_budget", "display cache is near capacity"
+                        ),
+                    ),
+                )
+        if max_tiles is None:
+            max_tiles = _owner_prefetch_batch_limit(window)
     if _owner_memory_pressure_blocks_prefetch(window):
         return _record(
             window,
@@ -136,10 +179,23 @@ def schedule_near_viewport_montage_prefetch(
     scheduled = 0
     shader_display = bool(getattr(session, "shader_display", False))
     canonical_orientation = bool(getattr(session, "canonical_orientation", False))
-    direction = _montage_prefetch_direction(window)
-    candidates = (
-        _candidate_tiles(session, direction=direction) if direction else _candidate_tiles(session)
-    )
+    if preview_walk_only:
+        # The retained-preview walk is defined over the current grid; keep it
+        # on the in-window candidate set it was designed around.
+        candidates = (
+            _candidate_tiles(session, direction=direction)
+            if direction
+            else _candidate_tiles(session)
+        )
+    elif direction:
+        # A directional scrub warms the indices about to arrive, not the tiles
+        # already resident in the current window.  Fall back to the in-window
+        # coverage walk only when the window is already against the axis edge.
+        candidates = _predicted_future_tiles(session, direction, limit=int(max_tiles) + 3)
+        if not candidates:
+            candidates = _candidate_tiles(session, direction=direction)
+    else:
+        candidates = _candidate_tiles(session)
     for tile in candidates:
         if scheduled >= int(max_tiles):
             break
@@ -194,7 +250,9 @@ def schedule_near_viewport_montage_prefetch(
                 )
             )
             continue
-        preview_claim = _claim_walk_preview(session, tile)
+        # Future-window tiles hold no current grid slot, so they never admit a
+        # grid-keyed preview plane; only real in-grid tiles claim preview pages.
+        preview_claim = _claim_walk_preview(session, tile) if int(tile.montage_index) >= 0 else None
 
         def evaluate(tile=tile, stage=stage, preview_claim=preview_claim):
             context = window.win._evaluation_context(ComputeLane.PREFETCH, None)
@@ -325,11 +383,16 @@ def schedule_near_viewport_montage_prefetch(
                 lane=WorkLane.SPECULATIVE_RESIDENCY,
                 frame_target=FrameTarget(
                     semantic_key=tile_key,
-                    viewport_key=("montage-near", int(tile.montage_index)),
+                    # Key by the window-independent data identity (source
+                    # index), not the grid slot: future-window tiles share
+                    # montage_index=-1, and even in-window tiles change slot as
+                    # the window scrolls, so a slot-keyed family would collapse
+                    # distinct speculations into one latest-only survivor.
+                    viewport_key=("montage-near", int(tile.source_index)),
                     presentation_key=("prefetch",),
                     quality="retained",
                 ),
-                supersession_key=("montage-tile-prefetch", session.key, int(tile.montage_index)),
+                supersession_key=("montage-tile-prefetch", session.key, int(tile.source_index)),
                 supersession_value=tile_key,
                 estimated_bytes=estimated_tile_bytes,
                 expected_value=1.0,
@@ -339,11 +402,17 @@ def schedule_near_viewport_montage_prefetch(
         if started.scheduled:
             scheduled += 1
             window.win.operation_evaluator.note_prefetch_scheduled()
+            if preview_walk_only:
+                scheduled_decision = "scheduled_preview_walk"
+            elif speculative_share:
+                scheduled_decision = "scheduled_speculative_share"
+            else:
+                scheduled_decision = "scheduled"
             decisions.append(
                 MontagePrefetchDecision(
                     int(tile.montage_index),
                     int(tile.source_index),
-                    "scheduled_preview_walk" if preview_walk_only else "scheduled",
+                    scheduled_decision,
                     tile_key=tile_key,
                 )
             )
@@ -421,6 +490,61 @@ def _candidate_tiles(session, *, direction: int = 0):
     return tuple(sorted(ordered, key=direction_rank))
 
 
+def _predicted_future_tiles(session, direction: int, *, limit: int) -> tuple:
+    """Synthetic tiles for the source indices about to scroll into the window.
+
+    The montage plan only ever contains the *current* index window, so the
+    standard candidate walk can never warm indices that are about to appear —
+    which is exactly what a directional scrub demands.  A montage tile's
+    display-cache key is a pure function of ``(document, source index as slice,
+    colormap, shader)`` and is independent of the window composition, so a tile
+    evaluated for source ``s`` now is a byte-identical cache HIT once ``s``
+    later enters the window.  These tiles carry ``montage_index=-1`` because
+    they hold no current grid slot: they warm the display cache only, and the
+    grid-specific GPU-residency warm (keyed on the montage index) is skipped.
+    """
+
+    limit = int(limit)
+    axis = getattr(session, "montage_axis", None)
+    if axis is None or not direction or limit <= 0:
+        return ()
+    axis = int(axis)
+    window_sources = tuple(int(tile.source_index) for tile in session.plan.tiles)
+    if not window_sources:
+        return ()
+    in_window = set(window_sources)
+    boundary = max(window_sources) if direction > 0 else min(window_sources)
+    step = 1 if direction > 0 else -1
+    try:
+        axis_size = int(session.view_state.shape[axis])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return ()
+    tile_h, tile_w = (int(value) for value in tuple(session.plan.tile_shape))
+    tiles: list[MontageTile] = []
+    index = boundary + step
+    while len(tiles) < limit and 0 <= index < axis_size:
+        if index not in in_window:
+            try:
+                tile_state = session.view_state.tile_state_for_slice(axis, index)
+            except (ValueError, IndexError):
+                break
+            tiles.append(
+                MontageTile(
+                    montage_index=-1,
+                    source_index=int(index),
+                    row=0,
+                    col=0,
+                    x0=0,
+                    y0=0,
+                    width=tile_w,
+                    height=tile_h,
+                    view_state=tile_state,
+                )
+            )
+        index += step
+    return tuple(tiles)
+
+
 def _montage_prefetch_direction(window) -> int:
     momentum = getattr(window, "_montage_prefetch_momentum", None)
     if momentum is None:
@@ -485,6 +609,27 @@ def _owner_prefetch_batch_limit(window) -> int:
     if profile_name == "conservative":
         return 1
     return 2
+
+
+def _speculative_share_limit(window) -> int:
+    """Tiles the busy-visible guaranteed speculative share may submit at once.
+
+    Deliberately tiny: the kernel already caps concurrent speculative work at
+    the optional-work quota and ranks it below every visible task, so this only
+    bounds how many predicted-ahead tiles one busy invitation seeds.  A single
+    tile per invitation keeps the added visible-latency risk to at most one
+    in-flight prefetch evaluation while a sustained scrub keeps re-inviting.
+    ``conservative`` opts out entirely, restoring the pre-share busy block.
+    """
+
+    governor = getattr(window.win, "resource_governor", None)
+    profile = getattr(governor, "profile", "balanced")
+    profile_name = str(getattr(profile, "value", profile)).lower()
+    if profile_name == "conservative":
+        return 0
+    if profile_name == "aggressive":
+        return 2
+    return 1
 
 
 def _owner_memory_pressure_blocks_prefetch(window) -> bool:
