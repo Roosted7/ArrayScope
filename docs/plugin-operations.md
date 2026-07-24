@@ -206,26 +206,49 @@ is enumerated through `registry.all_operations()` (which the operation dock,
 command palette, and export menu use). `operation_entries()` stays built-ins-only
 for callers that assume concrete dataclass operation types.
 
-### No sigpy pack (FFT is a built-in op + a backend setting)
+### `sigpy_pack` — threshold + centered resize (no FFT)
 
-There is **no sigpy operation pack**. An earlier design shipped `sigpy:fft` /
-`sigpy:ifft` ops; they were removed as redundant. ArrayScope already covers a
-centered FFT two ways that a `sigpy:fft` op only duplicated:
+`arrayscope/operations/packs/sigpy_pack.py` ships the sigpy operations that are
+**additive** over the 13 built-ins. It deliberately ships **no FFT**: an earlier
+design shipped `sigpy:fft` / `sigpy:ifft`, and they were removed as redundant
+(see docs/graveyard.md). ArrayScope already covers a centered FFT two ways a
+`sigpy:fft` op only duplicated — the built-in `centered_fft` / `centered_ifft`
+**operations** (`arrayscope/operations/pipeline.py`, in `OPERATION_REGISTRY`),
+and the **FFT backend** setting (`FFTBackendChoice {AUTO, NUMPY, PYFFTW, SCIPY}`
+in `arrayscope/app/settings_state.py`, resolved in
+`arrayscope/operations/fft_backend.py`) which selects the FFT *implementation*
+underneath those built-in ops. `sigpy.fft` is `numpy.fft` under the hood, so a
+sigpy FFT adds nothing as an op or as a backend, and is **not** added as a fourth
+`FFTBackendChoice`.
 
-- the built-in `centered_fft` / `centered_ifft` **operations**
-  (`arrayscope/operations/pipeline.py`, in `OPERATION_REGISTRY`); and
-- the **FFT backend** setting (`FFTBackendChoice {AUTO, NUMPY, PYFFTW, SCIPY}` in
-  `arrayscope/app/settings_state.py`, resolved in
-  `arrayscope/operations/fft_backend.py`) which selects the FFT *implementation*
-  underneath those built-in ops.
+What the pack does ship:
 
-`sigpy.fft` is `numpy.fft` under the hood, so a sigpy FFT added nothing as an op
-(the built-in already exists) or as a backend (no perf or quality gain over
-NumPy). It is deliberately **not** added as a fourth `FFTBackendChoice`.
+- `sigpy:soft_thresh` — pointwise complex **soft** thresholding (magnitude
+  shrinkage, `sign(x)·max(|x|−λ, 0)`; the L1 proximal operator). The workhorse MRI
+  sparsity/denoising primitive, offered as a view stage.
+- `sigpy:hard_thresh` — pointwise complex **hard** thresholding (keep samples with
+  `|x| > λ`, zero the rest). A sparsifying / support-view companion.
+- `sigpy:resize` — **centered** zero-pad / center-crop of one axis to a target
+  length (`sigpy.resize`): the canonical k-space *zero-fill* interpolation and its
+  inverse center-crop. Additive over the built-in `crop` (which only *shrinks* by
+  an explicit `[start:stop]` window and does not center).
 
-**The genuinely-additive sigpy value is deferred**, because it does not fit the
-`fn(ndarray) -> ndarray` + scalar-parameter plugin contract without engine
-changes:
+Both threshold ops are strictly pointwise, so `fn(whole)[region] ==
+fn(whole[region])` on every axis. They therefore declare **Tier-2
+`region_capable=True`** — and are the first pack ops whose windowable claim the
+conformance harness actually *honors* (the BART ops are all OPAQUE). `sigpy:resize`
+is shape-changing and re-indexes the whole axis, so it is **Tier-1 OPAQUE**.
+
+Numeric precision: sigpy's `soft_thresh` / `hard_thresh` always return
+`complex128`. The ops **narrow the result back** to the input dtype (complex stays
+complex by width, real floats keep their width, other real inputs → `float32`), so
+they respect the repo's float32 discipline; the narrowing cast is pointwise and
+does not disturb the windowable property. The `λ` threshold is a `float`
+parameter, which is why a `"float"` parameter kind sits beside `"int"` in the
+`create_operation` / `create_plugin_operation` paths.
+
+**Still deferred** (they do not fit the `fn(ndarray) -> ndarray` +
+scalar-parameter unary contract without engine changes):
 
 - `sigpy.nufft` / `sigpy.nufft_adjoint(input, coord, ...)` — needs a k-space
   *coordinate array* as a second argument; the plugin parameter model carries
@@ -234,11 +257,11 @@ changes:
   semantics and a compute device, and it *changes dimensionality* (produces
   sensitivity maps) in a way the scalar-param shape adapter cannot predict; it is
   an iterative app object, not a pure `fn(ndarray) -> ndarray`.
-
-If a multi-input op contract lands, a sigpy pack for nufft/espirit becomes worth
-adding; until then sigpy contributes nothing over the built-in FFT, so no sigpy
-pack module ships. The pack **registry** infra (`register_pack_operation`,
-`load_operation_packs`, `_PACK_MODULES`) stays — the BART pack below uses it.
+- `sigpy.fwt` / `sigpy.iwt` (wavelet transform pair) — a natural reversible view
+  stage, but `iwt` needs the *original* `oshape` **and** the `coeff_slices`
+  structure `fwt` produced to invert. The scalar-parameter model cannot carry that
+  structural metadata between two independent unary steps, so the forward/inverse
+  pair cannot be expressed honestly. Deferred for the same reason as nufft/espirit.
 
 ### `bart_pack` — out-of-process BART ops (subprocess + cfl handoff)
 

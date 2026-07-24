@@ -102,15 +102,37 @@ blocks graduated during cleanups are preserved after it.
   16 tests run against the live bart binary. bart installed at `~/projects/bart/`
   (MKL from the conda pkgs cache).
 
-- 2026-07-22 — **Plugin ops v2 — sigpy pack (queue step 9):** `sigpy:fft`/`ifft`
-  as an optional in-process pack (lazy via `find_spec`, contributes nothing when
-  sigpy is absent), honestly OPAQUE/Tier-1 (a centered FFT is not windowable, so
-  it does not claim `region_capable` — a mis-declared one is downgraded, red-first
-  tested). Added the first-party pack-registry seam (`register_pack_operation` /
-  `load_operation_packs` / `_PACK_MODULES`) reused by the BART pack; dock/palette/
-  export now enumerate via `all_operations()`. `nufft`/`espirit` deferred
-  (coordinate/calibration args + dim changes don't fit unary `fn`). Evidence:
-  `2e4c7202`; 320 operations+import-health passed. sigpy installed this session.
+- 2026-07-22 — **Plugin ops v2 — sigpy pack (queue step 9):** first shipped as
+  `sigpy:fft`/`ifft` (`2e4c7202`), then **removed the same day** (`3d38bce7`) as
+  redundant — ArrayScope already has the built-in `centered_fft`/`centered_ifft`
+  ops *and* a pluggable FFT backend, and `sigpy.fft` is `numpy.fft` underneath, so
+  the sigpy FFT added nothing (see docs/graveyard.md). What **did** durably land
+  from this step is the first-party pack-registry seam (`register_pack_operation` /
+  `load_operation_packs` / `_PACK_MODULES`), reused by the BART pack; dock/palette/
+  export enumerate via `all_operations()`. **Superseded 2026-07-24** by the sigpy
+  *threshold + resize* pack (`0a09d83e`) — see the entry below — which ships the
+  genuinely-additive sigpy ops (`sigpy:soft_thresh`/`hard_thresh` as verified
+  Tier-2 windowable, `sigpy:resize` as OPAQUE k-space zero-fill) instead of the FFT.
+
+- 2026-07-24 — **Plugin ops v2 — sigpy threshold + resize pack (supersedes the
+  removed fft pack):** reinstated an optional in-process sigpy pack
+  (`arrayscope/operations/packs/sigpy_pack.py`) with the ops sigpy does that the
+  13 built-ins do not — deliberately **no FFT**. `sigpy:soft_thresh` /
+  `sigpy:hard_thresh` are strictly pointwise complex thresholds (MRI
+  sparsity/denoise views), declared **Tier-2 `region_capable=True`** and *honored*
+  by the conformance harness — the first pack ops to exercise the honored Tier-2
+  fast path (BART is all OPAQUE). `sigpy:resize` is centered zero-pad/center-crop
+  of one axis (k-space zero-fill; additive over the shrink-only built-in `crop`),
+  shape-changing → Tier-1 OPAQUE. Numeric-precision: sigpy's thresholds always
+  return complex128, so the ops narrow back to the input dtype (float32/complex64
+  discipline); the narrowing is pointwise so it preserves the windowable property.
+  Enabling change: added a `"float"` parameter kind (the `lamda` threshold) beside
+  `"int"` in both create paths. Deferred (unchanged): `nufft`/`espirit`
+  (coordinate/calibration args + dim changes), and now `fwt`/`iwt` (the wavelet
+  inverse needs the forward's oshape + coeff_slices, which the scalar-param unary
+  contract cannot carry). Evidence: `0a09d83e`; targeted operations suite green
+  (56 passed incl. the 20 pack tests). sigpy pip-installed + declared as the
+  optional `sigpy` extra (pyproject) and mirrored in environment.yml.
 
 - 2026-07-22 — **Montage-relevel "red" DIAGNOSED — pyqtgraph throughput fork,
   not a bug (reds investigation):** the `level_stale` timeout is real and

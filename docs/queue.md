@@ -29,15 +29,20 @@ this file says *what, in what order, and when it counts as done*.
 ## Product turn — completed 2026-07-22 (rationale in [roadmap.md](roadmap.md) and [reviews/2026-07-19-course-review.md](reviews/2026-07-19-course-review.md))
 
 **The product turn (steps 5–10) is COMPLETE 2026-07-22.** Compare v1 (5/6/7),
-plugin ops v1/v2/v3 (8, sigpy pack + Tier-2 harness for 9, BART pack for 10),
-and the G7 codec groundwork landed — see the [Done ledger](queue-done.md). G7's
-live product-benefit gate closed with a measured NO. Row 4 audits what should be
-retained before any codec revival; codec implementation remains in the
-review/ideas list unless that audit identifies a real owner-level bottleneck.
-`sigpy`, `blosc2`/`zfpy`, and `bart` were installed into the env this session, so
-the previously dep-blocked gates ran on real data/tools. Deferred, with reasons
-recorded in the ledger: sigpy `nufft`/`espirit` and `bart:pics` (multi-input /
-don't fit the unary `fn(ndarray)->ndarray` contract).
+plugin ops v1/v2/v3 (8, Tier-2 conformance harness for 9, BART pack for 10),
+and the G7 codec groundwork landed — see the [Done ledger](queue-done.md). The
+sigpy FFT pack that first accompanied step 9 was removed as redundant with the
+built-in FFT (see [graveyard.md](graveyard.md)); the genuinely-additive sigpy
+*threshold + resize* pack landed 2026-07-24 (`sigpy:soft_thresh`/`hard_thresh`
+are the first verified-Tier-2 pack ops, `sigpy:resize` is OPAQUE k-space
+zero-fill). G7's live product-benefit gate closed with a measured NO. Row 4
+audits what should be retained before any codec revival; codec implementation
+remains in the review/ideas list unless that audit identifies a real owner-level
+bottleneck. `sigpy`, `blosc2`/`zfpy`, and `bart` were installed into the env this
+session, so the previously dep-blocked gates ran on real data/tools. Deferred,
+with reasons recorded in the ledger: sigpy `nufft`/`espirit`/`fwt`/`iwt` and
+`bart:pics` (multi-input / structural-metadata args that don't fit the unary
+`fn(ndarray)->ndarray` contract).
 
 ## Performance bars (commitments, not history — restored from R2/R4/R8D)
 
