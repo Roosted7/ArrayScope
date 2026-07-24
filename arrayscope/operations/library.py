@@ -507,11 +507,17 @@ def _parameters_from_payload(raw) -> tuple[OperationParameter, ...]:
         name = str(item.get("name") or "")
         if not name:
             continue
+        kind = str(item.get("kind") or "float")
+        if kind not in ("int", "float"):
+            # An unknown kind (e.g. "str") would survive load only to crash
+            # later in form building / value coercion, so reject the wrapper
+            # here -> recorded as a problem, skipped, rest of the library loads.
+            raise ValueError(f"unsupported parameter kind {kind!r} for parameter {name!r}")
         parameters.append(
             OperationParameter(
                 name=name,
                 label=str(item.get("label") or name.replace("_", " ").title()),
-                kind=str(item.get("kind") or "float"),
+                kind=kind,
                 default=item.get("default"),
                 minimum=item.get("minimum"),
                 maximum=item.get("maximum"),

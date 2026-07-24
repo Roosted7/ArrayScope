@@ -270,6 +270,33 @@ def test_reserved_runtime_is_skipped_with_problem(tmp_path):
     assert any("not yet supported" in message and "julia" in message for _path, message in problems)
 
 
+def test_unsupported_parameter_kind_is_skipped_with_problem(tmp_path):
+    # A parameter whose kind is neither "int" nor "float" would crash later in
+    # form building / coercion, so the wrapper is skipped and recorded instead.
+    ops_dir = tmp_path / "operations"
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    (ops_dir / "named.py").write_text(_DOUBLE_SRC)
+    (ops_dir / "named.json").write_text(
+        json.dumps(
+            {
+                "format": "arrayscope-operation",
+                "version": 1,
+                "id": "user:named",
+                "source": {"mode": "import", "path": "named.py", "callable": "double"},
+                "parameters": [{"name": "tag", "kind": "str"}],
+            }
+        )
+    )
+    library.refresh_user_operations()
+
+    assert "user:named" not in {entry.id for entry in registry.all_operations()}
+    problems = library.user_operation_problems()
+    assert any(
+        "unsupported parameter kind" in message and "named.json" in path
+        for path, message in problems
+    )
+
+
 def test_changes_shape_wrapper_is_skipped_with_problem(tmp_path):
     # A wrapper cannot predict the output shape, so a shape-changing user op
     # would lie to the evaluator: it is skipped, recorded, and never registered.
