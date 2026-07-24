@@ -76,11 +76,13 @@ class OperationAddPopup(EditBubble):
 
         self._list = QtWidgets.QListWidget(self)
         self._list.setObjectName("OperationAddList")
+        # Rows are NOT uniform (headers/toggle are shorter than op rows), so the
+        # height is summed row-by-row in _apply_list_height rather than assuming
+        # a single row height.
         self._list.setUniformItemSizes(False)
         self._list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self._list.setMinimumWidth(240)
-        self._list.setMinimumHeight(260)
         self._list.setIconSize(QtCore.QSize(16, 16))
         self._list.currentRowChanged.connect(lambda _row: self._sync_axis_visibility())
         self._list.itemClicked.connect(self._on_item_clicked)
@@ -120,7 +122,37 @@ class OperationAddPopup(EditBubble):
         if has_more:
             self._add_toggle_row(collapse=self._expanded)
         self._select_first_op()
+        self._apply_list_height()
         self._sync_axis_visibility()
+
+    #: Tallest the row list is allowed to grow before it starts scrolling.
+    #: Sized to clear the collapsed built-in listing (its full set of groups
+    #: plus the trailing "More…" toggle -- ~436 px) so the collapsed popup never
+    #: scrolls, while the taller expanded backend listing scrolls within it.
+    _LIST_MAX_HEIGHT = 460
+
+    def _apply_list_height(self) -> None:
+        """Size the list to a whole number of rows, capped at a sane maximum.
+
+        Sums the per-row size hints (they differ: headers/toggle are shorter
+        than op rows) and stops before a row would spill past the cap, so the
+        visible area always ends on a whole-row boundary -- never a half-cut
+        row -- and the collapsed listing does not scroll when it fits.
+        """
+
+        frame = 2 * self._list.frameWidth()
+        accumulated = 0
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            row_height = item.sizeHint().height()
+            if row_height <= 0:
+                row_height = self._list.sizeHintForRow(row)
+            # Stop before a row spills past the cap so the visible area always
+            # ends on a whole-row boundary (never a half-cut row).
+            if row > 0 and accumulated + row_height + frame > self._LIST_MAX_HEIGHT:
+                break
+            accumulated += row_height
+        self._list.setFixedHeight(accumulated + frame)
 
     def _add_header(self, title: str) -> None:
         item = QtWidgets.QListWidgetItem(title.upper())

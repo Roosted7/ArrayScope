@@ -207,7 +207,15 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.params_table.setHorizontalHeaderLabels(
             ["Name", "Kind", "Default", "Min", "Max", "Step"]
         )
-        self.params_table.horizontalHeader().setStretchLastSection(True)
+        header = self.params_table.horizontalHeader()
+        # Fit all six columns at the default dialog width (no horizontal
+        # scrollbar, no truncated header): the name column absorbs the slack,
+        # Kind hugs its combo, and the four numeric columns share the rest.
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        for _column in range(2, 6):
+            header.setSectionResizeMode(_column, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.params_table.verticalHeader().setVisible(False)
         right.addWidget(self.params_table, 1)
         params_buttons = QtWidgets.QHBoxLayout()
@@ -442,21 +450,19 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self._suppress = True
         try:
             self.label_edit.setText(entry.label)
-            self.label_edit.setReadOnly(not is_user)
             self.id_label.setText(operation_id)
             self._reload_group_combo(library.effective_group(entry))
             self.description_edit.setText(entry.description)
-            self.description_edit.setReadOnly(not is_user)
             self.icon_edit.setText(entry.icon or "")
             self._update_icon_preview()
             self.requires_axis_check.setChecked(entry.requires_axis)
-            self.requires_axis_check.setEnabled(is_user)
             self.common_check.setChecked(operation_id in library.effective_common_ids())
             self._fill_parameters(entry.parameters, editable=is_user)
         finally:
             self._suppress = False
 
         self._set_icon_row_visible(is_user)
+        self._apply_editor_editability(is_user)
         if is_user:
             self.status_label.setText(
                 "User operation — edits save automatically. Remove deletes it and its files."
@@ -482,6 +488,8 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.group_combo.blockSignals(False)
 
     def _set_editor_enabled(self, enabled: bool):
+        """Enable/disable every editor widget (used when nothing is selected)."""
+
         for widget in (
             self.label_edit,
             self.group_combo,
@@ -495,13 +503,29 @@ class OperationManagerDialog(QtWidgets.QDialog):
         ):
             widget.setEnabled(enabled)
 
+    def _apply_editor_editability(self, is_user: bool):
+        """Reflect the selected op's edit permissions in the widget states.
+
+        A system op's definition is read-only: its Label, Description, Icon and
+        parameters must LOOK disabled (greyed + read-only), not merely swallow
+        edits. The two controls that genuinely act on a system op -- Group and
+        the Common toggle -- stay enabled. A user op is fully editable.
+        """
+
+        for widget in (self.label_edit, self.description_edit, self.icon_edit):
+            widget.setReadOnly(not is_user)
+            widget.setEnabled(is_user)
+        self.requires_axis_check.setEnabled(is_user)
+        self.params_table.setEnabled(is_user)
+        self.add_param_button.setEnabled(is_user)
+        self.remove_param_button.setEnabled(is_user)
+        # These act on system ops too, so they stay live regardless.
+        self.group_combo.setEnabled(True)
+        self.common_check.setEnabled(True)
+
     def _set_icon_row_visible(self, visible: bool):
         self.icon_form_label.setVisible(visible)
         self.icon_row_widget.setVisible(visible)
-        self.add_param_button.setEnabled(_is_user_op(self._loaded_id or ""))
-        self.remove_param_button.setEnabled(_is_user_op(self._loaded_id or ""))
-        self._set_editor_enabled(True)
-        self.label_edit.setReadOnly(not _is_user_op(self._loaded_id or ""))
 
     def _update_icon_preview(self, *_args):
         name = self.icon_edit.text().strip() or "extension"

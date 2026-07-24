@@ -93,15 +93,33 @@ class OperationActionsMixin:
         sections = build_operation_listing()
         main_sections = [section for section in sections if not section.is_more]
         more_sections = [section for section in sections if section.is_more]
-        for section in main_sections:
-            menu.addSection(section.title)
+        for index, section in enumerate(main_sections):
+            self._add_menu_section_header(menu, section.title, first=index == 0)
             self._add_operation_menu_actions(menu, section.entries, dim, anchor)
         if more_sections:
             more_menu = menu.addMenu(material_icon("more_horiz"), "More…")
-            for section in more_sections:
-                more_menu.addSection(section.title)
+            for index, section in enumerate(more_sections):
+                self._add_menu_section_header(more_menu, section.title, first=index == 0)
                 self._add_operation_menu_actions(more_menu, section.entries, dim, anchor)
         return menu
+
+    @staticmethod
+    def _add_menu_section_header(menu, title, *, first):
+        """Add a legible, disabled group header to a chip "+" menu.
+
+        Fusion renders ``QMenu.addSection`` as an unlabeled separator, so the
+        group title is invisible. Instead use a disabled ``QAction`` carrying
+        the uppercased title (styled muted by the app stylesheet), preceded by a
+        separator for every group after the first.
+        """
+
+        if not first:
+            menu.addSeparator()
+        header = menu.addAction(title.upper())
+        header.setEnabled(False)
+        font = header.font()
+        font.setBold(True)
+        header.setFont(font)
 
     def _show_operation_context_menu(self, pos, widget, dim):
         if dim >= self.data.ndim:
