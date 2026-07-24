@@ -240,3 +240,14 @@ def test_soft_thresh_recipe_round_trips_float_param():
     assert item == {"id": "sigpy:soft_thresh", "parameters": {"lamda": 0.75}, "enabled": True}
     rebuilt = registry.create_operation(item["id"], parameters=item["parameters"])
     assert rebuilt == op  # identity (id + axis + params) compares equal
+
+
+def test_describe_operation_reads_plugin_param_from_mapping():
+    # A PluginOperation stores params in its opaque ``params`` mapping, not as
+    # attributes; describe_operation must not AttributeError on them (the crash
+    # that took down the whole op-dock refresh when a parameterized plugin op
+    # was added).
+    pytest.importorskip("sigpy")
+    op = registry.create_operation("sigpy:soft_thresh", parameters={"lamda": 0.5})
+    assert registry.operation_parameter_value(op, "lamda") == 0.5
+    assert "lamda=0.5" in registry.describe_operation(op)

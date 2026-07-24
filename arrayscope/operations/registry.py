@@ -414,6 +414,23 @@ def operation_id_for(operation) -> str:
     raise ValueError(f"operation type is not registered: {operation_type.__name__}")
 
 
+def operation_parameter_value(operation, name):
+    """Read one parameter value off any operation.
+
+    Built-in operations store each declared parameter as an attribute; a
+    :class:`~arrayscope.operations.plugins.PluginOperation` keeps them in its
+    opaque ``params`` mapping instead. Reading via ``getattr`` alone therefore
+    raises ``AttributeError`` for a parameterized plugin op -- this normalizes
+    both.
+    """
+
+    from arrayscope.operations.plugins import PluginOperation
+
+    if isinstance(operation, PluginOperation):
+        return dict(operation.params).get(name)
+    return getattr(operation, name, None)
+
+
 def describe_operation(operation) -> str:
     operation_id = operation_id_for(operation)
     entry = get_operation_entry(operation_id)
@@ -424,5 +441,5 @@ def describe_operation(operation) -> str:
         # "Mean over axis" + 2 -> "Mean over axis 2", not "... axis axis 2".
         parts = [f"{label} {axis}"] if label.endswith(" over axis") else [f"{label} · axis {axis}"]
     for parameter in entry.parameters:
-        parts.append(f"{parameter.name}={getattr(operation, parameter.name)}")
+        parts.append(f"{parameter.name}={operation_parameter_value(operation, parameter.name)}")
     return " ".join(parts)
