@@ -38,6 +38,23 @@ sigpy operations instead:
   Shape-changing -> **Tier-1 OPAQUE** (a centered resize re-indexes the whole
   axis; it is not windowable, and the conformance harness rejects any
   shape-changer anyway).
+- ``sigpy:circshift`` -- **circular shift** of one axis by an integer amount
+  (``sigpy.circshift``, equivalent to ``numpy.roll`` along the axis; the shift may
+  be negative).  Additive over the built-ins: ``reverse`` mirrors an axis and
+  ``fftshift`` rolls by exactly half, but there is no general roll-by-k.  It is
+  shape- and dtype-preserving, but **not** windowable -- a circular shift wraps
+  samples around the axis boundary, so ``fn(whole)[region] != fn(whole[region])``.
+  Tier-1 OPAQUE.
+- ``sigpy:downsample`` -- **strided decimation** of one axis by an integer factor
+  (``sigpy.downsample``; ``input[..., ::factor, ...]``, *no* anti-alias filter --
+  honest naming: it decimates, it does not low-pass first).  Shape-changing
+  (``ceil(n / factor)``), dtype-preserving.  Additive: ``crop`` takes a contiguous
+  window, never a strided subsample.  Tier-1 OPAQUE.
+- ``sigpy:upsample`` -- **zero-insertion upsample** of one axis by an integer
+  factor (``sigpy.upsample``; the exact adjoint of ``downsample`` -- it scatters
+  the samples to every ``factor``-th position of a zero array).  Shape-changing
+  (``n * factor``), dtype-preserving.  Tier-1 OPAQUE.  ``downsample`` +
+  ``upsample`` form a natural strided pair.
 
 Capability decisions are honest by design -- the Tier-2 conformance harness in
 ``arrayscope.operations.plugin_conformance`` exists precisely to catch a false
@@ -92,6 +109,9 @@ from arrayscope.operations.registry import OperationParameter, register_pack_ope
 SOFT_THRESH_ID = "sigpy:soft_thresh"
 HARD_THRESH_ID = "sigpy:hard_thresh"
 RESIZE_ID = "sigpy:resize"
+CIRCSHIFT_ID = "sigpy:circshift"
+DOWNSAMPLE_ID = "sigpy:downsample"
+UPSAMPLE_ID = "sigpy:upsample"
 
 
 # --- availability (cheap, lazy: never imports sigpy) -------------------------
@@ -193,6 +213,88 @@ def _resize_output_shape(shape, axis, params):
     return tuple(out)
 
 
+def _build_circshift(axis: int | None, params: Mapping[str, object]) -> Callable[[object], object]:
+    """Circular shift of ``axis`` by an integer ``shift`` (numpy.roll semantics)."""
+
+    resolved_axis = int(axis)  # requires_axis=True guarantees a bound axis
+    shift = int(params["shift"])
+
+    def fn(data):
+        import sigpy as sp
+
+        data = np.asarray(data)
+        ax = resolved_axis % data.ndim
+        # sigpy.circshift(input, shifts, axes): both are per-listed-axis lists.
+        return sp.circshift(data, [shift], axes=[ax])
+
+    return fn
+
+
+def _axis_factors(factor: int, axis: int, ndim: int) -> list[int]:
+    """Per-axis factor list selecting a single axis (``1`` everywhere else)."""
+
+    factors = [1] * ndim
+    factors[axis % ndim] = factor
+    return factors
+
+
+def _build_downsample(axis: int | None, params: Mapping[str, object]) -> Callable[[object], object]:
+    """Strided decimation of ``axis`` by ``factor`` (``input[..., ::factor, ...]``)."""
+
+    resolved_axis = int(axis)
+    factor = int(params["factor"])
+
+    def fn(data):
+        import sigpy as sp
+
+        data = np.asarray(data)
+        return sp.downsample(data, _axis_factors(factor, resolved_axis, data.ndim))
+
+    return fn
+
+
+def _build_upsample(axis: int | None, params: Mapping[str, object]) -> Callable[[object], object]:
+    """Zero-insertion upsample of ``axis`` by ``factor`` (adjoint of downsample)."""
+
+    resolved_axis = int(axis)
+    factor = int(params["factor"])
+
+    def fn(data):
+        import sigpy as sp
+
+        data = np.asarray(data)
+        ax = resolved_axis % data.ndim
+        oshape = list(data.shape)
+        oshape[ax] = int(data.shape[ax]) * factor
+        return sp.upsample(data, tuple(oshape), _axis_factors(factor, ax, data.ndim))
+
+    return fn
+
+
+def _downsample_output_shape(shape, axis, params):
+    """Output shape: ``shape[axis]`` -> ``ceil(shape[axis] / factor)``.
+
+    Exactly the length of ``range(0, n, factor)`` -- the number of samples the
+    strided slice ``input[..., ::factor, ...]`` keeps.
+    """
+
+    factor = int(params["factor"])
+    ax = int(axis) % len(shape)
+    out = [int(s) for s in shape]
+    out[ax] = (out[ax] + factor - 1) // factor
+    return tuple(out)
+
+
+def _upsample_output_shape(shape, axis, params):
+    """Output shape: ``shape[axis]`` -> ``shape[axis] * factor``."""
+
+    factor = int(params["factor"])
+    ax = int(axis) % len(shape)
+    out = [int(s) for s in shape]
+    out[ax] = out[ax] * factor
+    return tuple(out)
+
+
 # --- specs -------------------------------------------------------------------
 
 
@@ -277,10 +379,100 @@ def resize_spec() -> PluginOperationSpec:
     )
 
 
+def circshift_spec() -> PluginOperationSpec:
+    return PluginOperationSpec(
+        id=CIRCSHIFT_ID,
+        label="Circular shift axis (sigpy)",
+        build=_build_circshift,
+        # circshift is a pure reindex -> dtype-preserving (identity adapter).
+        parameters=(
+            OperationParameter(
+                "shift",
+                "Shift",
+                kind="int",
+                default=0,
+                step=1,
+                description="Roll the axis by this many samples (negative rolls the other way).",
+            ),
+        ),
+        requires_axis=True,
+        changes_shape=False,
+        # A circular shift wraps samples across the axis boundary, so it does not
+        # commute with sub-region reads -> never a Tier-2 windowable claim.
+        region_capable=False,
+        group="SigPy",
+        description="Circularly shift (roll) one axis by an integer number of samples.",
+        icon="sync",
+    )
+
+
+def downsample_spec() -> PluginOperationSpec:
+    return PluginOperationSpec(
+        id=DOWNSAMPLE_ID,
+        label="Downsample axis (sigpy)",
+        build=_build_downsample,
+        output_shape=_downsample_output_shape,
+        # Strided slice -> dtype-preserving (identity adapter).
+        parameters=(
+            OperationParameter(
+                "factor",
+                "Factor",
+                kind="int",
+                default=2,
+                minimum=1,
+                step=1,
+                description="Keep every factor-th sample along the axis (no anti-alias filter).",
+            ),
+        ),
+        requires_axis=True,
+        changes_shape=True,
+        # Strided decimation re-indexes the whole axis and changes shape -> OPAQUE.
+        region_capable=False,
+        group="SigPy",
+        description="Strided decimation of one axis by an integer factor (no filtering).",
+        icon="compress",
+    )
+
+
+def upsample_spec() -> PluginOperationSpec:
+    return PluginOperationSpec(
+        id=UPSAMPLE_ID,
+        label="Upsample axis (sigpy)",
+        build=_build_upsample,
+        output_shape=_upsample_output_shape,
+        # Zero-insertion scatter -> dtype-preserving (identity adapter).
+        parameters=(
+            OperationParameter(
+                "factor",
+                "Factor",
+                kind="int",
+                default=2,
+                minimum=1,
+                step=1,
+                description="Scatter each sample to every factor-th slot; fill the rest with zeros.",
+            ),
+        ),
+        requires_axis=True,
+        changes_shape=True,
+        # Zero-insertion re-indexes the whole axis and changes shape -> OPAQUE.
+        region_capable=False,
+        group="SigPy",
+        description="Zero-insertion upsample of one axis by an integer factor (downsample adjoint).",
+        icon="expand",
+    )
+
+
 def pack_specs() -> tuple[PluginOperationSpec, ...]:
     """The specs this pack contributes (independent of sigpy being installed)."""
 
-    return (soft_thresh_spec(), hard_thresh_spec(), resize_spec())
+    return (
+        soft_thresh_spec(),
+        hard_thresh_spec(),
+        resize_spec(),
+        circshift_spec(),
+        downsample_spec(),
+        upsample_spec(),
+    )
 
 
 def register(register_fn=register_pack_operation) -> bool:

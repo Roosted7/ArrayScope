@@ -17,7 +17,8 @@ from __future__ import annotations
 import glob
 import os
 import stat
-import tempfile
+import sys
+import textwrap
 import threading
 import time
 
@@ -131,7 +132,17 @@ def test_pack_contributes_nothing_when_bart_absent(monkeypatch):
 
 def test_pack_specs_exist_independently_of_installation():
     ids = {spec.id for spec in bart_pack.pack_specs()}
-    assert ids == {"bart:fft", "bart:ifft", "bart:cabs"}
+    assert ids == {
+        "bart:fft",
+        "bart:ifft",
+        "bart:cabs",
+        "bart:carg",
+        "bart:scale",
+        "bart:spow",
+        "bart:normalize",
+        "bart:std",
+        "bart:var",
+    }
 
 
 # --- correctness against a NumPy reference (real bart subprocess) -------------
@@ -223,7 +234,9 @@ def test_cancel_mid_op_kills_child_under_one_second(tmp_path):
     fake_bart = _write_fake_bart(tmp_path, marker)
     token = CancellationToken()
 
-    temp_root = tempfile.gettempdir()
+    # Isolate this run's scratch dir under tmp_path so the leak check cannot race a
+    # concurrent (xdist) run's dir in the shared system temp.
+    temp_root = str(tmp_path)
     before = set(glob.glob(os.path.join(temp_root, "arrayscope-bart-*")))
 
     result: dict[str, object] = {}
@@ -235,6 +248,7 @@ def test_cancel_mid_op_kills_child_under_one_second(tmp_path):
                 np.ones((4, 4), dtype=np.complex64),
                 cancellation_token=token,
                 executable=fake_bart,
+                temp_dir=temp_root,
             )
         except BaseException as exc:
             result["exc"] = exc
@@ -381,7 +395,9 @@ def test_overall_timeout_kills_stuck_child(tmp_path):
     marker = tmp_path / "child_pid"
     fake_bart = _write_chatty_then_hang_bart(tmp_path, marker)
 
-    temp_root = tempfile.gettempdir()
+    # Isolate this run's scratch dir under tmp_path so the leak check cannot race a
+    # concurrent (xdist) run's dir in the shared system temp.
+    temp_root = str(tmp_path)
     before = set(glob.glob(os.path.join(temp_root, "arrayscope-bart-*")))
 
     started = time.monotonic()
@@ -391,6 +407,7 @@ def test_overall_timeout_kills_stuck_child(tmp_path):
             np.ones((4, 4), dtype=np.complex64),
             executable=fake_bart,
             timeout=0.5,
+            temp_dir=temp_root,
         )
     elapsed = time.monotonic() - started
     assert elapsed < INTERACTION_SETTLE_HARD_LIMIT_S, f"timeout was not prompt ({elapsed:.2f}s)"
@@ -407,3 +424,275 @@ def test_overall_timeout_kills_stuck_child(tmp_path):
     # The temp dir was cleaned up even though we bailed on a timeout.
     after = set(glob.glob(os.path.join(temp_root, "arrayscope-bart-*")))
     assert after <= before, f"leaked temp dirs: {after - before}"
+
+
+# --- new ops: exact CLI argv composition (no real BART needed) ----------------
+#
+# A recording ``bart`` shim proves the *exact* command each new op composes --
+# tool name, parameter/bitmask encoding, ordering -- through the real cfl handoff.
+# The shim records the composed command (argv minus the trailing in/out stems) and
+# round-trips the cfl: shape-preserving tools echo their input; ``std`` / ``var``
+# emit a singleton along the bitmask axis so the op's reshape is exercised too.
+# It reuses the pack's own cfl format (a self-contained Python replica), so a green
+# result also proves ``write_cfl`` / ``read_cfl`` interop end to end.
+
+_RECORDING_BART_BODY = textwrap.dedent(
+    """\
+    import sys
+
+    import numpy as np
+
+
+    def read_cfl(stem):
+        with open(stem + ".hdr") as handle:
+            next(handle)
+            dims = [int(token) for token in next(handle).split()]
+        while len(dims) > 1 and dims[-1] == 1:
+            dims.pop()
+        with open(stem + ".cfl", "rb") as handle:
+            data = np.frombuffer(handle.read(), dtype=np.complex64)
+        return np.reshape(data[: int(np.prod(dims))], dims, order="F")
+
+
+    def write_cfl(stem, arr):
+        arr = np.asarray(arr).astype(np.complex64)
+        with open(stem + ".hdr", "w") as handle:
+            handle.write("# Dimensions\\n")
+            handle.write(" ".join(str(int(s)) for s in arr.shape))
+            handle.write("\\n")
+        with open(stem + ".cfl", "wb") as handle:
+            handle.write(np.ascontiguousarray(arr.T))
+
+
+    argv = sys.argv[1:]
+    in_stem, out_stem = argv[-2], argv[-1]
+    cmd = argv[:-2]
+    with open(MARKER_PATH, "w") as handle:
+        handle.write("\\n".join(cmd))
+    data = read_cfl(in_stem)
+    tool = cmd[0]
+    if tool in ("std", "var"):
+        axis = int(cmd[1]).bit_length() - 1
+        write_cfl(out_stem, np.take(data, [0], axis=axis))
+    else:
+        write_cfl(out_stem, data)
+    """
+)
+
+
+def _write_recording_bart(tmp_path, marker) -> str:
+    """A Python ``bart`` shim that records the composed command + round-trips cfl."""
+
+    script = tmp_path / "recording_bart"
+    body = _RECORDING_BART_BODY.replace("MARKER_PATH", repr(str(marker)))
+    script.write_text(f"#!{sys.executable}\n{body}")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return str(script)
+
+
+@pytest.fixture
+def recording_bart(tmp_path, monkeypatch):
+    """Register the BART pack against a recording shim; yield the argv marker.
+
+    Forces ``bart_available`` True and points ``bart_executable`` at the shim, so
+    the pack registers and every op's ``run_bart`` resolves to the recorder -- no
+    real BART toolbox required.
+    """
+
+    marker = tmp_path / "argv"
+    shim = _write_recording_bart(tmp_path, marker)
+    monkeypatch.setattr(bart_pack, "bart_available", lambda: True)
+    monkeypatch.setattr(bart_pack, "bart_executable", lambda: shim)
+    registry._reset_operation_packs()
+    return marker
+
+
+def _recorded_cmd(marker) -> list[str]:
+    return marker.read_text().split("\n")
+
+
+def test_scale_composes_scale_factor_argv(recording_bart):
+    x = np.arange(24, dtype=np.complex64).reshape(2, 3, 4)
+    op = registry.create_operation("bart:scale", parameters={"factor": 2.0})
+    got = np.asarray(op.apply(x))
+    assert _recorded_cmd(recording_bart) == ["scale", "2.0"]
+    assert got.dtype == np.complex64
+    np.testing.assert_array_equal(got, x)  # the shim echoes the input
+
+
+def test_spow_composes_exponent_argv(recording_bart):
+    x = np.ones((2, 3), dtype=np.complex64)
+    op = registry.create_operation("bart:spow", parameters={"exponent": 0.5})
+    op.apply(x)
+    assert _recorded_cmd(recording_bart) == ["spow", "0.5"]
+
+
+def test_carg_composes_bare_argv(recording_bart):
+    x = np.ones((2, 3), dtype=np.complex64)
+    op = registry.create_operation("bart:carg")
+    op.apply(x)
+    assert _recorded_cmd(recording_bart) == ["carg"]
+
+
+@pytest.mark.parametrize(("axis", "bitmask"), [(0, "1"), (1, "2"), (2, "4")])
+def test_normalize_composes_axis_bitmask(recording_bart, axis, bitmask):
+    x = np.ones((2, 3, 4), dtype=np.complex64)
+    op = registry.create_operation("bart:normalize", axis=axis)
+    got = np.asarray(op.apply(x))
+    assert _recorded_cmd(recording_bart) == ["normalize", bitmask]
+    assert got.shape == (2, 3, 4)  # shape-preserving
+
+
+@pytest.mark.parametrize("tool", ["std", "var"])
+@pytest.mark.parametrize(("axis", "bitmask"), [(0, "1"), (1, "2"), (2, "4")])
+def test_reduction_composes_bitmask_and_collapses_axis(recording_bart, tool, axis, bitmask):
+    x = np.arange(24, dtype=np.complex64).reshape(2, 3, 4)
+    op = registry.create_operation(f"bart:{tool}", axis=axis)
+    got = np.asarray(op.apply(x))
+    assert _recorded_cmd(recording_bart) == [tool, bitmask]
+    # The reduced axis is collapsed *out* (ndim - 1), matching the adapter.
+    expected_shape = x.shape[:axis] + x.shape[axis + 1 :]
+    assert got.shape == expected_shape
+    assert got.shape == op.output_shape(x.shape)
+    assert got.dtype == np.complex64
+
+
+# --- new ops: output-shape / dtype adapters (correct WITHOUT bart installed) --
+
+
+def test_reduction_output_shape_adapter_drops_axis():
+    from arrayscope.operations.packs.bart_pack import _reduce_output_shape
+
+    # Adapter is a pure function -> unit-testable with no bart, no registration.
+    assert _reduce_output_shape((6, 5, 4), 0, {}) == (5, 4)
+    assert _reduce_output_shape((6, 5, 4), 1, {}) == (6, 4)
+    assert _reduce_output_shape((6, 5, 4), 2, {}) == (6, 5)
+    assert _reduce_output_shape((6, 5, 4), -1, {}) == (6, 5)
+
+
+def test_shape_preserving_ops_declare_identity_shape_and_complex64_dtype():
+    # These adapters must be correct without bart, so read them off the specs.
+    for spec in bart_pack.pack_specs():
+        assert np.dtype(spec.resolve_output_dtype(np.dtype("float32"))) == np.complex64
+    for spec in (bart_pack.scale_spec(), bart_pack.spow_spec(), bart_pack.normalize_spec()):
+        assert spec.changes_shape is False
+        assert spec.resolve_output_shape((6, 5, 4), 1, {"factor": 2.0, "exponent": 2.0}) == (
+            6,
+            5,
+            4,
+        )
+    for spec in (bart_pack.std_spec(), bart_pack.var_spec()):
+        assert spec.changes_shape is True
+        assert spec.resolve_output_shape((6, 5, 4), 1, {}) == (6, 4)
+
+
+def test_new_pointwise_and_reduction_ops_are_all_opaque(recording_bart):
+    from arrayscope.operations.capabilities import OperationClass
+
+    # Every BART op stays OPAQUE (cost model, not correctness) -- including the
+    # pointwise carg/scale/spow: a per-tile subprocess is never the right plan.
+    for op_id, kwargs in [
+        ("bart:carg", {}),
+        ("bart:scale", {"parameters": {"factor": 2.0}}),
+        ("bart:spow", {"parameters": {"exponent": 2.0}}),
+        ("bart:normalize", {"axis": 1}),
+        ("bart:std", {"axis": 1}),
+        ("bart:var", {"axis": 1}),
+    ]:
+        op = registry.create_operation(op_id, **kwargs)
+        assert op.execution_class is OperationClass.OPAQUE, op_id
+        assert plugins.is_region_honored(op_id, op.axis, op.params) is False, op_id
+
+
+# --- new ops: discovery + presentation metadata ------------------------------
+
+
+def test_new_bart_ops_appear_with_metadata(recording_bart):
+    ids = {entry.id for entry in registry.all_operations()}
+    assert {"bart:carg", "bart:scale", "bart:spow", "bart:normalize", "bart:std", "bart:var"} <= ids
+    scale = registry.get_operation_entry("bart:scale")
+    assert scale.group == "BART"
+    assert scale.requires_axis is False
+    std = registry.get_operation_entry("bart:std")
+    assert std.requires_axis is True
+    assert std.changes_shape is True
+
+
+def test_new_bart_ops_recipe_round_trip(recording_bart):
+    scale = registry.create_operation("bart:scale", parameters={"factor": 0.25})
+    item = plugins.recipe_item_for_plugin_operation(scale, enabled=True)
+    assert item == {"id": "bart:scale", "parameters": {"factor": 0.25}, "enabled": True}
+    assert registry.create_operation(item["id"], parameters=item["parameters"]) == scale
+
+    std = registry.create_operation("bart:std", axis=2)
+    std_item = plugins.recipe_item_for_plugin_operation(std, enabled=True)
+    assert std_item == {"id": "bart:std", "axis": 2, "enabled": True}
+    assert registry.create_operation(std_item["id"], axis=std_item["axis"]) == std
+
+
+# --- new ops: real-BART numeric anchor (skips when bart is not runnable) ------
+
+
+def test_bart_scale_matches_reference(bart_env):
+    """``bart scale <factor>`` multiplies every sample by the real scalar."""
+
+    rng = np.random.default_rng(11)
+    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
+        np.complex64
+    )
+    op = registry.create_operation("bart:scale", parameters={"factor": 2.5})
+    got = np.asarray(op.apply(x))
+    ref = (x * 2.5).astype(np.complex64)
+    assert got.dtype == np.complex64
+    np.testing.assert_allclose(got, ref, rtol=0, atol=1e-4 * np.max(np.abs(ref)))
+
+
+def test_bart_carg_matches_numpy_angle(bart_env):
+    """``bart carg`` returns the phase in the real part (imag 0), like ``cabs``."""
+
+    rng = np.random.default_rng(13)
+    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
+        np.complex64
+    )
+    op = registry.create_operation("bart:carg")
+    got = np.asarray(op.apply(x))
+    np.testing.assert_allclose(got.real, np.angle(x), atol=1e-4)
+    np.testing.assert_allclose(got.imag, 0.0, atol=1e-5)
+
+
+def test_bart_spow_matches_numpy_power(bart_env):
+    rng = np.random.default_rng(17)
+    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
+        np.complex64
+    )
+    op = registry.create_operation("bart:spow", parameters={"exponent": 2.0})
+    got = np.asarray(op.apply(x))
+    np.testing.assert_allclose(got, (x**2).astype(np.complex64), rtol=0, atol=1e-3)
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_bart_std_matches_sample_std_and_collapses_axis(bart_env, axis):
+    """``bart std`` is the *sample* std (ddof=1); the op collapses the axis out."""
+
+    rng = np.random.default_rng(19 + axis)
+    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
+        np.complex64
+    )
+    op = registry.create_operation("bart:std", axis=axis)
+    got = np.asarray(op.apply(x))
+    assert got.shape == x.shape[:axis] + x.shape[axis + 1 :]
+    ref = np.std(x, axis=axis, ddof=1)
+    np.testing.assert_allclose(got.real, ref, rtol=0, atol=1e-3 * float(np.max(ref)))
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_bart_normalize_divides_by_axis_norm(bart_env, axis):
+    rng = np.random.default_rng(23 + axis)
+    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
+        np.complex64
+    )
+    op = registry.create_operation("bart:normalize", axis=axis)
+    got = np.asarray(op.apply(x))
+    assert got.shape == x.shape  # shape-preserving
+    norm = np.sqrt(np.sum(np.abs(x) ** 2, axis=axis, keepdims=True))
+    np.testing.assert_allclose(got, (x / norm).astype(np.complex64), rtol=0, atol=1e-3)

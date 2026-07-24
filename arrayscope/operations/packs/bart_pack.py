@@ -24,6 +24,29 @@ Ops shipped (all clean unary ``fn(ndarray) -> ndarray``):
   is documented as such).
 - ``bart:cabs`` -- pointwise complex magnitude via ``bart cabs``, a non-FFT
   demonstrator that the same cfl+subprocess mechanism serves.
+- ``bart:carg`` -- pointwise complex **phase** (argument, ``atan2(Im, Re)``) via
+  ``bart carg``.  The natural companion to ``cabs``: magnitude and phase are the
+  two halves of a complex sample, and neither has a built-in ArrayScope op.
+- ``bart:scale`` -- multiply every sample by a real scalar ``factor`` via
+  ``bart scale <factor>``.  Additive: no built-in scalar-multiply op.
+- ``bart:spow`` -- raise every sample to a (complex-principal-branch) power
+  ``exponent`` via ``bart spow <exponent>``.  Additive: no built-in power op.
+- ``bart:normalize`` -- scale by the reciprocal L2 norm computed *along one axis*
+  via ``bart normalize <bitmask>`` (shape-preserving; the norm broadcasts back
+  over the axis).  Additive: no built-in normalize.
+- ``bart:std`` / ``bart:var`` -- **reductions** along one axis: standard deviation
+  / variance via ``bart std <bitmask>`` / ``bart var <bitmask>``.  Additive: the
+  built-in reductions are ``mean`` / ``rss`` / ``sum`` / ``max`` / ``min`` -- there
+  is no built-in second-moment reduction.  BART reduces the axis to a singleton;
+  we reshape the axis *out* so the output ndim drops by one, matching the built-in
+  reductions' convention (and sidestepping ``read_cfl``'s trailing-singleton
+  strip, which is otherwise axis-position-dependent).
+
+Every op here is **OPAQUE / Tier-1** (see the capability note below): even the
+pointwise ones (``cabs`` / ``carg`` / ``scale`` / ``spow``) stay whole-array,
+because a per-tile out-of-process subprocess round-trip is never the right plan
+for an expensive backend -- here the *cost model*, not correctness, forbids
+windowing.
 
 Deferred (mirroring how the sigpy pack deferred ESPIRiT / NUFFT rather than
 shipping a fragile multi-input hack):
@@ -85,12 +108,18 @@ import numpy as np
 
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.plugins import PluginOperationSpec
-from arrayscope.operations.registry import register_pack_operation
+from arrayscope.operations.registry import OperationParameter, register_pack_operation
 
 # Namespaced, collision-safe ids (must contain the plugin namespace separator).
 FFT_ID = "bart:fft"
 IFFT_ID = "bart:ifft"
 CABS_ID = "bart:cabs"
+CARG_ID = "bart:carg"
+SCALE_ID = "bart:scale"
+SPOW_ID = "bart:spow"
+NORMALIZE_ID = "bart:normalize"
+STD_ID = "bart:std"
+VAR_ID = "bart:var"
 
 # Environment variable BART uses to locate its toolbox.  Its presence is part of
 # the (cheap) availability check: without a toolbox path a bare ``bart`` on PATH
@@ -285,6 +314,7 @@ def run_bart(
     poll_interval: float = _POLL_INTERVAL,
     grace: float = _TERM_GRACE,
     timeout: float | None = _USE_CONFIGURED_TIMEOUT,  # type: ignore[assignment]
+    temp_dir: str | None = None,
 ) -> np.ndarray:
     """Run ``bart <argv> in out`` on ``array`` via a cfl temp-file handoff.
 
@@ -309,6 +339,12 @@ def run_bart(
     generous by default because real recons run minutes); pass an explicit float
     to override or ``None`` to disable.  On expiry the child is killed exactly
     like a cancel and a :class:`RuntimeError` mentioning the timeout is raised.
+
+    Temp root: each run gets its own ``arrayscope-bart-*`` :class:`TemporaryDirectory`
+    that is always cleaned up.  ``temp_dir`` overrides *where* that scratch dir is
+    created (default: the system temp dir); it mainly lets a test isolate a run's
+    scratch dir under its own ``tmp_path`` so a leak check cannot race a concurrent
+    run's dir in the shared system temp.
     """
 
     import subprocess
@@ -326,7 +362,7 @@ def run_bart(
     def _cancelled() -> bool:
         return cancellation_token is not None and getattr(cancellation_token, "cancelled", False)
 
-    with tempfile.TemporaryDirectory(prefix="arrayscope-bart-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="arrayscope-bart-", dir=temp_dir) as tmp:
         in_stem = os.path.join(tmp, "in")
         out_stem = os.path.join(tmp, "out")
         write_cfl(in_stem, array)
@@ -450,11 +486,96 @@ def _build_cabs(axis: int | None, params: Mapping[str, object]) -> Callable[[obj
     return fn
 
 
+def _build_carg(axis: int | None, params: Mapping[str, object]) -> Callable[[object], object]:
+    del axis, params
+
+    def fn(data):
+        return run_bart(["carg"], np.asarray(data))
+
+    return fn
+
+
+def _build_scale(axis: int | None, params: Mapping[str, object]) -> Callable[[object], object]:
+    del axis
+    factor = float(params["factor"])  # defensive coercion (recipe/CLI robustness)
+
+    def fn(data):
+        # ``bart scale <factor>`` multiplies every sample by the real scalar.
+        return run_bart(["scale", repr(factor)], np.asarray(data))
+
+    return fn
+
+
+def _build_spow(axis: int | None, params: Mapping[str, object]) -> Callable[[object], object]:
+    del axis
+    exponent = float(params["exponent"])
+
+    def fn(data):
+        # ``bart spow <exponent>`` raises every sample to the power (complex
+        # principal branch for complex input).
+        return run_bart(["spow", repr(exponent)], np.asarray(data))
+
+    return fn
+
+
+def _build_normalize(axis: int | None, params: Mapping[str, object]) -> Callable[[object], object]:
+    del params
+    resolved_axis = int(axis)  # requires_axis=True guarantees a bound axis
+
+    def fn(data):
+        data = np.asarray(data)
+        bitmask = _axis_bitmask(resolved_axis, data.ndim)
+        # ``bart normalize <bitmask>`` scales by the reciprocal L2 norm computed
+        # along the selected axis; the norm broadcasts back, so shape is preserved.
+        return run_bart(["normalize", bitmask], data)
+
+    return fn
+
+
+def _build_reduce(tool: str) -> Callable[[int | None, Mapping[str, object]], Callable]:
+    """Return a ``build(axis, params)`` for a BART ``std`` / ``var`` reduction.
+
+    BART reduces the selected axis to a *singleton* (size 1).  We reshape that
+    singleton axis away so the output ndim drops by one -- matching the built-in
+    reductions (``mean`` / ``rss`` / ...), and making the realized shape
+    independent of ``read_cfl``'s trailing-singleton strip (which would otherwise
+    keep or drop the reduced axis depending on its position).  The reshape is
+    exact: a reduction-to-one has ``prod(shape) / shape[axis]`` elements, which is
+    precisely ``prod(shape without axis)``.
+    """
+
+    def build(axis: int | None, params: Mapping[str, object]) -> Callable[[object], object]:
+        del params
+        resolved_axis = int(axis)
+
+        def fn(data):
+            data = np.asarray(data)
+            ax = resolved_axis % data.ndim
+            bitmask = _axis_bitmask(ax, data.ndim)
+            result = np.asarray(run_bart([tool, bitmask], data))
+            out_shape = data.shape[:ax] + data.shape[ax + 1 :]
+            return result.reshape(out_shape)
+
+        return fn
+
+    return build
+
+
 def _complex64_dtype(input_dtype):
     """Every BART op returns complex64 -- cfl has no other element type."""
 
     del input_dtype
     return np.dtype(np.complex64)
+
+
+def _reduce_output_shape(shape, axis, params):
+    """Reduction output shape: drop ``axis`` (ndim - 1), matching built-in reductions."""
+
+    del params
+    ax = int(axis) % len(shape)
+    out = [int(s) for s in shape]
+    del out[ax]
+    return tuple(out)
 
 
 def fft_spec() -> PluginOperationSpec:
@@ -505,10 +626,136 @@ def cabs_spec() -> PluginOperationSpec:
     )
 
 
+def carg_spec() -> PluginOperationSpec:
+    return PluginOperationSpec(
+        id=CARG_ID,
+        label="Complex phase (BART)",
+        build=_build_carg,
+        output_dtype=_complex64_dtype,
+        requires_axis=False,
+        changes_shape=False,
+        # Pointwise, but kept OPAQUE for the same cost reason as cabs.
+        region_capable=False,
+        group="BART",
+        description="Elementwise complex phase / argument atan2(Im, Re) (via the BART binary).",
+        icon="rotate_right",
+    )
+
+
+def scale_spec() -> PluginOperationSpec:
+    return PluginOperationSpec(
+        id=SCALE_ID,
+        label="Scale (BART)",
+        build=_build_scale,
+        output_dtype=_complex64_dtype,
+        parameters=(
+            OperationParameter(
+                "factor",
+                "Factor",
+                kind="float",
+                default=1.0,
+                step=0.1,
+                description="Multiply every sample by this real scalar.",
+            ),
+        ),
+        requires_axis=False,
+        changes_shape=False,
+        region_capable=False,
+        group="BART",
+        description="Multiply every sample by a real scalar factor (via the BART binary).",
+        icon="close_fullscreen",
+    )
+
+
+def spow_spec() -> PluginOperationSpec:
+    return PluginOperationSpec(
+        id=SPOW_ID,
+        label="Power (BART)",
+        build=_build_spow,
+        output_dtype=_complex64_dtype,
+        parameters=(
+            OperationParameter(
+                "exponent",
+                "Exponent",
+                kind="float",
+                default=1.0,
+                step=0.1,
+                description="Raise every sample to this power (complex principal branch).",
+            ),
+        ),
+        requires_axis=False,
+        changes_shape=False,
+        region_capable=False,
+        group="BART",
+        description="Raise every sample to a scalar power (via the BART binary).",
+        icon="functions",
+    )
+
+
+def normalize_spec() -> PluginOperationSpec:
+    return PluginOperationSpec(
+        id=NORMALIZE_ID,
+        label="Normalize along axis (BART)",
+        build=_build_normalize,
+        output_dtype=_complex64_dtype,
+        requires_axis=True,
+        changes_shape=False,
+        # The scale factor depends on a whole-axis norm -> not windowable; and an
+        # out-of-process op stays OPAQUE regardless.
+        region_capable=False,
+        group="BART",
+        description="Scale by the reciprocal L2 norm computed along one axis (via BART).",
+        icon="straighten",
+    )
+
+
+def std_spec() -> PluginOperationSpec:
+    return PluginOperationSpec(
+        id=STD_ID,
+        label="Std along axis (BART)",
+        build=_build_reduce("std"),
+        output_shape=_reduce_output_shape,
+        output_dtype=_complex64_dtype,
+        requires_axis=True,
+        changes_shape=True,
+        # A reduction is never windowable, and it is out-of-process -> OPAQUE.
+        region_capable=False,
+        group="BART",
+        description="Standard deviation along one axis, collapsing it (via the BART binary).",
+        icon="show_chart",
+    )
+
+
+def var_spec() -> PluginOperationSpec:
+    return PluginOperationSpec(
+        id=VAR_ID,
+        label="Variance along axis (BART)",
+        build=_build_reduce("var"),
+        output_shape=_reduce_output_shape,
+        output_dtype=_complex64_dtype,
+        requires_axis=True,
+        changes_shape=True,
+        region_capable=False,
+        group="BART",
+        description="Variance along one axis, collapsing it (via the BART binary).",
+        icon="show_chart",
+    )
+
+
 def pack_specs() -> tuple[PluginOperationSpec, ...]:
     """The specs this pack contributes (independent of bart being installed)."""
 
-    return (fft_spec(), ifft_spec(), cabs_spec())
+    return (
+        fft_spec(),
+        ifft_spec(),
+        cabs_spec(),
+        carg_spec(),
+        scale_spec(),
+        spow_spec(),
+        normalize_spec(),
+        std_spec(),
+        var_spec(),
+    )
 
 
 def register(register_fn=register_pack_operation) -> bool:

@@ -245,10 +245,10 @@ is enumerated through `registry.all_operations()` (which the operation dock,
 command palette, and export menu use). `operation_entries()` stays built-ins-only
 for callers that assume concrete dataclass operation types.
 
-### `sigpy_pack` — threshold + centered resize (no FFT)
+### `sigpy_pack` — threshold, resize + strided resampling (no FFT)
 
 `arrayscope/operations/packs/sigpy_pack.py` ships the sigpy operations that are
-**additive** over the 13 built-ins. It deliberately ships **no FFT**: an earlier
+**additive** over the built-ins. It deliberately ships **no FFT**: an earlier
 design shipped `sigpy:fft` / `sigpy:ifft`, and they were removed as redundant
 (see docs/graveyard.md). ArrayScope already covers a centered FFT two ways a
 `sigpy:fft` op only duplicated — the built-in `centered_fft` / `centered_ifft`
@@ -271,12 +271,25 @@ What the pack does ship:
   length (`sigpy.resize`): the canonical k-space *zero-fill* interpolation and its
   inverse center-crop. Additive over the built-in `crop` (which only *shrinks* by
   an explicit `[start:stop]` window and does not center).
+- `sigpy:circshift` — **circular shift** (roll) of one axis by an integer number
+  of samples (`sigpy.circshift`, negative shifts allowed). Shape- and
+  dtype-preserving. Additive over the built-ins: `reverse` mirrors and `fftshift`
+  rolls by exactly half; there is no general roll-by-k.
+- `sigpy:downsample` — **strided decimation** of one axis by an integer factor
+  (`sigpy.downsample`, `input[..., ::factor, ...]`, *no* anti-alias filter; shape
+  `ceil(n / factor)`, dtype-preserving).
+- `sigpy:upsample` — **zero-insertion upsample** of one axis by an integer factor
+  (`sigpy.upsample`, the exact adjoint of `downsample`; shape `n · factor`,
+  dtype-preserving). `downsample` + `upsample` form a natural strided pair, both
+  with a context-aware form that derives the output length.
 
 Both threshold ops are strictly pointwise, so `fn(whole)[region] ==
 fn(whole[region])` on every axis. They therefore declare **Tier-2
 `region_capable=True`** — and are the first pack ops whose windowable claim the
-conformance harness actually *honors* (the BART ops are all OPAQUE). `sigpy:resize`
-is shape-changing and re-indexes the whole axis, so it is **Tier-1 OPAQUE**.
+conformance harness actually *honors* (the BART ops are all OPAQUE). `sigpy:resize`,
+`sigpy:downsample` and `sigpy:upsample` are shape-changing and re-index the whole
+axis; `sigpy:circshift` wraps samples across the axis boundary — all four are
+therefore **Tier-1 OPAQUE**.
 
 Numeric precision: sigpy's `soft_thresh` / `hard_thresh` always return
 `complex128`. The ops **narrow the result back** to the input dtype (complex stays
@@ -310,11 +323,27 @@ data across in BART's native **cfl** temp-file format. Unlike the sigpy pack (an
 in-process library call), the compute happens in a child process, so the pack owns
 the cfl handoff, a working child environment, and cancellation of the child.
 
-| id | label | axis | capability |
-|----|-------|------|------------|
-| `bart:fft`  | Centered FFT (BART)             | required | **OPAQUE / Tier-1** |
-| `bart:ifft` | Centered iFFT (BART, unnormalized) | required | **OPAQUE / Tier-1** |
-| `bart:cabs` | Complex magnitude (BART)        | none     | **OPAQUE / Tier-1** |
+| id | label | axis | shape | capability |
+|----|-------|------|-------|------------|
+| `bart:fft`  | Centered FFT (BART)             | required | same | **OPAQUE / Tier-1** |
+| `bart:ifft` | Centered iFFT (BART, unnormalized) | required | same | **OPAQUE / Tier-1** |
+| `bart:cabs` | Complex magnitude (BART)        | none     | same | **OPAQUE / Tier-1** |
+| `bart:carg` | Complex phase (BART)            | none     | same | **OPAQUE / Tier-1** |
+| `bart:scale`| Scale (BART)                    | none     | same | **OPAQUE / Tier-1** |
+| `bart:spow` | Power (BART)                    | none     | same | **OPAQUE / Tier-1** |
+| `bart:normalize` | Normalize along axis (BART) | required | same | **OPAQUE / Tier-1** |
+| `bart:std`  | Std along axis (BART)           | required | collapses axis | **OPAQUE / Tier-1** |
+| `bart:var`  | Variance along axis (BART)      | required | collapses axis | **OPAQUE / Tier-1** |
+
+The additions are genuinely BART-native — none has a built-in or sigpy-pack
+equivalent: `bart:carg` is the phase companion to `bart:cabs`; `bart:scale`
+(`× factor`) and `bart:spow` (`x**p`, complex principal branch) are pointwise
+scalar maps; `bart:normalize` scales by the reciprocal L2 norm along one axis; and
+`bart:std` / `bart:var` are the second-moment **reductions** the built-ins
+(`mean` / `rss` / `sum` / `max` / `min`) do not cover. `bart std` / `bart var` are
+the *sample* statistics (ddof = 1); BART reduces the axis to a singleton and the
+pack reshapes it **out**, so the output ndim drops by one exactly as the built-in
+reductions do.
 
 **BART's FFT convention.** `bart fft <bitmask>` is **centered but unnormalized**:
 it equals `fftshift(fft(ifftshift(x, ax), ax), ax)` (verified against NumPy in the
@@ -352,8 +381,9 @@ is ready to forward a token the moment the engine supplies one.
 
 **Admission cost (honest).** Every BART op is **OPAQUE** — a per-region execution would
 mean one out-of-process cfl round-trip *per tile*, which is never the right plan for an
-expensive subprocess op, so even the pointwise `bart:cabs` stays OPAQUE (here the *cost
-model*, not correctness, forbids windowing). The plugin path classifies each pack op as
+expensive subprocess op, so even the pointwise ops (`bart:cabs` / `bart:carg` /
+`bart:scale` / `bart:spow`) stay OPAQUE (here the *cost model*, not correctness, forbids
+windowing). The plugin path classifies each pack op as
 a whole-array `TRANSFORM` (blocks and expands every axis, not chunkable, not fusable, a
 cache-stage boundary) — the heaviest class the admission cost model has — and the forced
 complex64 output raises the estimated bytes for real inputs. That OPAQUE/TRANSFORM

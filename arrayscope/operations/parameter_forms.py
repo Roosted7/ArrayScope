@@ -247,11 +247,71 @@ def _resize_form(entry: OperationEntry, *, shape: Shape | None, axis: int | None
     return ParameterForm([size], derive=derive)
 
 
+def _downsample_form(
+    entry: OperationEntry, *, shape: Shape | None, axis: int | None
+) -> ParameterForm:
+    """sigpy:downsample: integer ``factor`` (default 2) + a derived output-length line."""
+
+    del entry
+    length = _axis_length(shape, axis)
+    factor = ParameterField(
+        name="factor",
+        label="Factor",
+        kind="int",
+        value=2,
+        minimum=1,
+        maximum=None,
+        step=1,
+        description="Keep every factor-th sample along the axis (no anti-alias filter).",
+    )
+
+    def derive(form: ParameterForm) -> list[DerivedValue]:
+        lines: list[DerivedValue] = []
+        f = max(int(form.field("factor").value), 1)
+        if length is not None:
+            lines.append(DerivedValue("Current length", str(length)))
+            lines.append(DerivedValue("Output length", str((length + f - 1) // f)))
+        return lines
+
+    return ParameterForm([factor], derive=derive)
+
+
+def _upsample_form(
+    entry: OperationEntry, *, shape: Shape | None, axis: int | None
+) -> ParameterForm:
+    """sigpy:upsample: integer ``factor`` (default 2) + a derived output-length line."""
+
+    del entry
+    length = _axis_length(shape, axis)
+    factor = ParameterField(
+        name="factor",
+        label="Factor",
+        kind="int",
+        value=2,
+        minimum=1,
+        maximum=None,
+        step=1,
+        description="Scatter each sample to every factor-th slot; fill the rest with zeros.",
+    )
+
+    def derive(form: ParameterForm) -> list[DerivedValue]:
+        lines: list[DerivedValue] = []
+        f = max(int(form.field("factor").value), 1)
+        if length is not None:
+            lines.append(DerivedValue("Current length", str(length)))
+            lines.append(DerivedValue("Output length", str(length * f)))
+        return lines
+
+    return ParameterForm([factor], derive=derive)
+
+
 # Keyed by op id. An op absent here falls back to the metadata-driven default
 # form, which already honors the parameter default / min / max / step / desc.
 _FORM_PROVIDERS: dict[str, Callable[..., ParameterForm]] = {
     "crop": _crop_form,
     "sigpy:resize": _resize_form,
+    "sigpy:downsample": _downsample_form,
+    "sigpy:upsample": _upsample_form,
 }
 
 

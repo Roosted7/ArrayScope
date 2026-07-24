@@ -66,7 +66,14 @@ def test_sigpy_ops_appear_when_available():
 
 def test_pack_specs_exist_independently_of_installation():
     ids = {spec.id for spec in sigpy_pack.pack_specs()}
-    assert ids == {"sigpy:soft_thresh", "sigpy:hard_thresh", "sigpy:resize"}
+    assert ids == {
+        "sigpy:soft_thresh",
+        "sigpy:hard_thresh",
+        "sigpy:resize",
+        "sigpy:circshift",
+        "sigpy:downsample",
+        "sigpy:upsample",
+    }
 
 
 def test_pack_contributes_nothing_when_sigpy_absent(monkeypatch):
@@ -240,6 +247,137 @@ def test_soft_thresh_recipe_round_trips_float_param():
     assert item == {"id": "sigpy:soft_thresh", "parameters": {"lamda": 0.75}, "enabled": True}
     rebuilt = registry.create_operation(item["id"], parameters=item["parameters"])
     assert rebuilt == op  # identity (id + axis + params) compares equal
+
+
+# --- sigpy:circshift is a shape/dtype-preserving OPAQUE roll --------------------
+
+
+@pytest.mark.parametrize("shift", [1, 3, -2, 5])
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_circshift_matches_numpy_roll(shift, axis):
+    pytest.importorskip("sigpy")
+    x = np.arange(120, dtype=np.complex64).reshape(PROBE_SHAPE)
+    op = registry.create_operation("sigpy:circshift", axis=axis, parameters={"shift": shift})
+    got = np.asarray(op.apply(x))
+    np.testing.assert_array_equal(got, np.roll(x, shift, axis=axis))
+    assert got.dtype == np.complex64  # dtype-preserving
+    assert got.shape == PROBE_SHAPE  # shape-preserving
+
+
+def test_circshift_preserves_real_dtype_and_is_opaque():
+    pytest.importorskip("sigpy")
+    from arrayscope.operations.capabilities import OperationClass
+
+    x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    op = registry.create_operation("sigpy:circshift", axis=1, parameters={"shift": 1})
+    got = np.asarray(op.apply(x))
+    np.testing.assert_array_equal(got, np.roll(x, 1, axis=1))
+    assert got.dtype == np.float32
+    # A circular shift wraps the axis boundary -> never a Tier-2 windowable claim.
+    assert op.execution_class is OperationClass.OPAQUE
+    assert plugins.is_region_honored("sigpy:circshift", op.axis, op.params) is False
+    # The dtype adapter is identity (no narrowing): float32 in, float32 out.
+    assert np.dtype(op.output_dtype(np.dtype("float32"))) == np.float32
+    assert np.dtype(op.output_dtype(np.dtype("complex64"))) == np.complex64
+
+
+def test_circshift_output_shape_is_identity():
+    pytest.importorskip("sigpy")
+    op = registry.create_operation("sigpy:circshift", axis=0, parameters={"shift": 2})
+    assert op.output_shape(PROBE_SHAPE) == PROBE_SHAPE
+
+
+# --- sigpy:downsample is a strided decimation (shape-changing, OPAQUE) ----------
+
+
+@pytest.mark.parametrize(("factor", "axis"), [(2, 0), (2, 1), (3, 1), (2, 2), (4, 2)])
+def test_downsample_matches_strided_slice(factor, axis):
+    pytest.importorskip("sigpy")
+    x = np.arange(120, dtype=np.complex64).reshape(PROBE_SHAPE)
+    op = registry.create_operation("sigpy:downsample", axis=axis, parameters={"factor": factor})
+    got = np.asarray(op.apply(x))
+    slicer = [slice(None)] * x.ndim
+    slicer[axis] = slice(None, None, factor)
+    np.testing.assert_array_equal(got, x[tuple(slicer)])
+    # The output_shape adapter predicts the realized (strided) length exactly.
+    assert got.shape == op.output_shape(PROBE_SHAPE)
+    assert got.dtype == np.complex64  # dtype-preserving
+
+
+def test_downsample_output_shape_and_dtype_adapters():
+    pytest.importorskip("sigpy")
+    op = registry.create_operation("sigpy:downsample", axis=1, parameters={"factor": 2})
+    # ceil(5 / 2) = 3 along axis 1.
+    assert op.output_shape(PROBE_SHAPE) == (6, 3, 4)
+    # Strided slice preserves dtype.
+    assert np.dtype(op.output_dtype(np.dtype("float32"))) == np.float32
+    assert np.dtype(op.output_dtype(np.dtype("complex64"))) == np.complex64
+
+
+def test_downsample_is_opaque_shape_changer():
+    pytest.importorskip("sigpy")
+    from arrayscope.operations.capabilities import OperationClass
+
+    op = registry.create_operation("sigpy:downsample", axis=0, parameters={"factor": 2})
+    assert op.execution_class is OperationClass.OPAQUE
+    assert plugins.is_region_honored("sigpy:downsample", op.axis, op.params) is False
+
+
+# --- sigpy:upsample is zero-insertion (downsample's adjoint) --------------------
+
+
+@pytest.mark.parametrize(("factor", "axis"), [(2, 0), (2, 1), (3, 1), (2, 2)])
+def test_upsample_zero_inserts(factor, axis):
+    pytest.importorskip("sigpy")
+    x = np.arange(120, dtype=np.complex64).reshape(PROBE_SHAPE)
+    op = registry.create_operation("sigpy:upsample", axis=axis, parameters={"factor": factor})
+    got = np.asarray(op.apply(x))
+    assert got.shape == op.output_shape(PROBE_SHAPE)
+    assert got.shape[axis] == PROBE_SHAPE[axis] * factor
+    assert got.dtype == np.complex64
+    # The samples land at every factor-th slot; the rest are zeros.
+    picker = [slice(None)] * x.ndim
+    picker[axis] = slice(None, None, factor)
+    np.testing.assert_array_equal(got[tuple(picker)], x)
+    holes = [slice(None)] * x.ndim
+    holes[axis] = slice(1, None, factor)
+    if factor > 1:
+        assert np.count_nonzero(got[tuple(holes)]) == 0
+
+
+def test_upsample_is_downsample_adjoint_on_1d():
+    pytest.importorskip("sigpy")
+    x = np.array([1, 2, 3, 4], dtype=np.float32)
+    up = registry.create_operation("sigpy:upsample", axis=0, parameters={"factor": 2})
+    y = np.asarray(up.apply(x))
+    np.testing.assert_array_equal(y, np.array([1, 0, 2, 0, 3, 0, 4, 0], dtype=np.float32))
+    assert y.dtype == np.float32  # dtype-preserving
+
+
+def test_upsample_output_shape_adapter():
+    pytest.importorskip("sigpy")
+    op = registry.create_operation("sigpy:upsample", axis=2, parameters={"factor": 3})
+    assert op.output_shape(PROBE_SHAPE) == (6, 5, 12)
+
+
+# --- downsample / upsample context-aware parameter forms -----------------------
+
+
+def test_downsample_upsample_forms_derive_output_length():
+    pytest.importorskip("sigpy")
+    from arrayscope.operations.parameter_forms import build_parameter_form
+
+    down = registry.get_operation_entry("sigpy:downsample")
+    form = build_parameter_form(down, shape=(6, 8, 10), axis=1)
+    assert form.field("factor").value == 2  # default factor
+    derived = {line.label: line.text for line in form.derived()}
+    assert derived["Current length"] == "8"
+    assert derived["Output length"] == "4"  # ceil(8 / 2)
+
+    up = registry.get_operation_entry("sigpy:upsample")
+    up_form = build_parameter_form(up, shape=(6, 8, 10), axis=1)
+    up_derived = {line.label: line.text for line in up_form.derived()}
+    assert up_derived["Output length"] == "16"  # 8 * 2
 
 
 def test_describe_operation_reads_plugin_param_from_mapping():
