@@ -69,6 +69,12 @@ class _StaleBatchIntent:
 _PRESENTATION_GATE_EVENT_TYPE = Qt.QtCore.QEvent.Type(Qt.QtCore.QEvent.registerEventType())
 _LOW_PRIORITY_CALLBACK_EVENT_TYPE = Qt.QtCore.QEvent.Type(Qt.QtCore.QEvent.registerEventType())
 
+# GUI budget for one atomic-successor warm callback: several batch_size-bounded
+# backend warm calls share one event-loop turn up to this elapsed budget, so a
+# wide successor warms in a handful of turns while each turn stays well inside
+# the 50 ms callback bar.
+_ATOMIC_WARM_BUDGET_MS = 8.0
+
 
 class _PresentationGateEvent(Qt.QtCore.QEvent):
     def __init__(self, effects, owner) -> None:
@@ -123,6 +129,24 @@ def _post_low_priority_callback(renderer, callback) -> None:
         _presentation_gate_receiver(renderer),
         _LowPriorityCallbackEvent(callback),
         int(Qt.QtCore.Qt.EventPriority.LowEventPriority.value),
+    )
+
+
+def _post_visible_path_callback(renderer, callback) -> None:
+    """Post a receiver-bound callback at NORMAL event priority.
+
+    Continuations on the visible critical path (atomic successor warming)
+    must share the event queue fairly with completion-drain signal
+    deliveries.  Posting them at LowEventPriority starved them behind a
+    saturated drain storm: during the 2026-07-24 completion-drain freeze the
+    warm continuation ran ~3 times/second while workers kept the queue full,
+    holding a 100-tile atomic transaction (and the pixels behind it) hostage
+    for tens of seconds.
+    """
+
+    Qt.QtCore.QCoreApplication.postEvent(
+        _presentation_gate_receiver(renderer),
+        _LowPriorityCallbackEvent(callback),
     )
 
 
@@ -4242,62 +4266,74 @@ def _warm_atomic_successor_residency(
         if current_signature != signature[:3]:
             session._atomic_warm_job = None
             return
-        admitted = tuple(job["pending"][: max(1, int(batch_size))])
-        del job["pending"][: len(admitted)]
-        batch = {int(tile): job["payloads"][int(tile)] for tile in admitted}
-        # This coordinator already owns the bounded GUI-thread continuation.
-        # Tell the backend to complete this batch synchronously instead of
-        # queueing it behind the background warm scheduler, whose admission
-        # correctly requires a settled visible target.  Queueing a target
-        # successor there created a cycle: target settlement waited for warm
-        # residency while warm residency waited for target settlement.
-        warm_delta = (
-            tile_delta
-            if bool(getattr(tile_delta, "atomic_handoff", False))
-            else replace(tile_delta, atomic_handoff=True)
-        )
-        warm(
-            payloads=batch,
-            geometry=geometry,
-            levels=level_key,
-            rgb_already_windowed=bool(rgb_already_windowed),
-            tile_delta=warm_delta,
-            tile_residency_budget_bytes=tile_residency_budget_bytes(renderer._memory_policy()),
-            frame_plan=getattr(session, "frame_plan", None),
-        )
-        unresolved = tuple(
-            int(tile) for tile in admitted if not physically_warm(job["payloads"][int(tile)])
-        )
-        for tile in admitted:
-            if int(tile) in unresolved:
-                continue
-            payload = job["payloads"][int(tile)]
-            marker = (getattr(payload, "source_id", None), level_key)
-            warmed[int(tile)] = marker
-            warmed_identities.add(marker)
-        if unresolved:
-            job["pending"].extend(unresolved)
-            if len(unresolved) == len(admitted):
-                # No page became resident: stop this bounded job instead of
-                # spinning a low-priority callback forever. Re-arm the visible
-                # presentation owner before returning: the settlement guard
-                # is observational and cannot own these dirty upserts. A
-                # later memory/interaction edge can now retry, and the global
-                # deadline still reports a persistent capacity failure.
-                session._atomic_warm_job = None
-                session.final_commit_pending = True
-                session.flush_pending = True
-                renderer.request_montage_replan(session)
+        # Time-budgeted warming: one receiver-owned callback prepares as many
+        # bounded batches as fit in the GUI budget instead of exactly one.
+        # With one fixed-size batch per callback, a 100-tile successor needed
+        # 50 event-loop turns; combined with LowEventPriority starvation the
+        # 2026-07-24 field freeze warmed ~6 tiles/second while the drain
+        # storm kept the queue full.  Each warm() call stays batch_size-
+        # bounded, so individual backend calls remain small; the budget only
+        # governs how many of them share one callback turn.
+        warm_budget_start = perf_counter()
+        while True:
+            admitted = tuple(job["pending"][: max(1, int(batch_size))])
+            del job["pending"][: len(admitted)]
+            batch = {int(tile): job["payloads"][int(tile)] for tile in admitted}
+            # This coordinator already owns the bounded GUI-thread continuation.
+            # Tell the backend to complete this batch synchronously instead of
+            # queueing it behind the background warm scheduler, whose admission
+            # correctly requires a settled visible target.  Queueing a target
+            # successor there created a cycle: target settlement waited for warm
+            # residency while warm residency waited for target settlement.
+            warm_delta = (
+                tile_delta
+                if bool(getattr(tile_delta, "atomic_handoff", False))
+                else replace(tile_delta, atomic_handoff=True)
+            )
+            warm(
+                payloads=batch,
+                geometry=geometry,
+                levels=level_key,
+                rgb_already_windowed=bool(rgb_already_windowed),
+                tile_delta=warm_delta,
+                tile_residency_budget_bytes=tile_residency_budget_bytes(renderer._memory_policy()),
+                frame_plan=getattr(session, "frame_plan", None),
+            )
+            unresolved = tuple(
+                int(tile) for tile in admitted if not physically_warm(job["payloads"][int(tile)])
+            )
+            for tile in admitted:
+                if int(tile) in unresolved:
+                    continue
+                payload = job["payloads"][int(tile)]
+                marker = (getattr(payload, "source_id", None), level_key)
+                warmed[int(tile)] = marker
+                warmed_identities.add(marker)
+            if unresolved:
+                job["pending"].extend(unresolved)
+                if len(unresolved) == len(admitted):
+                    # No page became resident: stop this bounded job instead of
+                    # spinning a callback forever. Re-arm the visible
+                    # presentation owner before returning: the settlement guard
+                    # is observational and cannot own these dirty upserts. A
+                    # later memory/interaction edge can now retry, and the global
+                    # deadline still reports a persistent capacity failure.
+                    session._atomic_warm_job = None
+                    session.final_commit_pending = True
+                    session.flush_pending = True
+                    renderer.request_montage_replan(session)
+                    return
+            if not job["pending"]:
+                break
+            if (perf_counter() - warm_budget_start) * 1000.0 >= _ATOMIC_WARM_BUDGET_MS:
+                _post_visible_path_callback(renderer, continue_warm)
                 return
-        if job["pending"]:
-            _post_low_priority_callback(renderer, continue_warm)
-            return
         session._atomic_warm_job = None
         session.final_commit_pending = True
         session.flush_pending = True
         renderer.request_montage_replan(session)
 
-    _post_low_priority_callback(renderer, continue_warm)
+    _post_visible_path_callback(renderer, continue_warm)
     return False
 
 
