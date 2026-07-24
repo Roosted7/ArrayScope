@@ -71,7 +71,7 @@ from arrayscope.display.shader_mapping import (
     default_phase_lut,
     pack_texture_data,
 )
-from arrayscope.display.tile_layout import tile_layout_map, tile_layout_shape
+from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map, tile_layout_shape
 from arrayscope.display.tile_truth_overlay import (
     tile_truth_overlay_row_text,
     tile_truth_overlay_text,
@@ -543,6 +543,21 @@ class WgpuImageView2D(ImageViewShell):
         device = _shared_wgpu_device()
         max_layers = int(device.limits["max-texture-array-layers"])
         preferred_pages = dict(preferred_pages or {})
+        previous_pages = {
+            representation: (0 if executor is None else executor.pool_budget(representation))
+            for representation in (
+                SCALAR_R32F,
+                COMPLEX_RG32F,
+                RGB8,
+                RGB_WINDOWED_RGBA32F,
+            )
+        }
+        representation_byte_budgets = _wgpu_representation_byte_budgets(
+            required_pages=required_pages,
+            preferred_pages=preferred_pages,
+            previous_pages=previous_pages,
+            budget_bytes=int(residency_budget_bytes or 0),
+        )
         budgets: dict[str, int] = {}
         for representation in (
             SCALAR_R32F,
@@ -550,14 +565,14 @@ class WgpuImageView2D(ImageViewShell):
             RGB8,
             RGB_WINDOWED_RGBA32F,
         ):
-            previous = 0 if executor is None else executor.pool_budget(representation)
+            previous = previous_pages[representation]
             needed = int(required_pages.get(representation, 0))
             budget = _wgpu_pool_layer_budget(
                 previous=previous,
                 needed=needed,
                 preferred=int(preferred_pages.get(representation, 0) or 0),
                 max_layers=max_layers,
-                budget_bytes=int(residency_budget_bytes or 0),
+                budget_bytes=int(representation_byte_budgets.get(representation, 0)),
                 bytes_per_layer=PAGE * PAGE * _WGPU_POOL_TEXEL_BYTES[representation],
             )
             if budget:
@@ -569,6 +584,10 @@ class WgpuImageView2D(ImageViewShell):
             # representation. Rebuilding here discarded all residency and
             # forced later index changes to re-upload unchanged chunks.
             executor.ensure_pool_budgets(budgets)
+            if not executor.codec_engaged:
+                for representation, needed in required_pages.items():
+                    if int(needed) > 0:
+                        executor.ensure_raw_pool_capacity(representation, int(needed))
             return executor
         # Resolve the explicit display-codec experiment against this device's
         # real block-compression support. OFF is the exact production default.
@@ -1442,10 +1461,32 @@ class WgpuImageView2D(ImageViewShell):
                 _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
                 for lod_level, source_shape in lod_geometry.values()
             )
-            pages_needed = sum(
-                -(-int(texture.shape[0]) // PAGE) * -(-int(texture.shape[1]) // PAGE)
-                for texture in textures.values()
+            capacity_pages_by_tile = {
+                tile: _wgpu_payload_capacity_page_count(
+                    payloads[tile],
+                    texture_shape=tuple(int(value) for value in textures[tile].shape[:2]),
+                    representation=representation,
+                    selected_lod=lod_geometry[tile][0],
+                )
+                for tile in payloads
+            }
+            pages_needed = sum(capacity_pages_by_tile.values())
+            # Progressive commits expose only the payloads materialized so
+            # far, while the immutable frame plan already declares the whole
+            # same-shaped montage transaction. Reserve that measured visible
+            # working set once. Otherwise every small presentation batch
+            # grows and copies the texture array again on its way to the same
+            # final capacity.
+            planned_count = planned_tile_count(
+                geometry,
+                frame_plan=frame_plan,
+                minimum=len(payloads),
             )
+            if capacity_pages_by_tile and planned_count > len(capacity_pages_by_tile):
+                pages_needed = max(
+                    pages_needed,
+                    int(planned_count) * max(capacity_pages_by_tile.values()),
+                )
             executor = self._ensure_wgpu_executor(
                 {representation: pages_needed},
                 preferred_pages={representation: pages_preferred},
@@ -1916,6 +1957,7 @@ class WgpuImageView2D(ImageViewShell):
 
     def _wgpu_payload_texture(self, payload, representation) -> np.ndarray:
         texture = payload.texture_data if payload.texture_data is not None else payload.image
+        texture = _wgpu_assembled_page_texture(payload, texture)
         if representation == RGB_WINDOWED_RGBA32F:
             base = pack_texture_data(texture, TexturePlaneKind.RGB8)
             scalar = getattr(payload, "histogram_data", None)
@@ -1950,7 +1992,7 @@ class WgpuImageView2D(ImageViewShell):
         """Return a complete exact native plane worth warming with a coarse draw.
 
         A zoomed-out full montage commonly presents LOD1/2 while the payload
-        still owns its exact semantic plane.  Uploading that plane through the
+        still owns its exact semantic plane. Uploading that plane through the
         same bounded tile commit populates the already-budgeted L0 pages once;
         a later displayed-axis crop then becomes only a source-window rebind.
         Narrow/cold crops never enter here because their binding is local, and
@@ -2144,15 +2186,12 @@ class WgpuImageView2D(ImageViewShell):
                 tuple(int(value) for value in texture.shape[:2]),
             )
         pages_needed = sum(
-            native_pages
-            if (
-                native_pages := _wgpu_native_prefetch_page_count(
-                    capacity_payloads[tile],
-                    representation=representation,
-                    selected_lod=geometry[0],
-                )
+            _wgpu_payload_capacity_page_count(
+                capacity_payloads[tile],
+                texture_shape=texture_shape,
+                representation=representation,
+                selected_lod=geometry[0],
             )
-            else -(-texture_shape[0] // PAGE) * -(-texture_shape[1] // PAGE)
             for tile, (geometry, texture_shape) in capacity_geometry.items()
         )
         pages_preferred = sum(
@@ -2434,6 +2473,10 @@ class WgpuImageView2D(ImageViewShell):
                 "physical_storage_mode": "wgpu_page_table",
                 "physical_texture_dtype": str(_WGPU_REP_DTYPES.get(representation, "")),
                 "physical_texture_shape": (int(source_height), int(source_width)),
+                "physical_source_origin_xy": tuple(
+                    float(value) for value in info.get("src_origin", (0.0, 0.0))
+                ),
+                "physical_source_size_xy": (float(source_width), float(source_height)),
                 "physical_mapping_mode": str(getattr(mapping, "mode", "") or ""),
                 "physical_component_mode": None,
                 "physical_levels": (
@@ -2949,7 +2992,7 @@ def _wgpu_payload_binding(
         )
 
     def page_backed_local_binding() -> _WgpuPayloadBinding:
-        """Bind one cold source-grid page without pretending its bins are local.
+        """Bind cold source-grid pages without pretending their bins are local.
 
         The executor's plane ladder is uniformly power-of-two reduced.  A
         globally aligned window fits that contract when the local plane starts
@@ -2962,15 +3005,17 @@ def _wgpu_payload_binding(
         backing = getattr(payload, "page_backing", None)
         plans = tuple(getattr(backing, "requested_plans", ()) or ())
         pages = tuple(getattr(backing, "materialized_pages", ()) or ())
-        if len(plans) != 1 or len(pages) != 1:
+        if not plans or not pages:
             raise geometry_error
-        plan = plans[0]
-        if tuple(int(value) for value in plan.reduction_yx) != (
-            int(lod_level),
-            int(lod_level),
+        if any(
+            tuple(int(value) for value in plan.reduction_yx) != (int(lod_level), int(lod_level))
+            for plan in plans
         ):
             raise geometry_error
-        stored_y0, stored_y1, stored_x0, stored_x1 = (int(value) for value in plan.stored_rect_yx)
+        stored_y0 = min(int(plan.stored_rect_yx[0]) for plan in plans)
+        stored_y1 = max(int(plan.stored_rect_yx[1]) for plan in plans)
+        stored_x0 = min(int(plan.stored_rect_yx[2]) for plan in plans)
+        stored_x1 = max(int(plan.stored_rect_yx[3]) for plan in plans)
         stored_shape = (stored_y1 - stored_y0, stored_x1 - stored_x0)
         if stored_shape != tuple(int(value) for value in texture.shape[:2]):
             raise geometry_error
@@ -3095,6 +3140,25 @@ def _wgpu_payload_binding(
                 source_anchored=True,
                 lod_level=0,
             )
+    if geometry_error is not None and not fully_resident:
+        try:
+            return page_backed_local_binding()
+        except ValueError:
+            resident_levels = tuple(
+                sorted(
+                    {
+                        int(key.lod.level)
+                        for key in resident
+                        if key.document_generation == global_identity
+                        and key.operation_key == "live"
+                        and key.representation == representation
+                    }
+                )
+            )
+            raise ValueError(
+                f"{geometry_error}; canonical source-plane resident levels="
+                f"{resident_levels or 'none'}"
+            ) from geometry_error
     supplies_complete_pages = (
         str(getattr(payload, "quality", "exact") or "exact") == "exact"
         and y0 % source_page == 0
@@ -3104,28 +3168,7 @@ def _wgpu_payload_binding(
         and len(global_chunks) == local_grid_h * local_grid_w
     )
     if not fully_resident and not supplies_complete_pages:
-        if geometry_error is not None:
-            try:
-                return page_backed_local_binding()
-            except ValueError:
-                resident_levels = tuple(
-                    sorted(
-                        {
-                            int(key.lod.level)
-                            for key in resident
-                            if key.document_generation == global_identity
-                            and key.operation_key == "live"
-                            and key.representation == representation
-                        }
-                    )
-                )
-                raise ValueError(
-                    f"{geometry_error}; canonical source-plane resident levels="
-                    f"{resident_levels or 'none'}"
-                ) from geometry_error
         return local_binding()
-    if geometry_error is not None and not fully_resident:
-        raise geometry_error
     return _WgpuPayloadBinding(
         plane_identity=global_identity,
         plane_shape=(plane_h, plane_w),
@@ -3201,6 +3244,101 @@ def _wgpu_plan_lod_page_generation(
     return True
 
 
+def _wgpu_assembled_page_texture(payload, fallback) -> np.ndarray:
+    """Assemble exact same-rung logical pages for a local WGPU upload.
+
+    ``DisplayTilePayload.texture_data`` historically names the first page
+    because most reduced crops fit one 256x256 stored page. A wider cold crop
+    legitimately spans several pages. Packing those already-materialized
+    values is the bounded upload fallback; it does not create new numeric
+    work or pretend the partial crop is canonical source residency.
+    """
+
+    texture = np.asarray(fallback)
+    backing = getattr(payload, "page_backing", None)
+    plans = tuple(getattr(backing, "requested_plans", ()) or ())
+    pages = tuple(getattr(backing, "materialized_pages", ()) or ())
+    if len(plans) <= 1 or len(pages) != len(plans):
+        return texture
+    pages_by_key = {page.key: page for page in pages}
+    if set(pages_by_key) != {plan.key for plan in plans}:
+        # Ancestor-backed floors have different stored geometry and remain on
+        # their existing resolution path.
+        return texture
+    stored_y0 = min(int(plan.stored_rect_yx[0]) for plan in plans)
+    stored_y1 = max(int(plan.stored_rect_yx[1]) for plan in plans)
+    stored_x0 = min(int(plan.stored_rect_yx[2]) for plan in plans)
+    stored_x1 = max(int(plan.stored_rect_yx[3]) for plan in plans)
+    shape = (stored_y1 - stored_y0, stored_x1 - stored_x0, *texture.shape[2:])
+    assembled = np.empty(shape, dtype=texture.dtype)
+    filled = np.zeros(shape[:2], dtype=np.bool_)
+    for plan in plans:
+        page = pages_by_key[plan.key]
+        values = np.asarray(page.values)
+        y0, y1, x0, x1 = (int(value) for value in plan.stored_rect_yx)
+        target = (slice(y0 - stored_y0, y1 - stored_y0), slice(x0 - stored_x0, x1 - stored_x0))
+        if tuple(values.shape) != tuple(assembled[target].shape):
+            raise ValueError("wgpu page values do not match their stored upload rectangle")
+        assembled[target] = values
+        filled[target] = True
+    if not bool(np.all(filled)):
+        raise ValueError("wgpu page-backed upload has a hole in its stored rectangle")
+    return np.ascontiguousarray(assembled)
+
+
+def _wgpu_representation_byte_budgets(
+    *,
+    required_pages: dict[str, int],
+    preferred_pages: dict[str, int],
+    previous_pages: dict[str, int],
+    budget_bytes: int,
+) -> dict[str, int]:
+    """Split one residency byte policy across representation pools."""
+
+    budget_bytes = max(0, int(budget_bytes))
+    if budget_bytes <= 0:
+        return {}
+    from arrayscope.gpu.wgpu_executor import PAGE
+
+    requested: dict[str, int] = {}
+    for representation in (
+        SCALAR_R32F,
+        COMPLEX_RG32F,
+        RGB8,
+        RGB_WINDOWED_RGBA32F,
+    ):
+        needed = max(0, int(required_pages.get(representation, 0)))
+        preferred = max(0, int(preferred_pages.get(representation, 0)))
+        previous = max(0, int(previous_pages.get(representation, 0)))
+        working_set = max(preferred, 2 * needed + 8 if needed else 0)
+        layers = max(previous, working_set)
+        if layers:
+            requested[representation] = (
+                layers * PAGE * PAGE * _WGPU_POOL_TEXEL_BYTES[representation]
+            )
+    requested_total = sum(requested.values())
+    if requested_total <= budget_bytes:
+        return dict(requested)
+    shares = {
+        representation: max(1, budget_bytes * value // requested_total)
+        for representation, value in requested.items()
+    }
+    # Integer division can leave a few bytes undistributed. Give them to the
+    # largest unmet requests deterministically without exceeding the policy.
+    remaining = budget_bytes - sum(shares.values())
+    for representation in sorted(
+        shares,
+        key=lambda rep: (requested[rep] - shares[rep], rep),
+        reverse=True,
+    ):
+        if remaining <= 0:
+            break
+        addition = min(remaining, requested[representation] - shares[representation])
+        shares[representation] += addition
+        remaining -= addition
+    return shares
+
+
 def _wgpu_pool_layer_budget(
     *,
     previous: int,
@@ -3233,8 +3371,10 @@ def _wgpu_pool_layer_budget(
     if budget_bytes and bytes_per_layer and (needed or preferred or previous):
         policy_layers = max(1, budget_bytes // bytes_per_layer)
         # Policy is the retention ceiling, not an admission refusal.  The
-        # active transaction still wins when it alone is larger.
-        desired = max(previous, needed, min(working_set, policy_layers), policy_layers)
+        # active transaction still wins when it alone is larger. Previous
+        # headroom is a retention request, not a reason to exceed a changed
+        # device policy.
+        desired = max(needed, min(max(previous, working_set), policy_layers))
     else:
         desired = max(previous, working_set)
     return min(desired, max_layers)
@@ -3353,6 +3493,35 @@ def _wgpu_native_prefetch_page_count(
     from arrayscope.gpu.wgpu_executor import PAGE
 
     return -(-int(plane_shape[0]) // PAGE) * -(-int(plane_shape[1]) // PAGE)
+
+
+def _wgpu_payload_capacity_page_count(
+    payload,
+    *,
+    texture_shape: tuple[int, int],
+    representation: str,
+    selected_lod: int,
+) -> int:
+    """Physical pages this payload path will submit for admission.
+
+    Reduced payloads can carry an exact reusable source plane.  Both the warm
+    path and the visible commit replace the reduced texture with those native
+    pages, so capacity must count the replacement rather than the small
+    preview texture.  Under-counting here turns a retention preference into a
+    correctness ceiling once the already-bound pages fill the pool.
+    """
+
+    native_pages = _wgpu_native_prefetch_page_count(
+        payload,
+        representation=representation,
+        selected_lod=selected_lod,
+    )
+    if native_pages:
+        return int(native_pages)
+    from arrayscope.gpu.wgpu_executor import PAGE
+
+    height, width = (int(value) for value in texture_shape)
+    return -(-height // PAGE) * -(-width // PAGE)
 
 
 def _wgpu_native_prefetch_page_keys(

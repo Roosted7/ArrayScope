@@ -81,7 +81,7 @@ def test_wgpu_pool_headroom_clamps_to_device_limit_but_active_pages_do_not():
         _wgpu_pool_layer_budget(previous=0, needed=2049, max_layers=2048)
 
 
-def test_wgpu_pool_retention_capacity_uses_byte_policy_per_representation():
+def test_wgpu_pool_retention_capacity_caps_headroom_instead_of_filling_policy():
     from arrayscope.display.wgpu_imageview2d import _wgpu_pool_layer_budget
     from arrayscope.gpu.wgpu_executor import PAGE
 
@@ -95,7 +95,7 @@ def test_wgpu_pool_retention_capacity_uses_byte_policy_per_representation():
             budget_bytes=budget,
             bytes_per_layer=PAGE * PAGE * 4,
         )
-        == 1024
+        == 408
     )
     assert (
         _wgpu_pool_layer_budget(
@@ -106,7 +106,101 @@ def test_wgpu_pool_retention_capacity_uses_byte_policy_per_representation():
             budget_bytes=budget,
             bytes_per_layer=PAGE * PAGE * 8,
         )
-        == 512
+        == 408
+    )
+
+
+def test_wgpu_pool_byte_policy_is_shared_across_representations():
+    from arrayscope.display.wgpu_imageview2d import (
+        _WGPU_POOL_TEXEL_BYTES,
+        _wgpu_pool_layer_budget,
+        _wgpu_representation_byte_budgets,
+    )
+    from arrayscope.gpu.wgpu_executor import (
+        COMPLEX_RG32F,
+        PAGE,
+        RGB8,
+        RGB_WINDOWED_RGBA32F,
+        SCALAR_R32F,
+    )
+
+    representations = (SCALAR_R32F, COMPLEX_RG32F, RGB8, RGB_WINDOWED_RGBA32F)
+    budget = 256 * 1024 * 1024
+    shares = _wgpu_representation_byte_budgets(
+        required_pages=dict.fromkeys(representations, 100),
+        preferred_pages={},
+        previous_pages={},
+        budget_bytes=budget,
+    )
+    layers = {
+        representation: _wgpu_pool_layer_budget(
+            previous=0,
+            needed=100,
+            max_layers=2048,
+            budget_bytes=shares[representation],
+            bytes_per_layer=PAGE * PAGE * _WGPU_POOL_TEXEL_BYTES[representation],
+        )
+        for representation in representations
+    }
+
+    assert sum(shares.values()) == budget
+    assert (
+        sum(
+            layers[representation] * PAGE * PAGE * _WGPU_POOL_TEXEL_BYTES[representation]
+            for representation in representations
+        )
+        <= budget
+    )
+
+
+def test_wgpu_pool_capacity_counts_reusable_native_pages_not_preview_textures():
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
+    from arrayscope.display.wgpu_imageview2d import (
+        _wgpu_payload_capacity_page_count,
+        _wgpu_pool_layer_budget,
+    )
+    from arrayscope.gpu.wgpu_executor import PAGE, SCALAR_R32F
+
+    source = np.arange(336 * 336, dtype=np.float32).reshape(336, 336)
+    preview = source.reshape(21, 16, 21, 16).mean(axis=(1, 3))
+    payload = DisplayTilePayload(
+        0,
+        0,
+        preview,
+        None,
+        ("pool-capacity", 0),
+        lod=LodInfo(
+            level=4,
+            factor=16,
+            source_shape=source.shape,
+            texture_shape=preview.shape,
+        ),
+        source_anchor=PayloadSourceAnchor(
+            ("pool-capacity", 0),
+            (0, 336, 0, 336),
+            plane_shape=source.shape,
+        ),
+        native_residency_data=source,
+    )
+
+    pages_per_tile = _wgpu_payload_capacity_page_count(
+        payload,
+        texture_shape=preview.shape,
+        representation=SCALAR_R32F,
+        selected_lod=4,
+    )
+    assert pages_per_tile == 4
+    assert (
+        _wgpu_pool_layer_budget(
+            previous=0,
+            needed=272 * pages_per_tile,
+            preferred=272,
+            max_layers=2048,
+            budget_bytes=256 * 1024 * 1024,
+            bytes_per_layer=PAGE * PAGE * 4,
+        )
+        == 1088
     )
 
 
@@ -2188,6 +2282,81 @@ def test_cold_odd_aligned_reduced_window_uploads_with_global_bin_offset(qt_app):
         view.close()
 
 
+def test_cold_wide_odd_aligned_reduced_window_uploads_all_local_pages(qt_app):
+    """A valid multi-page cold crop falls back to a packed local upload."""
+
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import (
+        DisplayTilePayload,
+        PageBackedPresentation,
+        PayloadSourceAnchor,
+    )
+    from arrayscope.display.pyramid import materialize_source_grid_pages, plan_source_grid_pages
+
+    source = np.arange(100 * 4500, dtype=np.float32).reshape(100, 4500)
+    content_key = ("doc", "wide-single-slice", 1)
+    source_rect = (94, 194, 125, 4625)
+    plans = plan_source_grid_pages(
+        content_key=("page-doc", "wide-page-op", 1),
+        valid_source_rect_yx=source_rect,
+        reduction_yx=(4, 4),
+        stored_page_shape=(256, 256),
+        dtype="float32",
+        representation="scalar_r32f",
+        reducer="mean",
+    )
+    pages = materialize_source_grid_pages(
+        source,
+        source_origin_yx=(94, 125),
+        plans=plans,
+    )
+    texture_shape = (
+        max(plan.stored_rect_yx[1] for plan in plans)
+        - min(plan.stored_rect_yx[0] for plan in plans),
+        max(plan.stored_rect_yx[3] for plan in plans)
+        - min(plan.stored_rect_yx[2] for plan in plans),
+    )
+    assert len(plans) == 2
+    lod = LodInfo(
+        level=4,
+        factor=16,
+        source_shape=(100, 4500),
+        texture_shape=texture_shape,
+    )
+    payload = DisplayTilePayload(
+        0,
+        1,
+        pages[0].values,
+        None,
+        ("cold-wide-odd-aligned-window", 1),
+        lod=lod,
+        quality="exact",
+        source_anchor=PayloadSourceAnchor(
+            content_key,
+            source_rect,
+            plane_shape=(336, 5000),
+        ),
+        page_backing=PageBackedPresentation(plans, pages, source_rect, lod),
+    )
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        _commit(
+            view,
+            _montage_geometry((100, 4500), 1, 1, loaded=1),
+            {0: payload},
+            levels=(0.0, float(source.max())),
+        )
+
+        assert view._wgpu_last_report_uploads == 2
+        tile = view._wgpu_committed["tiles"][0]
+        assert tile["src_origin"] == (13.0, 14.0)
+        assert tile["src_size"] == (4500.0, 100.0)
+        assert tile["lod_level"] == 4
+        assert tile["plane_identity"][0] == "wgpu-content-plane"
+    finally:
+        view.close()
+
+
 def test_cold_crop_local_pages_do_not_alias_across_source_windows(qt_app):
     """A window-invariant source identity must not alias crop-local texels.
 
@@ -2473,6 +2642,8 @@ def test_executor_pool_growth_preserves_atlas_upload_currency(qt_app):
         grown = view._ensure_wgpu_executor({"scalar_r32f": 8})
         assert grown is original
         assert grown.pool_budget("scalar_r32f") >= 8
+        assert grown.pool_allocated_layers("scalar_r32f") >= 8
+        assert grown.pool_grows_total == 1
         assert {name: getattr(view, name) for name in trackers} == dict.fromkeys(trackers, 7)
     finally:
         view.close()

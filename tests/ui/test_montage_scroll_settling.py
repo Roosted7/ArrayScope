@@ -24,10 +24,11 @@ from time import perf_counter
 import numpy as np
 import pytest
 
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-from tests.oracles.framebuffer_reference import (
+from arrayscope.tools.framebuffer_reference import (
+    assert_qt_raster_matches_cpu_reference,
     assert_wgpu_frame_matches_cpu_reference,
 )
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
@@ -178,12 +179,14 @@ def test_wgpu_scalar_scroll_back_settles_retained_fallbacks_to_exact(qtbot):
 def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
     """A rapid displayed-axis crop retarget must retain all 50 montage tiles."""
 
+    from arrayscope.tools.profile_montage_workflow import _shift_profile_axis_window
+
     configure = use_wgpu_backend if backend == "wgpu" else use_pyqtgraph_backend
     settings = configure(extra_settings={"montage_quality_policy": "resident"})
-    data = np.broadcast_to(
-        np.arange(336 * 336, dtype=np.float32).reshape(336, 336, 1),
-        (336, 336, 50),
-    )
+    yy = np.arange(336, dtype=np.float32)[:, None, None]
+    xx = np.arange(336, dtype=np.float32)[None, :, None]
+    zz = np.arange(80, dtype=np.float32)[None, None, :]
+    data = np.ascontiguousarray(yy * 1000.0 + xx * 2.0 + zz * 17.0)
     win = make_backend_window(
         qtbot,
         data,
@@ -193,7 +196,8 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
     win.resize(1200, 900)
     try:
         win.show()
-        montage_indices = tuple(range(50))
+        montage_indices = tuple(range(15, 65))
+        physical_tiles = set(range(len(montage_indices)))
         state = (
             win.view_state.with_image_axes(1, 0)
             .with_axis_flipped(1, True)
@@ -281,7 +285,7 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
                 return (
                     _window_settled(win, montage_indices)
                     and not session.atomic_successor_pending
-                    and set(win.img_view.tileTruthPhysicalRows()) == set(montage_indices)
+                    and set(win.img_view.tileTruthPhysicalRows()) == physical_tiles
                 )
 
             qtbot.waitUntil(
@@ -315,10 +319,12 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
         assert session.required_target_unsettled_tiles() == ()
         assert session.atomic_successor_pending is False
         assert min(physical_tile_counts) == len(montage_indices)
-        assert set(win.img_view.tileTruthPhysicalRows()) == set(montage_indices)
+        assert set(win.img_view.tileTruthPhysicalRows()) == physical_tiles
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
         if backend == "wgpu":
             assert_wgpu_frame_matches_cpu_reference(win)
+        else:
+            assert_qt_raster_matches_cpu_reference(win)
         uploads_before_axis_swap = (
             int(win.img_view.wgpuPresentationDiagnostics()["wgpu_uploads_total"])
             if backend == "wgpu"
@@ -335,10 +341,12 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
                 ),
                 timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
             )
-            assert set(win.img_view.tileTruthPhysicalRows()) == set(montage_indices)
+            assert set(win.img_view.tileTruthPhysicalRows()) == physical_tiles
             assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
             if backend == "wgpu":
                 assert_wgpu_frame_matches_cpu_reference(win)
+            else:
+                assert_qt_raster_matches_cpu_reference(win)
         if backend == "wgpu":
             final = win.img_view.wgpuPresentationDiagnostics()
             assert full_global_l0 == 4 * len(montage_indices)
@@ -346,6 +354,208 @@ def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
             assert uploads_before_axis_swap == crop_uploads
             assert int(final["wgpu_uploads_total"]) == uploads_before_axis_swap
             assert final["wgpu_last_pool_exhaustion"] == ""
+
+        # Keep both displayed axes cropped, then exercise the same short fast
+        # burst and fully settled slow forward/return used by the profiler on
+        # every dimension. This is backend-parity coverage: WGPU additionally
+        # compares physical pixels after every checkpoint, while PyQtGraph
+        # must preserve the complete current tile set.
+        previous_session_id = int(win.renderer._frame_session.session_id)
+        both_cropped = win.view_state.with_axis_range(
+            1,
+            indices=tuple(range(55, 155)),
+            text="55:155",
+        )
+        win._apply_slice_state(
+            1,
+            both_cropped,
+            reason="test-both-cropped",
+            interactive=True,
+            immediate_axis_only=False,
+        )
+        qtbot.waitUntil(
+            lambda: (
+                int(win.renderer._frame_session.session_id) != previous_session_id
+                and _window_settled(win, montage_indices)
+            ),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+        if backend == "wgpu":
+            assert_wgpu_frame_matches_cpu_reference(win)
+        else:
+            assert_qt_raster_matches_cpu_reference(win)
+
+        all_dimension_baseline = win.view_state
+
+        def expected_montage_indices(state):
+            return tuple(
+                state.montage_indices
+                if state.montage_indices is not None
+                else range(state.shape[state.montage_axis])
+            )
+
+        def wait_for_state(state):
+            expected = expected_montage_indices(state)
+            qtbot.waitUntil(
+                lambda: (
+                    win.renderer._frame_session.view_state == state
+                    and _window_settled(win, expected)
+                ),
+                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+            )
+            assert set(win.img_view.tileTruthPhysicalRows()) == set(range(len(expected)))
+            assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+            if backend == "wgpu":
+                assert_wgpu_frame_matches_cpu_reference(win)
+            else:
+                assert_qt_raster_matches_cpu_reference(win)
+
+        for axis in range(all_dimension_baseline.ndim):
+            for step in (1, 2, 3):
+                fast_state = _shift_profile_axis_window(
+                    all_dimension_baseline,
+                    axis,
+                    step,
+                )
+                win._apply_slice_state(
+                    axis,
+                    fast_state,
+                    reason=f"test-all-dims-axis-{axis}-fast",
+                    interactive=True,
+                    immediate_axis_only=False,
+                )
+                qtbot.wait(1)
+            wait_for_state(fast_state)
+
+            win._apply_slice_state(
+                axis,
+                all_dimension_baseline,
+                reason=f"test-all-dims-axis-{axis}-fast-restore",
+                interactive=True,
+                immediate_axis_only=False,
+            )
+            wait_for_state(all_dimension_baseline)
+
+            slow_state = _shift_profile_axis_window(all_dimension_baseline, axis, 1)
+            win._apply_slice_state(
+                axis,
+                slow_state,
+                reason=f"test-all-dims-axis-{axis}-slow",
+                interactive=True,
+                immediate_axis_only=False,
+            )
+            wait_for_state(slow_state)
+
+            win._apply_slice_state(
+                axis,
+                all_dimension_baseline,
+                reason=f"test-all-dims-axis-{axis}-slow-return",
+                interactive=True,
+                immediate_axis_only=False,
+            )
+            wait_for_state(all_dimension_baseline)
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_wgpu_cold_both_axes_crop_churn_keeps_every_tile_physically_current(qtbot):
+    """Cold local pages must survive short bursts on both cropped axes.
+
+    Unlike ``test_cropped_display_axis_scroll_keeps_complete_montage``, this
+    starts with both displayed axes already cropped.  No full source plane is
+    prewarmed, so successors take the crop-local fallback seen in the
+    2026-07-24 field trace. The correctness gate is the physical framebuffer
+    after each realistic three-event scrollbar burst, not an arbitrary number
+    of page-pool allocations.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={
+            "montage_quality_policy": "resident",
+            "wgpu_texture_codec": "off",
+        }
+    )
+    yy = np.arange(336, dtype=np.float32)[:, None, None]
+    xx = np.arange(336, dtype=np.float32)[None, :, None]
+    zz = np.arange(80, dtype=np.float32)[None, None, :]
+    data = np.ascontiguousarray(yy * 1000.0 + xx * 2.0 + zz * 17.0)
+    montage_indices = tuple(range(15, 65))
+
+    win = make_backend_window(
+        qtbot,
+        data,
+        backend="wgpu",
+        require_gpu_atlas=True,
+    )
+    win.resize(1200, 900)
+    try:
+        win.show()
+        state = (
+            win.view_state.with_image_axes(0, 1)
+            .with_axis_range(0, indices=tuple(range(80, 230)), text="80:230")
+            .with_axis_range(1, indices=tuple(range(55, 155)), text="55:155")
+            .with_montage_axis(
+                2,
+                columns=6,
+                indices=montage_indices,
+                text="15:65",
+            )
+        )
+        win._set_view_state(state)
+        win.update_image_view()
+        qtbot.waitUntil(
+            lambda: _window_settled(win, montage_indices),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+        assert_wgpu_frame_matches_cpu_reference(win)
+
+        # Three successors on one dimension overlap their hidden preparation
+        # just as one scrollbar burst does. Settle before changing the other
+        # scrollbar: this matches the profile gesture contract. Verify after
+        # every axis burst so an early corruption cannot be overwritten into
+        # a false final pass.
+        latest_offsets = [0, 0]
+        for burst in range(1):
+            for axis, start, stop, reason in (
+                (0, 80, 230, "test-cold-crop-x-scroll"),
+                (1, 55, 155, "test-cold-crop-y-scroll"),
+            ):
+                for step in range(3):
+                    offset = burst * 3 + step + 1
+                    previous_session_id = int(win.renderer._frame_session.session_id)
+                    next_state = win.view_state.with_axis_range(
+                        axis,
+                        indices=tuple(range(start + offset, stop + offset)),
+                        text=f"{start + offset}:{stop + offset}",
+                    )
+                    win._apply_slice_state(
+                        axis,
+                        next_state,
+                        reason=reason,
+                        interactive=True,
+                        immediate_axis_only=False,
+                    )
+                    qtbot.waitUntil(
+                        lambda previous_session_id=previous_session_id: (
+                            int(win.renderer._frame_session.session_id) != previous_session_id
+                        ),
+                        timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+                    )
+                latest_offsets[axis] = offset
+                qtbot.waitUntil(
+                    lambda: _window_settled(win, montage_indices),
+                    timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+                )
+                assert tuple(win.renderer._frame_session.source_anchoring.source_starts_yx) == (
+                    80 + latest_offsets[0],
+                    55 + latest_offsets[1],
+                )
+                assert_wgpu_frame_matches_cpu_reference(win)
+
+        diagnostics = win.img_view.wgpuPresentationDiagnostics()
+        assert str(diagnostics["wgpu_last_pool_exhaustion"]) == ""
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
     finally:
         win.close()
         restore_default_backend(settings)

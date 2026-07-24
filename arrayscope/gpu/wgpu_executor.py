@@ -1922,7 +1922,7 @@ class WgpuPlaneExecutor:
             return (PAGE // bx) * (PAGE // by) * self._codec_block_bytes[rep]
         return PAGE * PAGE * _POOL_TEXEL_BYTES[rep]
 
-    def _grow_pool(self, pool_id: str) -> None:
+    def _grow_pool(self, pool_id: str, *, minimum_layers: int = 0) -> None:
         """Grow one immutable texture array while preserving layer indices.
 
         Raw and block-compressed formats must remain separate bindings, but
@@ -1937,7 +1937,12 @@ class WgpuPlaneExecutor:
             return
         new_layers = min(
             int(pool.layer_count),
-            max(_POOL_INITIAL_LAYERS, old_layers + 1, old_layers * 2),
+            max(
+                _POOL_INITIAL_LAYERS,
+                old_layers + 1,
+                old_layers * 2,
+                int(minimum_layers),
+            ),
         )
         codec = pool_id in _CODEC_POOL_IDS.values()
         if codec:
@@ -3574,6 +3579,30 @@ class WgpuPlaneExecutor:
                 codec_pool.layer_count = requested
             grown[representation] = requested
         return grown
+
+    def ensure_raw_pool_capacity(self, representation: str, required_layers: int) -> int:
+        """Allocate a known raw working set in one copy-preserving growth.
+
+        Page admission normally grows geometrically because future demand is
+        unknown.  The display owner, however, computes the complete visible
+        transaction before submitting it.  Jumping directly to that measured
+        requirement avoids repeatedly copying an increasingly large texture
+        array while preserving every resident layer index.
+        """
+
+        if representation not in self._pools:
+            raise ValueError(f"unknown pool representation {representation!r}")
+        required = max(0, int(required_layers))
+        pool = self._pools[representation]
+        if required > int(pool.layer_count):
+            raise RuntimeError(
+                "wgpu raw working set exceeds its logical pool capacity: "
+                f"representation={representation!r}, needed={required}, "
+                f"budget={pool.layer_count}"
+            )
+        if required > int(pool.allocated_layers):
+            self._grow_pool(_POOL_IDS[representation], minimum_layers=required)
+        return int(pool.allocated_layers)
 
     def replace_resident_pin_set(self, owner: object, keys) -> frozenset[DataChunkKey]:
         """Replace one owner's pins with the resident subset of ``keys``.
