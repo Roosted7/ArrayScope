@@ -431,6 +431,13 @@ parsed (schema future-proofing) but not executed today. A wrapper that declares
 one is skipped with a clear "runtime not yet supported" problem recorded (see
 the no-crash guarantee below); only `"python"` runs.
 
+`changes_shape` is **reserved and must be `false`**. A wrapper cannot supply an
+`output_shape` adapter, so a shape-changing op could not predict its output
+shape — its `evaluate_shape` would diverge from `apply` and lie to the
+evaluator. A wrapper that sets `changes_shape: true` is skipped with a recorded
+problem, and `import_custom_operation(..., changes_shape=True)` raises. A user op
+is therefore shape- and dtype-preserving today.
+
 ### Import vs. link
 
 - **import** (`mode: "import"`, the default): the `.py` file is *copied* into the
@@ -458,8 +465,9 @@ all work without you writing any glue. Parameter `kind` (`int`/`float`) is guess
 from the annotation, then the default value, falling back to `float`.
 
 A user op is **Tier-1 OPAQUE** (whole-array). It makes no region/windowable
-claim, so it never touches the Tier-2 conformance gate — its output is shape- and
-dtype-preserving by default (declare `changes_shape` if it reduces/reshapes).
+claim, so it never touches the Tier-2 conformance gate — and its output must be
+shape- and dtype-preserving (a shape-changing op is rejected; see
+`changes_shape` above).
 
 ### Managing them (the public API the manager UI builds on)
 

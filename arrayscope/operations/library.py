@@ -34,7 +34,7 @@ Each user op is a wrapper JSON ``<slug>.json`` in
             "callable": "function_name",
         },
         "requires_axis": true,
-        "changes_shape": false,
+        "changes_shape": false,  # reserved: must be false (see below)
         "parameters": [
             {
                 "name": ...,
@@ -51,7 +51,11 @@ Each user op is a wrapper JSON ``<slug>.json`` in
 
 ``runtime`` values ``"shell" | "julia" | "matlab"`` are **reserved**: they parse
 but do not register (a clear "runtime not yet supported" problem is recorded and
-the op is skipped) -- schema future-proofing only.  A broken wrapper or code
+the op is skipped) -- schema future-proofing only.  ``changes_shape`` is likewise
+**reserved and must be ``false``**: a wrapper cannot supply an ``output_shape``
+adapter, so a shape-changing op could not predict its output shape and would lie
+to the evaluator; a ``true`` value is skipped with a recorded problem.  A broken
+wrapper or code
 file **never** breaks startup: it is caught, logged, recorded in
 :func:`user_operation_problems`, and skipped, so the rest of the library loads.
 
@@ -470,6 +474,15 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
     parameters = _parameters_from_payload(payload.get("parameters", ()))
     requires_axis = bool(payload.get("requires_axis", False))
     changes_shape = bool(payload.get("changes_shape", False))
+    if changes_shape:
+        # A user wrapper cannot supply an ``output_shape`` adapter, so the spec
+        # would fall back to the identity predictor -- its ``evaluate_shape``
+        # would then diverge from ``apply`` and lie to the evaluator. Reject it
+        # here (recorded as a problem, skipped) until wrappers can predict shape.
+        raise ValueError(
+            "shape-changing user operations are not yet supported "
+            "(the wrapper cannot predict the output shape)"
+        )
 
     return PluginOperationSpec(
         id=operation_id,
@@ -781,6 +794,15 @@ def import_custom_operation(
     the remaining non-data args (default + annotation-guessed kind), ``label``
     from the function name, ``description`` from the docstring.
     """
+
+    if changes_shape:
+        # See _spec_from_wrapper_file: a user wrapper cannot predict the output
+        # shape, so a shape-changing op would lie to the evaluator. Refuse to
+        # write a wrapper we would only skip on the next load.
+        raise ValueError(
+            "shape-changing user operations are not yet supported "
+            "(the wrapper cannot predict the output shape)"
+        )
 
     infos = {info.name: info for info in introspect_python_source(py_path)}
     info = infos.get(callable_name)

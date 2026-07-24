@@ -270,6 +270,40 @@ def test_reserved_runtime_is_skipped_with_problem(tmp_path):
     assert any("not yet supported" in message and "julia" in message for _path, message in problems)
 
 
+def test_changes_shape_wrapper_is_skipped_with_problem(tmp_path):
+    # A wrapper cannot predict the output shape, so a shape-changing user op
+    # would lie to the evaluator: it is skipped, recorded, and never registered.
+    ops_dir = tmp_path / "operations"
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    (ops_dir / "grow.py").write_text(_DOUBLE_SRC)
+    (ops_dir / "grow.json").write_text(
+        json.dumps(
+            {
+                "format": "arrayscope-operation",
+                "version": 1,
+                "id": "user:grow",
+                "changes_shape": True,
+                "source": {"mode": "import", "path": "grow.py", "callable": "double"},
+            }
+        )
+    )
+    library.refresh_user_operations()
+
+    assert "user:grow" not in {entry.id for entry in registry.all_operations()}
+    problems = library.user_operation_problems()
+    assert any(
+        "shape-changing" in message and "grow.json" in path for path, message in problems
+    )
+
+
+def test_import_custom_operation_rejects_changes_shape(tmp_path):
+    src = _write_source(tmp_path, "d.py", _DOUBLE_SRC)
+    with pytest.raises(ValueError, match="shape-changing"):
+        library.import_custom_operation(src, "double", changes_shape=True)
+    # Nothing was written to disk for the rejected op.
+    assert not os.path.exists(os.path.join(library.user_operations_directory(), "double.json"))
+
+
 def test_remove_user_operation_deletes_files(tmp_path):
     src = _write_source(tmp_path, "d.py", _DOUBLE_SRC)
     op_id = library.import_custom_operation(src, "double")
