@@ -9,15 +9,15 @@ import pytest
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from arrayscope.operations.registry import all_operations
 from arrayscope.ui.operation_add_popup import OperationAddPopup
+from arrayscope.ui.operation_listing import build_operation_listing
 
 
 def _make_popup(qtbot, *, fixed_axis=None, is_enabled=None, accepted=None, needs=None):
     accepted = accepted if accepted is not None else []
     needs = needs if needs is not None else []
     popup = OperationAddPopup(
-        tuple(all_operations()),
+        build_operation_listing(),
         axis_choices=[("dim 0 [4]", 0), ("dim 1 [5]", 1), ("dim 2 [6]", 2)],
         default_axis=1,
         fixed_axis=fixed_axis,

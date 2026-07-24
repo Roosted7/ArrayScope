@@ -5,27 +5,25 @@ catalogue of operations, grouped and ordered the same way: a pinned "Common"
 section first, then one section per taxonomy group, with the less-used backend
 groups (SigPy / BART / User / Other) tucked behind a trailing "More" partition.
 
-This module is deliberately Qt-free -- it turns a flat sequence of
-:class:`~arrayscope.operations.registry.OperationEntry` into an ordered list of
-:class:`ListingSection` -- so the grouping logic is unit-testable without a
-display and both UI surfaces render from one source of truth.
+The catalogue itself -- which ops exist, in what groups, in what order, and
+which are hidden -- is owned by :mod:`arrayscope.operations.library`. This module
+consumes the library's already-grouped listing (hidden ops excluded, layout
+group/order overrides applied) and applies the pure presentation split: pull the
+"Common" ops into a pinned first section and flag the "More" groups. By default
+it reads the library directly, so both UI surfaces reflect the user's hidden-op
+and layout choices; tests exercise the pure split by passing explicit arguments.
+
+This module is deliberately Qt-free -- it turns the grouped listing into an
+ordered list of :class:`ListingSection` -- so the grouping logic is
+unit-testable without a display and both UI surfaces render from one source of
+truth.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from arrayscope.operations.registry import (
-    COMMON_OPERATION_IDS,
-    DEFAULT_GROUP_ORDER,
-    OperationEntry,
-    is_common,
-)
-
-# Groups whose sections live behind the trailing "More" fold-out. These are the
-# optional / backend-specific families a first-time user rarely reaches for, so
-# they stay collapsed until asked for while the everyday groups stay visible.
-MORE_GROUPS: tuple[str, ...] = ("SigPy", "BART", "User", "Other")
+from arrayscope.operations.registry import OperationEntry
 
 
 @dataclass(frozen=True)
@@ -42,45 +40,60 @@ class ListingSection:
     is_more: bool = False
 
 
-def _effective_group(entry: OperationEntry) -> str:
-    """The taxonomy group an entry is filed under, mapping strays to "Other"."""
+def build_operation_listing(
+    grouped=None,
+    *,
+    common_ids=None,
+    more_groups=None,
+) -> list[ListingSection]:
+    """Split a grouped operation listing into ordered presentation sections.
 
-    return entry.group if entry.group in DEFAULT_GROUP_ORDER else "Other"
+    ``grouped`` is an ordered ``[(group, [entries])]`` listing; it defaults to
+    :func:`arrayscope.operations.library.grouped_operations` (which excludes
+    hidden ops and applies the persisted layout group/order overrides).
+    ``common_ids`` (default :func:`library.effective_common_ids`) are the ids
+    pinned to a leading "Common" section, in that order; ``more_groups``
+    (default :func:`library.effective_more_groups`) are the groups flagged for
+    the collapsed "More" partition.
 
-
-def build_operation_listing(entries) -> list[ListingSection]:
-    """Group ``entries`` into ordered listing sections.
-
-    Section 1 is "Common" (the entries in :data:`COMMON_OPERATION_IDS`, in that
-    order). Then one section per group in :data:`DEFAULT_GROUP_ORDER`, each
-    excluding its Common ops (so nothing is listed twice) and dropped entirely
-    when that leaves it empty. Groups in :data:`MORE_GROUPS` are flagged
-    ``is_more=True`` for the collapsed partition. An entry whose group is not in
-    the taxonomy is filed under "Other".
+    Section 1 is "Common" (the ``common_ids`` present anywhere in ``grouped``,
+    in that order). Then one section per group in ``grouped`` order, each with
+    its Common ops removed (so nothing is listed twice) and dropped entirely
+    when that leaves it empty. Groups in ``more_groups`` carry ``is_more=True``.
     """
 
-    entries = tuple(entries)
-    by_id = {entry.id: entry for entry in entries}
+    if grouped is None or common_ids is None or more_groups is None:
+        from arrayscope.operations import library
+
+        if grouped is None:
+            grouped = library.grouped_operations()
+        if common_ids is None:
+            common_ids = library.effective_common_ids()
+        if more_groups is None:
+            more_groups = library.effective_more_groups()
+
+    grouped = [(group, tuple(entries)) for group, entries in grouped]
+    common_ids = tuple(common_ids)
+    common_set = set(common_ids)
+    more_groups = frozenset(more_groups)
+
+    by_id: dict[str, OperationEntry] = {}
+    for _group, entries in grouped:
+        for entry in entries:
+            by_id[entry.id] = entry
 
     sections: list[ListingSection] = []
 
-    # 1. The pinned "Common" section, in COMMON_OPERATION_IDS order.
-    common = tuple(by_id[op_id] for op_id in COMMON_OPERATION_IDS if op_id in by_id)
+    # 1. The pinned "Common" section, in common_ids order.
+    common = tuple(by_id[op_id] for op_id in common_ids if op_id in by_id)
     if common:
         sections.append(ListingSection("Common", common, is_more=False))
 
-    # 2. One section per real group, excluding ops already pinned to Common.
-    for group in DEFAULT_GROUP_ORDER:
-        if group == "Common":
-            # "Common" is a presentation concern, never a real group value.
-            continue
-        group_entries = tuple(
-            entry
-            for entry in entries
-            if _effective_group(entry) == group and not is_common(entry.id)
-        )
+    # 2. One section per group, excluding ops already pinned to Common.
+    for group, entries in grouped:
+        group_entries = tuple(entry for entry in entries if entry.id not in common_set)
         if not group_entries:
             continue
-        sections.append(ListingSection(group, group_entries, is_more=group in MORE_GROUPS))
+        sections.append(ListingSection(group, group_entries, is_more=group in more_groups))
 
     return sections

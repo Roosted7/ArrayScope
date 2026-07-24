@@ -1,10 +1,11 @@
 """Anchored popup for adding an operation (stage 1 of the add flow).
 
-A compact, grouped operation picker rendered from
-:func:`~arrayscope.ui.operation_listing.build_operation_listing`. Section
-headers are non-selectable dividers; op rows carry an icon, label and
-description tooltip. The optional backend groups (SigPy / BART / ...) live
-behind a "More..." fold-out that expands in place.
+A compact, grouped operation picker rendered from the
+:class:`~arrayscope.ui.operation_listing.ListingSection` list the caller builds
+via :func:`~arrayscope.ui.operation_listing.build_operation_listing` (which reads
+the operation library). Section headers are non-selectable dividers; op rows
+carry an icon, label and description tooltip. The optional backend groups
+(SigPy / BART / ...) live behind a "More..." fold-out that expands in place.
 
 When the selected op takes an axis, an axis dropdown appears below the list so
 op *and* dimension are chosen in the same popup. For the dimension-chip flow the
@@ -25,7 +26,6 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 from arrayscope.operations.registry import OperationEntry
 from arrayscope.ui.bubbles import EditBubble
 from arrayscope.ui.icons import material_icon
-from arrayscope.ui.operation_listing import build_operation_listing
 
 # Item-data roles: ROLE_KIND distinguishes op rows / headers / the more toggle;
 # ROLE_OP carries the operation id for op rows.
@@ -43,7 +43,7 @@ class OperationAddPopup(EditBubble):
 
     def __init__(
         self,
-        entries,
+        sections,
         *,
         axis_choices=(),
         default_axis: int | None = None,
@@ -58,8 +58,11 @@ class OperationAddPopup(EditBubble):
         # the object alive on close rather than letting WA_DeleteOnClose delete
         # it while a caller still references it.
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
-        self._entries = tuple(entries)
-        self._by_id = {entry.id: entry for entry in self._entries}
+        # Pre-built listing sections (from build_operation_listing, which reads
+        # the operation library). The picker only presents them; it never owns
+        # the catalogue.
+        self._sections = list(sections)
+        self._by_id = {entry.id: entry for section in self._sections for entry in section.entries}
         self._fixed_axis = fixed_axis
         self._is_enabled = is_enabled or (lambda _entry: True)
         self._on_accept = on_accept
@@ -106,7 +109,7 @@ class OperationAddPopup(EditBubble):
 
     def _rebuild(self) -> None:
         self._list.clear()
-        sections = build_operation_listing(self._entries)
+        sections = self._sections
         for section in sections:
             if section.is_more and not self._expanded:
                 continue

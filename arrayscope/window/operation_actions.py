@@ -88,7 +88,7 @@ class OperationActionsMixin:
         # stage-2 popup just above the chip's "+" button (this global point).
         anchor = widget.mapToGlobal(pos)
         menu = QtWidgets.QMenu(self)
-        sections = build_operation_listing(all_operations())
+        sections = build_operation_listing()
         main_sections = [section for section in sections if not section.is_more]
         more_sections = [section for section in sections if section.is_more]
         for section in main_sections:
@@ -230,7 +230,7 @@ class OperationActionsMixin:
         if search:
             return self.open_command_palette()
         popup = OperationAddPopup(
-            tuple(all_operations()),
+            build_operation_listing(),
             axis_choices=self._axis_choices(),
             default_axis=self._default_operation_axis(),
             is_enabled=self._operation_entry_enabled_anywhere,
