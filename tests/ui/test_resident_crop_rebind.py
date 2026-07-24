@@ -217,3 +217,54 @@ def test_slice_change_does_not_reuse_residency(qtbot):
     finally:
         win.close()
         restore_default_backend(settings)
+
+
+def test_resident_crop_rebind_flag_reads_settings_object():
+    """The pipeline reads the first-class setting, not a raw QSettings key."""
+
+    import types
+
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.window.frame_effects import FramePipelineEffects
+
+    win = types.SimpleNamespace(app_settings=AppSettingsState(resident_crop_rebind=True))
+    effects = FramePipelineEffects(types.SimpleNamespace(win=win), session=None)
+    assert effects._resident_crop_rebind_enabled() is True
+
+    win.app_settings = AppSettingsState()  # default OFF
+    other = FramePipelineEffects(types.SimpleNamespace(win=win), session=None)
+    assert other._resident_crop_rebind_enabled() is False
+
+
+def test_resident_crop_rebind_flag_live_toggles_without_restart():
+    """A menu toggle flips the live pipeline's behavior via cache invalidation.
+
+    The flag is snapshotted once per session (read on every retarget), so a
+    menu toggle must drop that snapshot for the change to take effect on the
+    next scrub without an app restart or a new session.
+    """
+
+    import dataclasses
+    import types
+
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.window.frame_effects import FramePipelineEffects
+
+    win = types.SimpleNamespace(app_settings=AppSettingsState())  # default OFF
+    effects = FramePipelineEffects(types.SimpleNamespace(win=win), session=None)
+    assert effects._resident_crop_rebind_enabled() is False
+
+    # The menu setter replaces the settings object; the per-session snapshot
+    # still reports the old value until it is invalidated.
+    win.app_settings = dataclasses.replace(win.app_settings, resident_crop_rebind=True)
+    assert effects._resident_crop_rebind_enabled() is False
+
+    # Invalidation (what the menu toggle triggers on the live effects) makes the
+    # next read reflect the new value — live, no restart.
+    effects.invalidate_resident_crop_rebind_flag()
+    assert effects._resident_crop_rebind_enabled() is True
+
+    # And back off, again live.
+    win.app_settings = dataclasses.replace(win.app_settings, resident_crop_rebind=False)
+    effects.invalidate_resident_crop_rebind_flag()
+    assert effects._resident_crop_rebind_enabled() is False

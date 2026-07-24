@@ -448,14 +448,27 @@ class FramePipelineEffects:
             return bool(cached)
         enabled = False
         win = getattr(self.renderer, "win", None)
-        settings = getattr(win, "_settings", None)
-        if settings is not None:
-            try:
-                enabled = bool(settings.value("resident_crop_rebind", False, type=bool))
-            except Exception:
-                enabled = False
+        # Read the first-class setting object (settings -> window -> pipeline),
+        # the same path every sibling toggle flows; a menu toggle drops the
+        # cache via ``invalidate_resident_crop_rebind_flag`` so the next
+        # retarget re-reads it without an app restart.
+        app_settings = getattr(win, "app_settings", None)
+        if app_settings is not None:
+            enabled = bool(getattr(app_settings, "resident_crop_rebind", False))
         self._resident_crop_rebind_flag = bool(enabled)
         return bool(enabled)
+
+    def invalidate_resident_crop_rebind_flag(self) -> None:
+        """Drop the per-session resident-crop-rebind capability snapshot.
+
+        ``_resident_crop_rebind_enabled`` caches the setting once per
+        ``FramePipelineEffects`` (it is consulted on every ``tile_states``
+        retarget). A live menu toggle clears the snapshot here so the next crop
+        retarget re-reads ``app_settings.resident_crop_rebind`` — the toggle
+        takes effect on the next scrub, no new session or restart required.
+        """
+
+        self._resident_crop_rebind_flag = None
 
     def _seed_resident_crop_rebinds(self, scope) -> None:
         """Rebind a resident crop-window scrub before the ladder plans it.

@@ -395,3 +395,46 @@ def test_host_cache_compression_greys_out_auto_when_no_codec(qtbot, monkeypatch)
         assert not blosc2.isEnabled()
     finally:
         win.close()
+
+
+_RESIDENT_CROP_REBIND = "Resident Crop Rebind (experimental)"
+
+
+def test_resident_crop_rebind_menu_defaults_off_and_persists(qtbot):
+    """Performance → Resident Crop Rebind: checkable, default OFF, persists."""
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        action = _menu_action(win, "Performance", _RESIDENT_CROP_REBIND)
+        assert action.isCheckable()
+        # Default OFF (auto-level caveat; default-on is blocked on separate work).
+        assert not action.isChecked()
+        assert win.app_settings.resident_crop_rebind is False
+
+        action.trigger()
+        _process_events(qtbot)
+        assert win.app_settings.resident_crop_rebind is True
+        assert action.isChecked()
+        assert _to_bool(win._settings.value("resident_crop_rebind"))
+    finally:
+        win.close()
+
+    # A newly opened window restores the persisted toggle from QSettings.
+    win2 = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win2)
+    try:
+        _process_events(qtbot)
+        assert win2.app_settings.resident_crop_rebind is True
+        assert _menu_action(win2, "Performance", _RESIDENT_CROP_REBIND).isChecked()
+    finally:
+        win2.close()
+
+
+def _to_bool(value):
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)

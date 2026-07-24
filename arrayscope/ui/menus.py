@@ -61,6 +61,7 @@ class WindowMenuMixin:
                 ),
                 "wgpu_pixel_grid": self._settings.value("wgpu_pixel_grid", False),
                 "wgpu_clip_indicator": self._settings.value("wgpu_clip_indicator", False),
+                "resident_crop_rebind": self._settings.value("resident_crop_rebind", False),
                 "chunk_transport_codec": self._settings.value(
                     "chunk_transport_codec", ChunkTransportCodecChoice.RAW.value
                 ),
@@ -478,6 +479,27 @@ class WindowMenuMixin:
             montage_quality_menu.addAction(action)
             self._montage_quality_actions[choice] = action
 
+        # Experimental resident-montage fast path. Sits with Montage LOD because
+        # it only engages on resident montage presentations; default OFF (the
+        # auto-level caveat below is why).
+        resident_crop_rebind_action = QtGui.QAction(
+            "Resident Crop Rebind (experimental)", self, checkable=True
+        )
+        resident_crop_rebind_action.setToolTip(
+            "When you scrub a crop window over montage data that is already "
+            "loaded, reuse the loaded pixels instead of recomputing every tile "
+            "(much faster scrubbing). Caveat: automatic brightness/contrast can "
+            "lag on data whose value range varies strongly across the crop "
+            "window, until the next full pass re-measures it. Takes effect on "
+            "your next crop-window scrub; no restart needed."
+        )
+        resident_crop_rebind_action.setChecked(
+            bool(getattr(self.app_settings, "resident_crop_rebind", False))
+        )
+        resident_crop_rebind_action.toggled.connect(self._set_resident_crop_rebind_enabled)
+        performance_menu.addAction(resident_crop_rebind_action)
+        self._resident_crop_rebind_action = resident_crop_rebind_action
+
         self._render_budget_actions = {}
         self._render_budget_action_group = QtGui.QActionGroup(self)
         self._render_budget_action_group.setExclusive(True)
@@ -645,6 +667,13 @@ class WindowMenuMixin:
             action.blockSignals(True)
             action.setChecked(self.app_settings.montage_quality_policy == choice)
             action.blockSignals(False)
+        resident_crop_rebind_action = getattr(self, "_resident_crop_rebind_action", None)
+        if resident_crop_rebind_action is not None:
+            resident_crop_rebind_action.blockSignals(True)
+            resident_crop_rebind_action.setChecked(
+                bool(getattr(self.app_settings, "resident_crop_rebind", False))
+            )
+            resident_crop_rebind_action.blockSignals(False)
         for choice, action in self._memory_profile_actions.items():
             action.blockSignals(True)
             action.setChecked(self.app_settings.memory_profile == choice)
@@ -819,6 +848,30 @@ class WindowMenuMixin:
         self._save_app_settings()
         self._sync_performance_actions()
         self._rerender_montage_for_lod_policy_change()
+
+    def _set_resident_crop_rebind_enabled(self, enabled: bool) -> None:
+        self.app_settings = self._updated_app_settings(resident_crop_rebind=bool(enabled))
+        self._save_app_settings()
+        # The flag is captured once per frame session (frame_effects reads it on
+        # every retarget and caches it). Drop that live snapshot so the change
+        # takes effect on the next crop-window scrub without a new session or an
+        # app restart; a fresh session would read the new value regardless.
+        self._invalidate_resident_crop_rebind_cache()
+        show_status_message(
+            self,
+            f"Resident crop rebind: {'on' if enabled else 'off'} "
+            "(applies to your next crop-window scrub).",
+            timeout=3000,
+        )
+
+    def _invalidate_resident_crop_rebind_cache(self) -> None:
+        renderer = getattr(self, "renderer", None)
+        session = getattr(renderer, "_frame_session", None)
+        pipeline = getattr(session, "pipeline", None)
+        effects = getattr(pipeline, "effects", None)
+        invalidate = getattr(effects, "invalidate_resident_crop_rebind_flag", None)
+        if callable(invalidate):
+            invalidate()
 
     def _rerender_montage_for_lod_policy_change(self):
         """Apply the LOD policy on the next montage render without a restart.

@@ -97,6 +97,12 @@ class AppSettingsState:
     # default render is byte-identical; the pixel grid is zoom-gated even on.
     wgpu_pixel_grid: bool = False
     wgpu_clip_indicator: bool = False
+    # Experimental montage fast path: a displayed-axis crop-window scrub whose
+    # new source window is already physically resident short-circuits to a pure
+    # page rebind (no re-evaluation). Default OFF — it reuses the predecessor
+    # window's auto-level evidence, so auto levels can lag on data whose value
+    # range varies strongly across the crop until the next full evaluation.
+    resident_crop_rebind: bool = False
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
     # Linux/Wayland only; applied pre-QApplication (arrayscope.app.qt_platform).
@@ -127,6 +133,7 @@ def settings_from_mapping(values) -> AppSettingsState:
         texture_codec=normalize_texture_codec_choice(values.get("texture_codec")),
         wgpu_pixel_grid=_to_bool(values.get("wgpu_pixel_grid", False)),
         wgpu_clip_indicator=_to_bool(values.get("wgpu_clip_indicator", False)),
+        resident_crop_rebind=_to_bool(values.get("resident_crop_rebind", False)),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(
             values.get("render_memory_budget_mb", 512)
@@ -150,6 +157,7 @@ def settings_to_mapping(settings: AppSettingsState):
         "texture_codec": settings.texture_codec.value,
         "wgpu_pixel_grid": bool(settings.wgpu_pixel_grid),
         "wgpu_clip_indicator": bool(settings.wgpu_clip_indicator),
+        "resident_crop_rebind": bool(settings.resident_crop_rebind),
         "memory_profile": settings.memory_profile.value,
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
         "qt_platform": settings.qt_platform.value,
