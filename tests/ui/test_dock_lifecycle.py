@@ -176,6 +176,71 @@ def test_float_state_is_not_persisted_across_sessions(qtbot):
         _clear_arrayscope_settings()
 
 
+# --- Closing a FLOATING dock must survive a progressive sync -----------------
+# A floating Profile/Operations dialog the user closes must STAY closed. The
+# close-by-user hook has to flip the same user-visible flag a docked close
+# flips; otherwise the next sync_progressive_docks still sees the profile flag
+# True (or the operation still present) and reopens the panel -- now floating,
+# because the reopen restores the last OPEN location. The BUG 2 test only pumps
+# idle events after the close; reproducing this needs a render/sync in between.
+
+
+@pytest.mark.parametrize(
+    ("name", "action_text", "dock_attr"),
+    [
+        ("profile", "Profile", "profile_dock"),
+        ("operations", "Operations", "operation_dock"),
+    ],
+)
+def test_closing_floating_dock_survives_progressive_sync(qtbot, name, action_text, dock_attr):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window.panels import PanelLocation
+
+    win = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
+    qtbot.addWidget(win)
+    _give_generous_work_area(win)
+    try:
+        _process_events(qtbot, count=15)
+        dock = getattr(win, dock_attr)
+
+        # Put the panel in a state a progressive sync would WANT open: the
+        # profile via the user's explicit choice, operations via a step.
+        if name == "operations":
+            win.request_operation("reverse", 0)
+            _process_events(qtbot, count=25)
+        else:
+            action = _view_action(win, action_text)
+            if not action.isChecked():
+                action.trigger()
+                _process_events(qtbot, count=15)
+        assert dock.isVisible()
+
+        win.layout_manager.detach_managed_dock(dock, reason="test", preserve_canvas=False)
+        _process_events(qtbot, count=15)
+        panel = win.panel_manager.panel_for_dock(dock)
+        assert panel.dialog is not None
+        assert win.panel_manager.location(name) == PanelLocation.DETACHED
+
+        # The user closes the floating dialog.
+        panel.dialog.close()
+        _process_events(qtbot, count=15)
+        assert win.panel_manager.location(name) == PanelLocation.HIDDEN
+
+        # The renderer and the progressive-sync policy run constantly; a
+        # user-closed floating panel must not be resurrected by the next sync.
+        for _ in range(4):
+            win.render(reason="floating-close-survives")
+            win.layout_manager.sync_progressive_docks()
+            _process_events(qtbot, count=15)
+
+        assert win.panel_manager.location(name) == PanelLocation.HIDDEN
+        assert not dock.isVisible()
+        assert win.panel_manager.panel_for_dock(dock).dialog is None
+    finally:
+        win.close()
+
+
 # --- BUG 3: closing the inspection dock quiesces the ROI pipeline ------------
 
 

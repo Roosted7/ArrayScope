@@ -238,12 +238,22 @@ class InspectionWorkflowMixin:
     def _on_managed_panel_closed_by_user(self, name):
         """Panel-manager hook: the user closed a detached panel's dialog.
 
-        Mirrors the docked-close path so a floating inspection dock that is
-        closed also quiesces the ROI pipeline.
+        Mirrors the docked-close path, whose synchronous visibilityChanged
+        flips the dock's user-visible flag off. A floating close never emits
+        that signal, so without flipping the flag here the profile/operations
+        user-visible state stays True (or the operation stays present) and the
+        next ``sync_progressive_docks`` reopens the panel -- now floating,
+        because a reopen restores the last OPEN location. Closing the
+        inspection dock additionally quiesces the ROI pipeline it outlives.
         """
-        if str(name) == "inspection":
+        name = str(name)
+        if name == "inspection":
             self._inspection_dock_user_visible = False
             self._quiesce_hidden_roi_refresh()
+        elif name == "profile":
+            self.layout_manager.set_profile_dock_visible_from_user(False)
+        elif name == "operations":
+            self.layout_manager.set_operation_dock_visible_from_user(False)
 
     def _queue_roi_inspection_refresh(self, selections, *, panel_visible: bool) -> None:
         self._pending_roi_inspection_refresh = SimpleNamespace(
