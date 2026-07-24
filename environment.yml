@@ -22,6 +22,10 @@ dependencies:
   - cmcrameri
   - zfpy
   - python-blosc2
+  # Optional backend for the sigpy operation pack (soft/hard threshold, centered
+  # resize). Optional like the codecs above: absent sigpy -> the pack registers
+  # nothing. See pyproject.toml [project.optional-dependencies] `sigpy`.
+  - sigpy
   - psutil
   - pytest
   - pytest-cov

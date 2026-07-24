@@ -86,6 +86,16 @@ codecs = [
     "zfpy>=1.0.0",    # float/complex/int16 transform codec (zfp)
     "blosc2>=2.0.0",  # byte-exact codec for every dtype, incl. uint8
 ]
+# Optional sigpy operation pack (arrayscope.operations.packs.sigpy_pack): the
+# soft/hard threshold and centered-resize ops. Optional exactly like codecs --
+# the pack self-guards on ``import sigpy`` and contributes nothing when sigpy is
+# absent, so ArrayScope runs and imports fine without it; this extra is only
+# needed to actually offer the sigpy ops (and to exercise their test paths,
+# which skip when sigpy is missing). NOTE: no FFT here -- a sigpy FFT would only
+# duplicate the built-in centered FFT op + backend setting (see docs/graveyard.md).
+sigpy = [
+    "sigpy>=0.1.26",
+]
 installer = [
     "pyinstaller>=6.10.0",
 ]

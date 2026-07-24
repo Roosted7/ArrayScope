@@ -139,7 +139,10 @@ _PACK_SPECS: dict[str, object] = {}
 _PACKS_LOADED = False
 
 # Pack modules that expose ``register()`` (each guards its own backend).
-_PACK_MODULES: tuple[str, ...] = ("arrayscope.operations.packs.bart_pack",)
+_PACK_MODULES: tuple[str, ...] = (
+    "arrayscope.operations.packs.bart_pack",
+    "arrayscope.operations.packs.sigpy_pack",
+)
 
 
 def register_pack_operation(spec) -> None:
@@ -282,6 +285,8 @@ def create_operation(operation_id: str, axis=None, parameters: Mapping[str, obje
         value = parameters[parameter.name]
         if parameter.kind == "int":
             value = int(value)
+        elif parameter.kind == "float":
+            value = float(value)
         kwargs[parameter.name] = value
 
     return entry.operation_type(**kwargs)

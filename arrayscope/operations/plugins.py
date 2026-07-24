@@ -370,6 +370,8 @@ def create_plugin_operation(
         value = parameters[parameter.name]
         if parameter.kind == "int":
             value = int(value)
+        elif parameter.kind == "float":
+            value = float(value)
         bound_params.append((parameter.name, value))
 
     operation = PluginOperation(
