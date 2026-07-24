@@ -60,7 +60,12 @@ admission cost hint; see :func:`bart_admission_notes`.
 The subprocess runner (:func:`run_bart`) honors a cancellation token by
 ``SIGTERM``-ing the child (then ``SIGKILL`` after a short grace) so a mid-op
 cancel kills ``bart`` in well under a second, with no orphaned process and the
-temp dir always cleaned.  This machinery is self-contained: it does not depend on
+temp dir always cleaned.  The runner also drains stdout/stderr concurrently
+(reader threads) for the whole run so a chatty child that writes past the
+~64 KB pipe buffer can never deadlock, and applies a generous, env-configurable
+overall timeout (:func:`bart_timeout`, ``ARRAYSCOPE_BART_TIMEOUT_S``) that bounds
+a *stuck* child without capping an honest multi-minute recon.  This machinery is
+self-contained: it does not depend on
 the separate kernel work that threads a token into the plugin ``fn`` call path.
 Until that lands, the engine plugin path applies the op with no token (the sync
 whole-array path), so the runner is exercised with ``cancellation_token=None``
@@ -92,11 +97,25 @@ CABS_ID = "bart:cabs"
 # still would not run the reconstruction commands reliably.
 BART_TOOLBOX_ENV = "BART_TOOLBOX_PATH"
 
+# Overall wall-clock ceiling for a single ``bart`` invocation, overridable via the
+# same env-var config surface the toolbox path uses.  BART reconstructions
+# (``pics``/``ecalib`` on real k-space) legitimately run for *minutes*, so the
+# default is deliberately generous -- this ceiling exists to bound a *stuck* child
+# (a hang, a deadlock, a runaway), not to cap honest long recons.  A non-positive
+# value disables the ceiling entirely (rely on cancellation alone); a malformed
+# value falls back to the default.
+BART_TIMEOUT_ENV = "ARRAYSCOPE_BART_TIMEOUT_S"
+_DEFAULT_TIMEOUT_S = 600.0  # 10 minutes -- generous headroom over a real recon.
+
 # Subprocess-run tuning.  ``_POLL_INTERVAL`` is how often the run loop checks the
 # cancellation token; ``_TERM_GRACE`` is how long we wait after SIGTERM before
 # escalating to SIGKILL.  Both are small so a cancel resolves far under 1 s.
 _POLL_INTERVAL = 0.02
 _TERM_GRACE = 0.25
+
+# Sentinel distinguishing "caller did not pass a timeout" (-> use the configured
+# ceiling) from an explicit ``timeout=None`` (-> caller wants no ceiling).
+_USE_CONFIGURED_TIMEOUT: object = object()
 
 
 # --- availability (cheap, lazy: never runs bart) -----------------------------
@@ -130,6 +149,25 @@ def bart_available() -> bool:
     """
 
     return bool(os.environ.get(BART_TOOLBOX_ENV)) and bart_executable() is not None
+
+
+def bart_timeout(default: float = _DEFAULT_TIMEOUT_S) -> float | None:
+    """Configured wall-clock ceiling (seconds) for one ``bart`` run, or ``None``.
+
+    Reads ``ARRAYSCOPE_BART_TIMEOUT_S`` from the environment -- the same env-var
+    config surface :func:`bart_executable` uses for the toolbox path.  A
+    non-positive override disables the ceiling (returns ``None``); a malformed
+    override falls back to ``default``.  Pure env read -- never runs ``bart``.
+    """
+
+    raw = os.environ.get(BART_TIMEOUT_ENV)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else None
 
 
 def bart_admission_notes() -> tuple[str, ...]:
@@ -246,22 +284,39 @@ def run_bart(
     executable: str | None = None,
     poll_interval: float = _POLL_INTERVAL,
     grace: float = _TERM_GRACE,
+    timeout: float | None = _USE_CONFIGURED_TIMEOUT,  # type: ignore[assignment]
 ) -> np.ndarray:
     """Run ``bart <argv> in out`` on ``array`` via a cfl temp-file handoff.
 
     Writes ``array`` to a temp ``in.cfl``/``.hdr``, spawns ``bart`` with an
     ``out`` target, polls the cancellation token while it runs, reads ``out.cfl``
-    back, and *always* cleans up the temp directory -- on success, error, or
-    cancel.
+    back, and *always* cleans up the temp directory -- on success, error, cancel,
+    or timeout.
+
+    Draining: ``bart`` can be chatty (progress lines on stderr, banners on
+    stdout).  Both pipes are drained *concurrently* by reader threads for the
+    whole run, so a child that writes past the OS pipe buffer (~64 KB) can never
+    deadlock waiting for us to read -- the classic ``Popen(PIPE)`` + late-read
+    hang.  The captured stderr is still available for the failure message.
 
     Cancellation: if ``cancellation_token.cancelled`` becomes truthy mid-run the
     child (and its process group) is SIGTERM'd, then SIGKILL'd after ``grace``
     seconds, and :class:`EvaluationCancelled` is raised -- the same signal the
     rest of the operations engine uses.  The kill returns in well under a second.
+
+    Timeout: an overall wall-clock ceiling bounds a *stuck* child (hang/deadlock/
+    runaway).  ``timeout`` defaults to :func:`bart_timeout` (env-configurable,
+    generous by default because real recons run minutes); pass an explicit float
+    to override or ``None`` to disable.  On expiry the child is killed exactly
+    like a cancel and a :class:`RuntimeError` mentioning the timeout is raised.
     """
 
     import subprocess
     import tempfile
+    import threading
+
+    if timeout is _USE_CONFIGURED_TIMEOUT:
+        timeout = bart_timeout()
 
     binary = executable or bart_executable()
     if binary is None:
@@ -287,17 +342,50 @@ def run_bart(
             stderr=subprocess.PIPE,
             start_new_session=True,  # own process group -> we can kill the whole tree
         )
+
+        # Reader threads drain both pipes for the lifetime of the child so a
+        # chatty ``bart`` never blocks on a full pipe buffer while we poll.
+        # stdout is drained-and-discarded; only stderr is captured for the
+        # failure message.
+        stderr_chunks: list[bytes] = []
+        readers: list[threading.Thread] = []
+
+        def _drain(stream, sink: list[bytes] | None) -> None:
+            try:
+                for chunk in iter(lambda: stream.read(65536), b""):
+                    if sink is not None:
+                        sink.append(chunk)
+            except (ValueError, OSError):
+                # Stream was closed underneath us during teardown -- benign.
+                pass
+
+        for stream, sink in ((proc.stdout, None), (proc.stderr, stderr_chunks)):
+            if stream is not None:
+                thread = threading.Thread(target=_drain, args=(stream, sink), daemon=True)
+                thread.start()
+                readers.append(thread)
+
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
         try:
             while True:
                 if _cancelled():
                     _terminate_child(proc, grace)
                     raise EvaluationCancelled()
+                if deadline is not None and time.monotonic() >= deadline:
+                    _terminate_child(proc, grace)
+                    raise RuntimeError(
+                        f"bart {' '.join(str(a) for a in argv)} timed out after {float(timeout):g}s"
+                    )
                 try:
                     proc.wait(timeout=poll_interval)
                 except subprocess.TimeoutExpired:
                     continue
                 break
-            stderr = proc.stderr.read() if proc.stderr is not None else b""
+            # Child has exited: its write ends are closed, so the readers reach
+            # EOF and finish -- join them before we touch the captured bytes.
+            for thread in readers:
+                thread.join()
+            stderr = b"".join(stderr_chunks)
             if proc.returncode != 0:
                 message = stderr.decode("utf-8", "replace").strip()
                 raise RuntimeError(
@@ -307,9 +395,13 @@ def run_bart(
             return read_cfl(out_stem)
         finally:
             # Never leave a child holding the temp dir open when we unwind (the
-            # cancel path already killed it; this covers error/GC paths too).
+            # cancel/timeout paths already killed it; this covers error/GC too).
             if proc.poll() is None:
                 _terminate_child(proc, grace)
+            # Join readers (the now-dead child hit EOF) before closing the pipes
+            # so we do not close a fd out from under a mid-read reader thread.
+            for thread in readers:
+                thread.join(timeout=grace + 1.0)
             for stream in (proc.stdout, proc.stderr):
                 if stream is not None:
                     stream.close()

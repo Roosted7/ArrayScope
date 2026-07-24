@@ -32,11 +32,16 @@ from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
 
 PROBE_SHAPE = (6, 5, 4)
 
-# Known-good locations on this machine (the task's verified recipe).  Used only
-# to populate the env when the caller has not already; if they are absent the
-# real-BART tests skip.
-_DEFAULT_TOOLBOX = "/home/thomas/projects/bart"
-_DEFAULT_MKL_LIB = "/home/thomas/miniconda3/pkgs/mkl-2025.3.0-h0e700b2_462/lib"
+# Fallback locations for the real-BART tests.  Prefer explicit env overrides
+# (``ARRAYSCOPE_BART_TOOLBOX`` / ``ARRAYSCOPE_BART_MKL_LIB``) so the recipe is not
+# tied to one contributor's machine; the hardcoded paths remain only as a
+# documented local convenience for this workstation.  Used only to populate the
+# env when the caller has not already; if they are absent the real-BART tests
+# skip.
+_DEFAULT_TOOLBOX = os.environ.get("ARRAYSCOPE_BART_TOOLBOX", "/home/thomas/projects/bart")
+_DEFAULT_MKL_LIB = os.environ.get(
+    "ARRAYSCOPE_BART_MKL_LIB", "/home/thomas/miniconda3/pkgs/mkl-2025.3.0-h0e700b2_462/lib"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -281,3 +286,124 @@ def test_already_cancelled_never_spawns(tmp_path):
             executable=fake_bart,
         )
     assert not marker.exists(), "run_bart spawned bart despite pre-cancel"
+
+
+# --- pipe draining + overall timeout (no real BART toolbox needed) ------------
+
+
+# Comfortably past the ~64 KB OS pipe buffer, on BOTH stdout and stderr: an
+# undrained ``Popen(PIPE)`` child that writes this much blocks on write forever.
+_CHATTY_BYTES = 200_000
+
+
+def _make_executable(script) -> str:
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return str(script)
+
+
+def _write_chatty_then_exit_bart(tmp_path) -> str:
+    """A ``bart`` shim that floods both pipes, echoes its input to ``out``, exits 0.
+
+    ``run_bart`` appends ``in`` and ``out`` stems as the last two argv, so with an
+    empty command they land as ``$1``/``$2``.  Copying the cfl pair lets the real
+    ``read_cfl`` round-trip succeed, so a green result *proves* the flood was
+    drained rather than deadlocking.
+    """
+
+    script = tmp_path / "chatty_bart"
+    script.write_text(
+        "#!/bin/bash\n"
+        'in="$1"\n'
+        'out="$2"\n'
+        f"yes 'stdout-noise' | head -c {_CHATTY_BYTES}\n"
+        f"yes 'stderr-noise' | head -c {_CHATTY_BYTES} 1>&2\n"
+        'cp "$in.cfl" "$out.cfl"\n'
+        'cp "$in.hdr" "$out.hdr"\n'
+    )
+    return _make_executable(script)
+
+
+def _write_chatty_then_hang_bart(tmp_path, marker) -> str:
+    """A ``bart`` shim that floods both pipes, records its pid, then blocks forever."""
+
+    script = tmp_path / "chatty_hang_bart"
+    script.write_text(
+        "#!/bin/bash\n"
+        f'echo $$ > "{marker}"\n'
+        f"yes 'stdout-noise' | head -c {_CHATTY_BYTES}\n"
+        f"yes 'stderr-noise' | head -c {_CHATTY_BYTES} 1>&2\n"
+        "exec sleep 300\n"
+    )
+    return _make_executable(script)
+
+
+def test_bart_timeout_env_config(monkeypatch):
+    """The overall-timeout ceiling is env-driven with a documented fallback."""
+
+    monkeypatch.delenv(bart_pack.BART_TIMEOUT_ENV, raising=False)
+    assert bart_pack.bart_timeout() == bart_pack._DEFAULT_TIMEOUT_S
+    monkeypatch.setenv(bart_pack.BART_TIMEOUT_ENV, "12.5")
+    assert bart_pack.bart_timeout() == 12.5
+    monkeypatch.setenv(bart_pack.BART_TIMEOUT_ENV, "0")  # non-positive disables
+    assert bart_pack.bart_timeout() is None
+    monkeypatch.setenv(bart_pack.BART_TIMEOUT_ENV, "nonsense")  # malformed -> default
+    assert bart_pack.bart_timeout() == bart_pack._DEFAULT_TIMEOUT_S
+
+
+def test_chatty_child_is_drained_and_does_not_deadlock(tmp_path):
+    """A child flooding both pipes past the buffer must not hang the runner."""
+
+    fake_bart = _write_chatty_then_exit_bart(tmp_path)
+    x = (np.arange(120).reshape(PROBE_SHAPE)).astype(np.complex64)
+
+    result: dict[str, object] = {}
+
+    def _runner():
+        try:
+            # A bounded ceiling so a *regression* (undrained -> blocked child)
+            # fails as a timeout rather than wedging the whole suite forever.
+            result["out"] = bart_pack.run_bart([], x, executable=fake_bart, timeout=30.0)
+        except BaseException as exc:
+            result["exc"] = exc
+
+    thread = threading.Thread(target=_runner)
+    thread.start()
+    thread.join(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
+
+    assert not thread.is_alive(), "run_bart deadlocked on an undrained chatty child"
+    assert "exc" not in result, f"unexpected error: {result.get('exc')!r}"
+    np.testing.assert_allclose(np.asarray(result["out"]), x)
+
+
+def test_overall_timeout_kills_stuck_child(tmp_path):
+    """A child that floods then hangs is killed by the overall timeout, no orphan."""
+
+    marker = tmp_path / "child_pid"
+    fake_bart = _write_chatty_then_hang_bart(tmp_path, marker)
+
+    temp_root = tempfile.gettempdir()
+    before = set(glob.glob(os.path.join(temp_root, "arrayscope-bart-*")))
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="timed out"):
+        bart_pack.run_bart(
+            [],
+            np.ones((4, 4), dtype=np.complex64),
+            executable=fake_bart,
+            timeout=0.5,
+        )
+    elapsed = time.monotonic() - started
+    assert elapsed < INTERACTION_SETTLE_HARD_LIMIT_S, f"timeout was not prompt ({elapsed:.2f}s)"
+
+    # The flooding child recorded its pid; it (and its group) must be dead.
+    assert marker.exists(), "chatty child never started"
+    child_pid = int(marker.read_text().strip())
+    for _ in range(50):
+        if not _pid_alive(child_pid):
+            break
+        time.sleep(0.01)
+    assert not _pid_alive(child_pid), "stuck bart child survived the timeout"
+
+    # The temp dir was cleaned up even though we bailed on a timeout.
+    after = set(glob.glob(os.path.join(temp_root, "arrayscope-bart-*")))
+    assert after <= before, f"leaked temp dirs: {after - before}"
