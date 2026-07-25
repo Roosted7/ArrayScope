@@ -6,8 +6,8 @@ Proposed (2026-07-21), authored on `claude/wgpu-shader-enhancements-f3a22d`.
 Recovered into the repo 2026-07-25 during branch cleanup; it had only ever
 existed as an untracked file in that worktree.
 
-**Stage A is implemented on main** — `c2e0aa2d` (A1, zoom-gated pixel grid),
-`a2b190f0` (A2–A4, NaN / missing-page / clip trust signals), `05ec7f33`
+**Stage A is implemented on main** — `f18cdfdb` (A1, zoom-gated pixel grid),
+`7cb49e44` (A2–A4, NaN / missing-page / clip trust signals), `631db92a`
 (settings + Performance menu wiring). Both `pixel_grid` and `clip_indicator`
 ship **default off**; see the note in Stage A on why.
 
@@ -139,7 +139,7 @@ to keep the CPU pyramid as the only ladder and improve how the shader
 
 ## Stage A — in-shader pixel grid and trust signals — **IMPLEMENTED**
 
-Landed on main as `c2e0aa2d` (A1), `a2b190f0` (A2–A4), `05ec7f33` (settings +
+Landed on main as `f18cdfdb` (A1), `7cb49e44` (A2–A4), `631db92a` (settings +
 menu). Kept here as the design record; the text below is as proposed, with the
 one significant deviation noted at the end of the section.
 

@@ -70,7 +70,7 @@ Order chosen so each step deletes its legacy state immediately after the machine
    (then inline/delete it).
 4. **Delete `pending_lod_requests`:** replace remaining readers with a machine view (records
    with a claimed/materializing level), same set-like view pattern as
-   `loading_tiles`/`active_tile_requests` (sets-as-views landing, 448b8c4b).
+   `loading_tiles`/`active_tile_requests` (sets-as-views landing, f8b00bff).
 5. **Settle repair → convergence:** whatever evidence the flush-path repair consumed must get
    a consumer scheduled AT ARRIVAL (rule 6) — most likely `lod_level_ready`/materialization
    completion edges feeding `derive_montage_dispatch` so the dispatch derivation implies the

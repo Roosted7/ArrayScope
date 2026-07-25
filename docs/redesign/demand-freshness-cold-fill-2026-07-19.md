@@ -88,7 +88,7 @@ extended `test_interaction_stop_rearms_deferred_wgpu_histogram_evidence`
 
 - **pyqtgraph cold tail stall under screenshot-flag load** (offscreen, matrix
   driver flags `--screenshot-interval-s 0.1 --timeout-s 5`): unfixed main
-  `b0c3699b` stalls 1-of-2 with the same frozen-tail signature
+  `b7e94879` stalls 1-of-2 with the same frozen-tail signature
   (`level_stale=111`, planned-but-unsubmitted level-2 steps, armed
   presentation gate). The known tile-limbo/levels-tail family; offscreen
   only — the real-Wayland driver rows complete.
@@ -121,7 +121,7 @@ extended `test_interaction_stop_rearms_deferred_wgpu_histogram_evidence`
 
 ## Evidence
 
-- Full offscreen suite at `f2dbd556` (on `b0c3699b`): **2488 passed,
+- Full offscreen suite at `f2dbd556` (on `b7e94879`): **2488 passed,
   0 failed**, 36 skipped, 1 xfailed.
 - Seven real-Wayland full matrices
   (`tests/artifacts/journey-matrix-2026-07-19-v1…v7`), all re-verified

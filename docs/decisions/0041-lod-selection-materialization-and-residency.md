@@ -6,13 +6,13 @@
 
 ## Context
 
-Tile LOD was introduced by commit `548901c05d2ab4c157cf7e5c7bcadc26a6af7663` on 2026-06-19 at
+Tile LOD was introduced by commit `26a63afe492afd6239c36ae207eaa6b975e5349d` on 2026-06-19 at
 17:00 CEST. The first implementation selected a factor, built a complete CPU reduction pyramid from
 loaded tiles, added gutters, changed payload identity, and presented the result from
 `snapshot_display_tile_payloads()`.
 
 That snapshot function runs in the GUI presentation path. Commit
-`5a1ef86aa61d425ac0cf077b886c577df2f7d437`, *Remove synchronous LOD work from presentation commits*,
+`eb324c75837f1fd28624302bf970fa94b9aedc12`, *Remove synchronous LOD work from presentation commits*,
 disabled application of the selected factor at 18:48 CEST the same day. The selector remained active,
 but the applied factor was forced to one.
 

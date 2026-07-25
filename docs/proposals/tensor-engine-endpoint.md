@@ -346,7 +346,7 @@ interactive throughput parity NOT yet met — the ladder's next gate.
 ### Promotion evidence entry 2 (2026-07-19) — interaction stalls removed at their owners
 
 Three bounded changes, rebased over the same-submission histogram-frontier
-shield (`656f8c1c`), removed the two attributed retarget costs and the teardown
+shield (`adfa7f96`), removed the two attributed retarget costs and the teardown
 drain:
 
 - Wgpu histogram obligations are now content+mapping keyed and survive pure

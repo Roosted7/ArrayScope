@@ -64,7 +64,7 @@ timer — and each of those became the habitat of the next bug.
 
 ## Dead code removed
 
-"Tiles all the way" (26c768d4) removed the single-image presentation path but
+"Tiles all the way" (0d497649) removed the single-image presentation path but
 left its support layer: `operations/render_plan.py` (refuse/degraded/chunked
 decision machinery, no callers), `window/stage_warmup.py` (idle stage warmup,
 caller removed), `resource_governor.decide_stage_warmup`, the

@@ -2,7 +2,7 @@
 
 The abandoned `redesign-r8-marathon` worktree is read-only evidence.  This
 matrix records the narrow comparison against commit
-`775208866bc658dd415364cd1315e34138aead7e`; it is not a second implementation
+`e23ea7a5c6ab4473338e639df0012222397d479f`; it is not a second implementation
 plan.
 
 | Concern | Marathon evidence | Clean-branch decision |

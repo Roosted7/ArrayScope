@@ -20,10 +20,10 @@ what the pacer can achieve, and it is better stated than discovered later.
 **Baseline (Thomas, 2026-07-21).** Re-baseline against
 `claude/tile-panning-performance-adfc0a`, not the original tip. Per-tile
 CPU cost in the montage pan path was eliminated by moving the camera
-transform into the vertex shader (`62f851f5`); frame time is now ~1.4 ms at
+transform into the vertex shader (`e9956846`); frame time is now ~1.4 ms at
 512 tiles and flat in tile count. Pacing is therefore no longer masked by
 per-frame CPU work — which raises the value of this work and also means any
-pre-`62f851f5` measurement is worthless as a control.
+pre-`e9956846` measurement is worthless as a control.
 
 **Relation to the queue:** feeds row 3(d) promotion evidence. This is *not*
 a stall fix — see "Why this is not the pacing the graveyard rejected".
@@ -257,7 +257,7 @@ after — record which side of it every run sits on.
 ## Phase 2 result (2026-07-21) — refuted, and redirected at the event loop
 
 Three paired runs, headless Weston, Intel iGPU, current tip
-(`6bb0a321`, i.e. after the vertex-shader pan fix), wgpu screen present,
+(`3ed0a6be`, i.e. after the vertex-shader pan fix), wgpu screen present,
 Mailbox. Artifacts: `tests/artifacts/frame-pacing-baseline-2026-07-21/`
 (gitignored; `baseline-run{1,2,3}.jsonl`).
 
@@ -289,7 +289,7 @@ margin. Phases 3–4 as written would have been effort spent on the smallest
 term.
 
 **3. The GPU side is genuinely cheap now.** Frame cost 1.3–1.8 ms p50 and
-acquire 0.13 ms confirm the vertex-shader pan fix (`62f851f5`) removed the
+acquire 0.13 ms confirm the vertex-shader pan fix (`e9956846`) removed the
 per-tile CPU term, and that Mailbox acquire never blocks. The remaining
 cost is not in producing a frame.
 

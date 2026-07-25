@@ -569,7 +569,7 @@ def test_wgpu_cropped_scrub_bounds_preview_producer_work(qtbot):
     diagnostics ``arrayscope-diagnostics-20260724-145640.jsonl`` seq 172-181,
     stall traces ``arrayscope-stall-445-6/7``): during an atomic successor
     handoff no tile can be backend-acknowledged until the whole transaction
-    swaps, and the d7923dda residency guard cleared ladder-visible residency
+    swaps, and the 9e83dbe3 residency guard cleared ladder-visible residency
     for every admitted-but-unacknowledged wrapper.  Every replan gate then
     re-planned FLOOR for every tile (~27 redundant rounds per scrub step on a
     100-tile montage), saturating workers and the completion bridge and

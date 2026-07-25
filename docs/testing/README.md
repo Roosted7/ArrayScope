@@ -249,7 +249,7 @@ empty.
 - Open xfails that are *tracked work, not noise*: churn-convergence
   (queue step 1, strict=False), tiny-3-slices raciness (strict=False), and
   live-camera LOD-demand freshness after zoom (strict=True). The native
-  complex64 PyQtGraph stress row has been a hard pass since `14f0fbc5` and
+  complex64 PyQtGraph stress row has been a hard pass since `db18c8df` and
   was re-verified serially on 2026-07-17.
 - `tests/gpu_interaction`: 16/16 green on real Wayland (2026-07-17 full
   lane, strict=True), tiny-3-slices raciness (strict=False).

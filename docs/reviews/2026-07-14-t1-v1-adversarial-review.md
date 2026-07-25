@@ -1,7 +1,7 @@
 # Adversarial review of V0/T1/V1 (2026-07-14)
 
-Scope: commits 79c8ff11 (V0 import health), 3cdbd49e (T1 measurement
-foundation), 38811162 (V1 required-tile owner), reviewed and break-tested in
+Scope: commits b482a999 (V0 import health), 0f11a22c (T1 measurement
+foundation), 609b8410 (V1 required-tile owner), reviewed and break-tested in
 worktree `.worktrees/review-t1v1` (branch `review/t1-v1-hardening`, offscreen
 PyQtGraph; no real-display claims). Hardening fixes for everything in §1 are
 committed on that branch.
@@ -75,7 +75,7 @@ place to look.
 - The environment actually ships **PySide6** (`prefer_pyside6()` at the tool
   entry); AGENTS.md and several docs still say PyQt6. Worth one sweep.
 - A pre-existing failure (`test_montage_tile_residency_rss_stays_bounded`)
-  reproduces on clean 38811162 — part of the documented 47-failure baseline
+  reproduces on clean 609b8410 — part of the documented 47-failure baseline
   debt, not introduced by these commits.
 
 ## 4. Validation on the review branch
@@ -94,8 +94,8 @@ place to look.
 
 # Addendum: adversarial review of V2/V3 (same day)
 
-Scope: 81b55850 ("Carry canonical tile priority into execution") and
-5cd0e8a9 ("Make stranded tile ownership loud"), reviewed on this branch
+Scope: 6d073742 ("Carry canonical tile priority into execution") and
+b2025289 ("Make stranded tile ownership loud"), reviewed on this branch
 after rebasing onto them.
 
 ## What holds up
@@ -150,7 +150,7 @@ after rebasing onto them.
 
 ## Validation
 
-Rebased cleanly onto 5cd0e8a9 (conflicts in `trace_verify.py` /
+Rebased cleanly onto b2025289 (conflicts in `trace_verify.py` /
 `test_trace.py` resolved keeping both sides' invariants; V3's stall-only
 fixture gained a lifecycle event since lifecycle-free traces are now
 violations). Touched suites: 209 passed, 2 skipped; compileall and Ruff
@@ -196,12 +196,12 @@ floor. Do not restore a global default floor.
 
 # Addendum 2: review of the review-response, P1–P8 (2026-07-15)
 
-Scope: 72e1837a (review-response) through dfa53db3 (P8 evidence), reviewed
+Scope: 028cd444 (review-response) through ee28ff9d (P8 evidence), reviewed
 on branch `review/p8-stress`.
 
 ## Going well
 
-- **The feedback loop closed properly.** 72e1837a fixed the rank inversion
+- **The feedback loop closed properly.** 028cd444 fixed the rank inversion
   at the root (`UNRANKED_SCHEDULING_RANK` floor, stages inherit consuming
   tile rank, negative ranks raise), and P8 then resolved the design tension
   the right way: priority-before-rank restored in the kernel with the

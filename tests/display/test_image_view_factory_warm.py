@@ -92,7 +92,7 @@ def test_warm_is_one_shot_and_non_blocking(monkeypatch):
 def test_signatureless_and_settingsless_paths_never_enable_lossy_codec(monkeypatch):
     """No settings-less / attribute-less path may silently enable lossy BC pools.
 
-    The G7 verdict (commit 16b5d890) restored lossy texture compression to OFF
+    The G7 verdict (commit 4683bc3c) restored lossy texture compression to OFF
     by default. Two fallback sites must honour that even on a wgpu-capable
     machine (``bc_available=True``): the ``WgpuImageView2D.__init__`` signature
     default and the ``create_image_view`` construction default when ``settings``

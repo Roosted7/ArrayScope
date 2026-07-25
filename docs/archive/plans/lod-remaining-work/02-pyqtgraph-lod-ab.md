@@ -4,12 +4,12 @@
 
 ## Background
 
-ADR 0050 phase 3 (commit 8704438c) implemented PyQtGraph resident LOD behind
+ADR 0050 phase 3 (commit e68788ae) implemented PyQtGraph resident LOD behind
 `ARRAYSCOPE_PYQTGRAPH_RESIDENT_LOD=1`, default OFF per the "where measured" rule, because the
 first hardware A/B (Wayland, 272-tile montage) REGRESSED: raw settle 1263->1441 ms, FFT settle
 2590→4367 ms, level drag 9019→9686 ms.
 
-Since then the **auto-levels wait wedge was fixed** (ADR 0051, commit 448b8c4b line; stalls
+Since then the **auto-levels wait wedge was fixed** (ADR 0051, commit f8b00bff line; stalls
 8–10 → 0 per run). The wedge inflated FFT settle by ~2 s of watchdog rescue — i.e. most of the
 FFT regression in the numbers the default-off decision was based on. **The decision must be
 re-made on clean numbers.** Remaining named suspects if it still regresses: worker-side

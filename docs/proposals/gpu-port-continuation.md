@@ -84,10 +84,10 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
   as coverage + first-pass barrier = whole-montage stale/empty livelock;
   root-caused live, predates the G5 series — dossier
   `docs/redesign/stale-empty-tiles-2026-07-16.md`); first-pass
-  histogram evidence-race stall (`ffafb821`); zoom/phys-None triple pool
-  defect (`d049b212`); scrub retain-until-replace
+  histogram evidence-race stall (`fd6b77a6`); zoom/phys-None triple pool
+  defect (`3c2d6520`); scrub retain-until-replace
   (`slice_only_session_transition`; doc/op changes still blank) +
-  prefetch re-arm on visible drain (`fa76a3c1`); Performance-menu prefetch
+  prefetch re-arm on visible drain (`ab052659`); Performance-menu prefetch
   toggle restored; post-race session-50 shared-target candidate hole (coarse
   payload labelled exact was physically valid fallback but excluded from the
   finer target pass) fixed from lifecycle settlement truth. Severed-wire
@@ -154,12 +154,12 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
    vispy_imageview2d ~1840 lines); ruff F841 at tiles.py:931; the 4
    gpu_interaction baseline failures may deserve a re-look after main
    integrates tonight's fixes.
-9. **Session-level loose end** (from d049b212 report):
+9. **Session-level loose end** (from 3c2d6520 report):
    `_resident_source_matches_expected(source, None)` returns True —
    controller-side expected-source coverage during session switches is
    worth an audit.
 
-## Test-suite state (consolidation landed 2026-07-16: 1bc532da/55247c4e/9d1197b2)
+## Test-suite state (consolidation landed 2026-07-16: a39a36e6/3707b813/d4110d3d)
 
 Shared fakes live in `tests/display/vispy_test_utils.py` (FakeTexture2D/
 FakeGloo/FakeVisual/payload builders) and the live-window harness in

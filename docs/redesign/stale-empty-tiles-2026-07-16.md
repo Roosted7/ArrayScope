@@ -51,7 +51,7 @@ one aliased payload into a whole-montage stall:
    (`pipeline_plan` every ~50 ms, `submitted=0`, endless `frame-admission`
    continuations) with the kernel idle.
 
-**Attribution:** the stall reproduces at the pre-series base `2d0f605f` too —
+**Attribution:** the stall reproduces at the pre-series base `5ffb3b10` too —
 the G5/prefetch/retention series did **not** introduce the root defect; it
 changed exposure (more retained/warm coverage surviving transitions, so the
 spelling flip had more corpses to leave behind).

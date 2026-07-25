@@ -1,7 +1,7 @@
 """Real-display progressive-open publication-correctness gate (ring 4).
 
 Pins the residual of the "Progressive-load publication correctness" standing
-lane (447cbe42): a real-Wayland visual open of a progressively-filled source
+lane (a50247e0): a real-Wayland visual open of a progressively-filled source
 must, at completion, show ZERO unread (zero-fill) regions and the correct
 final pixels/levels on the first-class backends.  ``ProgressiveArraySource``
 (arrayscope/io/progressive.py) already publishes atomic detached region

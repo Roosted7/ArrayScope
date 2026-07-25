@@ -138,8 +138,8 @@ promotion-evidence argument in `docs/queue.md` row 3.
 | `journey-matrix-2026-07-17-v2` | real-wayland | — | 10 | no |
 | `journey-matrix-2026-07-17-v3` | real-wayland | — | 10 | no |
 | `journey-matrix-offscreen-2026-07-17` | offscreen-smoke | — | 10 | no |
-| `journey-matrix-main-2dc93b78-2026-07-17` | real-wayland | — | 10 | no |
-| `journey-matrix-main-5dd9999b-2026-07-18` | real-wayland | — | 10 | no |
+| `journey-matrix-main-7b6a7e9b-2026-07-17` | real-wayland | — | 10 | no |
+| `journey-matrix-main-caa62ca9-2026-07-18` | real-wayland | — | 10 | no |
 | `journey-matrix-postpolicy-2026-07-18` | real-wayland | — | 10 | no |
 | `journey-matrix-wgpu-2026-07-18` (+ v2, v3, v7, v17, v18, v19) | real-wayland | — | 15 | no |
 | `journey-matrix-2026-07-19-v1` | real-wayland | — | 15 | **yes** |

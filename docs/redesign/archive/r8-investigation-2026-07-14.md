@@ -6,16 +6,16 @@ Updated: 2026-07-14
 
 This checkpoint covers R8 viewer truth and convergence only. Scheduling,
 throughput policy, and LOD admission remain out of scope. The work started from
-clean R7+UI commit `906e5c3c`; `.worktrees/redesign-r8-marathon` remains
+clean R7+UI commit `a8eb813f`; `.worktrees/redesign-r8-marathon` remains
 reference-only.
 
 Work is stopped at the required two-hypothesis boundary. Two changes improved
 machine-checkable invariants but did **not** eliminate the visually observed
 wrong complex tiles:
 
-1. `b49f67c3` aligned predicted and acknowledged texture kinds with the
+1. `50ee260b` aligned predicted and acknowledged texture kinds with the
    storage each backend physically draws.
-2. `09729a6` prevented retained wrappers from carrying a prior source's typed
+2. `a5cfafc` prevented retained wrappers from carrying a prior source's typed
    tile identity after a semantic retarget.
 
 Both causes were real and their focused regressions are green. Neither is a
@@ -25,29 +25,29 @@ new hypothesis.
 
 ## Landed invariant slices
 
-- `500bcdc1` restores the R7 frame API coherence needed to run the viewer.
-- `44b77892` introduces typed semantic tile target and acknowledgement
+- `e14985db` restores the R7 frame API coherence needed to run the viewer.
+- `f39a108d` introduces typed semantic tile target and acknowledgement
   identities.
-- `257e5be2` enforces target/acknowledgement compatibility immediately before
+- `b85a0b18` enforces target/acknowledgement compatibility immediately before
   either backend draws.
-- `bc8b7477` removes the stale paced-admission keyword that crashed the
+- `5a4736d8` removes the stale paced-admission keyword that crashed the
   presentation gate.
-- `adf81fd4` attaches live presentation effects before level side work can
+- `727876ed` attaches live presentation effects before level side work can
   schedule a commit.
-- `b49f67c3` separates scalar storage, complex RG32F storage, and PyQtGraph's
+- `50ee260b` separates scalar storage, complex RG32F storage, and PyQtGraph's
   physical RGB8 output.
-- `db2aaa3f` adds the six-pattern adversarial complex fixture.
-- `b6ece11` replaces the rejected global truth HUD with a dedicated
+- `2f14bfda` adds the six-pattern adversarial complex fixture.
+- `64da3fe` replaces the rejected global truth HUD with a dedicated
   `tile_truth_overlay.py` layer and one spatially attached label per visible
   tile on both backends. Each label records target/acknowledged source,
   texture kind, real/imag upload-plane identity, complex mapping, LOD,
   semantic generation, levels generation, and DRAW/LOAD state.
-- `09729a6` rejects retained slot wrappers with the wrong semantic source and
+- `a5cfafc` rejects retained slot wrappers with the wrong semantic source and
   rebuilds typed identity when a compatible wrapper is retargeted.
-- `687fa60` fixes the montage-prefetch completion callback to use the
+- `7b12c89` fixes the montage-prefetch completion callback to use the
   canonical frame-session staleness guard and adds a real-orchestrator
   completion-path regression plus a stale-name architecture guard.
-- `e759738` updates the profiling tool to read
+- `1eec391` updates the profiling tool to read
   `win.renderer._frame_session`, removes retired tile-ledger diagnostics, and
   makes capped real-fixture runs select the center of axis 2.
 
@@ -77,9 +77,9 @@ Recent validation:
 - Prefetch completion, canonical guard, and ready-display focused tests:
   3 passed.
 - Broad prefetch/architecture slice: 74 passed, with two unrelated existing
-  architecture-guard failures (retired profiler ledger text before `e759738`,
+  architecture-guard failures (retired profiler ledger text before `1eec391`,
   and a `QTimer.singleShot` allowlist count in `window/main.py`). The retired
-  profiler ledger failure is green after `e759738`.
+  profiler ledger failure is green after `1eec391`.
 - Profiling-tool tests after the ownership update: 22 passed, 2 opt-in real
   profiler smokes skipped.
 
@@ -338,7 +338,7 @@ Two narrowly separated findings followed:
    range. Signal-blocking the complete no-image resize transaction preserves
    AUTO intent and lets the renderer retarget against the settled viewport.
 
-Commit `305aa69` contains only that shared production fix and two
+Commit `5381d5d` contains only that shared production fix and two
 backend-parametric regressions. The original immediate, centered synthetic
 FFT -> FFTShift -> iFFT Wayland smoke was repeated on PyQtGraph and VisPy.
 Both settled with six visible/drawn tiles, a session viewport of `619x741`,
@@ -381,7 +381,7 @@ explanation for the ownerless pending tile above.
 The apparent ownerless tile above was a scope mismatch, not a missing
 materialization handoff. `FramePlan.active_region_ids` correctly admitted only
 the physically onscreen tiles, while `visible_plan_complete()` incorrectly
-required the broader coverage ring to settle. Commit `359f618` changes only
+required the broader coverage ring to settle. Commit `d557969` changes only
 that completion predicate to use the existing `onscreen_target_settled()`
 contract. Its focused invariant and the complete frame-session file are green
 (61 tests). No admission, prefetch, queue, or scheduling policy changed.

@@ -1665,7 +1665,7 @@ class ImageViewShell(QtWidgets.QWidget):
         physical tile commit has landed yet. ``None`` restores image-derived
         content. Regression guard: without this, unlocking fit while commits
         were still gated re-fit the camera around the stale single-slice
-        shape (first bad commit 2995d039).
+        shape (first bad commit 5f53c674).
         """
 
         normalized = None if extent is None else (max(1, int(extent[0])), max(1, int(extent[1])))

@@ -2282,7 +2282,7 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
         )
 
     def settle_pump(current, payloads):
-        # The composed design (settle-edge pump, 6c32ed2b) dispatches the
+        # The composed design (settle-edge pump, 1b300833) dispatches the
         # deferred evidence BEFORE the forced commit — strictly earlier than
         # the quiet-edge-only flow this test originally encoded.
         settle_pumped.append(service._queue_montage_level_stats_for_payloads(current, payloads))
@@ -2299,7 +2299,7 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
     # Two dispatch edges exist in the composed design and BOTH sub-cases are
     # contract-legal with exactly one dispatch total: (a) an already-installed
     # obligation at the fill tail dispatches at the settle-edge pump (the
-    # 6c32ed2b wgpu cold-fill stall case); (b) THIS case — a cold obligation
+    # 1b300833 wgpu cold-fill stall case); (b) THIS case — a cold obligation
     # deferred before configuration — no-ops at the pump (0: nothing
     # installed yet) and dispatches when the forced commit re-runs the
     # evidence configuration (the codex finding-1 case).

@@ -68,7 +68,7 @@ The first R2 completion attempt shipped four architectural defects (commit
 storm, camera-only churn, deps-as-ordering, per-tile-native FFT floors) and
 tried to compensate with symptom patches (worker clamps, drain clamps,
 dtype sniffing, a weakened exit gate). Those are reverted and fixed at the
-root in a23fb2b2/4464a6e4. **Binding rules going forward, for every plan:**
+root in a5c69487/5866b309. **Binding rules going forward, for every plan:**
 
 1. **Exit gates are hard.** A plan is not done while its gate fails, and
    the gate text is never edited to match a result. Weakness found in a

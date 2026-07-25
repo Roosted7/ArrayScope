@@ -1,6 +1,6 @@
 # The montage-relevel "red" — diagnosed 2026-07-22 (NOT a bug; a pyqtgraph throughput fork)
 
-> **RESOLVED 2026-07-22 (`cca02e74`).** Owner chose the level-only fast-path
+> **RESOLVED 2026-07-22 (`1dd57fd9`).** Owner chose the level-only fast-path
 > (option 1). Implementation corrected this diagnosis's cost breakdown: the
 > ~1.2 s/commit cost was the pyqtgraph backend re-resolving ALL 272 resident
 > payloads per level commit (not the O(N) prioritization, which was ~1 ms).
@@ -16,7 +16,7 @@ Answers "is the level_stale red accurate?" — yes, but the premise that it is a
 convergence *bug* is wrong. This is a definitive diagnosis (headless-Weston
 trace-only, instrumented per-commit); no engine change was committed.
 
-## Symptom (reproduces trace-only, pre-existing on de5862d4)
+## Symptom (reproduces trace-only, pre-existing on 8582c882)
 `profile_montage_workflow --backend pyqtgraph` on the FFT montage times out:
 `active_presented=272/272 fully_visible=True … level_pending=True level_stale=~250 level_values=2`.
 The pixels are fully up; the per-tile window/level never finishes converging

@@ -133,7 +133,7 @@ slice does not conceal.
 ## Addendum 2026-07-24 — resident crop-rebind cannot re-anchor from the GPU histogram
 
 The resident crop-window rebind (`FramePipelineEffects._seed_resident_crop_rebinds`,
-commit 38fdfbb6) is default OFF because a rebind step reuses the predecessor
+commit 38c51806) is default OFF because a rebind step reuses the predecessor
 window's auto-level evidence instead of re-anchoring. Enabling it by default was
 scoped to feed the GPU-computed resident histogram evidence for the new window
 into the post-first-pass montage level tracker. That is **blocked by a

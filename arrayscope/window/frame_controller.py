@@ -1406,7 +1406,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # Threshold gate (persistent-GPU-residency backends only). A pan or zoom
         # only needs to replan when it crosses a tile boundary or a zoom
         # threshold; between crossings the camera moves entirely in the shader
-        # (tile instances hold world rects since 62f851f5) and there is nothing
+        # (tile instances hold world rects since e9956846) and there is nothing
         # to compute. ``viewport_invariant_key`` is that boundary, evaluated in
         # O(1); ``_viewport_converged_key`` records the key at which the last
         # full pass proved convergence by submitting zero work. When they match,

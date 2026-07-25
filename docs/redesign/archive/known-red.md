@@ -78,21 +78,21 @@ class quickly.
 
 | symptom | evidence | resolved by |
 |---|---|---|
-| Re-measured after 76860b4b (gate-signature + replan-coalescing fixes): pyqtgraph raw settled 1.87 s (max gap 693 ms), FFT 3.23 s (gap 760 ms), level refinement 3.57 s (gap 107 ms); vispy raw 2.27 s (gap 485 ms — pre-R2 parity), FFT 6.08 s (gap 586 ms, was 42.8 s / 22.8 s), level refinement 1.64 s (gap 127 ms). STALL 0 both backends | `tests/artifacts/r2b-postfix2-{pyqtgraph,vispy}-resident.jsonl` | Remaining gaps are the initial session build + first commit (~0.5–0.8 s single block; `_montage_viewport_plan_ms` ≈ 570 ms is one known piece) and per-commit fixed cost. Still above the 16 ms heartbeat bar → R2b item 5 continues; the *wedges* and multi-second storms are gone |
+| Re-measured after 4cae70d5 (gate-signature + replan-coalescing fixes): pyqtgraph raw settled 1.87 s (max gap 693 ms), FFT 3.23 s (gap 760 ms), level refinement 3.57 s (gap 107 ms); vispy raw 2.27 s (gap 485 ms — pre-R2 parity), FFT 6.08 s (gap 586 ms, was 42.8 s / 22.8 s), level refinement 1.64 s (gap 127 ms). STALL 0 both backends | `tests/artifacts/r2b-postfix2-{pyqtgraph,vispy}-resident.jsonl` | Remaining gaps are the initial session build + first commit (~0.5–0.8 s single block; `_montage_viewport_plan_ms` ≈ 570 ms is one known piece) and per-commit fixed cost. Still above the 16 ms heartbeat bar → R2b item 5 continues; the *wedges* and multi-second storms are gone |
 | VisPy level refinement is 1.6 s where main's uniform-only path did a 272-tile level drag in ~0.26 s | same JSONLs | R3 (level values into the lifecycle machine; uniform-only fast path must not regress through the generic commit) |
 
 Resolved on this branch (for the record):
 
 - R2 commit storm / camera-only churn / dep-parking / per-tile-native FFT
-  floors / windowing-metadata — fixed in 4464a6e4 (tests pin the camera
+  floors / windowing-metadata — fixed in 5866b309 (tests pin the camera
   invariant and the no-deps-ordering rule).
-- WIP symptom patches reverted in a23fb2b2 (worker clamps, bridge drain
+- WIP symptom patches reverted in a5c69487 (worker clamps, bridge drain
   clamps, dtype sniffing, harness event-processing edit).
 - `test_tile_layer_level_change_uses_governed_presentation_batches`,
   `test_scalar_tile_layer_level_change_uses_governed_batches_without_image_replacement`
-  — red on main since 6fa5c758 (legacy cost-signature stubs); fixed.
+  — red on main since 30d129d9 (legacy cost-signature stubs); fixed.
 - `test_vispy_montage_view_range_change_expands_visible_tile_set` — red on
-  main; bisected to 2995d039; fixed by plan-time content extent (a3992c8f).
+  main; bisected to 5f53c674; fixed by plan-time content extent (e19be280).
 - The R1 vispy/resident FFT transform-preview wedge no longer sticks after
   R2; the GPU harness includes
   `test_fft_preview_refinement_settles_without_stalls` (7/7 green).

@@ -1,4 +1,4 @@
-"""ADR 0056 G5: source-anchor stamping on floor payloads (c1674beb pin).
+"""ADR 0056 G5: source-anchor stamping on floor payloads (2c4754e5 pin).
 
 ``render.lod.ensure_floor_payloads`` stamps
 ``session._payload_source_anchor(plan.tile_shape)`` on EXACT reduced floor

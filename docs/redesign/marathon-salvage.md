@@ -1,6 +1,6 @@
 # Marathon salvage plan (2026-07-14)
 
-Source: full audit of `git diff 906e5c3c 77520886` — the single WIP
+Source: full audit of `git diff a8eb813f e23ea7a5` — the single WIP
 checkpoint on branch `redesign-r8-marathon` (worktree
 `.worktrees/redesign-r8-marathon`, ~9,400 insertions / 96 files). This
 supersedes the archived truth-only

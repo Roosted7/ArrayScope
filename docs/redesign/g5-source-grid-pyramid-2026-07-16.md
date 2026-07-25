@@ -397,10 +397,10 @@ resolved values, structurally rejecting the malformed payload class that made
 tiles draw at mixed sizes. Native two-dimensional `uint8` is likewise a scalar
 page family; only actual three/four-component `uint8` values may claim `RGB8`.
 
-History identifies two earlier false-truth seams. Commit `6ffce57a` let
+History identifies two earlier false-truth seams. Commit `87b37b96` let
 `build_tile_presentation` copy an unacknowledged lifecycle fallback directly
 into `TilePresentationState`; that duplicate acknowledgement path is deleted.
-The initial G5 cutover `56d1cc0a` then preserved a requested L2 identity over
+The initial G5 cutover `fbbb6f64` then preserved a requested L2 identity over
 physically sampled L4 values; floor payloads now keep requested geometry and
 actual sampled LOD as separate typed facts.
 

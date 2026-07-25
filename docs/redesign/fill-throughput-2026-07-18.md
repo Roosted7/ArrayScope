@@ -21,10 +21,10 @@ QT_QPA_PLATFORM=offscreen python -m arrayscope.tools.profile_montage_workflow \
 → `TimeoutError … target_unsettled=271 … gate_backlog armed` for vispy AND
 pyqtgraph, offscreen AND real Wayland, on main and the wgpu branch.
 
-The queue's hypothesis was a regression in main `661b6ba5..976ea275`
+The queue's hypothesis was a regression in main `8af35ea3..54f7447d`
 (G5 measured "PyQtGraph raw 272/272 in ~11.4 s" green on 2026-07-17).
 **Bisect verdict: there is no breaking commit.** The stall reproduces at the
-G5 merge commit `661b6ba5` itself and at `62904128` (the very commit whose
+G5 merge commit `8af35ea3` itself and at `040d90c6` (the very commit whose
 message records the 11.4 s green run). The G5 evidence was a *real-Wayland
 pyqtgraph* run that fit inside the wait budget by luck of phase accounting;
 the offscreen invocation used here was never validated green. The
@@ -64,7 +64,7 @@ reasons (cProfile, offscreen vispy):
    viewport retarget.
 4. **A gesture budget applied to a build.** `_run_phase` clamped the
    completion wait to the 5 s interaction cap for the cold 272-tile fill.
-   The churn harness learned this lesson on 2026-07-17 (`62904128`:
+   The churn harness learned this lesson on 2026-07-17 (`040d90c6`:
    "Build-time keeps a generous fill budget; the 5 s cap stays on
    per-gesture probes") but `profile_montage_workflow` never adopted it, so
    a slow-but-progressing fill was reported as a stall. Pass/fail authority
@@ -216,7 +216,7 @@ or every row dies `FileNotFoundError` with `instances: 0`.
   five-second join deadline with loud live-thread/task-scope diagnostics.
   The real-Wayland workflow trace completes the GUI close callback in 56.8 ms
   instead of draining queued work for the recorded ~19–26 s; focused
-  cancellation and global-deadline tests are green (`112343f8`). Whole-
+  cancellation and global-deadline tests are green (`30544794`). Whole-
   process exit is not yet bounded: a current non-daemon worker evaluation can
   continue after the loud deadline. The active queue retains the <5 s process
   exit gate rather than misreporting the callback result as full closure.

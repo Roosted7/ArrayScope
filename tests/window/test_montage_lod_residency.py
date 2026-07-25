@@ -8134,7 +8134,7 @@ def test_admitted_wrapper_keeps_ladder_residency_during_atomic_wait():
     ``arrayscope-diagnostics-20260724-145640.jsonl`` seq 172-181).
 
     During an atomic successor handoff no tile can be backend-acknowledged
-    until the whole transaction swaps.  The d7923dda residency guard keyed
+    until the whole transaction swaps.  The 9e83dbe3 residency guard keyed
     only on ack-gated predicates, so it cleared ladder-visible residency for
     every admitted-but-unacknowledged wrapper and the ladder re-planned FLOOR
     for every tile on every replan gate - a self-sustaining evaluation loop

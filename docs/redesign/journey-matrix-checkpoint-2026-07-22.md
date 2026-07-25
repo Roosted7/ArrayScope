@@ -4,7 +4,7 @@ Regression checkpoint after the 2026-07-22 orchestration session landed Compare
 v1 (steps 5/6/7), plugin ops Tier-1 + Tier-2 harness, and several fixes. Also
 serves as item-3d (wgpu promotion) evidence.
 
-- **Tree:** `main` at `df0ef1f4`.
+- **Tree:** `main` at `fd8d830a`.
 - **Ring:** headless-weston (`arrayscope.tools.headless_display` → `journey_matrix run`),
   real GL, `wgpu_present_method: bitmap`.
 - **Data gotcha:** the matrix needs a local NIfTI under `data/`, which is
@@ -45,4 +45,4 @@ remaining reds are the standing incumbent LOD/stall family. Full AUTO promotion
 of wgpu (item 3d) still needs dogfood hours and the VisPy-retirement call, which
 are the owner's, not something to flip from one matrix run.
 
-Artifacts: `tests/artifacts/journey-matrix-integrated2-df0ef1f4/` (gitignored).
+Artifacts: `tests/artifacts/journey-matrix-integrated2-fd8d830a/` (gitignored).

@@ -22,7 +22,7 @@ structurally.
 |---|---|
 | `_montage_viewport_plan`, `_effective_montage_columns`, `_retargeted_montage_viewport_plan` | `viewplan` (pure functions; drop the mixin-host parameter) |
 | `_on_image_viewport_resized`, `_retarget_montage_resize_camera/_payloads`, `_commit_montage_resize_presentation_retarget` | `pipeline.retarget` + `viewplan`; camera math stays in `display/viewport.py` |
-| `_maybe_auto_fit_montage_tiles`, `_publish_montage_content_extent`, `_set_montage_view_range`, revert/undo helpers | thin GUI controller (`window/`), driven by plan-time data only (see commit a3992c8f for the plan-time principle) |
+| `_maybe_auto_fit_montage_tiles`, `_publish_montage_content_extent`, `_set_montage_view_range`, revert/undo helpers | thin GUI controller (`window/`), driven by plan-time data only (see commit e19be280 for the plan-time principle) |
 | `_run_montage_viewport_update`, `_schedule_montage_viewport_update` (+delay) | `pipeline.retarget`; the deferral timer is DELETED — kernel (submit is cheap, supersession dedupes) |
 | `_schedule_montage_priority_retarget_from_hover`, `_refresh_montage_priority_targets`, `_run_montage_priority_retarget` (+delay/batch limits) | kernel priorities on resubmission; DELETED — kernel (priority rebuild timers) |
 

@@ -1,7 +1,7 @@
 # Root-cause dossier: black tiles & priority order (2026-07-14)
 
 Findings from a full read-only investigation of the `redesign` branch at
-18ba39db. These are ranked candidate mechanisms with code evidence — verify
+fa4b7843. These are ranked candidate mechanisms with code evidence — verify
 against the harness scenario before and after each fix.
 
 ## A. Priority rendering order
@@ -14,7 +14,7 @@ drifted apart:
    (native-only/pyqtgraph missing-tile queue)
 3. `prioritize_montage_tiles` — `window/montage_viewport.py:108` (queue seeding)
 
-Commit e6665315 ("Restore montage priority") touched only #1, verified only by
+Commit 59837ece ("Restore montage priority") touched only #1, verified only by
 an isolated sort-order unit test on a `SimpleNamespace` session
 (`tests/render/test_effects.py::test_tile_lod_states_prioritizes_screen_distance_in_landscape_viewport`).
 No test asserts end-to-end kernel execution or paint order.
@@ -70,7 +70,7 @@ observes real commit order center-out on cold load and fast scroll.
 
 Interaction of four recent commits:
 
-- 4a05cdca made `tiles_intersecting` strict (`>/<`) —
+- 92cbf9e8 made `tiles_intersecting` strict (`>/<`) —
   `display/montage.py:142`; `active_region_ids` is built with
   `margin_tiles=0` (`display/frame_planner.py:208-211`). A tile whose edge
   lands exactly on the viewport boundary is excluded.
@@ -79,9 +79,9 @@ Interaction of four recent commits:
   `tile_lod_states` only plans tiles in that scope
   (`render/effects.py:453-455,467`). The "coverage ring" is carried but
   **never admitted to the ladder** (`frame_runtime.py:196-199`).
-- 359f6184 made `visible_plan_complete()` = `onscreen_target_settled()`
+- d5579692 made `visible_plan_complete()` = `onscreen_target_settled()`
   (`frame_session.py:3274`).
-- d6ce5f40 scoped first-pass completion and level evidence to
+- d0394bc9 scoped first-pass completion and level evidence to
   `onscreen_tile_numbers()` (`frame_session.py:711-736`,
   `render/level_stats.py:344-364`).
 
@@ -111,15 +111,15 @@ the very pass that would give it levels. Circular; no timeout.
 
 ### B3: acknowledgement gating hides pixels when acks never arrive
 
-370e35e6 filters active VisPy tile slots on acknowledged identity
-(`display/backends/vispy/tiles.py`); 40ebf8ae defers DESIRED/EXACT rungs
+0f41c7a4 filters active VisPy tile slots on acknowledged identity
+(`display/backends/vispy/tiles.py`); 95d83ad6 defers DESIRED/EXACT rungs
 until `first_pass_histogram_published` (`window/frame_effects.py:322-328`).
 If B1/B2 prevent publication, deferral is forever and unacknowledged slots
 stay hidden → black.
 
 ### B4: intended black exists and masks triage
 
-e93737f7 pins that zero-valued complex backgrounds render black (correct
+77390f4e pins that zero-valued complex backgrounds render black (correct
 behavior). "Black tile" is therefore sometimes right — check the truth
 overlay before assuming a bug.
 

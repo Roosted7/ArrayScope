@@ -1,7 +1,7 @@
 # ArrayScope v30 rendering-consistency and architecture audit
 
 - **Review date:** 2026-06-24
-- **Supplied baseline:** `d35f30d` plus uncommitted v30 histogram/benchmark work
+- **Supplied baseline:** `e78b088` plus uncommitted v30 histogram/benchmark work
 - **Preserved supplied-work commit:** `103ab67`
 - **Review branch:** `review/v30-render-consistency`
 - **Primary scope:** histogram/window levels, progressive montage presentation, PyQtGraph/VisPy
@@ -45,7 +45,7 @@ be discarded.
 
 The review used the supplied repository including `.git` history. It covered:
 
-- the 28 commits after the `0.8.0` RC baseline `7c34b4b` through the review branch;
+- the 28 commits after the `0.8.0` RC baseline `051bb69` through the review branch;
 - diffs and history for level/histogram, montage session, PyQtGraph tile layer, VisPy atlas/shaders,
   LOD, resource governor, benchmarks, and diagnostics;
 - targeted Qt/offscreen tests and deterministic work-counter tests;
@@ -105,7 +105,7 @@ project then used more counters, flags, revisions, queues, and timers to repair 
 those layers. The result is correct in many isolated paths but increasingly difficult to prove as a
 whole.
 
-Since RC baseline `7c34b4b`, the reviewed branch contains 28 commits and changes 79 files with roughly
+Since RC baseline `051bb69`, the reviewed branch contains 28 commits and changes 79 files with roughly
 10,404 insertions and 1,085 deletions. Highest churn includes:
 
 | File | Churn | Commits touching it | Current size |
@@ -335,7 +335,7 @@ Finding 7: LOD is deliberately disabled, and the old implementation had deeper d
 Exact history
 LOD was introduced by:
 
-548901c05d2ab4c157cf7e5c7bcadc26a6af7663
+26a63afe492afd6239c36ae207eaa6b975e5349d
 
 Add LOD and (complex) shaders to VisPy renderer
 
@@ -343,7 +343,7 @@ Add LOD and (complex) shaders to VisPy renderer
 
 It was disabled by:
 
-5a1ef86aa61d425ac0cf077b886c577df2f7d437
+eb324c75837f1fd28624302bf970fa94b9aedc12
 
 Remove synchronous LOD work from presentation commits
 

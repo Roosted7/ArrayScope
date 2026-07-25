@@ -29,9 +29,9 @@ during coverage.
 
 The older `/tmp/arrayscope-stall-{19-2,24-3,29-4}.trace.jsonl` files are
 timestamped 17:54–17:55. They include the 17:45 late-evidence absorption
-change (`9f8b3970`) but predate loud queue bails (`7567fb3a`, 17:56), retained
-fallback coverage (`14633cd0`, 18:18), and the final first-pass aggregation
-fix (`6670b9df`, 18:38). They are therefore pre-fix evidence and were not used
+change (`503f864b`) but predate loud queue bails (`50e4bbdc`, 17:56), retained
+fallback coverage (`882617fd`, 18:18), and the final first-pass aggregation
+fix (`03b2f311`, 18:38). They are therefore pre-fix evidence and were not used
 to classify the two current field stalls.
 
 ## One mechanism, two terminal signatures

@@ -92,7 +92,7 @@ only at ring 4.
   pixels, `verify_trace` re-judges the edge with the production settlement
   rule, and `TOLERATED_INVARIANTS` is empty — the strongest invariant is
   enforced in whole-workflow replays.
-- **The native complex64 row is a hard pass** since `14f0fbc5`; its original
+- **The native complex64 row is a hard pass** since `db18c8df`; its original
   deterministic PyQtGraph deadlock was fixed at the canonical page-handoff
   route. A 2026-07-17 serial replay acknowledged 10/10 required targets with
   zero identity-rejected commits and no trace violations. Tiny-montage level

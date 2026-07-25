@@ -26,7 +26,7 @@ slimmed; evidence, never direction. Rejected experiments are indexed in
 >
 > **[Codex 2026-07-14 — open broad-suite debt discovered during V0]** The
 > documented full-suite command completed with **47 failed, 1844 passed,
-> 3 skipped, 2 teardown errors**. A pristine `eeee204a` worktree reproduced
+> 3 skipped, 2 teardown errors**. A pristine `186daf79` worktree reproduced
 > representative failures in the stale timer allowlist and tests that still
 > reach the deleted flat `window._montage_session` owner, proving those two
 > classes predate V0; the remaining failures have not yet been individually

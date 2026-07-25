@@ -3959,7 +3959,7 @@ class GpuMontageLayer:
             and mapping_key == self._shader_mapping_key
         ):
             # The desired-state caches above prove the COMMIT is clean, not
-            # that the page visuals physically hold that state (1e36084b
+            # that the page visuals physically hold that state (5fc43d7a
             # proved levels can diverge; the mapping key and mode buffer can
             # too).  Re-presenting without touching visuals is allowed only
             # when the physical audit passes; divergence is repaired and the

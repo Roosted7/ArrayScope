@@ -1794,7 +1794,7 @@ def _visible_instance_count(instances, view_range) -> int:
     """Instances whose world rect intersects the camera's view range.
 
     ``TileInstance.dst_rect`` stopped being a viewport-relative rect when
-    panning moved to the camera uniform (62f851f5): it is now the tile's
+    panning moved to the camera uniform (e9956846): it is now the tile's
     camera-free WORLD rect.  Testing it against the unit viewport therefore
     counted only the tile straddling the world origin and reported ``vis = 1``
     for every montage size -- a constant column cannot show a cost that scales

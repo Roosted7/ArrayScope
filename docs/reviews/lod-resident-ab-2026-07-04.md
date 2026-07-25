@@ -5,7 +5,7 @@ backend. Live Wayland session, `arrayscope` conda env, dataset
 `data/_WIPDelRec-tT2_20260223150234_14.nii` (336×336×272 f64), full 272-tile montage of
 axis 2 in a 1400×900 window via `arrayscope.tools.profile_montage_workflow`
 (`--backend vispy --montage-lod-policy {native-only,resident}`), branch
-`feature/lod-residency` @ 82573ba1. Desired LOD factor is 4 in every montage phase.
+`feature/lod-residency` @ d3054baf. Desired LOD factor is 4 in every montage phase.
 
 | Metric | native-only | resident |
 |---|---:|---:|
@@ -39,10 +39,10 @@ Not yet evidence for: PyQtGraph reduced-image adoption (phase 3), ops-input LOD
 (`lod-commuting`, phase 4), zoom-in refinement latency, Windows/macOS.
 
 
-## Update — zero-redundant-work pass (ba57500c, same day)
+## Update — zero-redundant-work pass (a915dbc4, same day)
 
 After the retarget/no-flash/zero-upload fixes (wave 1), the singleflight-release fix
-(5e018c13), and the histogram/stage reuse pass (wave 2), the same A/B shows the settle
+(6828de89), and the histogram/stage reuse pass (wave 2), the same A/B shows the settle
 regression eliminated:
 
 | Metric | native-only | resident |

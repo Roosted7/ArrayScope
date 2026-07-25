@@ -6,7 +6,7 @@
 
 Historical dimension-scrub cost on the LOD residency branch (VisPy, 272-tile montage):
 ~216 ms → ~23 ms (uncached burst, P2-adjacent scrub fastpath) / ~50 ms (cached rebuild) → ~36 ms
-(session reuse + index-window retarget, commit 07121fc2). ADR 0051 P2 names the remainder
+(session reuse + index-window retarget, commit 97eb3ec8). ADR 0051 P2 names the remainder
 explicitly: "the remaining cost is the delta-commit walk itself (vispy layer update, overlays,
 full-image apply)". That is ~20–30 ms of synchronous work per warm scrub step — above Thomas's
 ~16 ms interaction bar.

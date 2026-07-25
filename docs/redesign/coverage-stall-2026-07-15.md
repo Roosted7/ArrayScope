@@ -4,7 +4,7 @@
 `arrayscope-diagnostics-20260715-195337.jsonl` (user session, 19:53–19:54,
 complex128 NIfTI 336×336×272, montage axis 2, phase_color, PAL-relaxed,
 VisPy). Build: `codex/gpu-engine` at the pre-P9-rebase state (includes
-4646ecf8; predates 1e36084b/eb7f20d2 — verified by absent commit-batch
+7ee5c74c; predates 5fc43d7a/e19913b6 — verified by absent commit-batch
 fields). Authored on `codex/gpu-engine`; dedupe against the live P9 record
 at integration.
 
@@ -24,18 +24,18 @@ plan had `submitted=0` because `prepare_rung` (frame_effects.py:337)
 claim/coverage gates refused the steps — and nothing releases or refills
 claims for the tiles the partial fanout never covered. Planned work
 evaporates with no producer and no wakeup; after 2 s the watchdog asserts.
-4646ecf8 ("Close shared-transform coverage stalls") was IN the running
+7ee5c74c ("Close shared-transform coverage stalls") was IN the running
 build — this is a surviving member of that family at the
 partial-fanout-coverage refill edge (frame_effects.py:337 +
 `submit_shared_transform_floor` :835).
 
 Secondary: the drain collapsed to one-upsert-per-commit (~12 ms × 22 Hz,
 83/88 batches zero-upload) — the diagnostics "UI fan-in" bottleneck;
-1e36084b's `batch_limit = max(4, …)` addresses this half.
+5fc43d7a's `batch_limit = max(4, …)` addresses this half.
 
 Also observed: `atomic_source_successor_committed` stale-True in every
 stall-49 batch (plain bool surviving `retarget_index_window`) — fixed by
-eb7f20d2.
+e19913b6.
 
 ## Bug 2 — acknowledgement-only presentation can present stale GL state (fixed on this branch)
 
@@ -54,7 +54,7 @@ magnitude `complex_rg32f` texels render bright orange exactly under stale
 per-tile identity probes were fully self-consistent while the screen was
 wrong — bookkeeping cannot see below the identity layer.
 
-Fix landed on this branch (extends 1e36084b's levels-only physical no-op
+Fix landed on this branch (extends 5fc43d7a's levels-only physical no-op
 check): physical presentation truth in the tile layer — clean re-present
 and uniforms-only paths verify per-page shader-mapping key, levels, and
 per-quad mode buffer against desired state, repair on divergence, and
@@ -70,7 +70,7 @@ watchdog, so genuinely idle): `/tmp/arrayscope-stall-18-1.trace.jsonl`
 `/tmp/arrayscope-stall-65-2.trace.jsonl` (back to 70:170 then scroll up,
 stall `required_unsettled=[98,99]`, seq 37585). Direction does not matter.
 
-The claim ledger is NOT the surviving defect on this build: 4646ecf8's
+The claim ledger is NOT the surviving defect on this build: 7ee5c74c's
 release/refill held in both traces (every preview fanout released its
 claims and armed a replan; candidates re-yielded). The proven cycle is an
 **acknowledgement/evidence race around the first-pass histogram barrier**:
@@ -99,7 +99,7 @@ claims and armed a replan; candidates re-yielded). The proven cycle is an
 Slow scrolling "resolves" it because each further retarget produces a new
 ack commit that can win the evidence race and arm the flush.
 
-**Fix landed on `codex/gpu-engine` at `ffafb821`** ("Arm first-pass
+**Fix landed on `codex/gpu-engine` at `fd6b77a6`** ("Arm first-pass
 histogram publication when level evidence completes late"):
 `_maybe_publish_after_level_evidence` arms the same parked-flush
 obligation the ack path arms when it observes a completed, unpublished
@@ -120,13 +120,13 @@ FFT-montage scroll-down-then-up settling regression
    [2026-07-15 late: exit gate now pinned on this branch by
    `test_partial_coverage_shared_fanout_releases_all_claims_and_refills`;
    fresh traces show the surviving live stall was the evidence race above,
-   fixed in ffafb821 — dedupe both against the P9 record at integration.]
+   fixed in fd6b77a6 — dedupe both against the P9 record at integration.]
 
 2. (P9/main) Watchdog signature gains a commit-progress term so a live
    22 Hz drain does not assert (done on this branch; port with dedupe).
 3. (this branch, done) Physical presentation truth + injected-corruption
    gates as above.
-4. (this branch, done — ffafb821) First-pass histogram publication
+4. (this branch, done — fd6b77a6) First-pass histogram publication
    obligation must survive evidence completing after the last ack commit.
 
 ## Bug 1 update — session 50 exact-quality/coarse-LOD candidate hole (fixed 2026-07-16)

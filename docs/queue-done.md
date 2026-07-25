@@ -28,7 +28,7 @@ blocks graduated during cleanups are preserved after it.
   or another real transfer bottleneck is established.
 
 - 2026-07-22 — **Montage-relevel stall (the "reds") FIXED — pyqtgraph level-only
-  fast-path (`cca02e74`):** the profiler-gated fix corrected the diagnosis (the
+  fast-path (`1dd57fd9`):** the profiler-gated fix corrected the diagnosis (the
   ~1.2 s/commit cost was the backend re-resolving ALL 272 resident payloads each
   level commit, not the O(N) prioritization). `build_tile_presentation` now flags
   a `level_only_drain` delta when every upsert is a rewindow of an already-
@@ -51,7 +51,7 @@ blocks graduated during cleanups are preserved after it.
   completed honestly with the NO above.
 
 - 2026-07-22 — **G7 Phase B — native BC/ASTC compressed texture components
-  transfer + VRAM win (`27ac87e9`):** the GPU's texture sampler decompresses
+  transfer + VRAM win (`80de494c`):** the GPU's texture sampler decompresses
   BC/ASTC in hardware for free at sample time — no decode pass. Our own BC4
   (scalar) + BC5 (complex, stored as **(real, imag)** to match `rg32float` and
   avoid ±π phase-wrap smear) CPU encoders + a **WGSL on-GPU BC4 encoder** (for
@@ -67,7 +67,7 @@ blocks graduated during cleanups are preserved after it.
   pools, but the audit shows this did not yet create an end-to-end win.
 
 - 2026-07-22 — **G7 Phase A — compressed host-cache component, topology-aware
-  (`6e767001`):** two-level cache (large compressed backing tier under the raw
+  (`175bc826`):** two-level cache (large compressed backing tier under the raw
   cache via a default-None `BoundedCache.on_evict` hook — byte-identical for
   existing callers); a raw-cache miss is served by a decode (µs) instead of a
   recompute/re-read (ms–s). `device_topology.py` detects integrated/discrete +
@@ -89,7 +89,7 @@ blocks graduated during cleanups are preserved after it.
   < raw) **does NOT hold for CPU decode** (break-even ~0.01–0.04 GB/s vs ~12 GB/s
   PCIe), so **default correctly stays off** — the gate ("prove before flipping")
   satisfied with an honest "no CPU-decode win; the transfer win needs GPU-side
-  decode (nvCOMP/wgpu compute) — recorded follow-up." Evidence: `3450b75f`;
+  decode (nvCOMP/wgpu compute) — recorded follow-up." Evidence: `bed7d5e5`;
   lossless-exactness + default-off tests, 121 gpu+import-health passed.
 
 - 2026-07-22 — **Plugin ops v3 — BART subprocess pack (queue step 10):**
@@ -98,19 +98,19 @@ blocks graduated during cleanups are preserved after it.
   cancellation SIGTERMs the child's process group then SIGKILLs after a 0.25 s
   grace — **measured 22 ms kill** (<1 s gate), no orphan, temp dir always cleaned;
   OPAQUE heaviest-admission cost class. `bart:pics` deferred (multi-input, doesn't
-  fit unary `fn`). Evidence: `6973c134` (+ arch-guard barrier fix `4c7ad83f`);
+  fit unary `fn`). Evidence: `f1c07682` (+ arch-guard barrier fix `ed24d457`);
   16 tests run against the live bart binary. bart installed at `~/projects/bart/`
   (MKL from the conda pkgs cache).
 
 - 2026-07-22 — **Plugin ops v2 — sigpy pack (queue step 9):** first shipped as
-  `sigpy:fft`/`ifft` (`2e4c7202`), then **removed the same day** (`3d38bce7`) as
+  `sigpy:fft`/`ifft` (`14329efa`), then **removed the same day** (`3107ef0c`) as
   redundant — ArrayScope already has the built-in `centered_fft`/`centered_ifft`
   ops *and* a pluggable FFT backend, and `sigpy.fft` is `numpy.fft` underneath, so
   the sigpy FFT added nothing (see docs/graveyard.md). What **did** durably land
   from this step is the first-party pack-registry seam (`register_pack_operation` /
   `load_operation_packs` / `_PACK_MODULES`), reused by the BART pack; dock/palette/
   export enumerate via `all_operations()`. **Superseded 2026-07-24** by the sigpy
-  *threshold + resize* pack (`0a09d83e`) — see the entry below — which ships the
+  *threshold + resize* pack (`6f7f5571`) — see the entry below — which ships the
   genuinely-additive sigpy ops (`sigpy:soft_thresh`/`hard_thresh` as verified
   Tier-2 windowable, `sigpy:resize` as OPAQUE k-space zero-fill) instead of the FFT.
 
@@ -130,7 +130,7 @@ blocks graduated during cleanups are preserved after it.
   `"int"` in both create paths. Deferred (unchanged): `nufft`/`espirit`
   (coordinate/calibration args + dim changes), and now `fwt`/`iwt` (the wavelet
   inverse needs the forward's oshape + coeff_slices, which the scalar-param unary
-  contract cannot carry). Evidence: `0a09d83e`; targeted operations suite green
+  contract cannot carry). Evidence: `6f7f5571`; targeted operations suite green
   (56 passed incl. the 20 pack tests). sigpy pip-installed + declared as the
   optional `sigpy` extra (pyproject) and mirrored in environment.yml.
 
@@ -154,7 +154,7 @@ blocks graduated during cleanups are preserved after it.
   (region-only `read_region`, no whole-array materialization). Lifecycle: the
   `own_inputs=False` guard means closing A−B never tears down the still-live A/B
   sources; the linked cursor now reads via `read_region` (also fixes lazy/memmap
-  compare windows). Menu: "Open difference (A − B)…". Evidence: `d4ca8cac`;
+  compare windows). Menu: "Open difference (A − B)…". Evidence: `da37ce19`;
   real-Wayland `tests/ui/test_compare_difference.py` 4/4; progressive spy proves
   region-only reads + exact vs `A_np − B_np`; mismatched-shape refusal + lifecycle
   tests; full parallel suite 2752 passed. **Compare v1 (steps 5+6+7) is complete.**
@@ -167,7 +167,7 @@ blocks graduated during cleanups are preserved after it.
   built a WgpuSurface instead of pyqtgraph. Fix: `tests/conftest.py` now redirects
   `XDG_CONFIG_HOME` to a private empty dir for EVERY run (per-process for serial),
   not only xdist workers. Not a production bug (the app sets a real org name).
-  Evidence: `aa597939`; serial+parallel 14/14, fail-then-pass proven, full suite
+  Evidence: `0ee00f33`; serial+parallel 14/14, fail-then-pass proven, full suite
   2752 passed.
 
 - 2026-07-22 — **Compare v1b — "Compare with…" launcher + linked complex cursor
@@ -176,8 +176,8 @@ blocks graduated during cleanups are preserved after it.
   controllers, no new transport); an in-process `CompareCursorGroup` shares the
   source array index so every window's HUD shows A and B (magnitude+phase for
   complex) read exactly from each window's own `base_data` — rides the existing
-  hover-refresh path, no new scheduler. Evidence: `cca17a4c` (+ test-hygiene fix
-  `7fbcfc2d`); real-Wayland `tests/ui/test_compare_launcher.py` 2/2 headless-weston,
+  hover-refresh path, no new scheduler. Evidence: `187efea3` (+ test-hygiene fix
+  `644d89c2`); real-Wayland `tests/ui/test_compare_launcher.py` 2/2 headless-weston,
   values exact vs NumPy oracle (float + complex64); full parallel suite 2746
   passed. **Integration bug caught + fixed:** the compare test leaked its sibling
   window (app-global retention list, no `WA_DeleteOnClose`) so a later test's
@@ -191,7 +191,7 @@ blocks graduated during cleanups are preserved after it.
   (windowable) claim is honored only after `plugin_conformance.verify_region_conformance`
   property-tests `fn(whole)[region] == fn(whole[region])` across seeded probes,
   else it is downgraded to OPAQUE whole-array with a loud WARNING +
-  `region_conformance_stats()` tally. Evidence: `800efe4c`;
+  `region_conformance_stats()` tally. Evidence: `2e567ccb`;
   `tests/operations/test_plugin_conformance.py` red-first (mis-declared roll /
   global-mean rejected, honest `x*2+1` honored) + non-vacuity proof; 303
   operations+import-health passed. **Remaining (dep-blocked):** the sigpy
@@ -201,7 +201,7 @@ blocks graduated during cleanups are preserved after it.
   `CompositeArraySource(A, B, op="subtract")` is a pure `ArraySource`
   (shape/dtype/ndim/read_region), reads the same `index_spec` from both inputs,
   applies the op region-only, and propagates the cancellation token — so A−B
-  flows through the unchanged unary pipeline/tile engine. Evidence: `39d313d8`;
+  flows through the unchanged unary pipeline/tile engine. Evidence: `76496a08`;
   `tests/core/test_composite_array_source.py` 25 tests (NumPy-oracle exactness,
   region-only spy sources, token propagation, progressive-input streaming);
   203 core tests passed. **Remaining:** opening A−B as a third linked window,
@@ -214,7 +214,7 @@ blocks graduated during cleanups are preserved after it.
   existing leading-edge+coalesce `schedule_publish` (no new scheduler/timer) and
   applies peer ranges via `setRange` guarded by `view_ranges_near`, with echo
   suppression by the existing `_applying` window; the "Sync" toolbar link now
-  couples window/level **and** pan/zoom. Evidence: `30b2d25e`; real-Wayland
+  couples window/level **and** pan/zoom. Evidence: `b93a26bf`; real-Wayland
   `tests/ui/test_window_sync.py::test_camera_pan_zoom_syncs_between_windows` +
   `::test_camera_apply_does_not_echo_a_republish` (2/2 headless-weston);
   `tests/sync/test_messages.py` round-trip/keep-current/non-finite pins; full
@@ -227,7 +227,7 @@ blocks graduated during cleanups are preserved after it.
   wraps a pure `fn(ndarray)->ndarray` (or `build` factory) as an `OPAQUE`
   whole-array, cache-stage-able step reusing the existing region engine; recipe
   round-trip via the namespaced id, uninstalled ids raise a clear caught error.
-  Evidence: `327aa80f`; `arrayscope/operations/plugins.py`,
+  Evidence: `e29b4156`; `arrayscope/operations/plugins.py`,
   `tests/operations/test_plugin_operations.py` (12 tests, in-test fake entry
   point with real `EntryPoint.load()`), lazy proof in
   `tests/app/test_import_health.py`; `docs/plugin-operations.md` is the author
@@ -235,21 +235,21 @@ blocks graduated during cleanups are preserved after it.
 
 - 2026-07-22 — **Progressive-load publication correctness — residual closed
   (standing lane):** the real-Wayland gate the offscreen atomic-read test
-  (`447cbe42`) could not see now exists —
+  (`a50247e0`) could not see now exists —
   `tests/gpu_interaction/test_progressive_open_reference.py` drives the
   production window over a `ProgressiveArraySource` on VisPy (real GL) and
   PyQtGraph (real Qt raster), proving zero unread/zero-fill regions at
   completion with a truth-anchored full-coverage gate, plus a red-then-green
   fault-injection (a torn/partial fill fails the gate) that also exposed that
   the payload pixel-oracle passes *vacuously* on an unread tile. Evidence:
-  `db1c5393`; ring-4 4/4 under headless-weston.
+  `648d00fb`; ring-4 4/4 under headless-weston.
 
 - 2026-07-22 — **Render crash fixed: windowability anchored on base shape
   (found while integrating step 5):** `source_anchoring_for_view` fed the
   post-operation display shape into `pipeline_windowable_display_axes`, so a
   reduction on a non-display axis (e.g. Mean over the slider axis) raised
   `axis 2 out of bounds for 2D data` and crashed the render. Now passes the
-  document base-data shape. Evidence: `14dc44a7`; two UI sync tests red on
+  document base-data shape. Evidence: `838ed75c`; two UI sync tests red on
   `main` → green, new
   `tests/display/test_source_anchoring.py::...::test_reduction_on_a_non_display_axis_does_not_raise`.
 
@@ -350,17 +350,17 @@ blocks graduated during cleanups are preserved after it.
   `tests/gpu/test_wgpu_command_protocol.py`, and
   `tests/display/test_wgpu_imageview2d.py` (ADR 0057 status updated).
 - 2026-07-19 — **Wgpu interaction-path stalls and queued shutdown drain closed:**
-  gesture histogram resolves are deferred to settle (`1fa2e0f2`), floor lookup
-  is residency-epoch memoized with a stale-store guard (`f6a9e329`), and queued
-  kernel work cancels under one global shutdown deadline (`112343f8`). Real-
+  gesture histogram resolves are deferred to settle (`cc2c2ea8`), floor lookup
+  is residency-epoch memoized with a stale-store guard (`3c984560`), and queued
+  kernel work cancels under one global shutdown deadline (`30544794`). Real-
   Wayland fast-scroll p95 is 100.8 ms (was 194–214 ms), all five Wgpu journey
   rows pass, and the close callback completes in 56.8 ms; whole-process exit
   on a current long worker item remains explicitly open above, as do the
   shared callback/heartbeat bars. [Promotion evidence](proposals/tensor-engine-endpoint.md#promotion-evidence-entry-2-2026-07-19--interaction-stalls-removed-at-their-owners).
 - 2026-07-19 — **Wgpu/system interaction follow-through:** content-family
-  plane indexing (`a8e0ee06`), quality-converged perf phases (`18986810`),
-  wake-free unchanged governor quotas (`17dfb948`), and single-consumption
-  viewport LOD decisions (`ca2b1846`). Every measured row finished 60/60
+  plane indexing (`ff410fdb`), quality-converged perf phases (`e49bbc0f`),
+  wake-free unchanged governor quotas (`2449ce27`), and single-consumption
+  viewport LOD decisions (`f4100bec`). Every measured row finished 60/60
   exact with zero pending/stale levels; representative Wgpu fast-scroll p95
   reached 77.3 ms, while accepted repeat zoom/pan controls were 141.5–145.2
   ms. Final real-Wayland matrix: 14/15 overall, Wgpu 5/5 and VisPy 5/5; only
@@ -402,31 +402,31 @@ blocks graduated during cleanups are preserved after it.
   unchanged; benchmark artifacts:
   `tests/artifacts/g6b-histogram-collapse-2026-07-18/`.
 - 2026-07-18 — **wgpu live backend COMPLETE (row 3 slices a–c):** executor
-  grown to multi-plane sessions + per-representation pools (`d675d57a`);
+  grown to multi-plane sessions + per-representation pools (`ab63220e`);
   live viewer commits every payload shape — scalar/complex/RGB8/windowable-
   float-RGB montages, all mapping modes and scales, LOD ladder from physical
   reduction factors — with ZERO remaining `_wgpu_commit_plan` rejections and
-  physical page-table acks throughout (`50ab831d`, `cf00ae7b`/`d286b135`,
-  `657e4a34`, `77bb9fee`); journey/profile harness registration + real-
-  Wayland v3 matrix all-five-green (`a2568b52`); settlement livelock fixed —
+  physical page-table acks throughout (`219e992a`, `cf00ae7b`/`d286b135`,
+  `752320fd`, `e61dd42c`); journey/profile harness registration + real-
+  Wayland v3 matrix all-five-green (`993d9dae`); settlement livelock fixed —
   retained-fallback presentation restores first-pass coverage evidence
   WITHOUT acknowledging exact targets, and the 4 s offscreen 60-tile repro
-  settles 60/60 (`14633cd0`/`6670b9df`); v7 independent matrix: cold_fill
+  settles 60/60 (`882617fd`/`03b2f311`); v7 independent matrix: cold_fill
   passes outright, 4/5 rows green, zoom_out under adjudication (resolved
   harness-gap — entry above).
   Suite 2422/0. Three field defects were found ONLY by the journey matrix
-  (warm-arity seam `df4f6286`, ladder-factor mismatch, settlement livelock)
+  (warm-arity seam `efc6ad95`, ladder-factor mismatch, settlement livelock)
   — every fix strengthened oracles, none weakened.
 - 2026-07-18 — **G6(a) live GPU histogram evidence on wgpu**
-  (`c875a121..04977931`): committed planes dispatch dynamic-bound histograms
+  (`c875a121..8ac508f3`): committed planes dispatch dynamic-bound histograms
   over their exact resident ADR 0056 frontier, completion-token fenced, into
   the existing level/first-pass machinery via a coverage evidence barrier
   INSIDE `ProgressiveSchedulingPolicy` (no GUI aggregation, no parallel
   scheduler); superseded task results are ABSORBED content-keyed with
-  refined-first cache reuse instead of discarded (`9f8b3970`, Thomas's
+  refined-first cache reuse instead of discarded (`503f864b`, Thomas's
   design — cancellation cancels presentation ownership, never useful
-  computation); every queue bail is a loud trace event (`7567fb3a`).
-  G6(c) RESOLVED: keep the PyQtGraph histogram widget (`03b46d88`).
+  computation); every queue bail is a loud trace event (`50e4bbdc`).
+  G6(c) RESOLVED: keep the PyQtGraph histogram widget (`0bd97a52`).
 
 - 2026-07-18 — **Renderer command protocol (ADR 0057) + wgpu executor seed
   landed:** `arrayscope/gpu/command_protocol.py` (the only renderer seam) +
@@ -501,7 +501,7 @@ blocks graduated during cleanups are preserved after it.
   which also closes the "4 pre-existing P9-era baseline failures" row: none
   reproduce post-G5.
 - 2026-07-17 — **ImageViewShell duplication lane closed**
-  (`b657bb5d..d71d4c8e`): the shell is now the single owner of ROI/
+  (`f68b3514..37384468`): the shell is now the single owner of ROI/
   interaction emphasis, the tiled-commit skeleton, and tiled-layer queries;
   PyQtGraph tile mechanics moved to `ImageView2D` behind declared backend
   hooks; VisPy's seven override+mirror methods and its duplicate
@@ -518,7 +518,7 @@ blocks graduated during cleanups are preserved after it.
   which passed 5/5 rows serially. Gates: `tests/core/test_trace.py`
   (`*retained_satisfaction*`, red-first).
 
-- 2026-07-17 — **G5 merged to main** (`661b6ba5`): canonical source-grid page
+- 2026-07-17 — **G5 merged to main** (`8af35ea3`): canonical source-grid page
   route, reducer families, page cache, both-backend consumers, legacy
   whole-plane ownership deleted with a resurrection guard; the progressive
   presentation contract (docs/architecture/rendering.md) is enforced at work
@@ -536,19 +536,19 @@ blocks graduated during cleanups are preserved after it.
   churn scenario converges 3/3 in ~23 s and its xfail is removed. Dossier:
   [stale-empty-tiles-2026-07-16](redesign/stale-empty-tiles-2026-07-16.md).
 - 2026-07-16 — **Native complex64 PyQtGraph convergence restored**
-  (`14f0fbc5`): the canonical native level-zero page route preserves complete
+  (`db18c8df`): the canonical native level-zero page route preserves complete
   handoffs, and the stress-matrix complex64 row is a hard pass. Re-verified
   serially on 2026-07-17 with 10/10 required targets acknowledged, zero
   identity-rejected commits, and no `trace_verify` violations.
-- 2026-07-16 — PyQtGraph identity-rejected upserts made loud (`6f95ce70`).
+- 2026-07-16 — PyQtGraph identity-rejected upserts made loud (`53fa7e1e`).
 - 2026-07-16 — Session-148 identity-aliasing follow-ups: canonical full
   ranges, per-tile ack-vs-target coverage, re-commit backoff, trace_verify
-  invariant (`37979222`; dossier
+  invariant (`17540670`; dossier
   [stale-empty-tiles-2026-07-16](redesign/stale-empty-tiles-2026-07-16.md)).
 - 2026-07-16 — Orange floor tiles (per-session preview metadata vs
-  persistent pyramid cache) + three deferred-stage lost-wakeups (`18a207fb`).
+  persistent pyramid cache) + three deferred-stage lost-wakeups (`96ce6eb9`).
 - 2026-07-16 — Identity-aliasing starvation stall root-caused and fixed
-  (`dff723b4`).
+  (`2fddbb73`).
 - 2026-07-16 — Montage scroll-direction GPU warming; retained-slice
   staleness fixed at the rung-label owner (dossier
   [slice-retention-staleness-2026-07-16](redesign/slice-retention-staleness-2026-07-16.md)).
@@ -569,14 +569,14 @@ blocks graduated during cleanups are preserved after it.
 
 Preserved verbatim; the condensed row in [queue.md](queue.md) points here.
 
-| 3 | **wgpu strangler — promotion evidence** (slices (a)–(c) LANDED, see Done; ADR 0057). zoom_out full-matrix red ADJUDICATED 2026-07-18: **harness gap, closed** (`da22dad7`, see Done — the canvas repainted ~24 ms after the journey-end capture; sampler now drains presentation-draw acks before the end sample; three consecutive FULL Wayland matrices v10/v11/v12 wgpu-green). The 2026-07-18 field stalls `259-1`/`1-1` are **not** the standing 272-tile fill: both are one wgpu physical-first-pass quality drift (exact latch followed by a mixed exact+fallback snapshot), fixed in `43287f8` and recorded in [the field-stall dossier](redesign/wgpu-field-stalls-2026-07-18.md). **2026-07-19 dogfood crash (complex FFT chain, L2 view) FIXED:** a submission's own `EnsureChunkResident` commands could LRU-evict a page snapshotted for a later `DispatchHistogram` in the SAME submission; the executor's loud KeyError then aborted the whole commit mid-batch (ensures applied, present never ran). Two-layer fix: the executor pre-scans each submission and shields histogram frontier keys from its own eviction (scoped pin owner, always released per submission; pool pressure beyond the shield yields the page honestly), and a key missing at histogram time becomes `FrameReport.histogram_missing` — the view drops that evidence spec with a loud `wgpu_histogram_queue_bail reason="evicted_in_batch"` trace, the commit completes, and evidence retries via the normal re-queue machinery (design rationale in ADR 0057 status). **Dogfood overlay parity:** wgpu now draws camera-locked ROI outlines/handles, live-profile cursor geometry, and tile loading/skipped boxes + symbols natively after the tiles in the same render pass; camera-only frames update one transform uniform and never rewrite the world-anchored overlay buffer. **TEXT GAP CLOSED (2026-07-19):** overlay text is GPU-native — a CPU-baked glyph atlas (`arrayscope/display/glyph_atlas.py`, QPainter bake off the frame path, DPR-keyed cache, bounded growth with loud `wgpu_glyph_atlas_evicted` eviction) feeds `glyph_quad`/`screen_rect` instances in the SAME flat instanced overlay pass via one `UpdateGlyphAtlas` command; tile-truth labels render as executor pixels in the wgpu view (QLabels replaced), world-anchored with constant screen size, camera-only pans move them with the image at zero atlas uploads and zero buffer rewrites (`FrameReport.glyph_atlas_uploads` + border-corner pixel oracles in `tests/display/test_wgpu_imageview2d.py`, executor oracles in `tests/gpu/test_wgpu_command_protocol.py`). With Qt-widget overlays no longer required over the canvas, the screen-present-mode experiment was unblocked — and **SCREEN PRESENTATION LANDED 2026-07-19** behind the new `wgpu_present_method` setting (bitmap default; `auto` = screen exactly where the measured native-Wayland recipe applies; `screen` explicit pin — selectable from Performance → wgpu Presentation, enabled with the wgpu backend): a paint-less native child drives its own swapchain via the gate-B recipe (QNativeInterface wl_display + winId-as-wl_surface + Vulkan-only instance; rendercanvas fully bypassed on this path), re-configured for **Mailbox** where offered so the ~15 ms Fifo acquire block never reaches the GUI thread (measured steady-state acquire 0.09–0.16 ms, present 0.03–0.12 ms), draw-paced at rendercanvas's 30 fps default (unpaced glides exhausted the mailbox chain — ~1.5–2× worse zoompan event-loop p95 until the cap), with draw-acks keyed on the real `wgpuSurfacePresent` edge and loud bitmap fallback anywhere screen cannot exist. Native-child risks pinned in ring 4 (`tests/gpu_interaction/test_wgpu_screen_present.py`: input transparency, close-cancels-drag, present-edge ack drain, resize reconfigure) plus a `wgpu-screen` contract-suite twin (44/44 on real Wayland). Screen-enabled journey matrix: **all five wgpu rows green** (`tests/artifacts/journey-matrix-wgpu-screen-2026-07-19/`; the first run exposed that widget grabs are blind to swapchain pixels — harness screenshots now use the view's physical framebuffer readback). Paired same-tip perf: fast-scroll p95 118.0 → 107.1/109.5 ms (~8–10 % win, the readback tax); zoom/pan parity within the standing jank band — at this window size the 4–7 ms readback is a small slice of the shared row-1 presentation tail; the decisive screen case remains 4K (26 ms readback), still unmeasured (endpoint entry 4). Three consecutive full real-Wayland matrices v17/v18/v19 hold the text geometry on every sample and pass all five wgpu rows outright (including index 10/10); zoom-in/out remain zero-commit. **Codex post-merge review of this landing found two real-risk defects — the coverage-evidence bypass and lost wakeup #7 — both fixed red-first the same day with the kernel shutdown completion contract pinned (see Done); post-fix acceptance: full suite 2491/0 on the rebase over the exit-gate landing, TWO fresh full Wayland matrices (pre- and post-rebase) each all-five-wgpu-rows green with only the standing incumbent cold_fill demand-freshness reds (vispy+pyqtgraph), fast-scroll p95 83.2/88.3 ms warm repeats (in band; one post-matrix cold outlier 157 ms discarded per the load-variance protocol; artifacts `tests/artifacts/codex-review-fixes-2026-07-19/`, `journey-matrix-2026-07-19-codexfix{,-v2}`).** Open: **(d)** promotion by evidence — STATUS after the 2026-07-19 perf landing: wgpu LEADS on fast-scroll (p95 77.3 ms vs VisPy ~106-124) and matches on zoom/pan steady-state (141-145 ms repeat controls); both 5/5 in the final matrix. Remaining before the AUTO flip: the shared callback/heartbeat bars (row 1), Thomas's continued dogfood hours (screen mode now dogfoodable from Performance → wgpu Presentation, incl. Auto), and the FFT-scroll 4→17 fps headline measured on the new tip. VisPy retirement review only after a release cycle — never a flag-day switch. **Successor traps:** import rendercanvas ONLY via `import_qrenderwidget()`; every wgpu adapter probe pins `set_instance_extras(backends=["Vulkan"])` BEFORE its first request (an all-backends instance re-inits EGL during GL enumeration and SIGABRTs workers holding vispy GL state — `8c57a7bf`). | Promotion gate: journey matrix + perf bars on real data; written verdict in tensor-engine-endpoint.md |
+| 3 | **wgpu strangler — promotion evidence** (slices (a)–(c) LANDED, see Done; ADR 0057). zoom_out full-matrix red ADJUDICATED 2026-07-18: **harness gap, closed** (`da22dad7`, see Done — the canvas repainted ~24 ms after the journey-end capture; sampler now drains presentation-draw acks before the end sample; three consecutive FULL Wayland matrices v10/v11/v12 wgpu-green). The 2026-07-18 field stalls `259-1`/`1-1` are **not** the standing 272-tile fill: both are one wgpu physical-first-pass quality drift (exact latch followed by a mixed exact+fallback snapshot), fixed in `43287f8` and recorded in [the field-stall dossier](redesign/wgpu-field-stalls-2026-07-18.md). **2026-07-19 dogfood crash (complex FFT chain, L2 view) FIXED:** a submission's own `EnsureChunkResident` commands could LRU-evict a page snapshotted for a later `DispatchHistogram` in the SAME submission; the executor's loud KeyError then aborted the whole commit mid-batch (ensures applied, present never ran). Two-layer fix: the executor pre-scans each submission and shields histogram frontier keys from its own eviction (scoped pin owner, always released per submission; pool pressure beyond the shield yields the page honestly), and a key missing at histogram time becomes `FrameReport.histogram_missing` — the view drops that evidence spec with a loud `wgpu_histogram_queue_bail reason="evicted_in_batch"` trace, the commit completes, and evidence retries via the normal re-queue machinery (design rationale in ADR 0057 status). **Dogfood overlay parity:** wgpu now draws camera-locked ROI outlines/handles, live-profile cursor geometry, and tile loading/skipped boxes + symbols natively after the tiles in the same render pass; camera-only frames update one transform uniform and never rewrite the world-anchored overlay buffer. **TEXT GAP CLOSED (2026-07-19):** overlay text is GPU-native — a CPU-baked glyph atlas (`arrayscope/display/glyph_atlas.py`, QPainter bake off the frame path, DPR-keyed cache, bounded growth with loud `wgpu_glyph_atlas_evicted` eviction) feeds `glyph_quad`/`screen_rect` instances in the SAME flat instanced overlay pass via one `UpdateGlyphAtlas` command; tile-truth labels render as executor pixels in the wgpu view (QLabels replaced), world-anchored with constant screen size, camera-only pans move them with the image at zero atlas uploads and zero buffer rewrites (`FrameReport.glyph_atlas_uploads` + border-corner pixel oracles in `tests/display/test_wgpu_imageview2d.py`, executor oracles in `tests/gpu/test_wgpu_command_protocol.py`). With Qt-widget overlays no longer required over the canvas, the screen-present-mode experiment was unblocked — and **SCREEN PRESENTATION LANDED 2026-07-19** behind the new `wgpu_present_method` setting (bitmap default; `auto` = screen exactly where the measured native-Wayland recipe applies; `screen` explicit pin — selectable from Performance → wgpu Presentation, enabled with the wgpu backend): a paint-less native child drives its own swapchain via the gate-B recipe (QNativeInterface wl_display + winId-as-wl_surface + Vulkan-only instance; rendercanvas fully bypassed on this path), re-configured for **Mailbox** where offered so the ~15 ms Fifo acquire block never reaches the GUI thread (measured steady-state acquire 0.09–0.16 ms, present 0.03–0.12 ms), draw-paced at rendercanvas's 30 fps default (unpaced glides exhausted the mailbox chain — ~1.5–2× worse zoompan event-loop p95 until the cap), with draw-acks keyed on the real `wgpuSurfacePresent` edge and loud bitmap fallback anywhere screen cannot exist. Native-child risks pinned in ring 4 (`tests/gpu_interaction/test_wgpu_screen_present.py`: input transparency, close-cancels-drag, present-edge ack drain, resize reconfigure) plus a `wgpu-screen` contract-suite twin (44/44 on real Wayland). Screen-enabled journey matrix: **all five wgpu rows green** (`tests/artifacts/journey-matrix-wgpu-screen-2026-07-19/`; the first run exposed that widget grabs are blind to swapchain pixels — harness screenshots now use the view's physical framebuffer readback). Paired same-tip perf: fast-scroll p95 118.0 → 107.1/109.5 ms (~8–10 % win, the readback tax); zoom/pan parity within the standing jank band — at this window size the 4–7 ms readback is a small slice of the shared row-1 presentation tail; the decisive screen case remains 4K (26 ms readback), still unmeasured (endpoint entry 4). Three consecutive full real-Wayland matrices v17/v18/v19 hold the text geometry on every sample and pass all five wgpu rows outright (including index 10/10); zoom-in/out remain zero-commit. **Codex post-merge review of this landing found two real-risk defects — the coverage-evidence bypass and lost wakeup #7 — both fixed red-first the same day with the kernel shutdown completion contract pinned (see Done); post-fix acceptance: full suite 2491/0 on the rebase over the exit-gate landing, TWO fresh full Wayland matrices (pre- and post-rebase) each all-five-wgpu-rows green with only the standing incumbent cold_fill demand-freshness reds (vispy+pyqtgraph), fast-scroll p95 83.2/88.3 ms warm repeats (in band; one post-matrix cold outlier 157 ms discarded per the load-variance protocol; artifacts `tests/artifacts/codex-review-fixes-2026-07-19/`, `journey-matrix-2026-07-19-codexfix{,-v2}`).** Open: **(d)** promotion by evidence — STATUS after the 2026-07-19 perf landing: wgpu LEADS on fast-scroll (p95 77.3 ms vs VisPy ~106-124) and matches on zoom/pan steady-state (141-145 ms repeat controls); both 5/5 in the final matrix. Remaining before the AUTO flip: the shared callback/heartbeat bars (row 1), Thomas's continued dogfood hours (screen mode now dogfoodable from Performance → wgpu Presentation, incl. Auto), and the FFT-scroll 4→17 fps headline measured on the new tip. VisPy retirement review only after a release cycle — never a flag-day switch. **Successor traps:** import rendercanvas ONLY via `import_qrenderwidget()`; every wgpu adapter probe pins `set_instance_extras(backends=["Vulkan"])` BEFORE its first request (an all-backends instance re-inits EGL during GL enumeration and SIGABRTs workers holding vispy GL state — `9c115686`). | Promotion gate: journey matrix + perf bars on real data; written verdict in tensor-engine-endpoint.md |
 
 ### Graduated standing-lane items (2026-07-19 cleanup)
 
 - **CLOSED 2026-07-18 — the 272-tile raw fill "stall" was a throughput
   collapse, not a lost wakeup.** Bisect verdict: no breaking commit in
-  `661b6ba5..976ea275` — the timeout reproduces at the G5 merge and at
-  `62904128` itself; the offscreen invocation was never validated green.
+  `8af35ea3..54f7447d` — the timeout reproduces at the G5 merge and at
+  `040d90c6` itself; the offscreen invocation was never validated green.
   Gate-liveness instrumentation (now permanent trace events
   `presentation_gate`/`replan_gate`/`commit_rearm`) proved every wakeup
   fires; the fill was O(tiles²)-slow against a mis-applied 5 s gesture

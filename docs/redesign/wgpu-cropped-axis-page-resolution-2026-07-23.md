@@ -36,7 +36,7 @@ tile coverage, upload delta, binding-cache hit/miss delta, and page fan-in.
 The WGPU gate requires zero uploads after the source montage has made the
 needed pages resident.
 
-## Baseline on `b23f42dc` plus benchmark-only changes
+## Baseline on `19e757c4` plus benchmark-only changes
 
 Real Wayland, Intel low-power Vulkan adapter, scalar float32 NIfTI
 `(336, 336, 272)`, 50 montage tiles:
