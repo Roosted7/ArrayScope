@@ -236,19 +236,88 @@ mean 480 ms, one outlier run carrying all of the difference; excluding it,
 448 ms), still zero `display_preparation` producers, with a ~200-400 ms
 statistics-lane tail after the last step.
 
-### Why the default stays OFF
+### Why the default stayed OFF — and what it actually was
 
-The route does not reach **operation-pipeline montages**. Under
-`CenteredFFT(axis=2)` the owner is armed but never admitted — `verdict` and
-`_montage_side_work_visible_settled` refusals, zero completed batches — with or
-without the rebind; under `CenteredFFT(axis=0)` the content key changes per
-window so the rebind declines outright and the owner is never even armed
-(`blocking_reason: inactive`). A crop scrub on such a montage can only be as
-good as its demoted placeholder: it holds the predecessor's window and keeps a
-histogram source, which is honest, but it is not the window-exact re-anchor the
-plain-montage case now gets.
+The route did not reach **operation-pipeline montages**. Under
+`CenteredFFT(axis=2)` the owner is armed but never admitted — zero completed
+batches — with or without the rebind; under `CenteredFFT(axis=0)` the content
+key changes per window so the rebind declines outright and the owner is never
+even armed (`blocking_reason: inactive`). A crop scrub on such a montage could
+only be as good as its demoted placeholder: it held the predecessor's window and
+kept a histogram source, which is honest, but it is not the window-exact
+re-anchor the plain-montage case gets.
 
-That is the escape clause of this design, and it is why the capability remains
-opt-in. Making refinement admissible on an operation-pipeline montage is the
-work that would close it; it is a scheduling change in the montage settle
-contract, not another evidence route, and it is out of scope here.
+Attributing that to the `verdict` / `_montage_side_work_visible_settled`
+refusals was reading the refusals a probe happens to catch rather than the one
+that persists. Both gates are **open** by the time such a session settles
+(`verdict: refine`, side-work settled, `first_pass_histogram_published: True`).
+The refusals seen are the ordinary early ones, and neither protects an operation
+budget. See the closing addendum.
+
+## Addendum 2026-07-25 (second) — the op-pipeline gap was a stale deferral backlog
+
+`_schedule_semantic_level_evidence` is level-triggered: it re-checks its gates
+only when something calls it. After a session settles, the sole caller that can
+still re-arm it is `_finish_frame_session_if_complete`, which bails on
+`FrameSession.is_complete()`.
+
+`is_complete()` reads `deferred_missing_tiles` directly. The index-window
+retarget (`_maybe_retarget_frame_session`) recorded that backlog
+**unconditionally** while setting its `stage_planning_deferred` flag
+conditionally. The backlog is only meaningful with the flag — it is the argument
+`complete_deferred_stage_fan_in` replans from, and that owner returns early
+unless the flag is set. A retarget that found an existing stage plan therefore
+left a backlog nobody would ever drain.
+
+Finding an existing stage plan is exactly what an **operation-pipeline** montage
+does once its shared stage is warm, and exactly what a raw montage never does.
+That is the whole of the raw-versus-op asymmetry: on the FFT montage every
+retarget parked 50 undrainable tiles, `is_complete()` stayed False forever after
+its pixels settled, and every completion continuation behind it never ran.
+
+The fix pairs the two, as the session-build path already did:
+
+```python
+session.deferred_missing_tiles = (
+    tuple(missing_tiles) if session.stage_planning_deferred else ()
+)
+```
+
+**Scope is wider than the rebind.** Measured on the 50-tile 64x64 row gradient
+under `CenteredFFT(axis=2)`, wgpu: before the fix the displayed auto levels were
+frozen on the FIRST window for the whole scrub on **both** paths — the rebind
+path AND the ordinary per-tile evaluation (`blocking_reason: inactive`,
+`ROUGH_TARGET`). An operation-pipeline montage simply never refined its levels.
+
+| `CenteredFFT(axis=2)`, 50 tiles | settle/step | producers | evidence batches | window-exact levels |
+|---|---:|---:|---:|---|
+| rebind, before | 90-139 ms | 0 | 0 | never |
+| evaluation, before | 313-346 ms | 0 | 0 | never |
+| rebind, after | 102-107 ms | 0 | 4 | 198-323 ms after settle |
+| evaluation, after | 305-352 ms | 0 | 25 | 174-269 ms after settle |
+
+Both paths settle on identical levels, as on raw data. Visible settle per scrub
+step is unchanged within run-to-run spread on every cell; the evidence lane is
+`WorkLane.HISTOGRAM_REFINEMENT` work admitted only after the visible plan
+settles, and it stays 62-113 ms of worker time per step across the bounded
+batches. The raw-montage cells are untouched by the fix (130-143 ms rebind,
+550-770 ms evaluation, both anchoring ~220 ms after settle).
+
+Other readers of `is_complete()` were mis-served by the same residue on every
+operation-pipeline montage: the montage watchdog kept re-arming, the loading
+overlay stayed eligible, and `_montage_render_active` reported the render busy
+forever, holding the memory policy in its active-render branch.
+
+### The default
+
+The capability stays opt-in in this step; flipping it is a separate decision
+with its own gates.  Nothing is left of the caveat that gated it, though: the
+rebind now settles the same auto levels as the ordinary evaluation on raw and
+operation-pipeline montages alike.
+
+Standing reds observed while gating this, neither caused by it (both reproduce
+on the unmodified tip): `tests/ui/test_montage_scroll_level_retention.py::test_vispy_one_tile_scroll_retains_level_population`
+times out settling, and `tests/app/test_memory_stress.py::test_montage_tile_residency_rss_stays_bounded`
+is flaky at roughly the same rate either way (8/12 red unmodified, 7/12 red with
+the capability forced on, with LARGER overshoots unmodified — 17.1 MB against
+15.3 MB), so its accounted-bytes gate is not evidence about this capability.

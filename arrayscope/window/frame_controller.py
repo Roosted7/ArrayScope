@@ -1222,7 +1222,19 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._last_montage_retarget_attach_ms = (perf_counter() - attach_start) * 1000.0
         session.stage_planning_deferred = bool(missing_tiles and stage_plan_deferred)
         session.stage_planning_async = False
-        session.deferred_missing_tiles = tuple(missing_tiles)
+        # The deferred backlog is only meaningful WITH the deferral flag: it is
+        # the argument ``complete_deferred_stage_fan_in`` replans from, and that
+        # owner bails unless ``stage_planning_deferred`` is set.  Recording it
+        # unconditionally left a retarget that found an existing stage plan
+        # (an operation-pipeline montage whose shared stage is already warm)
+        # holding a backlog nobody would ever drain, and ``is_complete`` reads
+        # it directly — so such a session never reported complete even after its
+        # pixels settled, stranding every completion continuation behind it
+        # (the semantic level-evidence owner among them).  The session-build
+        # path already pairs them this way.
+        session.deferred_missing_tiles = (
+            tuple(missing_tiles) if session.stage_planning_deferred else ()
+        )
         session.tile_compute_cache_hits = int(stats["hits"])
         session.tile_compute_waiting_for_stage = len(hot_stage_plan["waiting_indices"])
         session.stage_backed_tiles_pending = len(hot_stage_plan["waiting_indices"])

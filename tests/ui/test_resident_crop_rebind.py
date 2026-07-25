@@ -18,19 +18,14 @@ answers the exact path's second requirement: an exact payload carries CPU
 semantics indexed window-locally, which the rebind re-cuts from the same plane
 instead of leaving the shifted window reading its predecessor's values.
 
-The capability is gated OFF by default: the rebind reuses the predecessor
-window's auto-level evidence (the maturity contract) instead of re-anchoring, so
-it is only pixel-exact against the CPU oracle while the level window is stable
-(verified here with statistically uniform data).  A crop whose pages are NOT
-resident, any pixel-affecting identity change, or a montage of planes too large
-for the residency byte policy falls through to the ordinary evaluation.
 A rebound window re-anchors its own auto levels: the evidence it carries
 describes the PREDECESSOR window, so it is demoted to preview quality and the
 semantic level-evidence owner re-samples the new window off the display lane.
-The capability is still gated OFF by default because that owner is not admitted
-on an operation-pipeline montage, which the last test here pins.  A crop whose
-pages are NOT resident, or any pixel-affecting identity change, falls through to
-the ordinary evaluation.
+That holds on raw AND operation-pipeline montages, and the rebind and evaluation
+paths settle identical levels on both.  The capability is nevertheless still
+gated OFF by default.  A crop whose pages are NOT resident, any pixel-affecting
+identity change, or a montage of planes too large for the residency byte policy
+falls through to the ordinary evaluation.
 """
 
 from __future__ import annotations
@@ -1254,9 +1249,13 @@ def _gradient_levels_anchored(win, start: int) -> bool:
     return displayed == tuple(round(float(value), 4) for value in summary.bounds)
 
 
-def _gradient_scrub(win, starts, *, deadline_ms) -> list[dict]:
+def _gradient_scrub(win, starts, *, deadline_ms, operations=()) -> list[dict]:
     """Fill the whole plane, crop, scrub, and report each settled step."""
 
+    if operations:
+        win.operation_coordinator.load_operations(tuple(operations))
+        win._set_document(win.operation_coordinator.document)
+        win._coerce_channel_for_current_dtype()
     full = win.view_state.with_montage_axis(
         2, columns=10, indices=_GRADIENT_TILE_INDICES, text="0:50"
     )
@@ -1385,21 +1384,23 @@ def test_rebind_and_evaluation_paths_settle_identical_levels(qtbot):
     ]
 
 
-def test_operation_pipeline_montage_keeps_the_predecessor_window_levels(qtbot):
-    """The re-anchor does NOT reach operation-pipeline montages — pinned, not fixed.
+def test_operation_pipeline_montage_reanchors_its_own_auto_levels(qtbot):
+    """The re-anchor reaches operation-pipeline montages too.
 
-    Levels for a rebound window come from the semantic evidence owner, and that
-    owner is unreachable on a montage with an operation pipeline: its refinement
-    work is never admitted (measured under ``CenteredFFT(axis=2)`` — armed target,
-    ``verdict``/``side-work`` refusals, zero completed batches, with or without
-    the rebind).  So a rebound crop window here can only be as good as its
-    demoted placeholder, which is precisely why the capability stays default OFF.
+    It did not before ``deferred_missing_tiles`` stopped outliving its deferral
+    flag: a retarget that found an existing stage plan — an operation-pipeline
+    montage whose shared stage is already warm — recorded a backlog nobody would
+    ever drain, so ``FrameSession.is_complete`` stayed False forever and the only
+    continuation that re-arms the semantic evidence owner after its gates open
+    (``_finish_frame_session_if_complete``) never ran.  Measured under
+    ``CenteredFFT(axis=2)``: zero completed batches and levels frozen on the FIRST
+    window for the whole scrub, on the rebind path AND on the ordinary
+    evaluation path.
 
-    What must hold is that this degrades honestly: the placeholder keeps the
-    successor population COMPLETE but IMMATURE, so the display holds the
-    predecessor's window instead of republishing the ancestor window's bounds
-    under this window's key, and the histogram still has a source.  Dropping the
-    placeholder outright left this montage with no evidence at all.
+    Both paths must now settle each window on its own evidence.  The exact
+    magnitude bounds are the pipeline's business, so this asserts the two
+    properties that distinguish a re-anchor from a hold: every window's levels
+    come from a REFINED full population, and consecutive windows differ.
     """
 
     from arrayscope.operations.pipeline import CenteredFFT
@@ -1411,53 +1412,60 @@ def test_operation_pipeline_montage_keeps_the_predecessor_window_levels(qtbot):
     win.resize(790, 780)
     try:
         win.show()
-        win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
-        win._set_document(win.operation_coordinator.document)
-        win._coerce_channel_for_current_dtype()
-
-        full = win.view_state.with_montage_axis(
-            2, columns=10, indices=_GRADIENT_TILE_INDICES, text="0:50"
+        steps = _gradient_scrub(
+            win,
+            (10, 11, 12),
+            deadline_ms=INTERACTION_SETTLE_HARD_LIMIT_MS * 4,
+            operations=(CenteredFFT(axis=2),),
         )
-        win._set_view_state(full)
-        win.update_image_view()
-        _busy_pump_until(
-            lambda: frame_session_settled(win),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "fft full-plane fill",
+        levels = [step["levels"] for step in steps]
+        assert len(set(levels)) == len(levels), (
+            f"each crop window must re-anchor to its own bounds, not hold one window's ({levels})"
         )
-        win._apply_slice_state(
-            0,
-            _gradient_cropped_state(win, 10),
-            reason="slice-range",
-            interactive=True,
-            immediate_axis_only=False,
-        )
-        _busy_pump_until(
-            lambda: _gradient_crop_settled(win, 10),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "fft cropped fill",
-        )
-        held = tuple(round(float(value), 4) for value in win.img_view.getLevels())
-
-        for start in (11, 12):
-            win._on_slice_text_changed(0, f"{start}:{start + 40}")
-            _busy_pump_until(
-                lambda start=start: _gradient_crop_settled(win, start),
-                INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
-                f"fft scrub {start}",
-            )
-            assert tuple(round(float(value), 4) for value in win.img_view.getLevels()) == held, (
-                "an unreachable re-anchor must hold the predecessor window, not remap"
-            )
 
         session = win.renderer._frame_session
         assert session.level_evidence_reanchor is True, "the rebind must still arm the owner"
+        assert session.semantic_level_evidence_diagnostics()["blocking_reason"] == "ready"
         summary = win.renderer._montage_level_tracker().summary_for(session.level_key)
-        assert summary is not None, "the demoted placeholder must remain as the histogram source"
-        assert int(summary.evidence_quality) == int(LevelEvidenceQuality.ROUGH_PREVIEW), (
-            "a rebound window's carried evidence must never claim target quality"
-        )
+        assert summary is not None
+        assert int(summary.evidence_quality) == int(LevelEvidenceQuality.REFINED)
         assert len(summary.source_indices) == len(_GRADIENT_TILE_INDICES)
+        # The mechanism, named: a settled stage-backed session must report
+        # complete, which it cannot while a drained deferral backlog lingers.
+        assert not session.deferred_missing_tiles
+        assert session.is_complete()
     finally:
         win.close()
         restore_default_backend(settings)
+
+
+def test_operation_pipeline_rebind_and_evaluation_paths_settle_identical_levels(qtbot):
+    """Path independence under an operation pipeline, not only on raw data.
+
+    The rebind skips the per-tile evaluation of a stage-backed montage as well,
+    so the same rule applies: the fast path may change the schedule, never the
+    settled levels.
+    """
+
+    from arrayscope.operations.pipeline import CenteredFFT
+
+    def settled_levels(*, rebind: bool) -> list[tuple[float, float]]:
+        settings = use_wgpu_backend(
+            extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": rebind}
+        )
+        win = make_backend_window(qtbot, _gradient_source(), backend="wgpu", require_gpu_atlas=True)
+        win.resize(790, 780)
+        try:
+            win.show()
+            steps = _gradient_scrub(
+                win,
+                (10, 11, 12),
+                deadline_ms=INTERACTION_SETTLE_HARD_LIMIT_MS * 4,
+                operations=(CenteredFFT(axis=2),),
+            )
+            return [step["levels"] for step in steps]
+        finally:
+            win.close()
+            restore_default_backend(settings)
+
+    assert settled_levels(rebind=True) == settled_levels(rebind=False)
