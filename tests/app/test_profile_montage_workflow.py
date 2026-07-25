@@ -1289,9 +1289,9 @@ def _passing_r8_phase_record(*, backend="vispy"):
         "session_viewport_shape_matches": True,
         "viewport_shape": [753, 1245],
         "session_viewport_shape_target": [753, 1245],
-        "session_window_size_matches": True,
-        "window_size": [1400, 940],
+        "window_size": [1400, 948],
         "session_window_size_target": [1400, 940],
+        "session_window_size_chrome_delta": [0, 8],
         "session_axis_orientation_matches": True,
         "image_axes": [0, 1],
         "axis_flipped": [False, True, False],
@@ -1567,20 +1567,30 @@ def test_r8_display_axis_wgpu_gate_surfaces_pool_exhaustion():
     assert "display_axis_page_pool_has_headroom" in failures
 
 
-def test_r8_certification_rejects_window_size_drift_from_session_fixture():
+def test_r8_certification_ignores_outer_window_size_but_still_gates_the_viewport():
+    """Window size is viewport + chrome, so it is an outcome, not a promise.
+
+    Pinning it made every profile run fail the moment the menu/tool/status
+    bars grew 8 px: the fixture's 739-row viewport restored EXACTLY and the
+    window that holds it went 940 -> 948 (reproduced on a live Wayland
+    session, so never a headless artifact).  The viewport is what decides
+    aspect, montage layout, and LOD, and a restore that did not happen fails
+    it — so that is the gate, and the window sizes stay in the record as
+    diagnostics.
+    """
+
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
     record = _passing_r8_phase_record(backend="wgpu")
-    record.update(
-        session_window_size_matches=False,
-        window_size=[1399, 940],
-    )
+    record.update(window_size=[1400, 948], session_window_size_chrome_delta=[0, 8])
+    assert _r8_certification(record)["r8_gate_passed"] is True
 
+    record.update(session_viewport_shape_matches=False, viewport_shape=[600, 1245])
     result = _r8_certification(record)
-    failed = {failure["gate"] for failure in result["r8_gate_failures"]}
-
     assert result["r8_gate_passed"] is False
-    assert "session_window_geometry_stable" in failed
+    assert "session_viewport_geometry_stable" in {
+        failure["gate"] for failure in result["r8_gate_failures"]
+    }
 
 
 def test_r8_certification_names_first_pixel_and_latency_failures():

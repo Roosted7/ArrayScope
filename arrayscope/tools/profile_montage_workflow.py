@@ -28,6 +28,7 @@ from arrayscope.core.trace import emit_trace
 from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.tools.headless_display import (
     capture_output,
+    headless_display,
     is_headless_display,
     run_in_headless_display,
 )
@@ -1043,7 +1044,6 @@ def run_profile_montage_workflow(
             geometry_deadline = perf_counter() + timeout_s
             while not (
                 _window_geometry_state(win)["session_viewport_shape_matches"]
-                and _window_geometry_state(win)["session_window_size_matches"]
                 and _window_geometry_state(win)["session_axis_orientation_matches"]
             ):
                 if perf_counter() >= geometry_deadline:
@@ -7180,9 +7180,18 @@ def _window_geometry_state(win) -> dict[str, object]:
         if raw_window_target is None
         else [int(raw_window_target[0]), int(raw_window_target[1])]
     )
-    window_size_matches = bool(
-        window_target is None
-        or (window_size is not None and [int(window_size[0]), int(window_size[1])] == window_target)
+    # Reported, deliberately NOT gated.  A window size is viewport plus
+    # chrome, so it is a consequence of the restore rather than an input to
+    # it: when the menu/tool/status bars grew 8 px after this fixture was
+    # captured, the correctly-restored 739-row viewport started needing a
+    # 948-tall window and an exact-match gate rejected every profile run --
+    # on a live Wayland session as readily as headless.  The viewport shape
+    # and axis orientation below are what decide aspect, montage layout, and
+    # LOD, and a restore that genuinely did not happen fails those.
+    window_size_delta = (
+        None
+        if window_target is None or window_size is None
+        else [int(window_size[0]) - window_target[0], int(window_size[1]) - window_target[1]]
     )
     current_state = getattr(win, "view_state", None)
     current_image_axes = None if current_state is None else list(current_state.image_axes or ())
@@ -7192,7 +7201,7 @@ def _window_geometry_state(win) -> dict[str, object]:
     return {
         "window_size": window_size,
         "session_window_size_target": window_target,
-        "session_window_size_matches": window_size_matches,
+        "session_window_size_chrome_delta": window_size_delta,
         "window_minimum_size": minimum_size,
         "viewport_shape": viewport_shape,
         "vispy_canvas_shape": vispy_canvas_shape,
@@ -7726,15 +7735,11 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         },
         target="restored viewport shape retained",
     )
-    require(
-        "session_window_geometry_stable",
-        bool(record.get("session_window_size_matches", False)),
-        evidence={
-            "actual": record.get("window_size"),
-            "target": record.get("session_window_size_target"),
-        },
-        target="restored outer window size retained",
-    )
+    # No outer-window oracle: the window size a restore lands on is its
+    # viewport plus whatever chrome the build currently has, so pinning it to
+    # a recorded number fails on correct behaviour the moment a bar changes
+    # height. Drift during a run would move the viewport, which the oracle
+    # above already owns; the raw sizes and their delta stay in the record.
     require(
         "session_axis_orientation_stable",
         bool(record.get("session_axis_orientation_matches", False)),
@@ -9520,6 +9525,53 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_CHROME_PROBE = """\
+import numpy as np
+from PySide6 import QtWidgets
+from arrayscope.window.main import ArrayScopeWindow
+
+app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+win = ArrayScopeWindow(np.zeros((16, 16, 4), dtype=np.float32), filepath="chrome-probe.nii")
+win.show()
+for _ in range(60):
+    app.processEvents()
+win.resize(900, 800)
+for _ in range(60):
+    app.processEvents()
+viewport = win.img_view.graphicsView.viewport()
+print(f"CHROME {win.width() - viewport.width()} {win.height() - viewport.height()}")
+"""
+
+
+def _measure_window_chrome() -> tuple[int, int] | None:
+    """Pixels of window that are not viewport, measured on a real compositor.
+
+    Chrome is what stands between the viewport a session pins and the window
+    size that holds it.  It is constant in the window size (verified across
+    900-1000 px) but NOT portable across platforms: the same build measures
+    153x209 under Wayland and 153x235 under the offscreen QPA plugin, so this
+    has to run somewhere the screenshot run would also run.
+    """
+
+    try:
+        with headless_display(log_dir=None) as display:
+            completed = subprocess.run(
+                (sys.executable, "-c", _CHROME_PROBE),
+                check=False,
+                capture_output=True,
+                text=True,
+                env=display.child_environment(),
+                timeout=180,
+            )
+    except Exception:
+        return None
+    for line in reversed((completed.stdout or "").splitlines()):
+        if line.startswith("CHROME "):
+            _, width, height = line.split()
+            return int(width), int(height)
+    return None
+
+
 def _managed_weston_output_size(session_fixture: str | Path | None) -> tuple[int, int]:
     """Size the compositor output to the window the session will restore.
 
@@ -9530,17 +9582,54 @@ def _managed_weston_output_size(session_fixture: str | Path | None) -> tuple[int
     window.  This replaces the kiosk shell, which achieved the same identity
     by force-fullscreening and in doing so changed viewport aspect and
     montage layout.
+
+    What the session pins is its VIEWPORT; the window size it recorded is
+    that viewport plus the chrome of whatever build recorded it.  Sizing the
+    output from the recorded window size silently loses the identity as soon
+    as a bar changes height — the fixture captured at `0f11a22` asks for
+    1400x940 while today's chrome needs 1400x948, so every exact-window
+    capture was short by 8 px of the window it claimed to be.  Derive the
+    output the way the app derives the window instead: pinned viewport plus
+    measured chrome, falling back to the recorded size when the probe cannot
+    run.
     """
 
     default = (1400, 940)
-    if session_fixture is None or not str(session_fixture).strip():
-        return default
+    payload: dict = {}
+    if session_fixture is not None and str(session_fixture).strip():
+        try:
+            payload = json.loads(Path(session_fixture).read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            payload = {}
     try:
-        payload = json.loads(Path(session_fixture).read_text(encoding="utf-8"))
-        width, height = payload["panels"]["window_size"]
-        return max(1, int(width)), max(1, int(height))
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return default
+        recorded = payload["panels"]["window_size"]
+        recorded_size = (max(1, int(recorded[0])), max(1, int(recorded[1])))
+    except (KeyError, TypeError, ValueError):
+        recorded_size = default
+    try:
+        viewport_shape = payload["viewport"]["viewport_shape"]
+        viewport_height, viewport_width = (int(viewport_shape[0]), int(viewport_shape[1]))
+    except (KeyError, TypeError, ValueError):
+        return recorded_size
+    chrome = _measure_window_chrome()
+    if chrome is None:
+        print(
+            "profile: could not measure window chrome; sizing the screenshot output from "
+            f"the session's recorded window {recorded_size[0]}x{recorded_size[1]}, which is "
+            "only exact-window evidence if this build's chrome matches the recording's",
+            file=sys.stderr,
+        )
+        return recorded_size
+    measured = (max(1, viewport_width + chrome[0]), max(1, viewport_height + chrome[1]))
+    if measured != recorded_size:
+        print(
+            f"profile: session records window {recorded_size[0]}x{recorded_size[1]} for viewport "
+            f"{viewport_width}x{viewport_height}, but this build's chrome "
+            f"({chrome[0]}x{chrome[1]}) needs {measured[0]}x{measured[1]}; sizing the "
+            "screenshot output to the latter so the capture is still the window",
+            file=sys.stderr,
+        )
+    return measured
 
 
 def _managed_weston_requested(args) -> bool:
