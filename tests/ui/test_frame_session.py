@@ -3,6 +3,7 @@ from collections import deque
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ViewState
@@ -2431,9 +2432,17 @@ def test_layout_reflow_retargets_priority_context_to_new_plan():
     assert session.priority_retargeted_tiles == len(context.near_tiles)
 
 
+@pytest.mark.parametrize("jsonl_sink", [True, False], ids=["with-jsonl-sink", "ring-only"])
 def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
-    tmp_path, monkeypatch, qtbot
+    tmp_path, monkeypatch, qtbot, jsonl_sink
 ):
+    """The dump must be complete and parseable from the ring alone.
+
+    `_ensure_montage_watchdog` arms a ring-only bus in normal production, and
+    that bus no longer encodes anything until `dump` — so the ring-only case
+    is the one a real stall exercises, not the `--trace` case.
+    """
+
     import json
     from pathlib import Path
 
@@ -2521,8 +2530,7 @@ def test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic(
         def _frame_session_is_current(_session):
             return True
 
-    trace_path = tmp_path / "live.trace.jsonl"
-    configure_trace(trace_path)
+    configure_trace(tmp_path / "live.trace.jsonl" if jsonl_sink else None)
     renderer = Renderer()
     try:
         renderer._montage_watchdog_tick()

@@ -119,6 +119,12 @@ never per-pixel events.
 
 One bus, one schema, no plugin architecture. An event is one flat dict.
 If an analysis needs an event that doesn't exist, add the event — never a
-second stream. The ring buffer has a fixed byte budget. Tools are plain
+second stream. The ring buffer holds a fixed number of events — a count, not
+a byte budget, since 2026-07-25: the ring has always stored raw event dicts
+and encoded them in `dump`, so an emit-time encode bought only the byte
+accounting while costing every event of every montage session (the stall
+watchdog arms a ring-only bus in normal production). The count is picked to
+hold the envelope the byte budget actually held on a live montage; the dump
+size now varies with how fat the workload's events are. Tools are plain
 scripts over JSONL; no database, no dashboard until the P-steps prove we
 need one.

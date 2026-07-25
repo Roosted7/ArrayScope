@@ -1,7 +1,8 @@
 # Index-window retarget cost — anatomy and the delta hypothesis (2026-07-25)
 
-**Status:** measured, two redundancies removed and gated; the rest is
-characterised below and deliberately not touched.
+**Status:** measured, two redundancies removed and gated; the deferred trace
+encode has since been adjudicated and removed too (see the follow-up section);
+the rest is characterised below and deliberately not touched.
 
 The 2026-07-24 perf tier profiled a montage index-window scrub and named
 `FrameSession.retarget_index_window`'s model remap as the dominant remaining
@@ -15,8 +16,9 @@ Offscreen, wgpu, `montage_quality_policy=resident`, a `(336, 336, 272)`
 float32 volume, a 100-tile montage (10 columns) in a 1200x1000 window,
 scrubbed one index at a time and pumped to first pixels between steps.
 `retarget_index_window` is timed directly; the trace bus is left in its
-production state — `_ensure_montage_watchdog` arms an 8 MB ring on every
-montage session, so lifecycle edges really are encoded during a scrub.
+production state — `_ensure_montage_watchdog` arms a ring on every montage
+session, and at the time of the baseline below that ring encoded every
+lifecycle edge as it arrived.
 
 Baseline on that shape: **29.1 ms mean, 30.5 p50, 46.2 worst** — the field's
 30–54 ms slice, reproduced.
@@ -103,14 +105,6 @@ at p50. It is kept for the countable work it removes, not for a p50 claim.
 
 ## What is left, and why it was not touched
 
-- **Trace encoding, ~5 ms.** `TraceBus.emit` calls `json.dumps` on every
-  event even when no JSONL sink is configured — which is the default
-  production state, since the watchdog arms a ring-only bus. The encode
-  exists solely to size the ring for its byte budget. Deferring it would
-  need the ring bound to become approximate, which is an observability
-  contract change in a different subsystem; it should be decided on its own
-  merits, not smuggled in behind a render perf fix. It is the largest single
-  remaining item and it is not specific to the retarget.
 - **`mark_ladder_swaps_for_viewport`, ~8 ms.** After the remap, 99 slots have
   no `RenderedTile`, so the ladder pass runs `floor_can_progress` — a real
   pyramid query per tile — for each. That is LOD ladder work, not model
@@ -120,6 +114,64 @@ at p50. It is kept for the countable work it removes, not for a p50 claim.
   distinct derivation with nothing to share. Inherent at this slot contract.
 - **`_apply_backend_tiled_presentation`, ~25 ms** (field measurement) is a
   separate concern and out of scope here.
+
+## The trace encode, adjudicated (follow-up)
+
+The largest remaining item above was the trace encode — `TraceBus.emit`
+running `json.dumps` on every event even with no JSONL sink, which is the
+default production state because the watchdog arms a ring-only bus. It was
+deferred as an observability-contract decision rather than a render fix. It
+has now been taken on its own merits.
+
+**The premise that made it a contract question was wrong.** Deferring the
+encode did *not* require the bound to become approximate in the sense that
+mattered: the ring has always stored raw event dicts and `dump` has always
+re-encoded them from scratch, so the emit-time encode was never producing
+anything the ring kept. It produced one integer — the event's encoded size —
+and nothing else consumed it. Grepping the tree for ring-size/byte consumers
+found exactly one caller of the whole ring (`TRACE.dump` from
+`_montage_watchdog_tick`) and no consumer of byte accounting at all.
+
+The bound is now the event **count** (`ring_events`, default 8192),
+exact and free. What is given up is that a fat event no longer evicts more
+of its neighbours than a lean one, so the dumped size varies with the
+workload instead of being capped. The count was picked against the measured
+envelope rather than a round number: a live 100-tile scrub emits **622–656
+events and ~607 KiB per scroll step** (~1 KiB/event), so 8192 events is the
+~8 MiB the byte bound was actually holding there — about 13 scroll steps of
+history either way. Leaner event mixes now keep more history for the same
+memory.
+
+Measured, same repro and the same interleaved in-process A/B discipline
+(variants switched per step, round-robin; the timing read is production's
+own `_last_montage_retarget_model_ms`):
+
+| variant | min | p50 | mean |
+| --- | --- | --- | --- |
+| emit-time encode, byte-bounded ring | 11.2–20.5 | 20.0–22.5 | 19.7–23.1 |
+| encode at dump, count-bounded ring | 13.0–14.8 | 15.0–16.7 | 15.3–17.3 |
+
+**≈ −4.8 ms p50 per retarget (≈ −23%)**, reproduced across six runs of 30
+samples per variant. At the bus itself the cost per event falls from 5.5 µs
+to 1.6 µs (298-event micro-bench, same interleaving).
+
+Dump-time cost is unchanged by construction and confirmed by measurement:
+`dump` always re-encoded the stored dicts. A forced stall dump on a full
+production ring writes **8192 rows / 7.7 MiB in 160 ms p50**, with
+contiguous sequence numbers — rare, and already the cheap half of a stall
+(the watchdog also prints a probe and raises a status message).
+
+One behaviour did move with the encode: a field JSON cannot represent now
+fails at dump time rather than inside the render loop. `dump` therefore
+encodes per row and degrades an unencodable event to its identity plus a
+`trace_encode_error`/`trace_event_repr` pair, so one pathological event
+costs its own row and not the evidence someone is reading.
+
+Gates for that change: `tests/core/test_trace.py` (ring keeps the newest
+`ring_events` events; ring-only dump is complete and parseable; a cyclic
+field costs one row; a ring-less sink-only bus still writes every line),
+`tests/ui/test_frame_session.py::test_stranded_required_tile_emits_stall_trace_dump_and_visible_diagnostic`
+(now parametrized over a JSONL sink and the production ring-only bus).
 
 ## Gates
 

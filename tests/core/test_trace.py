@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 
 
 def test_trace_bus_writes_flat_jsonl_and_bounds_ring(tmp_path):
@@ -6,7 +7,7 @@ def test_trace_bus_writes_flat_jsonl_and_bounds_ring(tmp_path):
 
     path = tmp_path / "trace.jsonl"
     bus = TraceBus()
-    bus.configure(path, ring_bytes=250)
+    bus.configure(path, ring_events=3)
     for index in range(8):
         bus.emit("kernel_submit", task_seq=index, key=("tile", index))
     snapshot = bus.snapshot()
@@ -17,7 +18,78 @@ def test_trace_bus_writes_flat_jsonl_and_bounds_ring(tmp_path):
     assert rows[0]["schema_version"] == 1
     assert rows[-1]["sequence"] == 8
     assert all(row["kind"] == "kernel_submit" for row in rows)
-    assert 0 < len(snapshot) < len(rows)
+    # The ring keeps exactly the last `ring_events` events, and it keeps the
+    # *newest* ones — a stall dump is only useful if it ends at the stall.
+    assert len(snapshot) == 3
+    assert [event["sequence"] for event in snapshot] == [6, 7, 8]
+
+
+def test_trace_ring_only_bus_dumps_complete_parseable_jsonl(tmp_path):
+    """The ring-only bus (production's watchdog default) encodes at dump."""
+
+    from arrayscope.core.trace import TraceBus
+
+    bus = TraceBus()
+    bus.configure(ring_events=4)
+    assert bus.enabled
+    for index in range(6):
+        bus.emit("lifecycle", edge="target_required", tile=index, key=Decimal(index))
+    dump = bus.dump(tmp_path / "nested" / "stall.trace.jsonl")
+    bus.close()
+
+    rows = [json.loads(line) for line in dump.read_text().splitlines()]
+    assert [row["sequence"] for row in rows] == [3, 4, 5, 6]
+    assert [row["tile"] for row in rows] == [2, 3, 4, 5]
+    # A field JSON cannot represent still degrades to `repr` at the boundary.
+    assert rows[0]["key"] == "Decimal('2')"
+
+
+def test_trace_dump_survives_an_event_that_cannot_encode(tmp_path):
+    """A pathological field costs its own row, not the whole stall dump.
+
+    Moving the encode to dump time moves any encode failure there too, which
+    is the moment the trace is the evidence.  The dump must stay complete and
+    parseable line-for-line.
+    """
+
+    from arrayscope.core.trace import TraceBus
+
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+
+    bus = TraceBus()
+    bus.configure(ring_events=8)
+    bus.emit("lifecycle", edge="target_required", tile=0)
+    bus.emit("lifecycle", edge="fallback_ready", tile=1, payload=cyclic)
+    bus.emit("stall", session_id=3)
+    dump = bus.dump(tmp_path / "stall.trace.jsonl")
+    bus.close()
+
+    rows = [json.loads(line) for line in dump.read_text().splitlines()]
+    assert [row["sequence"] for row in rows] == [1, 2, 3]
+    assert [row["kind"] for row in rows] == ["lifecycle", "lifecycle", "stall"]
+    assert "trace_encode_error" in rows[1]
+    assert "trace_encode_error" not in rows[0]
+    assert "trace_encode_error" not in rows[2]
+
+
+def test_trace_bus_without_ring_or_sink_is_disabled(tmp_path):
+    from arrayscope.core.trace import TraceBus
+
+    bus = TraceBus()
+    bus.configure(ring_events=0)
+    assert not bus.enabled
+    bus.emit("lifecycle", edge="target_required", tile=0)
+    assert bus.snapshot() == ()
+
+    # A sink with no ring still writes every line and keeps no tail.
+    path = tmp_path / "sink-only.jsonl"
+    bus.configure(path, ring_events=0)
+    assert bus.enabled
+    bus.emit("lifecycle", edge="target_required", tile=0)
+    bus.close()
+    assert bus.snapshot() == ()
+    assert len(path.read_text().splitlines()) == 1
 
 
 def test_trace_latency_matches_task_spans(tmp_path):
