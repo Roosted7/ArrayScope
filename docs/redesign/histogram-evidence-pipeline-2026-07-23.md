@@ -321,3 +321,68 @@ times out settling, and `tests/app/test_memory_stress.py::test_montage_tile_resi
 is flaky at roughly the same rate either way (8/12 red unmodified, 7/12 red with
 the capability forced on, with LARGER overshoots unmodified — 17.1 MB against
 15.3 MB), so its accounted-bytes gate is not evidence about this capability.
+
+## Addendum 2026-07-25 (third) — the default-ON blocker was anchor/plane coherence
+
+Merging the default flip surfaced a deterministic crop-parity failure:
+`test_cropped_display_axis_scroll_keeps_complete_montage[wgpu]`, every tile
+~99% mismatched at a uniform 8-9/255 against a 6/255 tolerance. It reproduces
+only with the flip applied, and only in combination with the exact born-cropped
+rebind (`6843a04`) — two changes each green in isolation.
+
+The first triage read the uniform offset as a window-levels difference and
+blamed the evidence owner's bounded sample
+(`_bounded_level_evidence_state`, `REFINED_TILE_SAMPLE_LIMIT`). **Measured, that
+is not the mechanism.** Two checks refute it:
+
+- On the failing fixture the owner's per-source bounds are exactly the window's
+  true bounds. `_even_pool_sample` uses `np.linspace(0, n - 1, k)`, so a strided
+  evidence grid always retains both endpoints of every axis.
+- On a fixture built to defeat it — a 120x120 window (14400 px, strided to
+  90x91) with a spike at a window-relative offset the grid never visits — the
+  rebind path and the ordinary evaluation settle *identical* levels
+  (`(110.0, 1438.0)`), both excluding the spike. The bounded sample belongs to
+  the evidence owner, which both paths share on a shader backend; it is not a
+  rebind-specific inexactness and cannot break path independence.
+
+The real defect is in `FrameSession.seed_display_tile_payloads`. Carrying a
+wrapper across a retarget restamps its `source_anchor` onto the current window:
+
+```python
+source_anchor=current_source_anchor,   # physical page identity, restamped
+```
+
+That is right for a page-backed wrapper, whose pixels come from the resident
+pages the anchor names. It is wrong for an *exact* wrapper, whose CPU planes are
+indexed **window-locally** — `semantic_data[0, 0]` is the value at the anchor's
+`source_rect` origin. Restamping without re-slicing pairs the requested
+window's GPU pixels with the predecessor window's CPU semantics. This is the
+same invariant `_rebind_reslice_planes` already states for the rebind seam,
+missing at the carry-forward seam.
+
+Traced on the profile walk, tile 0 held `source_rect=(94, 194, 55, 155)` with
+`semantic_data.min() == 97365.0` — the 97:197 window's values under the 94:194
+window's anchor. A 3-index offset is 3000 source units over a 100031 span:
+7.65/255, exactly the observed 8-9. The GPU was right; the CPU-side semantics
+(and with them the oracle, hover readouts, and level evidence) were stale.
+
+Returning to an already-committed window is what exposes it. The rebind seam
+compares the new anchor against the last *committed* frame, so on a return step
+it sees no shift, declines `window_unchanged`, and leaves the already-restamped
+wrapper in place. Before exact tiles could rebind at all they declined
+`no_reslicable_plane` and re-evaluated, which replaced the incoherent wrapper
+before presentation — that is why the bug is only reachable with both changes.
+
+The fix declines the carry-forward for a wrapper whose window-local semantics
+would outlive its anchor (`_window_local_semantics_outlive_anchor`). Re-slicing
+needs the memoized whole plane, which only the rebind seam holds, so the tile is
+left to that seam — which then sees a genuine shift and re-slices correctly — or
+to an ordinary evaluation. Scrub cost is unchanged: still zero display
+producers per step, and re-anchor latency is indistinguishable across 9 samples
+either way (179-629 ms with, 189-652 ms without).
+
+Re-verified with the flip applied: raw and `CenteredFFT(axis=2)` gradient scrubs
+settle identical levels on the rebind and evaluation paths — raw
+`(122, 600)/(132, 610)/(142, 620)`, FFT
+`(3.373, 4496.534)/(3.373, 4573.993)/(3.373, 4651.453)` — with 0 producers per
+step against 50 on the raw evaluation path.

@@ -981,6 +981,90 @@ def test_born_cropped_exact_montage_rebinds_without_a_whole_plane_frame(qtbot):
         restore_default_backend(settings)
 
 
+def test_returning_to_a_committed_window_keeps_semantics_with_the_anchor(qtbot):
+    """A scrub that RETURNS to an already-committed window stays coherent.
+
+    ``seed_display_tile_payloads`` restamps a carried wrapper's ``source_anchor``
+    onto the current window — right for a page-backed wrapper, whose pixels come
+    from the resident pages that anchor names, and wrong for an exact one, whose
+    CPU planes are indexed window-locally against the anchor it had.  Returning
+    to a window the last committed frame still holds is what exposes it: the
+    rebind seam then compares the new anchor against that committed frame, sees
+    no shift, and leaves in place a wrapper whose anchor was already restamped
+    forward while its planes stayed on the window before it.
+
+    Measured on the profile walk, that wrapper presented the requested window's
+    GPU pixels beside the predecessor window's CPU semantics — a uniform 3-index
+    offset, 8-9/255 over the crop-parity oracle's 6/255 (and the same stale
+    values behind hover readouts and level evidence).  Exact tiles only survive
+    to presentation as rebound wrappers at all since they stopped declining
+    ``no_reslicable_plane``, which is why this never surfaced before.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    data = _exact_source()
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
+    win.resize(790, 780)
+    try:
+        win.show()
+        _fill_exact_montage_then_crop(win, 10)
+
+        # Forward, then back onto windows the committed frame already carried.
+        for start in (11, 12, 13, 12, 11, 10, 11):
+            win._on_slice_text_changed(0, f"{start}:{start + 40}")
+            _busy_pump_until(
+                lambda start=start: _exact_crop_settled(win, start),
+                INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
+                f"return scrub {start}",
+            )
+            payloads = win.renderer._frame_session.display_tile_payloads
+            for tile_number, payload in sorted(payloads.items()):
+                if payload.semantic_data is None:
+                    continue
+                y0, y1, x0, x1 = payload.source_anchor.source_rect
+                np.testing.assert_allclose(
+                    np.asarray(payload.semantic_data),
+                    data[y0:y1, x0:x1, int(payload.source_index)],
+                    atol=1e-6,
+                    err_msg=(
+                        f"window {start}, tile {tile_number}: the payload's semantic plane "
+                        f"describes a different window than its anchor {(y0, y1, x0, x1)}"
+                    ),
+                )
+            assert_wgpu_frame_matches_cpu_reference(win)
+
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_window_local_semantics_block_only_an_anchor_that_moves():
+    """The carry-forward guard is about CPU planes, not about anchors as such."""
+
+    import types
+
+    from arrayscope.window.frame_session import _window_local_semantics_outlive_anchor
+
+    def anchor(rect):
+        return types.SimpleNamespace(source_rect=rect)
+
+    here, moved = anchor((10, 50, 12, 52)), anchor((11, 51, 12, 52))
+    exact = types.SimpleNamespace(semantic_data=np.zeros((40, 40)), source_anchor=here)
+    page_backed = types.SimpleNamespace(semantic_data=None, source_anchor=here)
+
+    # An exact wrapper may not be restamped onto a different window ...
+    assert _window_local_semantics_outlive_anchor(exact, moved) is True
+    # ... but restamping it onto its own window is a no-op, not a hazard.
+    assert _window_local_semantics_outlive_anchor(exact, anchor((10, 50, 12, 52))) is False
+    # A page-backed wrapper owns no window-local planes: always restampable.
+    assert _window_local_semantics_outlive_anchor(page_backed, moved) is False
+    # Nothing to compare against is not a hazard either.
+    assert _window_local_semantics_outlive_anchor(exact, None) is False
+
+
 def _pinned_canonical_planes(win) -> tuple[int, int]:
     memo = getattr(win.renderer, "_resident_crop_canonical_planes", None) or {}
     return len(memo), canonical_plane_memo_bytes(memo)

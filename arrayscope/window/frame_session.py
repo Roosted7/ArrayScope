@@ -2345,6 +2345,20 @@ class FrameSession:
                 native_shape,
                 source_index=int(identity_tile.source_index),
             )
+            if _window_local_semantics_outlive_anchor(previous, current_source_anchor):
+                # Restamping the anchor moves the physical binding to a new
+                # source window while the wrapper's CPU planes stay indexed
+                # window-locally against the OLD one (``value_at`` and the
+                # semantic level/hover owners all read them that way).  For a
+                # page-backed wrapper there are no such planes and the restamp
+                # is exactly right; for an exact wrapper it silently pairs this
+                # window's pixels with the predecessor window's semantics.
+                # Re-slicing needs the memoized whole plane, which only the
+                # rebind seam holds, so leave this tile to that seam (or to an
+                # ordinary evaluation) rather than seeding an incoherent
+                # wrapper.  Before exact tiles could rebind at all they always
+                # re-evaluated here, which is why this never surfaced.
+                continue
             if (
                 not retargeted
                 and int(previous.source_index) == int(rendered.tile.source_index)
@@ -5023,6 +5037,24 @@ def plan_presentation_transition(
     # still owns a compatible predecessor. Hand off every required on-screen
     # slot together so no partial successor replaces that complete frame.
     return PresentationTransitionDecision(True, True, "montage-compatible")
+
+
+def _window_local_semantics_outlive_anchor(payload, new_anchor) -> bool:
+    """Whether restamping ``payload``'s anchor would strand its CPU planes.
+
+    A wrapper's CPU planes are indexed window-locally: ``semantic_data[0, 0]``
+    is the value at the anchor's ``source_rect`` origin, not at the plane
+    origin.  Moving the anchor to a different sub-rect therefore invalidates
+    them, exactly as ``_rebind_reslice_planes`` documents for the rebind seam.
+    A page-backed wrapper carries no CPU planes and may be restamped freely.
+    """
+
+    if getattr(payload, "semantic_data", None) is None:
+        return False
+    previous_anchor = getattr(payload, "source_anchor", None)
+    if previous_anchor is None or new_anchor is None:
+        return False
+    return tuple(previous_anchor.source_rect or ()) != tuple(new_anchor.source_rect or ())
 
 
 def _base_source_id(source_id) -> object:
