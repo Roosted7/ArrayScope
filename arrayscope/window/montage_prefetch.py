@@ -1,4 +1,9 @@
-"""Stage-aware rendered montage tile prefetch."""
+"""Rendered montage tile prefetch, stage-aware but not stage-gated.
+
+An operation-backed document warms tiles off an already-materialized stage; a
+raw document has no stage and warms the display payload directly.  Both land in
+the same display cache under the same window-independent key.
+"""
 
 from __future__ import annotations
 
@@ -94,18 +99,15 @@ def schedule_near_viewport_montage_prefetch(
     busy = _busy(window, session)
     if not window._frame_session_is_current(session):
         return _record(window, (MontagePrefetchDecision(None, None, "stale", "session is stale"),))
-    if not session.document.enabled_operations:
-        return _record(
-            window,
-            (
-                MontagePrefetchDecision(
-                    None,
-                    None,
-                    "blocked_no_stage",
-                    "raw montage tiles rely on visible-level commit ordering",
-                ),
-            ),
-        )
+    # A document with no operations used to be rejected outright here
+    # (``blocked_no_stage``): the original prefetch was built around reusing an
+    # already-materialized operation stage, and without one there was nothing to
+    # reuse.  But the stage is only ever a *shortcut* -- the thing worth warming
+    # is the display payload (slice + window + LOD reduction + upload prep), and
+    # the display cache holds that for raw and operation-backed documents alike
+    # under the identical window-independent key.  Raw viewing is a primary
+    # workflow, so it now takes the same walk minus the stage step.
+    has_operations = bool(session.document.enabled_operations)
     direction = _montage_prefetch_direction(window)
     speculative_share = False
     preview_walk_only = False
@@ -227,7 +229,11 @@ def schedule_near_viewport_montage_prefetch(
                 )
             )
             continue
-        stage = _stage_for_tile(window, session, tile)
+        # ``_stage_for_tile`` runs ``plan_slab`` on the GUI scheduling boundary
+        # per candidate.  A raw document has no retainable cache candidates, so
+        # the probe can only return ``None`` -- skip it rather than pay for an
+        # answer that is structurally fixed.
+        stage = _stage_for_tile(window, session, tile) if has_operations else None
         if stage == "in_flight":
             decisions.append(
                 MontagePrefetchDecision(
@@ -239,7 +245,7 @@ def schedule_near_viewport_montage_prefetch(
                 )
             )
             continue
-        if stage is None and session.document.enabled_operations:
+        if stage is None and has_operations:
             decisions.append(
                 MontagePrefetchDecision(
                     int(tile.montage_index),

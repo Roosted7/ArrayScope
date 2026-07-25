@@ -611,6 +611,224 @@ def test_busy_visible_permits_a_speculative_share_toward_the_prediction(qtbot, m
         win.close()
 
 
+def _raw_montage_window(qtbot, shape=(3, 4, 16), *, indices=6):
+    """A settled montage frame session over a document with no operations."""
+
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(int(np.prod(shape)), dtype=np.float32).reshape(shape))
+    qtbot.addWidget(win)
+    _process_events(qtbot)
+    # Deliberately no request_operation(): this is the raw-viewing workflow.
+    assert not win.document.enabled_operations
+    state = win.view_state.with_montage_axis(
+        2, columns=3, indices=tuple(range(indices)), text=f"0:{indices}"
+    )
+    win._set_view_state(state)
+    win.render(reason="test-raw-prefetch")
+    qtbot.waitUntil(
+        lambda: win.renderer._frame_session is not None,
+        timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+    )
+    return win
+
+
+def _forward_scrub_momentum(win):
+    from arrayscope.core.prefetch_policy import SliceScrubMomentum
+
+    momentum = SliceScrubMomentum()
+    for step, index in enumerate((0, 1, 2, 3)):
+        momentum.observe(index, now=0.1 * step)
+    win.renderer._montage_prefetch_momentum = momentum
+    assert momentum.plan().direction == 1
+    return momentum
+
+
+def test_raw_montage_earns_the_directional_speculative_share(qtbot, monkeypatch):
+    """A document with no operations must still warm predicted arrivals.
+
+    Red-first: pre-fix, ``schedule_near_viewport_montage_prefetch`` returned a
+    single ``blocked_no_stage`` decision for every raw montage, so raw viewing --
+    a primary workflow -- got zero prefetch no matter how confident the scrub.
+    The stage step exists to avoid recomputing an expensive operation pipeline
+    per tile; a raw document has no pipeline, so there is nothing to protect and
+    the display-payload evaluation is exactly the work worth warming.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.core.frame_targets import WorkStart
+    from arrayscope.kernel import Lane as WorkLane
+    from arrayscope.kernel.task import VISIBLE_LANES
+    from arrayscope.window import montage_prefetch
+
+    win = _raw_montage_window(qtbot)
+    try:
+        session = win.renderer._frame_session
+        _forward_scrub_momentum(win)
+
+        captured = {}
+
+        def capture_prefetch(_evaluate, *, on_done, work_item=None, **_kwargs):
+            captured["work_item"] = work_item
+            return WorkStart(True)
+
+        monkeypatch.setattr(montage_prefetch, "_interaction_active", lambda _owner: False)
+        monkeypatch.setattr(montage_prefetch, "_busy", lambda _owner, _session: True)
+        monkeypatch.setattr(win.operation_evaluator, "cached_montage_tile", lambda *_a, **_k: None)
+        monkeypatch.setattr(win.prefetch_evaluation_controller, "start_prefetch", capture_prefetch)
+
+        decisions = montage_prefetch.schedule_near_viewport_montage_prefetch(win.renderer, session)
+
+        assert not [d for d in decisions if d.decision == "blocked_no_stage"], (
+            f"raw montages must no longer be rejected outright, got {decisions}"
+        )
+        share = [d for d in decisions if d.decision == "scheduled_speculative_share"]
+        assert share, f"raw busy visible must grant a speculative share, got {decisions}"
+        # The share leads the scroll past the window max (5), exactly as it does
+        # for an operation-backed document.
+        assert all(d.source_index >= 6 for d in share)
+        item = captured["work_item"]
+        assert item.lane == WorkLane.SPECULATIVE_RESIDENCY
+        assert item.lane not in VISIBLE_LANES
+        assert item.supersession_key[-1] == share[0].source_index
+    finally:
+        win.close()
+
+
+def test_raw_montage_prefetch_skips_the_stage_probe(qtbot, monkeypatch):
+    """Raw speculation must not pay for a stage lookup that cannot succeed.
+
+    ``_stage_for_tile`` runs ``plan_slab`` on the GUI thread per candidate. A
+    document with no operations has no retainable cache candidates, so that
+    probe can only ever return ``None`` -- pure scheduling-boundary overhead on
+    the very path we are trying to make cheap. Raw prefetch takes the no-stage
+    evaluation branch directly.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.core.frame_targets import WorkStart
+    from arrayscope.window import montage_prefetch
+
+    win = _raw_montage_window(qtbot)
+    try:
+        session = win.renderer._frame_session
+        _forward_scrub_momentum(win)
+
+        def forbidden_stage(*_args, **_kwargs):
+            raise AssertionError("raw prefetch must not probe for an operation stage")
+
+        monkeypatch.setattr(montage_prefetch, "_interaction_active", lambda _owner: False)
+        monkeypatch.setattr(montage_prefetch, "_busy", lambda _owner, _session: True)
+        monkeypatch.setattr(montage_prefetch, "_stage_for_tile", forbidden_stage)
+        monkeypatch.setattr(win.operation_evaluator, "cached_montage_tile", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            win.prefetch_evaluation_controller,
+            "start_prefetch",
+            lambda _evaluate, **_kwargs: WorkStart(True),
+        )
+
+        decisions = montage_prefetch.schedule_near_viewport_montage_prefetch(win.renderer, session)
+
+        assert [d for d in decisions if d.decision == "scheduled_speculative_share"], (
+            f"raw share must schedule without a stage probe, got {decisions}"
+        )
+        assert not [d for d in decisions if d.decision == "skipped_stage_missing"], (
+            f"a missing stage is normal for raw, not a skip reason, got {decisions}"
+        )
+    finally:
+        win.close()
+
+
+def test_raw_montage_prefetch_yields_a_near_capacity_display_cache(qtbot, monkeypatch):
+    """The busy share's budget guard applies to raw exactly as to operations.
+
+    Warming a speculative raw tile must never evict a visible-path entry, so a
+    near-full display cache still yields the whole busy share.
+    """
+
+    _clear_arrayscope_settings()
+    from types import SimpleNamespace
+
+    from arrayscope.window import montage_prefetch
+
+    win = _raw_montage_window(qtbot)
+    try:
+        session = win.renderer._frame_session
+        _forward_scrub_momentum(win)
+
+        monkeypatch.setattr(montage_prefetch, "_interaction_active", lambda _owner: False)
+        monkeypatch.setattr(montage_prefetch, "_busy", lambda _owner, _session: True)
+        monkeypatch.setattr(
+            win.operation_evaluator,
+            "_display_cache",
+            SimpleNamespace(bytes_used=100, max_bytes=100),
+        )
+        monkeypatch.setattr(
+            win.prefetch_evaluation_controller,
+            "start_prefetch",
+            lambda *_a, **_k: (_ for _ in ()).throw(
+                AssertionError("near-capacity raw share must schedule nothing")
+            ),
+        )
+
+        decisions = montage_prefetch.schedule_near_viewport_montage_prefetch(win.renderer, session)
+
+        assert [d.decision for d in decisions] == ["blocked_budget"], decisions
+    finally:
+        win.close()
+
+
+def test_raw_future_index_prefetch_key_matches_the_later_in_window_demand(qtbot):
+    """A prefetched raw future tile is a byte-identical HIT once it scrolls in.
+
+    The operation-backed round-trip is covered by
+    ``test_future_index_prefetch_key_matches_the_later_in_window_demand``. Raw
+    documents key through the same ``display_tile_key`` layout, but nothing had
+    ever exercised it speculatively, so this drives the real store/lookup
+    round-trip for a document with an empty operation pipeline -- the whole
+    premise of raw prefetch is that this key matches.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.display.slice_engine import make_image_from_slab
+    from arrayscope.operations.evaluator import EvaluationResult
+    from arrayscope.operations.slabs import request_for_image
+    from arrayscope.window.montage_prefetch import _predicted_future_tiles
+
+    win = _raw_montage_window(qtbot, shape=(3, 4, 12))
+    try:
+        session = win.renderer._frame_session
+
+        future = _predicted_future_tiles(session, 1, limit=1)
+        assert future, "a mid-axis window must have an index ahead of it"
+        tile = future[0]
+        assert tile.source_index == 6  # just past window max (5)
+
+        image = np.full(tuple(session.plan.tile_shape), 7.0, dtype=np.float32)
+        request = request_for_image(tile.view_state)
+        display_image = make_image_from_slab(image, request, colormap_lut=session.colormap_lut)
+        result = EvaluationResult(
+            value=display_image, eval_ms=0.0, slab_shape=image.shape, slab_nbytes=image.nbytes
+        )
+        win.operation_evaluator.store_montage_tile_result(
+            tile,
+            montage_axis=session.montage_axis,
+            colormap_lut=session.colormap_lut,
+            result=result,
+        )
+
+        demand_state = win.view_state.tile_state_for_slice(2, 6)
+        hit = win.operation_evaluator.cached_montage_tile(
+            demand_state,
+            montage_axis=2,
+            source_index=6,
+            colormap_lut=session.colormap_lut,
+        )
+        assert hit is not None, "prefetched raw future-index key must match the later demand key"
+    finally:
+        win.close()
+
+
 def test_montage_index_window_observation_reuses_scrub_momentum(monkeypatch):
     from types import SimpleNamespace
 
