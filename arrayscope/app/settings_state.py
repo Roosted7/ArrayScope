@@ -97,14 +97,13 @@ class AppSettingsState:
     # default render is byte-identical; the pixel grid is zoom-gated even on.
     wgpu_pixel_grid: bool = False
     wgpu_clip_indicator: bool = False
-    # Experimental montage fast path: a displayed-axis crop-window scrub whose
-    # new source window is already physically resident short-circuits to a pure
-    # page rebind (no re-evaluation). A rebound window re-anchors its auto levels
-    # from the semantic evidence owner, but that owner is not admitted on a
-    # montage with an operation pipeline, where the levels stay on the
-    # predecessor window. Default OFF until that gap closes (see
+    # Montage fast path: a displayed-axis crop-window scrub whose new source
+    # window is already physically resident short-circuits to a pure page rebind
+    # (no re-evaluation). A rebound window re-anchors its auto levels from the
+    # semantic evidence owner, on raw AND operation-pipeline montages, and both
+    # paths settle identical levels; only the schedule differs (see
     # docs/redesign/histogram-evidence-pipeline-2026-07-23.md).
-    resident_crop_rebind: bool = False
+    resident_crop_rebind: bool = True
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
     # Linux/Wayland only; applied pre-QApplication (arrayscope.app.qt_platform).
@@ -135,7 +134,7 @@ def settings_from_mapping(values) -> AppSettingsState:
         texture_codec=normalize_texture_codec_choice(values.get("texture_codec")),
         wgpu_pixel_grid=_to_bool(values.get("wgpu_pixel_grid", False)),
         wgpu_clip_indicator=_to_bool(values.get("wgpu_clip_indicator", False)),
-        resident_crop_rebind=_to_bool(values.get("resident_crop_rebind", False)),
+        resident_crop_rebind=_to_bool(values.get("resident_crop_rebind", True)),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(
             values.get("render_memory_budget_mb", 512)

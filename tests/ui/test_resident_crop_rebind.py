@@ -4,9 +4,9 @@ Scrubbing the displayed-axis crop window of an already-resident montage plane
 re-samples the same canonical GPU pages at a shifted origin.  The demand/planning
 layer otherwise never consults physical residency, so every shifted window is a
 fresh typed target and each tile is re-evaluated (one display-cache miss and one
-producer per tile per step) even though the pixels are already resident.  With
-the opt-in ``resident_crop_rebind`` capability the planner rebinds the resident
-pages before the ladder plans, scheduling ZERO producers for the resident tiles.
+producer per tile per step) even though the pixels are already resident.  Under
+the ``resident_crop_rebind`` capability the planner rebinds the resident pages
+before the ladder plans, scheduling ZERO producers for the resident tiles.
 
 Residency is not a gift a cropped view receives: a view cropped from its first
 frame onward never presents a whole source plane, so under a crop-local upload
@@ -22,10 +22,10 @@ A rebound window re-anchors its own auto levels: the evidence it carries
 describes the PREDECESSOR window, so it is demoted to preview quality and the
 semantic level-evidence owner re-samples the new window off the display lane.
 That holds on raw AND operation-pipeline montages, and the rebind and evaluation
-paths settle identical levels on both.  The capability is nevertheless still
-gated OFF by default.  A crop whose pages are NOT resident, any pixel-affecting
-identity change, or a montage of planes too large for the residency byte policy
-falls through to the ordinary evaluation.
+paths settle identical levels on both, which is what makes the capability
+default ON.  A crop whose pages are NOT resident, any pixel-affecting identity
+change, or a montage of planes too large for the residency byte policy falls
+through to the ordinary evaluation.
 """
 
 from __future__ import annotations
@@ -748,13 +748,13 @@ def test_resident_crop_rebind_flag_reads_settings_object():
     from arrayscope.app.settings_state import AppSettingsState
     from arrayscope.window.frame_effects import FramePipelineEffects
 
-    win = types.SimpleNamespace(app_settings=AppSettingsState(resident_crop_rebind=True))
+    win = types.SimpleNamespace(app_settings=AppSettingsState(resident_crop_rebind=False))
     effects = FramePipelineEffects(types.SimpleNamespace(win=win), session=None)
-    assert effects._resident_crop_rebind_enabled() is True
+    assert effects._resident_crop_rebind_enabled() is False
 
-    win.app_settings = AppSettingsState()  # default OFF
+    win.app_settings = AppSettingsState()  # default ON
     other = FramePipelineEffects(types.SimpleNamespace(win=win), session=None)
-    assert other._resident_crop_rebind_enabled() is False
+    assert other._resident_crop_rebind_enabled() is True
 
 
 def test_resident_crop_rebind_flag_live_toggles_without_restart():
@@ -771,24 +771,24 @@ def test_resident_crop_rebind_flag_live_toggles_without_restart():
     from arrayscope.app.settings_state import AppSettingsState
     from arrayscope.window.frame_effects import FramePipelineEffects
 
-    win = types.SimpleNamespace(app_settings=AppSettingsState())  # default OFF
+    win = types.SimpleNamespace(app_settings=AppSettingsState())  # default ON
     effects = FramePipelineEffects(types.SimpleNamespace(win=win), session=None)
-    assert effects._resident_crop_rebind_enabled() is False
+    assert effects._resident_crop_rebind_enabled() is True
 
     # The menu setter replaces the settings object; the per-session snapshot
     # still reports the old value until it is invalidated.
-    win.app_settings = dataclasses.replace(win.app_settings, resident_crop_rebind=True)
-    assert effects._resident_crop_rebind_enabled() is False
+    win.app_settings = dataclasses.replace(win.app_settings, resident_crop_rebind=False)
+    assert effects._resident_crop_rebind_enabled() is True
 
     # Invalidation (what the menu toggle triggers on the live effects) makes the
     # next read reflect the new value — live, no restart.
     effects.invalidate_resident_crop_rebind_flag()
-    assert effects._resident_crop_rebind_enabled() is True
-
-    # And back off, again live.
-    win.app_settings = dataclasses.replace(win.app_settings, resident_crop_rebind=False)
-    effects.invalidate_resident_crop_rebind_flag()
     assert effects._resident_crop_rebind_enabled() is False
+
+    # And back on, again live.
+    win.app_settings = dataclasses.replace(win.app_settings, resident_crop_rebind=True)
+    effects.invalidate_resident_crop_rebind_flag()
+    assert effects._resident_crop_rebind_enabled() is True
 
 
 _EXACT_TILE_INDICES = tuple(range(50))

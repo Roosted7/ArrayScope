@@ -433,27 +433,20 @@ class FramePipelineEffects:
         return states
 
     def _resident_crop_rebind_enabled(self) -> bool:
-        """Read the opt-in resident-crop-rebind capability once per session.
+        """Read the resident-crop-rebind capability once per session.
 
-        Default OFF.  The rebind eliminates the per-tile evaluation storm of a
-        resident crop scrub and is pixel-correct, and a rebound window now
+        Default ON.  The rebind eliminates the per-tile evaluation storm of a
+        resident crop scrub and is pixel-correct, and a rebound window
         re-anchors its own auto levels: its carried evidence is demoted to
         preview quality (it describes the predecessor window) and the semantic
         level-evidence owner re-samples the new window off the display lane, so
         the maturity contract switches once, atomically.  Measured on a 50-tile
-        row-gradient montage: window-exact levels 80-100 ms after settle, still
+        row-gradient montage: window-exact levels ~220 ms after a 130 ms settle,
         zero display-preparation producers, and identical settled levels to the
-        ordinary evaluation that costs 570-750 ms and 50 producers per step.
-
-        The gap that keeps it OFF is operation-pipeline montages.  There the
-        evidence owner is never admitted (measured under CenteredFFT(axis=2):
-        armed target, scheduling-verdict and side-work refusals, zero completed
-        batches, with or without the rebind), so such a scrub holds the
-        predecessor window's levels for as long as it lasts.  The demoted
-        placeholder keeps that honest rather than silently wrong, but it is not
-        a re-anchor.  Closing it is a montage scheduling change, not another
-        evidence route (docs/redesign/histogram-evidence-pipeline-2026-07-23.md,
-        2026-07-25 addendum).
+        ordinary evaluation that costs 550-770 ms and 50 producers per step.
+        Under ``CenteredFFT(axis=2)`` the same holds on the shared-stage montage
+        (settle ~105 ms against ~330 ms, identical settled levels).  The toggle
+        survives as the field isolation switch, not as a caveat.
 
         The GPU-histogram route is refuted, not merely unwired: the resident
         histogram (``DispatchHistogram`` over ``DataChunkKey`` blocks) is

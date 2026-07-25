@@ -308,18 +308,25 @@ operation-pipeline montage: the montage watchdog kept re-arming, the loading
 overlay stayed eligible, and `_montage_render_active` reported the render busy
 forever, holding the memory policy in its active-render branch.
 
-### The default
+### The default is now ON
 
-The capability stays opt-in in this step; flipping it is a separate decision
-with its own gates.  Nothing is left of the caveat that gated it, though: the
-rebind now settles the same auto levels as the ordinary evaluation on raw and
-operation-pipeline montages alike.
+`resident_crop_rebind` defaults to `True`. Nothing is left of the caveat that
+gated it: the rebind settles the same pixels (crop-parity/CPU-oracle gates) and
+the same auto levels as the ordinary evaluation, on raw and operation-pipeline
+montages alike, and only the schedule differs — 102-143 ms per scrub step with
+zero display producers against 305-770 ms with up to 50. The menu toggle stays
+as the field isolation switch and loses its "(experimental)" label and its
+caveat sentence.
+
+`CenteredFFT(axis=0)` still changes the content key per window, so the rebind
+correctly declines there and the scrub takes the ordinary evaluation; that is
+the capability's own identity rule, not a gap.
 
 Standing reds observed while gating this, neither caused by it (both reproduce
 on the unmodified tip): `tests/ui/test_montage_scroll_level_retention.py::test_vispy_one_tile_scroll_retains_level_population`
 times out settling, and `tests/app/test_memory_stress.py::test_montage_tile_residency_rss_stays_bounded`
 is flaky at roughly the same rate either way (8/12 red unmodified, 7/12 red with
-the capability forced on, with LARGER overshoots unmodified — 17.1 MB against
+the default flipped, with LARGER overshoots unmodified — 17.1 MB against
 15.3 MB), so its accounted-bytes gate is not evidence about this capability.
 
 ## Addendum 2026-07-25 (third) — the default-ON blocker was anchor/plane coherence

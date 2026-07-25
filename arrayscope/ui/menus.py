@@ -61,7 +61,7 @@ class WindowMenuMixin:
                 ),
                 "wgpu_pixel_grid": self._settings.value("wgpu_pixel_grid", False),
                 "wgpu_clip_indicator": self._settings.value("wgpu_clip_indicator", False),
-                "resident_crop_rebind": self._settings.value("resident_crop_rebind", False),
+                "resident_crop_rebind": self._settings.value("resident_crop_rebind", True),
                 "chunk_transport_codec": self._settings.value(
                     "chunk_transport_codec", ChunkTransportCodecChoice.RAW.value
                 ),
@@ -479,24 +479,23 @@ class WindowMenuMixin:
             montage_quality_menu.addAction(action)
             self._montage_quality_actions[choice] = action
 
-        # Experimental resident-montage fast path. Sits with Montage LOD because
-        # it only engages on resident montage presentations; default OFF (the
-        # auto-level caveat below is why).
-        resident_crop_rebind_action = QtGui.QAction(
-            "Resident Crop Rebind (experimental)", self, checkable=True
-        )
+        # Resident-montage fast path. Sits with Montage LOD because it only
+        # engages on resident montage presentations; default ON — it settles the
+        # same pixels and the same auto levels as the ordinary evaluation, just
+        # sooner, and the toggle stays for isolating it in the field.
+        resident_crop_rebind_action = QtGui.QAction("Resident Crop Rebind", self, checkable=True)
         resident_crop_rebind_action.setToolTip(
             "When you scrub a crop window over montage data that is already "
             "loaded, reuse the loaded pixels instead of recomputing every tile "
             "(much faster scrubbing). Automatic brightness/contrast keeps the "
             "previous window's setting for a moment, then re-measures the new "
-            "one in a single step. Caveat: on a montage with an operation "
-            "applied, that re-measurement does not run and the brightness stays "
-            "on the previous window until you change something else. Takes "
-            "effect on your next crop-window scrub; no restart needed."
+            "one in a single step. Turning this off recomputes every tile "
+            "instead; the picture and the brightness end up the same either "
+            "way. Takes effect on your next crop-window scrub; no restart "
+            "needed."
         )
         resident_crop_rebind_action.setChecked(
-            bool(getattr(self.app_settings, "resident_crop_rebind", False))
+            bool(getattr(self.app_settings, "resident_crop_rebind", True))
         )
         resident_crop_rebind_action.toggled.connect(self._set_resident_crop_rebind_enabled)
         performance_menu.addAction(resident_crop_rebind_action)
@@ -673,7 +672,7 @@ class WindowMenuMixin:
         if resident_crop_rebind_action is not None:
             resident_crop_rebind_action.blockSignals(True)
             resident_crop_rebind_action.setChecked(
-                bool(getattr(self.app_settings, "resident_crop_rebind", False))
+                bool(getattr(self.app_settings, "resident_crop_rebind", True))
             )
             resident_crop_rebind_action.blockSignals(False)
         for choice, action in self._memory_profile_actions.items():

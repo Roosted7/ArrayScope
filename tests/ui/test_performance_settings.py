@@ -397,11 +397,11 @@ def test_host_cache_compression_greys_out_auto_when_no_codec(qtbot, monkeypatch)
         win.close()
 
 
-_RESIDENT_CROP_REBIND = "Resident Crop Rebind (experimental)"
+_RESIDENT_CROP_REBIND = "Resident Crop Rebind"
 
 
-def test_resident_crop_rebind_menu_defaults_off_and_persists(qtbot):
-    """Performance → Resident Crop Rebind: checkable, default OFF, persists."""
+def test_resident_crop_rebind_menu_defaults_on_and_persists(qtbot):
+    """Performance → Resident Crop Rebind: checkable, default ON, persists off."""
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
 
@@ -411,15 +411,17 @@ def test_resident_crop_rebind_menu_defaults_off_and_persists(qtbot):
         _process_events(qtbot)
         action = _menu_action(win, "Performance", _RESIDENT_CROP_REBIND)
         assert action.isCheckable()
-        # Default OFF (auto-level caveat; default-on is blocked on separate work).
-        assert not action.isChecked()
-        assert win.app_settings.resident_crop_rebind is False
+        # Default ON: the rebind settles the same pixels and the same auto
+        # levels as the ordinary evaluation, on raw and operation-pipeline
+        # montages alike (tests/ui/test_resident_crop_rebind.py).
+        assert action.isChecked()
+        assert win.app_settings.resident_crop_rebind is True
 
         action.trigger()
         _process_events(qtbot)
-        assert win.app_settings.resident_crop_rebind is True
-        assert action.isChecked()
-        assert _to_bool(win._settings.value("resident_crop_rebind"))
+        assert win.app_settings.resident_crop_rebind is False
+        assert not action.isChecked()
+        assert not _to_bool(win._settings.value("resident_crop_rebind"))
     finally:
         win.close()
 
@@ -428,8 +430,8 @@ def test_resident_crop_rebind_menu_defaults_off_and_persists(qtbot):
     qtbot.addWidget(win2)
     try:
         _process_events(qtbot)
-        assert win2.app_settings.resident_crop_rebind is True
-        assert _menu_action(win2, "Performance", _RESIDENT_CROP_REBIND).isChecked()
+        assert win2.app_settings.resident_crop_rebind is False
+        assert not _menu_action(win2, "Performance", _RESIDENT_CROP_REBIND).isChecked()
     finally:
         win2.close()
 

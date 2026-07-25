@@ -88,7 +88,7 @@ source plane, so under a crop-local upload the canonical pages stay cold
 forever and no crop scrub can ever rebind. Anchoring already certifies that the
 operation chain commutes with slicing on the anchored display axes — that is
 what lets the content key drop those axes' windows — so the window-free state
-the key names can simply be evaluated. With the opt-in `resident_crop_rebind`
+the key names can simply be evaluated. Under the `resident_crop_rebind`
 capability a cropped tile's evaluation produces that whole canonical plane
 (`canonical_plane_residency_source`) and carries it as
 `native_residency_data`; the commit uploads it under the window-invariant
