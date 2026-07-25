@@ -127,10 +127,31 @@ down from 571–686 ms). That bar belongs to queue row 1.
 
 ## Follow-ups
 
-- The fixture-based profile stages (`display_x_axis_slice`,
-  `display_y_axis_slice`) could not run here: the session fixture demands an
-  exact 1400×940 window and the headless compositor grants 1400×948. With
-  `--session-fixture ""` those stages crash in `_wgpu_payload_lod_geometry`
+- **The session fixture's window-size gate is stale, and it is not a headless
+  artifact.** Every fixture-based profile run dies with
+  `window_size [1400, 948]` against `session_window_size_target [1400, 940]`.
+  This reproduces **identically on a live Wayland session**, and a headless
+  probe resizes the same window to exactly 1400×940 on demand (output is
+  1920×1200, dpr 1.0), so the compositor is not the constraint.
+
+  `window_size` is a *derived* quantity — viewport plus chrome — asserted as
+  if it were an input. Measured today, vertical chrome is a constant 209 px,
+  so the fixture's recorded viewport of 739 needs a 948-tall window; when the
+  fixture was captured (`0f11a22`) the same viewport came with 940, i.e.
+  chrome was 201. Chrome has grown 8 px since. The restore is *correct*: it
+  reproduces `viewport_shape [739, 1247]` exactly, which is what determines
+  aspect, montage layout, and LOD. The gate fails it anyway, because
+  `session_viewport_shape_matches` allows ±1 while
+  `session_window_size_matches` demands exact equality.
+
+  The same stale number sizes the screenshot compositor:
+  `_managed_weston_output_size` reads `panels.window_size` so that "the window
+  fills the output and one capture is the window". At 940 against a 948-tall
+  window that identity is broken by 8 px — a likely source of previously
+  observed full-window pixel mismatches attributed to Qt chrome.
+
+- With `--session-fixture ""` the crop stages (`display_x_axis_slice`,
+  `display_y_axis_slice`) crash in `_wgpu_payload_lod_geometry`
   (`source=(100, 336)`, `declared=(51, 168)`, `expected=(50, 168)`) — an
   edge-bin geometry mismatch that **reproduces unchanged on `65a9540`** and is
   therefore pre-existing and unrelated to this work. Untriaged.
