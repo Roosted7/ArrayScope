@@ -1269,6 +1269,7 @@ class LodPageCache:
         self._resolver_revision = -1
         self._resolver_table = PageTable()
         self._resolver_pages_by_key: dict[DataChunkKey, MaterializedLodPage] = {}
+        self._resolver_slot_sequence = 0
         self._resolution_memo: dict[tuple[DataChunkKey, ...], ResolvedLodPageSet | None] = {}
         self._resolution_memo_revision = -1
 
@@ -1382,13 +1383,30 @@ class LodPageCache:
             if self._resolver_revision == self._revision:
                 return self._resolver_table, self._resolver_pages_by_key
             pages_by_key = dict(self._cache.items())
+            previous_pages = self._resolver_pages_by_key
+            # A published table must stay frozen: ``resolved_page_set`` calls
+            # ``resolve`` on it OUTSIDE the lock, and a worker admit can land
+            # a new revision meanwhile. So build a fresh table -- but adopt
+            # the last one's bindings and re-bind only the pages that moved.
+            # One admit changes one page, while a cold fill's resident set
+            # grows into the hundreds; rebuilding every page per revision
+            # cost 544 rebuilds and 147696 binds (0.51 s) on a 272-tile fill.
             table = PageTable()
-            for index, (resident_key, page) in enumerate(pages_by_key.items()):
+            table.rebind_from(self._resolver_table)
+            for resident_key in previous_pages:
+                if resident_key not in pages_by_key:
+                    table.unbind(resident_key)
+            for resident_key, page in pages_by_key.items():
+                if previous_pages.get(resident_key) is page:
+                    continue
+                # Slots only have to be unique here -- this table describes a
+                # CPU cache, and nothing reads its physical placement.
                 table.bind(
                     resident_key,
-                    PageSlot("cpu-lod-page-cache", 0, index),
+                    PageSlot("cpu-lod-page-cache", 0, self._resolver_slot_sequence),
                     nbytes=page.nbytes,
                 )
+                self._resolver_slot_sequence += 1
             self._resolver_table = table
             self._resolver_pages_by_key = pages_by_key
             self._resolver_revision = self._revision

@@ -254,3 +254,49 @@ def test_all_pinned_capacity_denial_preserves_resolvable_coverage():
         scale=(0.125, 0.125),
         offset=(32.0, 32.0),
     )
+
+
+def test_rebind_from_adopts_bindings_and_then_diverges():
+    # A consumer that republishes a fresh table per residency revision needs
+    # the new table to answer for every page the old one held, while staying
+    # free to drop and add pages without disturbing the table it copied --
+    # a published table is still being resolved against.
+    source_table = PageTable()
+    kept = chunk(origin=(0, 0))
+    dropped = chunk(origin=(256, 0))
+    kept_slot = bind(source_table, kept, 0)
+    bind(source_table, dropped, 1)
+
+    successor = PageTable()
+    successor.rebind_from(source_table)
+    assert successor.lookup(kept) == kept_slot
+    assert successor.resolve(kept) is not None
+
+    added = chunk(origin=(512, 0))
+    successor.unbind(dropped)
+    added_slot = bind(successor, added, 2)
+
+    assert successor.lookup(dropped) is None
+    assert successor.lookup(added) == added_slot
+    # The predecessor is untouched: whoever holds it still resolves both of
+    # the pages it was published with.
+    assert source_table.lookup(dropped) is not None
+    assert source_table.lookup(added) is None
+    assert len(source_table) == 2
+
+
+def test_rebind_from_copies_the_family_index_not_its_buckets():
+    # Sharing a family bucket would let a successor's bind surface in the
+    # predecessor's ancestor search, which is the resolution path itself.
+    source_table = PageTable()
+    coarse = chunk(origin=(0, 0), shape=(1024, 1024), reduction=(2, 2))
+    bind(source_table, coarse, 0)
+
+    successor = PageTable()
+    successor.rebind_from(source_table)
+    finer = chunk(origin=(0, 0), shape=(512, 512), reduction=(1, 1))
+    bind(successor, finer, 1)
+
+    target = chunk(origin=(0, 0), shape=(256, 256))
+    assert successor.resolve(target).actual_key == finer
+    assert source_table.resolve(target).actual_key == coarse

@@ -84,6 +84,31 @@ class PageTable:
     def __len__(self) -> int:
         return len(self._entries)
 
+    def rebind_from(self, other: PageTable) -> None:
+        """Adopt ``other``'s bindings so this table can diverge from them.
+
+        For a consumer that publishes a fresh table per residency revision and
+        changes only a few pages between them: rebuilding by ``bind`` costs a
+        ``ResidencyEntry`` construction and four index writes per resident
+        page, which on a montage-sized set dwarfs the handful of pages that
+        actually moved.
+
+        ``ResidencyEntry`` values are SHARED with ``other``, not copied, so
+        this is only sound when neither table will mutate an entry in place --
+        ``touch``, ``pin``, and ``remap`` all do. ``bind`` and ``unbind``
+        replace or drop whole entries and stay safe. Callers that need a
+        table they can touch or remap must build their own.
+        """
+
+        self._entries = dict(other._entries)
+        self._slots = dict(other._slots)
+        self._family_entries = {
+            family: dict(entries) for family, entries in other._family_entries.items()
+        }
+        self._pin_sets = dict(other._pin_sets)
+        self._generation = other._generation
+        self._use_counter = other._use_counter
+
     def __contains__(self, key: DataChunkKey) -> bool:
         return key in self._entries
 

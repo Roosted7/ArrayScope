@@ -515,6 +515,86 @@ def test_logical_page_cache_reuses_resolver_snapshot_until_residency_changes(mon
     assert bind_calls == 1
 
 
+def _admit_square(cache, page_plan, owner, *, origin):
+    page = materialize_lod_page(
+        np.arange(16, dtype=np.float32).reshape(4, 4),
+        source_origin_yx=origin,
+        plan=page_plan,
+    )
+    assert cache.begin_claim(page.key, owner)
+    cache.admit(page, owner=owner)
+    return page
+
+
+def test_resolver_snapshot_rebinds_only_the_pages_that_moved(monkeypatch):
+    # Each admit publishes a new residency revision, and the next query
+    # republishes the resolver.  Re-binding the whole resident set per
+    # revision is quadratic across a fill: the 272-tile cold fill spent 544
+    # rebuilds and 147696 binds (0.51 s) re-stating pages that had not
+    # moved.  A revision changes one page; the republished table should cost
+    # one bind.
+    plans = [
+        plan(rect=(0, 4, row * 4, row * 4 + 4), reduction=(1, 1), page_shape=(4, 4))[0]
+        for row in range(4)
+    ]
+    cache = LodPageCache(max_bytes=1 << 20)
+    _admit_square(cache, plans[0], "worker-0", origin=(0, 0))
+    assert cache.resolved_page_set((plans[0],)) is not None
+
+    bind_calls = 0
+    original_bind = pyramid_core.PageTable.bind
+
+    def counted_bind(table, *args, **kwargs):
+        nonlocal bind_calls
+        bind_calls += 1
+        return original_bind(table, *args, **kwargs)
+
+    monkeypatch.setattr(pyramid_core.PageTable, "bind", counted_bind)
+    for index, page_plan in enumerate(plans[1:], start=1):
+        _admit_square(cache, page_plan, f"worker-{index}", origin=(0, index * 4))
+        assert cache.resolved_page_set(tuple(plans[: index + 1])) is not None
+
+    assert bind_calls == 3
+
+
+def test_resolver_snapshot_is_path_independent():
+    # The incremental republish must land the same resolver as a table built
+    # from the resident set in one go, including after an eviction drops a
+    # page: a resolver that kept a stale binding would report an evicted page
+    # as resolvable and hand back values the cache no longer owns.
+    plans = [
+        plan(rect=(0, 4, row * 4, row * 4 + 4), reduction=(1, 1), page_shape=(4, 4))[0]
+        for row in range(3)
+    ]
+    incremental = LodPageCache(max_bytes=1 << 20)
+    for index, page_plan in enumerate(plans):
+        _admit_square(incremental, page_plan, f"worker-{index}", origin=(0, index * 4))
+        # Query between admits: this is what forces a republish per revision.
+        incremental.resolved_page_set((page_plan,))
+
+    fresh = LodPageCache(max_bytes=1 << 20)
+    for index, page_plan in enumerate(plans):
+        _admit_square(fresh, page_plan, f"worker-{index}", origin=(0, index * 4))
+
+    def actual_keys(cache):
+        resolved = cache.resolved_page_set(tuple(plans))
+        assert resolved is not None
+        return tuple(item.actual_key for item in resolved.resolutions)
+
+    assert actual_keys(incremental) == actual_keys(fresh)
+
+    # An eviction must leave the republished resolver too.
+    evicting = LodPageCache(max_entries=2)
+    for index, page_plan in enumerate(plans):
+        _admit_square(evicting, page_plan, f"worker-{index}", origin=(0, index * 4))
+        evicting.resolved_page_set((page_plan,))
+    resident = {page.key for page in evicting.resident_pages()}
+    assert len(resident) == 2
+    for page_plan in plans:
+        resolved = evicting.resolved_page_set((page_plan,))
+        assert (resolved is not None) == (page_plan.key in resident)
+
+
 def test_page_set_resolution_is_memoized_per_residency_revision(monkeypatch):
     # The 272-tile cold-fill replans resolve the same page-set keys thousands
     # of times between residency changes (floor scans run per tile per
