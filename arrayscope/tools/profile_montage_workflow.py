@@ -436,8 +436,18 @@ def _physical_frame_reference_truth(
     *,
     backend: str,
     sample_seed: int,
-) -> dict[str, object]:
-    """Render/read the maintained backend and compare its pixels with CPU truth."""
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Compare the maintained backend's pixels with CPU truth.
+
+    Returns the image verdict and, beside it, the ROI-placement verdict the
+    same capture produced.  The image comparison withholds pixels the frame
+    legitimately draws over the montage -- ROI strokes, the profile marker,
+    the rasterized floating chips -- so the placement verdict is what keeps
+    ROI-through-crop coverage: every enabled ROI must still paint its own
+    colour inside the band its semantic geometry projects to, and nowhere
+    else.  One capture answers both, so they can never disagree about which
+    frame they saw.
+    """
 
     from arrayscope.tools.framebuffer_reference import (
         qt_raster_matches_cpu_reference,
@@ -458,23 +468,39 @@ def _physical_frame_reference_truth(
                 sample_seed=sample_seed,
             )
         else:
-            return {"applicable": False, "passed": True}
+            return ({"applicable": False, "passed": True}, {"applicable": False, "passed": True})
     except Exception as exc:
-        return {
-            "applicable": True,
-            "passed": False,
-            "error": repr(exc),
-            "failures": (),
-        }
+        failed = {"applicable": True, "passed": False, "error": repr(exc), "failures": ()}
+        return (failed, dict(failed))
     failures = tuple(report.failures())
-    return {
+    image = {
         "applicable": True,
         "passed": not failures,
         "frame_shape": tuple(int(value) for value in report.frame_shape),
         "tile_count": len(report.tiles),
         "total_samples": int(report.total_samples),
+        "overlay_excluded_samples": int(report.overlay_excluded_samples),
         "failures": tuple(asdict(failure) for failure in failures),
     }
+    placement_report = report.roi_placement
+    if placement_report is None:
+        placement = {
+            "applicable": True,
+            "passed": False,
+            "error": "frame reference report carried no ROI placement verdict",
+            "failures": (),
+        }
+    else:
+        placement_failures = tuple(placement_report.failures())
+        placement = {
+            "applicable": True,
+            "passed": not placement_failures,
+            "frame_shape": tuple(int(value) for value in placement_report.frame_shape),
+            "roi_count": len(placement_report.rois),
+            "stray_checked_roi_count": sum(1 for roi in placement_report.rois if roi.stray_checked),
+            "failures": tuple(asdict(failure) for failure in placement_failures),
+        }
+    return (image, placement)
 
 
 def _apply_all_dimension_scroll_stress(
@@ -493,6 +519,7 @@ def _apply_all_dimension_scroll_stress(
     physical_counts: list[int] = []
     source_truth_checks: list[dict[str, object]] = []
     physical_reference_checks: list[dict[str, object]] = []
+    roi_placement_checks: list[dict[str, object]] = []
     visual_checkpoint_count = 0
     uploads_before = _wgpu_upload_total(win)
 
@@ -529,13 +556,13 @@ def _apply_all_dimension_scroll_stress(
             physical_counts.append(len(dict(physical_rows_fn() or {})))
         if backend == "wgpu":
             source_truth_checks.append(_wgpu_source_window_truth(win))
-        physical_reference_checks.append(
-            _physical_frame_reference_truth(
-                win,
-                backend=backend,
-                sample_seed=int(physical_sample_seed) + len(physical_reference_checks),
-            )
+        image_check, placement_check = _physical_frame_reference_truth(
+            win,
+            backend=backend,
+            sample_seed=int(physical_sample_seed) + len(physical_reference_checks),
         )
+        physical_reference_checks.append(image_check)
+        roi_placement_checks.append(placement_check)
         visual_probe = getattr(win, "_arrayscope_visual_timeline_probe", None)
         capture = getattr(visual_probe, "capture", None)
         if callable(capture):
@@ -684,6 +711,24 @@ def _apply_all_dimension_scroll_stress(
         ),
         "physical_reference_failures": tuple(
             check for check in physical_reference_checks if not bool(check.get("passed", False))
+        ),
+        # What the overlay-coverage mask withheld from the image comparison,
+        # so the exclusion is a reported number rather than a silent cap.
+        "physical_reference_overlay_excluded_samples": sum(
+            int(check.get("overlay_excluded_samples", 0) or 0)
+            for check in physical_reference_checks
+        ),
+        "roi_placement_check_count": len(roi_placement_checks),
+        "roi_placement_applicable": bool(
+            roi_placement_checks
+            and all(bool(check.get("applicable", False)) for check in roi_placement_checks)
+        ),
+        "roi_placement_passed": bool(
+            roi_placement_checks
+            and all(bool(check.get("passed", False)) for check in roi_placement_checks)
+        ),
+        "roi_placement_failures": tuple(
+            check for check in roi_placement_checks if not bool(check.get("passed", False))
         ),
         "physical_sample_seed": int(physical_sample_seed),
         "physical_samples_per_tile": int(PROFILE_PHYSICAL_SAMPLES_PER_TILE),
@@ -1557,6 +1602,21 @@ def run_profile_montage_workflow(
                 ),
                 "display_axis_physical_reference_failures": tuple(
                     all_dimension_scroll["physical_reference_failures"]
+                ),
+                "display_axis_physical_reference_overlay_excluded_samples": int(
+                    all_dimension_scroll["physical_reference_overlay_excluded_samples"]
+                ),
+                "display_axis_roi_placement_check_count": int(
+                    all_dimension_scroll["roi_placement_check_count"]
+                ),
+                "display_axis_roi_placement_applicable": bool(
+                    all_dimension_scroll["roi_placement_applicable"]
+                ),
+                "display_axis_roi_placement_passed": bool(
+                    all_dimension_scroll["roi_placement_passed"]
+                ),
+                "display_axis_roi_placement_failures": tuple(
+                    all_dimension_scroll["roi_placement_failures"]
                 ),
                 "display_axis_physical_sample_seed": int(
                     all_dimension_scroll["physical_sample_seed"]
@@ -7506,6 +7566,23 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             target=(
                 "the rendered WGPU target or PyQtGraph raster matches CPU semantic "
                 "pixels after every fast, restore, slow-forward, and slow-return checkpoint"
+            ),
+        )
+        require(
+            "display_axis_roi_overlays_track_geometry",
+            int(record.get("display_axis_roi_placement_check_count", 0) or 0)
+            == expected_axis_count * 4
+            and bool(record.get("display_axis_roi_placement_applicable", False))
+            and bool(record.get("display_axis_roi_placement_passed", False)),
+            evidence={
+                "checks": record.get("display_axis_roi_placement_check_count"),
+                "applicable": record.get("display_axis_roi_placement_applicable"),
+                "failures": record.get("display_axis_roi_placement_failures"),
+            },
+            target=(
+                "every enabled ROI paints its own colour inside the band its "
+                "semantic geometry projects to, and nowhere else on the frame, "
+                "after every crop-stage checkpoint"
             ),
         )
         require(
