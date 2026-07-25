@@ -18,6 +18,12 @@ Proposals describe a concrete design that has not yet become an accepted archite
   designed instead of improvised.
 - [wgpu renderer experiment](wgpu-renderer-experiment.md): the wgpu-py evidence program that
   produced the ADR 0057 backend (gates, measurements, native-Wayland recipe).
+- [wgpu shader legibility and filtering](wgpu-shader-legibility.md): four stages making the
+  wgpu frame self-describing — pixel grid, NaN/missing-page/clip trust signals, montage
+  guides and slice labels, honest minification filtering, per-pixel value labels. Stage A is
+  implemented (default off); B–D are the live part. Argues explicitly *against* GPU mipmaps
+  for this backend, since hardware mip generation cannot express the pyramid's semantic
+  reducers.
 - [GPU-port continuation](gpu-port-continuation.md): continuation record for the GPU-engine
   port sessions.
 - [LOD multi-resolution implementation plan](lod-multires-implementation-plan.md): historical —
