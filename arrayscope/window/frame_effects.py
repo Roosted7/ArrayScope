@@ -569,13 +569,17 @@ class FramePipelineEffects:
             **{f"stat_{key}": int(value) for key, value in stats.items()},
         )
 
-    # A montage whose tiles carried exact semantics would otherwise pin one
-    # whole source plane per tile; the rebind only ever needs a handful.
-    _CANONICAL_PLANE_MEMO_LIMIT = 4
     # The memo holds a STRONG reference (a weak one dies the moment the crop
     # replaces the whole-plane payload, which is exactly when the scrub starts),
-    # so it must state what it can pin.  A plane above this keeps its ordinary
-    # evaluation rather than pinning hundreds of MB to save one producer.
+    # so it must state what it can pin.  This is the budget for the memo AS A
+    # WHOLE.  A per-plane cap with a flat four-entry count was measured to be
+    # both too loose and too tight at once: four planes could pin 256 MB, while
+    # a 50-tile montage — every tile of which needs its own whole plane to
+    # re-slice — could seat only four and therefore declined the rebind for the
+    # other 46 (measured: 50 producers per scrub step where the pre-single-slice
+    # montage rebind scheduled none).  Fifty 336x336 float32 planes are 22.6 MB,
+    # comfortably inside this; a montage of genuinely large planes still stops
+    # at the budget and keeps its ordinary evaluation.
     _CANONICAL_PLANE_MEMO_MAX_BYTES = 64 * 1024 * 1024
 
     def _remember_canonical_plane_payloads(self, previous_by_tile) -> dict[int, object]:
@@ -600,6 +604,11 @@ class FramePipelineEffects:
         if memo is None:
             memo = {}
             self.renderer._resident_crop_canonical_planes = memo
+        pinned_bytes = sum(
+            int(np.asarray(entry.semantic_data).nbytes)
+            for entry in memo.values()
+            if getattr(entry, "semantic_data", None) is not None
+        )
         for tile_number, payload in dict(previous_by_tile or {}).items():
             if str(getattr(payload, "quality", "exact") or "exact") != "exact":
                 continue
@@ -613,11 +622,17 @@ class FramePipelineEffects:
             y0, y1, x0, x1 = (int(value) for value in source_rect)
             if (y0, x0) != (0, 0) or (y1, x1) != (int(plane_shape[0]), int(plane_shape[1])):
                 continue
-            if int(np.asarray(payload.semantic_data).nbytes) > self._CANONICAL_PLANE_MEMO_MAX_BYTES:
-                continue
+            plane_bytes = int(np.asarray(payload.semantic_data).nbytes)
             key = int(tile_number)
-            if key not in memo and len(memo) >= self._CANONICAL_PLANE_MEMO_LIMIT:
+            replaced = memo.get(key)
+            replaced_bytes = (
+                0
+                if replaced is None or getattr(replaced, "semantic_data", None) is None
+                else int(np.asarray(replaced.semantic_data).nbytes)
+            )
+            if pinned_bytes - replaced_bytes + plane_bytes > self._CANONICAL_PLANE_MEMO_MAX_BYTES:
                 continue
+            pinned_bytes += plane_bytes - replaced_bytes
             memo[key] = payload
         return memo
 

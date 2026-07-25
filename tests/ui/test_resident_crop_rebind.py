@@ -474,3 +474,158 @@ def test_resident_crop_rebind_flag_live_toggles_without_restart():
     win.app_settings = dataclasses.replace(win.app_settings, resident_crop_rebind=False)
     effects.invalidate_resident_crop_rebind_flag()
     assert effects._resident_crop_rebind_enabled() is False
+
+
+_EXACT_TILE_INDICES = tuple(range(50))
+
+
+def _exact_source() -> np.ndarray:
+    # Small enough that a ten-column montage presents every tile at native
+    # resolution: the payloads are exact (quality="exact") and carry the whole
+    # source plane as CPU semantics, which is the shape the canonical-plane
+    # memo must serve.  Statistically uniform, so the reused level window stays
+    # pixel-exact against the CPU oracle (see the module docstring).
+    return np.random.default_rng(20260725).standard_normal((64, 64, 60), dtype=np.float32)
+
+
+def _exact_cropped_state(win, start: int):
+    state = win.view_state
+    state = state.with_axis_range(
+        0, indices=tuple(range(start, start + 40)), text=f"{start}:{start + 40}"
+    )
+    state = state.with_axis_range(1, indices=tuple(range(12, 52)), text="12:52")
+    return state.with_montage_axis(2, columns=10, indices=_EXACT_TILE_INDICES, text="0:50")
+
+
+def _exact_crop_settled(win, start: int) -> bool:
+    session = getattr(win.renderer, "_frame_session", None)
+    if session is None or session.plan is None:
+        return False
+    ranges = tuple(getattr(session.view_state, "axis_range_indices", None) or ())
+    indices = tuple(ranges[0] or ()) if ranges else ()
+    if not indices or int(indices[0]) != int(start):
+        return False
+    return frame_session_settled(win)
+
+
+def test_exact_montage_crop_scrub_rebinds_every_visible_tile(qtbot):
+    """A 50-tile exact montage rebinds ALL its tiles, not the first four.
+
+    Exact (unreduced) tile payloads carry window-local CPU semantics, so a
+    rebind must re-slice them out of the memoized whole plane.  That memo is the
+    only thing standing between a 50-tile montage and 50 producers per scrub
+    step, and a montage needs one whole plane PER TILE — capping it by entry
+    count instead of by total bytes served four tiles and left the other 46
+    re-evaluating on every step (measured: 46 producers and 367-474 ms per step,
+    against 0 producers and 86-110 ms once the memo is budgeted by size).
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    win = make_backend_window(qtbot, _exact_source(), backend="wgpu", require_gpu_atlas=True)
+    win.resize(790, 780)
+    try:
+        win.show()
+        # The whole plane must be presented once: it is what makes the canonical
+        # pages physically resident AND what the memo re-slices from.
+        full = win.view_state.with_montage_axis(
+            2, columns=10, indices=_EXACT_TILE_INDICES, text="0:50"
+        )
+        win._set_view_state(full)
+        win.update_image_view()
+        _busy_pump_until(
+            lambda: frame_session_settled(win),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+            "full-plane fill",
+        )
+        win._apply_slice_state(
+            0,
+            _exact_cropped_state(win, 10),
+            reason="slice-range",
+            interactive=True,
+            immediate_axis_only=False,
+        )
+        _busy_pump_until(
+            lambda: _exact_crop_settled(win, 10),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+            "cropped fill",
+        )
+        assert len(getattr(win.renderer, "_resident_crop_canonical_planes", {})) == len(
+            _EXACT_TILE_INDICES
+        ), "every exact tile's whole plane must be memoized, not an arbitrary prefix"
+
+        for step in range(3):
+            start = 11 + step
+            before = _preparation_completed(win)
+            win._on_slice_text_changed(0, f"{start}:{start + 40}")
+            _busy_pump_until(
+                lambda start=start: _exact_crop_settled(win, start),
+                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
+                f"exact resident scrub {start}",
+            )
+            assert _preparation_completed(win) - before == 0, (
+                "every tile of an exact resident crop scrub must rebind, not re-evaluate"
+            )
+
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+        assert_wgpu_frame_matches_cpu_reference(win)
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_born_cropped_montage_records_why_it_cannot_rebind(qtbot):
+    """A montage that is never uncropped records the residency decline.
+
+    This is the field shape (2026-07-25 diagnostics: 336x336x272 float32, raw
+    scalar, 50 tiles, crop windows on BOTH displayed axes from the first
+    snapshot onward, presented at LOD level 1).  Nothing ever presents the whole
+    source plane, so no canonical ``("wgpu-source-plane", content_key)`` page is
+    ever uploaded — every window binds crop-local under an identity that folds
+    its own source rect — and the residency probe correctly refuses every
+    shifted window.  The rebind is therefore inert for that workflow, and the
+    only way to tell it apart from "the feature never ran" is the decline
+    histogram this pins: ``pages_not_resident``, not a closed gate.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    win = make_backend_window(qtbot, _uniform_source(), backend="wgpu", require_gpu_atlas=True)
+    win.resize(780, 760)
+    try:
+        win.show()
+        win._set_view_state(_cropped_state(win, 38))
+        win.update_image_view()
+        _busy_pump_until(
+            lambda: _crop_settled(win, 38),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+            "born-cropped fill",
+        )
+        before = _preparation_completed(win)
+        win._on_slice_text_changed(0, "39:239")
+        _busy_pump_until(
+            lambda: _crop_settled(win, 39),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
+            "born-cropped scrub",
+        )
+        assert _preparation_completed(win) - before > 0
+
+        totals = dict(getattr(win.renderer, "resident_crop_rebind_totals", None) or {})
+        assert totals.get("gate:attempted", 0) > 0, "the seed must run, not be gated out"
+        assert totals.get("rebound", 0) == 0
+        assert totals.get("pages_not_resident", 0) > 0, (
+            "the decline must name physical residency, so a field JSONL says why"
+        )
+
+        # The same counters must reach the diagnostics snapshot the field
+        # records: making them measurable there is the point.
+        from arrayscope.window.diagnostics_snapshot import collect_runtime_diagnostics_snapshot
+
+        snapshot = collect_runtime_diagnostics_snapshot(win)
+        assert snapshot.montage.resident_crop_rebind_last_gate == "attempted"
+        assert snapshot.montage.resident_crop_rebind_totals.get("pages_not_resident", 0) > 0
+    finally:
+        win.close()
+        restore_default_backend(settings)
