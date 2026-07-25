@@ -108,11 +108,26 @@ def schedule_near_viewport_montage_prefetch(
     # under the identical window-independent key.  Raw viewing is a primary
     # workflow, so it now takes the same walk minus the stage step.
     has_operations = bool(session.document.enabled_operations)
+    # Prefetch budgets against — and stores into — the evaluator's display
+    # cache.  A window without an evaluator (partial test harnesses, teardown)
+    # has neither a budget to check nor a cache to warm, so decline instead of
+    # reaching through a missing seam.  The raw path used to be shielded from
+    # this line by the removed ``blocked_no_stage`` gate.
+    evaluator = getattr(window.win, "operation_evaluator", None)
+    if evaluator is None:
+        return _record(
+            window,
+            (
+                MontagePrefetchDecision(
+                    None, None, "no_evaluator", "window has no operation evaluator"
+                ),
+            ),
+        )
     direction = _montage_prefetch_direction(window)
     speculative_share = False
     preview_walk_only = False
-    near_capacity = window.win.operation_evaluator._display_cache.bytes_used > int(
-        window.win.operation_evaluator._display_cache.max_bytes * 0.8
+    near_capacity = evaluator._display_cache.bytes_used > int(
+        evaluator._display_cache.max_bytes * 0.8
     )
     if busy:
         # A busy visible phase only earns speculation when the scrub has a
