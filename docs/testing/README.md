@@ -4,7 +4,10 @@ Front page for test policy. Deep dives:
 [strategy.md](strategy.md) (what each layer proves),
 [stress-and-trace-strategy.md](stress-and-trace-strategy.md)
 (drivers × oracles), [manual-regression.md](manual-regression.md),
-[release-candidate.md](release-candidate.md).
+[release-candidate.md](release-candidate.md),
+[performance-baselines.md](performance-baselines.md) (the frozen v0.8.0 numbers
+behind the ±10% bar, plus the journey-matrix acceptance ledger — distilled from
+the deleted `tests/artifacts/` tree).
 
 ## The laws (why recurring defects recur, and what stops them)
 
