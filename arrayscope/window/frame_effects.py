@@ -117,6 +117,20 @@ def _session_display_transposed(session) -> bool:
     return len(axes) == 2 and int(axes[0]) > int(axes[1])
 
 
+def canonical_plane_memo_bytes(memo) -> int:
+    """CPU bytes the resident-crop canonical-plane memo currently pins.
+
+    Both the memo's own budget and its release accounting measure the same
+    thing: the semantic planes it holds strong references to.
+    """
+
+    return sum(
+        int(np.asarray(entry.semantic_data).nbytes)
+        for entry in dict(memo or {}).values()
+        if getattr(entry, "semantic_data", None) is not None
+    )
+
+
 def _presentation_gate_receiver(renderer) -> _PresentationGateReceiver:
     receiver = getattr(renderer, "_montage_presentation_gate_receiver", None)
     if receiver is None:
@@ -498,8 +512,13 @@ class FramePipelineEffects:
         """
 
         if not self._resident_crop_rebind_enabled():
+            # A capability the user turned off may not keep whole planes pinned:
+            # the memo holds STRONG references, so the toggle is also how the
+            # memory is handed back.
+            self._release_canonical_plane_payloads("capability-disabled")
             self._record_resident_crop_rebind(gate="disabled")
             return
+        self._expire_canonical_plane_payloads_for_document()
         win = getattr(self.renderer, "win", None)
         img_view = getattr(win, "img_view", None)
         resident_fn = getattr(img_view, "tiledPayloadResident", None)
@@ -604,11 +623,7 @@ class FramePipelineEffects:
         if memo is None:
             memo = {}
             self.renderer._resident_crop_canonical_planes = memo
-        pinned_bytes = sum(
-            int(np.asarray(entry.semantic_data).nbytes)
-            for entry in memo.values()
-            if getattr(entry, "semantic_data", None) is not None
-        )
+        pinned_bytes = canonical_plane_memo_bytes(memo)
         for tile_number, payload in dict(previous_by_tile or {}).items():
             if str(getattr(payload, "quality", "exact") or "exact") != "exact":
                 continue
@@ -635,6 +650,52 @@ class FramePipelineEffects:
             pinned_bytes += plane_bytes - replaced_bytes
             memo[key] = payload
         return memo
+
+    def _release_canonical_plane_payloads(self, reason: str) -> None:
+        """Unpin every memoized whole plane and say why.
+
+        The memo is the only strong reference the rebind adds outside the frame
+        it committed, so releasing it is the whole of its memory contract; the
+        reason is recorded because a field session sees the freed bytes but not
+        the cause.
+        """
+
+        renderer = self.renderer
+        memo = getattr(renderer, "_resident_crop_canonical_planes", None)
+        if not memo:
+            return
+        renderer._resident_crop_canonical_planes_released_bytes = canonical_plane_memo_bytes(memo)
+        renderer._resident_crop_canonical_planes_release_reason = str(reason)
+        memo.clear()
+
+    def _expire_canonical_plane_payloads_for_document(self) -> None:
+        """Release the pinned planes when the document/operation identity moves.
+
+        The memo is keyed by tile number alone, so a document reload or an
+        operation edit leaves planes of the RETIRED identity pinned under the
+        live tile numbers.  Correctness never depended on this — the content-key
+        check in ``rebind_resident_crop_tiles`` refuses to re-slice a stale plane
+        — but nothing dropped them either, so a whole edited-away plane set
+        (bounded by ``_CANONICAL_PLANE_MEMO_MAX_BYTES``) stayed resident for the
+        rest of the session.  ``_document_key`` is the same identity the frame
+        currency check uses, and it folds the operation steps, so an operation
+        edit expires the memo exactly like a data reload.
+
+        This runs on the seed path rather than a fresh document-change signal:
+        the seed is consulted on every retarget, so the first render after any
+        change reaches it, and no new notification has to stay in sync.
+        """
+
+        renderer = self.renderer
+        win = getattr(renderer, "win", None)
+        document = getattr(win, "document", None)
+        if document is None:
+            document = getattr(self.session, "document", None)
+        key = None if document is None else _document_key(document)
+        if key == getattr(renderer, "_resident_crop_canonical_planes_document_key", None):
+            return
+        self._release_canonical_plane_payloads("document-changed")
+        renderer._resident_crop_canonical_planes_document_key = key
 
     def prepare_rung(self, intent, step) -> bool:
         tile = self._tile_for_step(step)
