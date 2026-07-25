@@ -3134,7 +3134,28 @@ def _wgpu_native_warm_payload(*, lod_level: int, source_rect):
     )
 
 
-def test_wgpu_native_source_prefetch_stays_in_bounded_two_tile_cohorts():
+def _wgpu_warm_limits_window(*, interactive: bool):
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="wgpu",
+                persistent_tile_residency=True,
+                tile_residency_kind="gpu_atlas",
+                shader_windowing=True,
+            )
+        ),
+        _viewport_interaction_active=bool(interactive),
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=32, byte_cap=32 * 1024 * 1024, budget_ms=8.0
+            )
+        ),
+    )
+    window.win = window
+    return window
+
+
+def test_wgpu_native_source_prefetch_stays_in_bounded_two_tile_cohorts_mid_gesture():
     from arrayscope.window import frame_effects as montage_commit
 
     native = np.zeros((336, 336), dtype=np.float32)
@@ -3145,28 +3166,46 @@ def test_wgpu_native_source_prefetch_stays_in_bounded_two_tile_cohorts():
         pending_payload_upserts={},
         display_tile_payloads=dict.fromkeys(range(50), payload),
     )
-    window = SimpleNamespace(
-        img_view=SimpleNamespace(
-            rendering_capabilities=ImageViewBackendCapabilities(
-                name="wgpu",
-                persistent_tile_residency=True,
-                tile_residency_kind="gpu_atlas",
-                shader_windowing=True,
-            )
-        ),
-        _viewport_interaction_active=False,
-        resource_governor=SimpleNamespace(
-            decide_commit_batch=lambda *, interactive: SimpleNamespace(
-                batch_limit=32, byte_cap=32 * 1024 * 1024, budget_ms=8.0
-            )
-        ),
-    )
-    window.win = window
 
-    limits = montage_commit._persistent_tile_upsert_limits(window, session)
+    limits = montage_commit._persistent_tile_upsert_limits(
+        _wgpu_warm_limits_window(interactive=True), session
+    )
 
     assert limits["max_upserts"] == 2
     assert limits["max_upsert_bytes"] == 3 * 1024 * 1024
+    assert limits["upsert_cost_fn"](payload) == native.nbytes
+
+
+def test_wgpu_idle_plane_warm_keeps_its_backlog_cohort():
+    """A reduced montage is ALL plane warms, so the clamp must not own idle.
+
+    ``wgpu_native_plane_warm_payload`` qualifies on ``lod.level > 0`` alone,
+    which every tile of a zoomed-out montage satisfies.  Clamping idle commits
+    to two upserts on that basis collapsed the ordinary cold fill: 272 tiles
+    became 136 full-montage transactions at ~93 ms each — 15.4 s of GUI
+    callbacks for pixels that were already computed (field trace 2026-07-25).
+    The byte cap keeps bounding hidden warming, because ``upsert_cost_fn``
+    charges each warm payload its whole plane.
+    """
+
+    from arrayscope.window import frame_effects as montage_commit
+
+    native = np.zeros((336, 336), dtype=np.float32)
+    payload = _wgpu_native_warm_payload(lod_level=2, source_rect=(0, 336, 0, 336))
+    session = SimpleNamespace(
+        display_committed=True,
+        dirty_payloads=dict.fromkeys(range(272)),
+        pending_payload_upserts={},
+        display_tile_payloads=dict.fromkeys(range(272), payload),
+    )
+
+    limits = montage_commit._persistent_tile_upsert_limits(
+        _wgpu_warm_limits_window(interactive=False), session
+    )
+
+    assert limits["max_upserts"] == 32
+    assert limits["max_upsert_bytes"] == 32 * 1024 * 1024
+    # Hidden warming stays governed by bytes, not by a blanket item clamp.
     assert limits["upsert_cost_fn"](payload) == native.nbytes
 
 
@@ -3200,25 +3239,10 @@ def test_wgpu_cropped_native_warm_is_costed_as_its_whole_plane():
         pending_payload_upserts={},
         display_tile_payloads=dict.fromkeys(range(50), cropped),
     )
-    window = SimpleNamespace(
-        img_view=SimpleNamespace(
-            rendering_capabilities=ImageViewBackendCapabilities(
-                name="wgpu",
-                persistent_tile_residency=True,
-                tile_residency_kind="gpu_atlas",
-                shader_windowing=True,
-            )
-        ),
-        _viewport_interaction_active=False,
-        resource_governor=SimpleNamespace(
-            decide_commit_batch=lambda *, interactive: SimpleNamespace(
-                batch_limit=32, byte_cap=32 * 1024 * 1024, budget_ms=8.0
-            )
-        ),
-    )
-    window.win = window
 
-    limits = montage_commit._persistent_tile_upsert_limits(window, session)
+    limits = montage_commit._persistent_tile_upsert_limits(
+        _wgpu_warm_limits_window(interactive=True), session
+    )
     assert limits["max_upserts"] == 2
     assert limits["max_upsert_bytes"] == 3 * 1024 * 1024
     assert limits["upsert_cost_fn"](cropped) == native.nbytes

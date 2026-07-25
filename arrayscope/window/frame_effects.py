@@ -5086,11 +5086,21 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
             for payload in dict(getattr(session, "display_tile_payloads", {}) or {}).values()
         )
     )
-    if wgpu_native_prefetch:
-        # One 336² scalar source plane is four 256² page uploads. Keep this
-        # hidden source-page work in the same two-tile cohorts as the atomic
-        # warm owner; the generic idle backlog expansion is tuned for one
-        # reduced texture per tile and otherwise creates 20-40 MiB callbacks.
+    if wgpu_native_prefetch and interactive:
+        # One 336² scalar source plane is four 256² page uploads. During a
+        # gesture, keep this hidden source-page work in the same two-tile
+        # cohorts as the atomic warm owner: a mid-gesture callback that warms
+        # 20-40 MiB delays the next frame's pixels.
+        #
+        # Idle commits keep their backlog cohort. ``upsert_cost_fn`` already
+        # charges a warm payload its WHOLE plane, so the byte cap bounds
+        # hidden warming on its own axis and the item clamp adds nothing to
+        # it — while costing everything the cohort exists to save. Every tile
+        # of a reduced montage is a plane warm (``lod.level > 0`` alone
+        # qualifies), so an ungated clamp collapsed the ordinary cold fill to
+        # two tiles per commit: 272 tiles became 136 full-montage
+        # transactions at ~93 ms each, 15.4 s of GUI callbacks for a montage
+        # whose pixels were already computed (field trace 2026-07-25).
         batch_limit = min(2, max(1, int(batch_limit)))
         byte_cap = min(int(byte_cap), 3 * 1024 * 1024)
     limits: dict[str, object] = {
