@@ -25,6 +25,7 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.tools.framebuffer_reference import assert_wgpu_frame_matches_cpu_reference
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from arrayscope.window.frame_effects import canonical_plane_memo_bytes
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
@@ -352,6 +353,98 @@ def test_single_slice_rebind_carries_the_new_window_semantics(qtbot):
         restore_default_backend(settings)
 
 
+def _hover_text(win, view_x: float, view_y: float) -> str:
+    """Hover the real pointer entry point and return the readout label."""
+
+    scene_pos = win.img_view.getView().mapViewToScene(
+        QtCore.QPointF(float(view_x) + 0.25, float(view_y) + 0.25)
+    )
+    win.getPixel(scene_pos)
+    return str(win.widgets["labels"]["pixelValue"].text())
+
+
+def test_single_slice_rebind_hover_reads_the_new_window_value(qtbot):
+    """Hovering a rebound tile reports its value, not "tile loading...".
+
+    A rebind presents pixels with no evaluation, so the slot has no
+    ``RenderedTile``.  ``mark_presented`` used that as its only admission test
+    and dropped the tile, leaving the session's tile-state mirror at UNLOADED
+    while the lifecycle already held the tile as presented — so
+    ``view_point_to_array_index``'s ``require_loaded`` gate refused every hover
+    over a tile that was drawn, current, and carrying the new window's own
+    re-sliced CPU planes.  Scrubbing with the capability on therefore blanked
+    the readout for the whole scrub.
+
+    The value is checked against a full evaluation of the SAME window (the
+    capability toggled off mid-test), which is the only comparison that proves
+    the rebound plane is read with the right window-LOCAL coordinates: an
+    off-by-the-shift read would still produce a plausible number.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    data = _uniform_source()
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
+    win.resize(780, 760)
+    try:
+        win.show()
+        _single_slice_fill_full_plane_then_crop(win, 94)
+        slice_index = int(win.view_state.slice_indices[2])
+        hover_x, hover_y = 37, 61
+
+        # Baseline: this window WAS fully evaluated, and hover reads it.
+        evaluated_94 = _hover_text(win, hover_x, hover_y)
+        assert "loading" not in evaluated_94.lower()
+        np.testing.assert_allclose(
+            win.renderer._hover_value_from_display(
+                win.renderer.display_geometry.context_for_view_point(
+                    hover_x + 0.25, hover_y + 0.25
+                ).mapping
+            ),
+            data[94 + hover_y, 66 + hover_x, slice_index],
+            atol=1e-6,
+        )
+
+        before = _preparation_completed(win)
+        win._on_slice_text_changed(0, "96:296")
+        _busy_pump_until(
+            lambda: _crop_settled(win, 96),
+            INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
+            "hover scrub 96",
+        )
+        assert _preparation_completed(win) - before == 0, (
+            "window 96 was evaluated, so it does not exercise the rebind"
+        )
+        rebound_96 = _hover_text(win, hover_x, hover_y)
+        assert "loading" not in rebound_96.lower(), (
+            f"a rebound tile must answer hover, got {rebound_96!r}"
+        )
+
+        # The same window, produced the ordinary way: toggling the capability
+        # off makes the next scrub evaluate, so the readout below is the
+        # evaluated truth for exactly the window the rebind served.
+        win._set_resident_crop_rebind_enabled(False)
+        for start in (98, 96):
+            before = _preparation_completed(win)
+            win._on_slice_text_changed(0, f"{start}:{start + 200}")
+            _busy_pump_until(
+                lambda start=start: _crop_settled(win, start),
+                INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
+                f"evaluated scrub {start}",
+            )
+        assert _preparation_completed(win) - before > 0, (
+            "the capability is off, so the return to window 96 must evaluate"
+        )
+        evaluated_96 = _hover_text(win, hover_x, hover_y)
+        assert rebound_96 == evaluated_96, (
+            "the rebound readout must equal the evaluated readout for the same window"
+        )
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
 def test_single_slice_cold_crop_scrub_falls_back_to_evaluation(qtbot):
     """A non-resident single-slice crop window keeps the ordinary evaluation."""
 
@@ -508,6 +601,31 @@ def _exact_crop_settled(win, start: int) -> bool:
     return frame_session_settled(win)
 
 
+def _fill_exact_montage_then_crop(win, start: int) -> None:
+    # The whole plane must be presented once: it is what makes the canonical
+    # pages physically resident AND what the memo re-slices from.
+    full = win.view_state.with_montage_axis(2, columns=10, indices=_EXACT_TILE_INDICES, text="0:50")
+    win._set_view_state(full)
+    win.update_image_view()
+    _busy_pump_until(
+        lambda: frame_session_settled(win),
+        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+        "full-plane fill",
+    )
+    win._apply_slice_state(
+        0,
+        _exact_cropped_state(win, start),
+        reason="slice-range",
+        interactive=True,
+        immediate_axis_only=False,
+    )
+    _busy_pump_until(
+        lambda: _exact_crop_settled(win, start),
+        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+        "cropped fill",
+    )
+
+
 def test_exact_montage_crop_scrub_rebinds_every_visible_tile(qtbot):
     """A 50-tile exact montage rebinds ALL its tiles, not the first four.
 
@@ -527,30 +645,7 @@ def test_exact_montage_crop_scrub_rebinds_every_visible_tile(qtbot):
     win.resize(790, 780)
     try:
         win.show()
-        # The whole plane must be presented once: it is what makes the canonical
-        # pages physically resident AND what the memo re-slices from.
-        full = win.view_state.with_montage_axis(
-            2, columns=10, indices=_EXACT_TILE_INDICES, text="0:50"
-        )
-        win._set_view_state(full)
-        win.update_image_view()
-        _busy_pump_until(
-            lambda: frame_session_settled(win),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "full-plane fill",
-        )
-        win._apply_slice_state(
-            0,
-            _exact_cropped_state(win, 10),
-            reason="slice-range",
-            interactive=True,
-            immediate_axis_only=False,
-        )
-        _busy_pump_until(
-            lambda: _exact_crop_settled(win, 10),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "cropped fill",
-        )
+        _fill_exact_montage_then_crop(win, 10)
         assert len(getattr(win.renderer, "_resident_crop_canonical_planes", {})) == len(
             _EXACT_TILE_INDICES
         ), "every exact tile's whole plane must be memoized, not an arbitrary prefix"
@@ -570,6 +665,117 @@ def test_exact_montage_crop_scrub_rebinds_every_visible_tile(qtbot):
 
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
         assert_wgpu_frame_matches_cpu_reference(win)
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def _pinned_canonical_planes(win) -> tuple[int, int]:
+    memo = getattr(win.renderer, "_resident_crop_canonical_planes", None) or {}
+    return len(memo), canonical_plane_memo_bytes(memo)
+
+
+def test_document_change_releases_the_pinned_canonical_planes(qtbot):
+    """A new document generation unpins the memoized whole planes.
+
+    The memo keeps STRONG references (a weak one would die the moment the crop
+    replaces the whole-plane payload, which is exactly when the scrub needs it)
+    and is keyed by tile number alone, so nothing about a document change made
+    the retired planes go away.  Correctness never depended on it — the
+    content-key check refuses to re-slice a stale plane — but up to the whole
+    memo budget stayed resident for the rest of the session.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    win = make_backend_window(qtbot, _exact_source(), backend="wgpu", require_gpu_atlas=True)
+    win.resize(790, 780)
+    try:
+        win.show()
+        _fill_exact_montage_then_crop(win, 10)
+        entries, pinned_bytes = _pinned_canonical_planes(win)
+        assert entries == len(_EXACT_TILE_INDICES)
+        assert pinned_bytes > 0
+
+        win.notify_data_changed()
+        _busy_pump_until(
+            lambda: frame_session_settled(win),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+            "settle after document change",
+        )
+        assert _pinned_canonical_planes(win) == (0, 0), (
+            "planes of the retired document generation stayed pinned"
+        )
+        assert win.renderer._resident_crop_canonical_planes_release_reason == "document-changed"
+        assert win.renderer._resident_crop_canonical_planes_released_bytes == pinned_bytes
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_operation_change_releases_the_pinned_canonical_planes(qtbot):
+    """An operation edit retires the pinned planes as surely as a data reload.
+
+    ``_document_key`` folds the operation steps, so the memo's identity stamp
+    moves when the pipeline is edited — the pinned planes describe pixels the
+    document no longer produces.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    win = make_backend_window(qtbot, _exact_source(), backend="wgpu", require_gpu_atlas=True)
+    win.resize(790, 780)
+    try:
+        win.show()
+        _fill_exact_montage_then_crop(win, 10)
+        entries, pinned_bytes = _pinned_canonical_planes(win)
+        assert entries == len(_EXACT_TILE_INDICES)
+        assert pinned_bytes > 0
+
+        win.request_operation("centered_fft", 2)
+        _busy_pump_until(
+            lambda: frame_session_settled(win),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 6 / 1000.0,
+            "settle after operation change",
+        )
+        assert _pinned_canonical_planes(win) == (0, 0), (
+            "planes of the pre-edit operation chain stayed pinned"
+        )
+        assert win.renderer._resident_crop_canonical_planes_released_bytes == pinned_bytes
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_disabling_the_capability_releases_the_pinned_canonical_planes(qtbot):
+    """Turning the toggle off hands the pinned memory back.
+
+    The memo exists only to serve rebinds; with the capability off it can never
+    be read again, so the menu toggle is also how a user reclaims the bytes it
+    holds.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    win = make_backend_window(qtbot, _exact_source(), backend="wgpu", require_gpu_atlas=True)
+    win.resize(790, 780)
+    try:
+        win.show()
+        _fill_exact_montage_then_crop(win, 10)
+        assert _pinned_canonical_planes(win)[0] == len(_EXACT_TILE_INDICES)
+
+        win._set_resident_crop_rebind_enabled(False)
+        win._on_slice_text_changed(0, "11:51")
+        _busy_pump_until(
+            lambda: _exact_crop_settled(win, 11),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
+            "scrub with the capability off",
+        )
+        assert _pinned_canonical_planes(win) == (0, 0)
+        assert win.renderer._resident_crop_canonical_planes_release_reason == "capability-disabled"
     finally:
         win.close()
         restore_default_backend(settings)
