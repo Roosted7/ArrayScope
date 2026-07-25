@@ -752,6 +752,12 @@ class FrameSession:
     tile_state_revision: int = 0
     priority_focus: tuple[float, float] | None = None
     priority_retargeted_tiles: int = 0
+    # Last ``rebind_resident_crop_tiles`` outcome: ``{"rebound": n, "considered":
+    # n, <decline reason>: n}``.  The rebind is a silent short-circuit, so
+    # without this the only field-visible signal is the producer count it did
+    # NOT avoid; a decline reason distinguishes "never called" from "called and
+    # declined per tile" without a debugger.
+    resident_crop_rebind_stats: dict[str, int] = field(default_factory=dict)
     # First presented tile numbers in presentation order (capped): makes
     # priority-order violations observable in diagnostics logs.
     presented_order: list[int] = field(default_factory=list)
@@ -2291,18 +2297,29 @@ class FrameSession:
         the missing exact/finer rung.
         """
 
+        stats: dict[str, int] = {"considered": 0, "rebound": 0}
+        self.resident_crop_rebind_stats = stats
+
+        def decline(reason: str) -> None:
+            stats[reason] = stats.get(reason, 0) + 1
+
         if not callable(physical_resident_fn):
+            decline("no_residency_seam")
             return ()
         plan_tiles = {
             int(tile.montage_index): tile
             for tile in tuple(getattr(getattr(self, "plan", None), "tiles", ()) or ())
         }
         if not plan_tiles:
+            decline("no_plan_tiles")
             return ()
         previous_by_tile = dict(previous_by_tile or {})
         canonical_by_tile = dict(canonical_by_tile or {})
+        stats["previous_by_tile"] = len(previous_by_tile)
+        stats["canonical_by_tile"] = len(canonical_by_tile)
         rebound: list[int] = []
         for raw_number in tuple(tile_numbers or ()):
+            stats["considered"] += 1
             tile_number = int(raw_number)
             # Prefer the last committed wrapper (the predecessor window): a new
             # session's ``display_tile_payloads`` is empty at plan time, and a
@@ -2312,16 +2329,19 @@ class FrameSession:
             if previous is None or getattr(previous, "source_anchor", None) is None:
                 previous = self.display_tile_payloads.get(tile_number)
             if previous is None or getattr(previous, "source_anchor", None) is None:
+                decline("no_anchored_predecessor")
                 continue
             # The predecessor wrapper is the reuse source; the plan tile carries
             # this tile's CURRENT-window view state (the native tile cache is
             # cleared by the window change, so it cannot be the identity source).
             base_tile = plan_tiles.get(tile_number)
             if base_tile is None:
+                decline("tile_not_planned")
                 continue
             # A crop-window shift keeps the tile's immutable source index; a
             # montage retarget or slice change that moves it is not our case.
             if int(previous.source_index) != int(base_tile.source_index):
+                decline("source_index_moved")
                 continue
             identity_tile = self._identity_tile_for(base_tile)
             previous_lod = getattr(previous, "lod", None)
@@ -2335,17 +2355,21 @@ class FrameSession:
                 source_index=int(identity_tile.source_index),
             )
             if new_anchor is None:
+                decline("no_new_anchor")
                 continue
             # The content key is the whole pixel-affecting identity minus the
             # window.  Equal keys prove this is a pure window shift; the plane
             # shape must also match so the resident pages address the same grid.
             if new_anchor.content_key != previous.source_anchor.content_key:
+                decline("content_key_changed")
                 continue
             if new_anchor.plane_shape != previous.source_anchor.plane_shape:
+                decline("plane_shape_changed")
                 continue
             if new_anchor == previous.source_anchor:
                 # Nothing shifted (or this tile is already rebound to the new
                 # window): leave the existing state untouched.
+                decline("window_unchanged")
                 continue
             # Exact CPU planes are window-local; a rebind must re-slice them
             # for the new window or decline (see _rebind_reslice_planes).
@@ -2353,9 +2377,11 @@ class FrameSession:
             if canonical is not None and canonical.source_anchor.content_key != (
                 new_anchor.content_key
             ):
+                decline("canonical_content_key_changed")
                 canonical = None
             planes = self._rebind_reslice_planes(previous, new_anchor, canonical)
             if planes is None:
+                decline("no_reslicable_plane")
                 continue
             texture_data = planes.get("texture_data", previous.texture_data)
             new_identity = self.tile_payload_identity(
@@ -2379,6 +2405,7 @@ class FrameSession:
             # cold binds crop-local and reports False, so it falls through to a
             # normal evaluation that produces the missing pixels.
             if not bool(physical_resident_fn(candidate)):
+                decline("pages_not_resident")
                 continue
             self.display_tile_payloads[tile_number] = candidate
             self.record_tile_payload(candidate)
@@ -2387,6 +2414,7 @@ class FrameSession:
             self.dirty_payloads[tile_number] = None
             self.lifecycle.remember_presentable(tile_number, candidate)
             rebound.append(tile_number)
+            stats["rebound"] += 1
         if rebound:
             self.invalidate_tile_states()
         return tuple(rebound)

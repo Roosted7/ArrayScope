@@ -498,24 +498,75 @@ class FramePipelineEffects:
         """
 
         if not self._resident_crop_rebind_enabled():
+            self._record_resident_crop_rebind(gate="disabled")
             return
         win = getattr(self.renderer, "win", None)
         img_view = getattr(win, "img_view", None)
         resident_fn = getattr(img_view, "tiledPayloadResident", None)
         if not callable(resident_fn):
+            self._record_resident_crop_rebind(gate="no-residency-seam")
             return
         tile_numbers = tuple(getattr(scope, "visible_tile_numbers", ()) or ())
         if not tile_numbers:
+            self._record_resident_crop_rebind(gate="no-visible-tiles")
             return
         # The last committed frame is the pre-scrub (predecessor-window) truth:
         # a new session's live payload map is empty at plan time, so the
         # committed wrappers are what a resident rebind clones from.
         previous_by_tile = previous_tiled_payloads(getattr(win, "_committed_display_frame", None))
-        self.session.rebind_resident_crop_tiles(
+        rebound = self.session.rebind_resident_crop_tiles(
             physical_resident_fn=resident_fn,
             tile_numbers=tile_numbers,
             previous_by_tile=previous_by_tile,
             canonical_by_tile=self._remember_canonical_plane_payloads(previous_by_tile),
+        )
+        self._record_resident_crop_rebind(
+            gate="attempted",
+            tile_numbers=len(tile_numbers),
+            rebound=len(rebound),
+            stats=dict(getattr(self.session, "resident_crop_rebind_stats", None) or {}),
+        )
+
+    def _record_resident_crop_rebind(
+        self,
+        *,
+        gate: str,
+        tile_numbers: int = 0,
+        rebound: int = 0,
+        stats: dict[str, int] | None = None,
+    ) -> None:
+        """Publish one seed outcome to the trace stream and the field counters.
+
+        The rebind either happens or silently does not; a field session can only
+        observe the producers it failed to avoid.  Recording the gate verdict and
+        the per-tile decline histogram here means the next diagnostics JSONL
+        answers "was it called, and why did it decline?" directly.  Counters live
+        on the renderer, not the session, because a crop scrub retires sessions
+        continuously and per-session totals would reset before anyone read them.
+        """
+
+        stats = dict(stats or {})
+        renderer = self.renderer
+        totals = getattr(renderer, "resident_crop_rebind_totals", None)
+        if totals is None:
+            totals = {}
+            renderer.resident_crop_rebind_totals = totals
+        totals[f"gate:{gate}"] = int(totals.get(f"gate:{gate}", 0)) + 1
+        for key, value in stats.items():
+            totals[key] = int(totals.get(key, 0)) + int(value)
+        previous_gate = getattr(renderer, "resident_crop_rebind_last_gate", None)
+        renderer.resident_crop_rebind_last_gate = str(gate)
+        if gate != "attempted" and previous_gate == gate:
+            # A refused gate repeats on every retarget of every session; one
+            # event per transition is enough to prove which gate is closed.
+            return
+        emit_trace(
+            "resident_crop_rebind",
+            gate=gate,
+            session=int(getattr(self.session, "session_id", 0) or 0),
+            tile_numbers=int(tile_numbers),
+            rebound=int(rebound),
+            **{f"stat_{key}": int(value) for key, value in stats.items()},
         )
 
     # A montage whose tiles carried exact semantics would otherwise pin one

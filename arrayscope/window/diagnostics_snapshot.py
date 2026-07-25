@@ -309,6 +309,12 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         priority_retargeted_tiles=0
         if session is None
         else int(getattr(session, "priority_retargeted_tiles", 0) or 0),
+        resident_crop_rebind_last_gate=str(
+            getattr(window.renderer, "resident_crop_rebind_last_gate", "") or ""
+        ),
+        resident_crop_rebind_totals=dict(
+            getattr(window.renderer, "resident_crop_rebind_totals", None) or {}
+        ),
         lifecycle_parked=0 if session is None else len(session.lifecycle.parked_tiles),
         lifecycle_evaluating=0 if session is None else len(session.lifecycle.evaluating_tiles),
         lifecycle_dangling_claims=0

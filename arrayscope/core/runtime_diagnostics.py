@@ -170,6 +170,11 @@ class MontageRuntimeDiagnostics:
     retained_stage_decision: str = ""
     repeated_expensive_stage_per_tile: bool = False
     priority_retargeted_tiles: int = 0
+    # Resident crop-window rebind (opt-in ``resident_crop_rebind``). The gate
+    # verdict of the last seed plus cumulative per-tile decline reasons, so a
+    # field JSONL distinguishes "never called" from "called and declined".
+    resident_crop_rebind_last_gate: str = ""
+    resident_crop_rebind_totals: dict[str, int] = field(default_factory=dict)
     presented_order_sample: tuple[int, ...] = ()
     # ADR 0051: single-owner tile lifecycle machine.
     lifecycle_parked: int = 0
