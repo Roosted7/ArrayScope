@@ -47,6 +47,7 @@ These are **not archive**: queue steps and tests cite them.
 | [wgpu-field-stalls-2026-07-18.md](wgpu-field-stalls-2026-07-18.md) | wgpu field stalls 259-1/1-1: physical first-pass quality drift (fixed `43287f8`) |
 | [demand-freshness-cold-fill-2026-07-19.md](demand-freshness-cold-fill-2026-07-19.md) | AUTO-camera demand-freshness cold_fill red: ViewportBridge dropped entry camera intent (live path fixed `6fd0c262`; unit-gate fixture still open) |
 | [wgpu-frame-pacing-2026-07-21.md](wgpu-frame-pacing-2026-07-21.md) | wgpu screen frame pacing: cadence instrumentation landed (`c67a4730`), and the phase-locked-pacer premise **measured and refuted** — schedule slip (12–18 ms p50) is as large as the whole refresh period, so the limit is event-loop occupancy, not phase |
+| [index-window-retarget-cost-2026-07-25.md](index-window-retarget-cost-2026-07-25.md) | Montage index-window remap cost: the delta premise **measured and refuted** (a +1 step leaves 0 of 100 slots unchanged), two per-tile redundancies removed for ≈ −25%, and the remaining slices characterised |
 
 **Dossier convention:** a dossier is created when a field defect or design
 slice needs evidence that outlives one commit. It records symptom → trace
