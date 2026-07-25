@@ -48,6 +48,7 @@ These are **not archive**: queue steps and tests cite them.
 | [demand-freshness-cold-fill-2026-07-19.md](demand-freshness-cold-fill-2026-07-19.md) | AUTO-camera demand-freshness cold_fill red: ViewportBridge dropped entry camera intent (live path fixed `6fd0c262`; unit-gate fixture still open) |
 | [wgpu-frame-pacing-2026-07-21.md](wgpu-frame-pacing-2026-07-21.md) | wgpu screen frame pacing: cadence instrumentation landed (`c67a4730`), and the phase-locked-pacer premise **measured and refuted** — schedule slip (12–18 ms p50) is as large as the whole refresh period, so the limit is event-loop occupancy, not phase |
 | [index-window-retarget-cost-2026-07-25.md](index-window-retarget-cost-2026-07-25.md) | Montage index-window remap cost: the delta premise **measured and refuted** (a +1 step leaves 0 of 100 slots unchanged), two per-tile redundancies removed for ≈ −25%, and the remaining slices characterised |
+| [montage-cold-fill-cohort-2026-07-25.md](montage-cold-fill-cohort-2026-07-25.md) | 272-tile wgpu cold fill took 15.4 s with no worker active: the plane-warm clamp collapsed every idle commit to two upserts (**15.4 s → 4.05 s**), plus the per-revision resolver rebuild, and three refuted cost hypotheses |
 
 **Dossier convention:** a dossier is created when a field defect or design
 slice needs evidence that outlives one commit. It records symptom → trace

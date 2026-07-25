@@ -312,6 +312,17 @@ COMPUTE GOES, never about what may be shown:
    pacing comes only from the ordinary bounded-batch commit caps.
    (A commit-side refinement-withholding gate was built 2026-07-17 and
    rejected 2026-07-18 — see the graveyard.)
+   Those caps have two axes and they are not interchangeable. **Bytes**
+   bound what one callback uploads, and `upsert_cost_fn` is what makes them
+   honest — a wgpu payload that hides a whole-plane warm behind a small
+   reduced texture is charged its plane. **Items** bound nothing physical;
+   they exist to keep a *gesture* responsive, because a tiled transaction's
+   cost is fixed-dominated. So an item clamp on an idle drain multiplies
+   that fixed cost across the backlog instead of shortening any callback:
+   clamping idle plane-warm commits to two upserts turned a 272-tile cold
+   fill into 143 whole-montage transactions and 13.4 s of GUI callbacks
+   ([dossier](../redesign/montage-cold-fill-cohort-2026-07-25.md)). Cap
+   idle commits by bytes; reserve item clamps for the interactive arm.
 3. **Every unit of work obeys the priority system** — inside phase 1 and
    inside phase 2 alike, ordering is the canonical tile priority
    (viewport distance from the CURRENT camera), re-targeted on every view
