@@ -31,6 +31,7 @@ readback/mapping paths honest offscreen without constituting acceptance.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 
 import numpy as np
@@ -72,6 +73,34 @@ DEFAULT_EDGE_INSET_PX = 2.0
 QT_RASTER_TOLERANCE = 2
 QT_RASTER_MAX_MISMATCH_FRACTION = 0.0
 
+# Slack (frame pixels) added around an overlay's geometric footprint before
+# its pixels are withheld from the image comparison.  Covers antialiasing,
+# the half-pixel between a quad edge and the pixel centers it tints, and Qt's
+# cosmetic-pen rounding.  Deliberately small: the mask is built from where an
+# overlay is *supposed* to be, so a stroke drawn in the wrong place stays
+# inside the compared population and still fails the oracle.
+OVERLAY_COVERAGE_MARGIN_PX = 2.0
+# Per-channel distance at which a frame pixel counts as "this ROI's colour".
+# The montage image is greyscale, so no image pixel can come within this of a
+# saturated palette entry, and the palette's own entries stay far apart.
+ROI_COLOR_MATCH_TOLERANCE = 40
+# Minimum max-minus-min channel spread for a pixel to be a candidate ROI
+# stroke.  The palette's least saturated entry spreads 110, and a match may
+# shift each channel by the tolerance in opposite directions, so anything a
+# ROI could have painted still clears this; greyscale image pixels spread 0.
+ROI_COLOR_MIN_CHROMA = 24
+# A ROI whose on-target outline is at least this long (frame pixels) must
+# show its colour somewhere inside its own band; shorter slivers may be
+# swallowed whole by antialiasing against a bright tile.
+ROI_PLACEMENT_MIN_VISIBLE_LENGTH_PX = 12.0
+# Above this share of chromatic un-masked pixels the frame's own image is
+# coloured (a phase/colour LUT), a palette colour no longer identifies an
+# overlay, and the stray half of the placement check stops being evidence.
+# Set far above any misplacement: a whole ROI outline drawn in the wrong place
+# is a fraction of a percent of a frame, while a colour LUT tints nearly all of
+# it -- so the guard cannot swallow the fault it exists beside.
+ROI_PLACEMENT_MAX_CHROMATIC_FRACTION = 0.25
+
 
 @dataclass(frozen=True)
 class TileComparison:
@@ -81,6 +110,7 @@ class TileComparison:
     worst_diff: int
     mean_diff: float
     detail: str = ""
+    overlay_excluded: int = 0
 
     @property
     def mismatch_fraction(self) -> float:
@@ -94,6 +124,11 @@ class FrameReferenceReport:
     tolerance: int
     max_mismatch_fraction: float
     min_samples_per_tile: int
+    overlay_excluded_samples: int = 0
+    #: Placement verdict for the same captured frame -- the presence half of
+    #: the overlay contract, computed from the capture this report compared so
+    #: the two verdicts can never describe different frames.
+    roi_placement: RoiPlacementReport | None = None
 
     @property
     def total_samples(self) -> int:
@@ -405,6 +440,366 @@ def _view_to_viewport_affine(img_view) -> tuple[np.ndarray, np.ndarray]:
     return matrix, origin
 
 
+# --- Overlay coverage -------------------------------------------------------
+# A presented frame is image pixels *plus* everything drawn over them: ROI
+# outlines and handles, the profile marker, montage lifecycle boxes, tile-truth
+# glyphs, and (on the WGPU screen path) the rasterized floating Qt chips.  The
+# CPU reference models semantic image values only, so those pixels are not the
+# oracle's to compare -- but they are also not the oracle's to ignore blindly.
+#
+# The mask below is built from where each overlay's own geometry says it
+# belongs, projected through the same camera the tiles use.  Two properties
+# follow, and both are load-bearing:
+#
+#   * an overlay drawn where it belongs is withheld from the image comparison,
+#     so a stroke crossing a tile is no longer read as a stale texel;
+#   * an overlay drawn anywhere else lands OUTSIDE the mask, stays in the
+#     compared population, and still fails the oracle.
+#
+# ``roi_placement_report`` adds the other half -- that each ROI's colour is
+# actually present inside its own band -- so a silently undrawn overlay cannot
+# pass by leaving a hole that nothing looks at.
+
+
+@dataclass(frozen=True)
+class RoiPlacementComparison:
+    roi_id: str
+    color: tuple[int, int, int]
+    visible_length_px: float
+    band_pixels: int
+    matched_in_band: int
+    stray_pixels: int
+    stray_extent: tuple[int, int, int, int] | None = None
+    #: False when the frame's own image pixels are chromatic enough that a
+    #: palette colour cannot be told from image content.  The stray half of
+    #: the check is then not evidence and is not counted; the presence half
+    #: still is.  Reported so a skipped half is never silently a pass.
+    stray_checked: bool = True
+
+    @property
+    def passed(self) -> bool:
+        if self.stray_checked and self.stray_pixels:
+            return False
+        if self.visible_length_px < ROI_PLACEMENT_MIN_VISIBLE_LENGTH_PX:
+            return True
+        return self.matched_in_band > 0
+
+
+@dataclass(frozen=True)
+class RoiPlacementReport:
+    rois: tuple[RoiPlacementComparison, ...]
+    frame_shape: tuple[int, int]
+
+    def failures(self) -> tuple[RoiPlacementComparison, ...]:
+        return tuple(roi for roi in self.rois if not roi.passed)
+
+
+def _add_segment(mask: np.ndarray, p0, p1, radius: float) -> None:
+    """OR every pixel within ``radius`` of the ``p0``-``p1`` segment into ``mask``.
+
+    Accumulating in place, over the segment's own bounding box only, keeps the
+    whole coverage build off the GUI thread's critical path: a per-primitive
+    full-frame temporary cost ~34 ms per checkpoint and tripped the profile
+    harness's own 50 ms callback budget.
+    """
+
+    height, width = mask.shape
+    x0, y0 = float(p0[0]), float(p0[1])
+    x1, y1 = float(p1[0]), float(p1[1])
+    radius = max(0.5, float(radius))
+    lo_x = max(0, int(np.floor(min(x0, x1) - radius)))
+    hi_x = min(width - 1, int(np.ceil(max(x0, x1) + radius)))
+    lo_y = max(0, int(np.floor(min(y0, y1) - radius)))
+    hi_y = min(height - 1, int(np.ceil(max(y0, y1) + radius)))
+    if hi_x < lo_x or hi_y < lo_y:
+        return
+    xs = np.arange(lo_x, hi_x + 1, dtype=np.float64)[None, :] + 0.5
+    ys = np.arange(lo_y, hi_y + 1, dtype=np.float64)[:, None] + 0.5
+    dx, dy = x1 - x0, y1 - y0
+    length_sq = dx * dx + dy * dy
+    if length_sq < 1e-12:
+        distance_sq = (xs - x0) ** 2 + (ys - y0) ** 2
+    else:
+        t = np.clip(((xs - x0) * dx + (ys - y0) * dy) / length_sq, 0.0, 1.0)
+        distance_sq = (xs - (x0 + t * dx)) ** 2 + (ys - (y0 + t * dy)) ** 2
+    mask[lo_y : hi_y + 1, lo_x : hi_x + 1] |= distance_sq <= radius * radius
+
+
+def _add_rect(mask: np.ndarray, x0: float, y0: float, x1: float, y1: float, margin: float) -> None:
+    """OR an axis-aligned rect grown by ``margin`` into ``mask``."""
+
+    height, width = mask.shape
+    lo_x = max(0, int(np.floor(min(x0, x1) - margin)))
+    hi_x = min(width - 1, int(np.ceil(max(x0, x1) + margin)))
+    lo_y = max(0, int(np.floor(min(y0, y1) - margin)))
+    hi_y = min(height - 1, int(np.ceil(max(y0, y1) + margin)))
+    if hi_x < lo_x or hi_y < lo_y:
+        return
+    mask[lo_y : hi_y + 1, lo_x : hi_x + 1] = True
+
+
+def _polyline_coverage(shape, points, radius: float) -> np.ndarray:
+    mask = np.zeros((int(shape[0]), int(shape[1])), dtype=bool)
+    for start, end in itertools.pairwise(points):
+        _add_segment(mask, start, end, radius)
+    return mask
+
+
+def _polyline_bounds(shape, points, radius: float) -> tuple[int, int, int, int] | None:
+    """Clipped ``(lo_x, lo_y, hi_x, hi_y)`` covering a dilated polyline."""
+
+    height, width = int(shape[0]), int(shape[1])
+    xs = [float(point[0]) for point in points]
+    ys = [float(point[1]) for point in points]
+    if not xs:
+        return None
+    lo_x = max(0, int(np.floor(min(xs) - radius)))
+    hi_x = min(width - 1, int(np.ceil(max(xs) + radius)))
+    lo_y = max(0, int(np.floor(min(ys) - radius)))
+    hi_y = min(height - 1, int(np.ceil(max(ys) + radius)))
+    if hi_x < lo_x or hi_y < lo_y:
+        return None
+    return (lo_x, lo_y, hi_x, hi_y)
+
+
+def _visible_polyline_length(shape, points) -> float:
+    """Total polyline length (frame px) clipped to the frame rectangle."""
+
+    height, width = float(shape[0]), float(shape[1])
+    total = 0.0
+    for start, end in itertools.pairwise(points):
+        x0, y0 = float(start[0]), float(start[1])
+        x1, y1 = float(end[0]), float(end[1])
+        # Cheap conservative clip: sample the segment and count the fraction
+        # of it that lies on-frame.  Exact Liang-Barsky is unnecessary here --
+        # this number only decides whether a ROI is long enough to demand
+        # visible evidence of itself.
+        steps = 64
+        ts = np.linspace(0.0, 1.0, steps)
+        xs = x0 + ts * (x1 - x0)
+        ys = y0 + ts * (y1 - y0)
+        on_frame = (xs >= 0.0) & (xs <= width) & (ys >= 0.0) & (ys <= height)
+        total += float(np.hypot(x1 - x0, y1 - y0) * on_frame.mean())
+    return total
+
+
+def _wgpu_world_projector(camera, frame_h: int, frame_w: int):
+    """Return ``project(world_xy) -> frame_xy`` for the WGPU camera."""
+
+    x0, y0, x1, y1 = (float(value) for value in camera.world_rect)
+    span_x, span_y = x1 - x0, y1 - y0
+
+    def project(point) -> tuple[float, float]:
+        fraction_x = (float(point[0]) - x0) / span_x
+        if camera.x_inverted:
+            fraction_x = 1.0 - fraction_x
+        fraction_y = (float(point[1]) - y0) / span_y
+        if not camera.y_inverted:
+            fraction_y = 1.0 - fraction_y
+        return (fraction_x * frame_w, fraction_y * frame_h)
+
+    return project
+
+
+def _wgpu_overlay_coverage(img_view, *, frame_shape, camera) -> np.ndarray:
+    """Mask of every non-image primitive this frame drew.
+
+    Mirrors ``_OVERLAY_WGSL``'s vertex expansion: ``line`` widths are a
+    half-extent in target pixels, ``handle_quad`` is a ``width``-sided square
+    centred on its world point, screen-anchored kinds offset from a projected
+    anchor in y-down pixels, and ``widget_quad`` ignores the camera entirely.
+
+    Reads ``_wgpu_overlay_geometry`` -- the tuple last handed to the executor,
+    which the oracle's own submit folds into the frame it reads back -- rather
+    than rebuilding the list.  That is the geometry the target actually
+    contains, and it costs nothing.  Independence is not lost by reading the
+    backend here: the ROI *placement* half projects ``win.roi_store`` instead,
+    so an outline published in the wrong place still has an oracle above it.
+    """
+
+    frame_h, frame_w = int(frame_shape[0]), int(frame_shape[1])
+    project = _wgpu_world_projector(camera, frame_h, frame_w)
+    margin = OVERLAY_COVERAGE_MARGIN_PX
+    mask = np.zeros((frame_h, frame_w), dtype=bool)
+    for primitive in tuple(img_view._wgpu_overlay_geometry or ()):
+        anchor = getattr(primitive, "visibility_anchor", None)
+        if anchor is not None:
+            anchor_x, anchor_y = project(anchor)
+            if not (0.0 <= anchor_x <= frame_w and 0.0 <= anchor_y <= frame_h):
+                # The shader flings anchor-hidden geometry off-clip, so it
+                # tints nothing and must not be withheld from the comparison.
+                continue
+        kind = str(primitive.kind)
+        width = float(primitive.width)
+        if kind == "line":
+            _add_segment(mask, project(primitive.p0), project(primitive.p1), width + margin)
+        elif kind == "world_rect":
+            (rx0, ry0), (rx1, ry1) = project(primitive.p0), project(primitive.p1)
+            _add_rect(mask, rx0, ry0, rx1, ry1, margin)
+        elif kind == "handle_quad":
+            cx, cy = project(primitive.p0)
+            half = width / 2.0
+            _add_rect(mask, cx - half, cy - half, cx + half, cy + half, margin)
+        elif kind == "widget_quad":
+            ox, oy = (float(value) for value in primitive.screen_offset)
+            sx, sy = (float(value) for value in primitive.size)
+            _add_rect(mask, ox, oy, ox + sx, oy + sy, margin)
+        elif kind in ("screen_rect", "glyph_quad"):
+            ax, ay = project(primitive.p0)
+            ox, oy = (float(value) for value in primitive.screen_offset)
+            sx, sy = (float(value) for value in primitive.size)
+            _add_rect(mask, ax + ox, ay + oy, ax + ox + sx, ay + oy + sy, margin)
+        else:
+            raise AssertionError(f"overlay coverage does not model primitive kind {kind!r}")
+    return mask
+
+
+def _qt_overlay_coverage(win, *, frame_shape, project, scale: float) -> np.ndarray:
+    """Mask of the Qt-raster viewport's ROI and profile-marker strokes.
+
+    PyQtGraph draws these as QGraphics items rather than as a published
+    primitive list, so the footprint is derived from the same semantic ROI
+    geometry and the same ``_roi_visual_style`` width the items were pen'd
+    with -- one owner, read twice, never a second geometry.
+    """
+
+    from arrayscope.display.overlay_geometry import roi_outline_points
+    from arrayscope.display.overlay_hit_test import roi_handle_points
+
+    img_view = win.img_view
+    frame_h, frame_w = int(frame_shape[0]), int(frame_shape[1])
+    margin = OVERLAY_COVERAGE_MARGIN_PX
+    mask = np.zeros((frame_h, frame_w), dtype=bool)
+    for _roi_id, geometry, _color, pen_width in _semantic_roi_outlines(win):
+        points = [project(point) for point in roi_outline_points(geometry)]
+        for start, end in itertools.pairwise(points):
+            _add_segment(mask, start, end, pen_width * scale / 2.0 + margin)
+        for handle in roi_handle_points(geometry):
+            hx, hy = project(handle)
+            # pyqtgraph's scale handle is a fixed-size device-pixel glyph;
+            # this half-extent covers it and its hover halo.
+            half = 9.0 * scale
+            _add_rect(mask, hx - half, hy - half, hx + half, hy + half, margin)
+    if bool(getattr(img_view, "_profile_marker_requested_visible", False)):
+        position = img_view.profileMarkerPosition()
+        if position is not None:
+            x, y = (float(position[0]), float(position[1]))
+            bx0, by0, bx1, by1 = img_view._current_profile_bounds()
+            radius = 2.0 * scale + margin
+            _add_segment(mask, project((x, by0)), project((x, by1)), radius)
+            _add_segment(mask, project((bx0, y)), project((bx1, y)), radius)
+            hx, hy = project((x, y))
+            half = 8.0 * scale
+            _add_rect(mask, hx - half, hy - half, hx + half, hy + half, margin)
+    return mask
+
+
+def _semantic_roi_outlines(win):
+    """Yield ``(roi_id, geometry, rgb, pen_width)`` for every drawn ROI.
+
+    Geometry comes from ``win.roi_store`` -- the semantic owner -- not from a
+    backend's mirrored item, so a backend that drew a stale outline is a
+    divergence this oracle can see rather than one it inherits.
+    """
+
+    store = getattr(win, "roi_store", None)
+    selections = tuple(getattr(store, "selections", ()) or ())
+    img_view = win.img_view
+    for selection in selections:
+        if not bool(selection.enabled):
+            continue
+        width, rgb = img_view._roi_visual_style(str(selection.id), selection.color)
+        yield str(selection.id), selection.geometry, tuple(int(v) for v in rgb), float(width)
+
+
+def _roi_placement_report(
+    win,
+    *,
+    frame_rgb: np.ndarray,
+    project,
+    band_radius,
+    overlay_mask: np.ndarray,
+) -> RoiPlacementReport:
+    """Check each ROI's colour is present in its band and nowhere else.
+
+    ``band_radius(pen_width)`` returns the stroke half-extent in frame pixels
+    for the backend under test.  Stray pixels are counted only outside the
+    *whole* overlay mask, so one ROI's colour appearing under another overlay
+    (the profile marker shares the first palette entry) is not miscounted as
+    misplacement.
+
+    The stray search runs over non-grey, un-masked pixels only.  A greyscale
+    LUT emits ``r == g == b``, so under one the candidate set is a handful of
+    antialiased overlay fringes and the scan stays inside the harness's
+    GUI-callback budget on a full-size frame.  Under a colour LUT the set
+    explodes and a palette colour stops being distinguishable from image
+    content -- ``stray_checked`` then records that this half of the check was
+    not evidence, rather than reporting a pass it did not earn.
+    """
+
+    from arrayscope.display.overlay_geometry import roi_outline_points
+
+    frame_shape = (int(frame_rgb.shape[0]), int(frame_rgb.shape[1]))
+    red, green, blue = frame_rgb[..., 0], frame_rgb[..., 1], frame_rgb[..., 2]
+    candidates = ((red != green) | (green != blue)) & ~overlay_mask
+    candidate_y, candidate_x = np.nonzero(candidates)
+    candidate_rgb = frame_rgb[candidate_y, candidate_x]
+    if candidate_rgb.size:
+        chroma = candidate_rgb.max(axis=-1) - candidate_rgb.min(axis=-1)
+        keep = chroma >= ROI_COLOR_MIN_CHROMA
+        candidate_y, candidate_x = candidate_y[keep], candidate_x[keep]
+        candidate_rgb = candidate_rgb[keep]
+    stray_checked = candidate_y.size <= int(
+        ROI_PLACEMENT_MAX_CHROMATIC_FRACTION * frame_shape[0] * frame_shape[1]
+    )
+    comparisons: list[RoiPlacementComparison] = []
+    for roi_id, geometry, rgb, pen_width in _semantic_roi_outlines(win):
+        points = [project(point) for point in roi_outline_points(geometry)]
+        if len(points) < 2:
+            continue
+        target = np.asarray(rgb, dtype=np.int16)
+        stray_count = 0
+        extent = None
+        if stray_checked and candidate_rgb.size:
+            stray = np.abs(candidate_rgb - target).max(axis=-1) <= ROI_COLOR_MATCH_TOLERANCE
+            stray_count = int(np.count_nonzero(stray))
+            if stray_count:
+                xs, ys = candidate_x[stray], candidate_y[stray]
+                extent = (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
+
+        radius = band_radius(pen_width)
+        bounds = _polyline_bounds(frame_shape, points, radius)
+        band_pixels = 0
+        matched_in_band = 0
+        if bounds is not None:
+            lo_x, lo_y, hi_x, hi_y = bounds
+            window = np.zeros((hi_y - lo_y + 1, hi_x - lo_x + 1), dtype=bool)
+            for start, end in itertools.pairwise(points):
+                _add_segment(
+                    window,
+                    (start[0] - lo_x, start[1] - lo_y),
+                    (end[0] - lo_x, end[1] - lo_y),
+                    radius,
+                )
+            band_pixels = int(np.count_nonzero(window))
+            patch = frame_rgb[lo_y : hi_y + 1, lo_x : hi_x + 1]
+            in_band = np.abs(patch - target).max(axis=-1) <= ROI_COLOR_MATCH_TOLERANCE
+            matched_in_band = int(np.count_nonzero(in_band & window))
+        comparisons.append(
+            RoiPlacementComparison(
+                roi_id=roi_id,
+                color=rgb,
+                visible_length_px=_visible_polyline_length(frame_shape, points),
+                band_pixels=band_pixels,
+                matched_in_band=matched_in_band,
+                stray_pixels=stray_count,
+                stray_extent=extent,
+                stray_checked=bool(stray_checked),
+            )
+        )
+    return RoiPlacementReport(rois=tuple(comparisons), frame_shape=frame_shape)
+
+
 def qt_raster_matches_cpu_reference(
     win,
     *,
@@ -469,7 +864,18 @@ def qt_raster_matches_cpu_reference(
     view_matrix, view_offset = _view_to_viewport_affine(img_view)
     inverse_view_matrix = np.linalg.inv(view_matrix)
 
+    def project(point) -> tuple[float, float]:
+        viewport_xy = np.asarray(point, dtype=np.float64) @ view_matrix.T + view_offset
+        return (float(viewport_xy[0]) * scale_x, float(viewport_xy[1]) * scale_y)
+
+    overlay_mask = _qt_overlay_coverage(
+        win,
+        frame_shape=frame.shape[:2],
+        project=project,
+        scale=float(max(scale_x, scale_y)),
+    )
     reports: list[TileComparison] = []
+    overlay_excluded = 0
     for tile_number in sorted(required):
         tile = plan_tiles[tile_number]
         payload = payloads[tile_number]
@@ -548,7 +954,9 @@ def qt_raster_matches_cpu_reference(
             & (frac_ty >= texel_guard)
             & (frac_ty <= 1.0 - texel_guard)
         )
-        select = inside & guarded
+        drawn_over = overlay_mask[grid_y, grid_x]
+        overlay_excluded += int(np.count_nonzero(inside & guarded & drawn_over))
+        select = inside & guarded & ~drawn_over
         sample = _bounded_sample_positions(
             select,
             max_samples=max_samples_per_tile,
@@ -563,7 +971,10 @@ def qt_raster_matches_cpu_reference(
                     mismatched=0,
                     worst_diff=0,
                     mean_diff=0.0,
-                    detail="no pixel centers survive the interior/texel guards",
+                    detail=(
+                        "no pixel centers survive the interior/texel guards "
+                        "and the overlay coverage mask"
+                    ),
                 )
             )
             continue
@@ -605,6 +1016,15 @@ def qt_raster_matches_cpu_reference(
         tolerance=int(tolerance),
         max_mismatch_fraction=float(max_mismatch_fraction),
         min_samples_per_tile=int(min_samples_per_tile),
+        overlay_excluded_samples=int(overlay_excluded),
+        # Qt pens are centred on the path, so half the pen width each side.
+        roi_placement=_roi_placement_report(
+            win,
+            frame_rgb=frame_rgb,
+            project=project,
+            band_radius=lambda pen: pen * max(scale_x, scale_y) / 2.0 + OVERLAY_COVERAGE_MARGIN_PX,
+            overlay_mask=overlay_mask,
+        ),
     )
 
 
@@ -794,6 +1214,13 @@ def wgpu_frame_matches_cpu_reference(
     crop window.  The expected image is derived from the frame session's
     payloads and montage plan; only the public camera state is shared with the
     renderer.
+
+    Pixels the frame draws over the image -- ROI strokes, the profile marker,
+    lifecycle boxes, tile-truth glyphs, floating chips -- are withheld through
+    ``_wgpu_overlay_coverage``, which masks only where each overlay's own
+    geometry places it.  See that function for why misplaced overlays are
+    still caught, and ``roi_placement_matches_geometry`` for the presence half
+    of the contract.
     """
 
     from arrayscope.gpu.command_protocol import SetDisplayMapping, UpdateTileInstances
@@ -841,9 +1268,11 @@ def wgpu_frame_matches_cpu_reference(
     if not (span_x > 0.0 and span_y > 0.0):
         raise AssertionError(f"degenerate WGPU camera: {camera!r}")
 
+    overlay_mask = _wgpu_overlay_coverage(img_view, frame_shape=(frame_h, frame_w), camera=camera)
     transposed = bool(getattr(img_view, "_wgpu_committed", {}).get("transposed", False))
     committed_tiles = dict(getattr(img_view, "_wgpu_committed", {}).get("tiles", {}) or {})
     reports: list[TileComparison] = []
+    overlay_excluded = 0
     for tile_number in sorted(required):
         tile = plan_tiles[tile_number]
         payload = payloads[tile_number]
@@ -933,7 +1362,9 @@ def wgpu_frame_matches_cpu_reference(
             & (frac_ty >= texel_guard)
             & (frac_ty <= 1.0 - texel_guard)
         )
-        select = inside & guarded
+        drawn_over = overlay_mask[grid_y, grid_x]
+        overlay_excluded += int(np.count_nonzero(inside & guarded & drawn_over))
+        select = inside & guarded & ~drawn_over
         sample = _bounded_sample_positions(
             select,
             max_samples=max_samples_per_tile,
@@ -948,7 +1379,10 @@ def wgpu_frame_matches_cpu_reference(
                     mismatched=0,
                     worst_diff=0,
                     mean_diff=0.0,
-                    detail="no pixel centers survive the interior/texel guards",
+                    detail=(
+                        "no pixel centers survive the interior/texel guards "
+                        "and the overlay coverage mask"
+                    ),
                 )
             )
             continue
@@ -991,7 +1425,45 @@ def wgpu_frame_matches_cpu_reference(
         tolerance=int(tolerance),
         max_mismatch_fraction=float(max_mismatch_fraction),
         min_samples_per_tile=int(min_samples_per_tile),
+        overlay_excluded_samples=int(overlay_excluded),
+        # WGSL expands a line by ``width`` on EACH side of its centreline.
+        roi_placement=_roi_placement_report(
+            win,
+            frame_rgb=frame_rgb,
+            project=_wgpu_world_projector(camera, frame_h, frame_w),
+            band_radius=lambda pen: pen + OVERLAY_COVERAGE_MARGIN_PX,
+            overlay_mask=overlay_mask,
+        ),
     )
+
+
+def roi_placement_matches_geometry(win, *, backend: str) -> RoiPlacementReport:
+    """Check every drawn ROI outline sits where its semantic geometry says.
+
+    The complement of the image comparison: that oracle proves no overlay
+    stroke tinted a pixel it had no business tinting, this one proves each
+    ROI's colour really is on the frame, inside its own band, after whatever
+    the stage just did to the displayed axis.  Together they keep a cropped
+    montage's ROI coverage without letting overlay pixels masquerade as image
+    divergence -- and without letting an overlay that stopped being drawn at
+    all pass unnoticed.
+
+    Standalone form.  Callers that also want the image verdict should read
+    ``FrameReferenceReport.roi_placement`` instead: both verdicts then come
+    from one capture, which is both cheaper and the only way to be sure they
+    describe the same frame.
+    """
+
+    backend = str(backend)
+    if backend == "wgpu":
+        report = wgpu_frame_matches_cpu_reference(win)
+    elif backend == "pyqtgraph":
+        report = qt_raster_matches_cpu_reference(win)
+    else:
+        raise AssertionError(f"ROI placement oracle does not cover backend {backend!r}")
+    if report.roi_placement is None:
+        raise AssertionError("frame reference report carried no ROI placement verdict")
+    return report.roi_placement
 
 
 def _assert_report(report: FrameReferenceReport, *, label: str) -> FrameReferenceReport:
