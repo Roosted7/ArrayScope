@@ -219,6 +219,212 @@ def test_slice_change_does_not_reuse_residency(qtbot):
         restore_default_backend(settings)
 
 
+# --- Single-slice (non-montage) shape --------------------------------------
+# The same canonical source-plane pages back a single-slice view: its payload
+# is crop-local exactly like a cropped montage tile's, and its source anchor
+# resolves through the same ``source_anchoring_for_view`` content key.  A
+# resident crop scrub there must short-circuit identically.
+
+
+def _single_slice_cropped_state(win, start: int):
+    state = win.view_state.with_montage_axis(None)
+    state = state.with_axis_range(
+        0, indices=tuple(range(start, start + 200)), text=f"{start}:{start + 200}"
+    )
+    return state.with_axis_range(1, indices=tuple(range(66, 266)), text="66:266")
+
+
+def _single_slice_fill_full_plane_then_crop(win, start: int) -> None:
+    """Fill the uncropped plane first so the canonical pages are complete.
+
+    A source-anchored binding only reuses canonical pages that a
+    ``supplies_complete_pages`` payload uploaded; the uncropped plane is what
+    makes them complete.  Starting already cropped leaves the window on
+    crop-local pages, which is the cold case below.
+    """
+
+    win._set_view_state(win.view_state.with_montage_axis(None))
+    win.update_image_view()
+    _busy_pump_until(
+        lambda: frame_session_settled(win),
+        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+        "single-slice full-plane fill",
+    )
+    win._apply_slice_state(
+        0,
+        _single_slice_cropped_state(win, start),
+        reason="slice-range",
+        interactive=True,
+        immediate_axis_only=False,
+    )
+    _busy_pump_until(
+        lambda: _crop_settled(win, start),
+        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+        "single-slice cold cropped fill",
+    )
+
+
+def test_single_slice_resident_crop_scrub_schedules_no_producers(qtbot):
+    """A non-montage resident crop scrub schedules zero producers, pixel-exact.
+
+    The montage gate excluded this shape on the rationale that its
+    source-anchored composition diverges and that it is "already 1
+    producer/step".  Measured, the composition is the same canonical
+    source-plane binding, and the step still costs a full evaluation.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    win = make_backend_window(qtbot, _uniform_source(), backend="wgpu", require_gpu_atlas=True)
+    win.resize(780, 760)
+    try:
+        win.show()
+        assert win.view_state.montage_axis is None
+        _single_slice_fill_full_plane_then_crop(win, 94)
+
+        for step in range(4):
+            start = 96 + step
+            before = _preparation_completed(win)
+            win._on_slice_text_changed(0, f"{start}:{start + 200}")
+            _busy_pump_until(
+                lambda start=start: _crop_settled(win, start),
+                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
+                f"single-slice resident scrub {start}",
+            )
+            assert _preparation_completed(win) - before == 0, (
+                "a resident single-slice crop scrub must schedule no display-preparation producers"
+            )
+
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+        assert_wgpu_frame_matches_cpu_reference(win)
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_single_slice_rebind_carries_the_new_window_semantics(qtbot):
+    """A rebound single-slice payload carries the NEW window's exact values.
+
+    ``TiledValueSource`` indexes a payload's semantic plane by window-LOCAL
+    coordinates, so a rebind that shifted only ``source_anchor`` would draw the
+    new window on the GPU while every CPU value read (ROI, profile, export, and
+    the physical-truth oracle) silently answered from the predecessor window's
+    plane.  The rebind re-slices those planes out of the whole plane, so the
+    payload's semantics move with its anchor.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    data = _uniform_source()
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
+    win.resize(780, 760)
+    try:
+        win.show()
+        _single_slice_fill_full_plane_then_crop(win, 94)
+        slice_index = int(win.view_state.slice_indices[2])
+
+        for start in (96, 99, 103):
+            before = _preparation_completed(win)
+            win._on_slice_text_changed(0, f"{start}:{start + 200}")
+            _busy_pump_until(
+                lambda start=start: _crop_settled(win, start),
+                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
+                f"semantics scrub {start}",
+            )
+            assert _preparation_completed(win) - before == 0, (
+                f"window {start} was evaluated, so it does not exercise the rebind"
+            )
+            payload = win.renderer._frame_session.display_tile_payloads[0]
+            assert payload.source_anchor.source_rect == (start, start + 200, 66, 266)
+            np.testing.assert_allclose(
+                np.asarray(payload.semantic_data),
+                data[start : start + 200, 66:266, slice_index],
+                atol=1e-6,
+                err_msg=(
+                    f"window {start}: the rebound payload's semantic plane does not "
+                    "describe its own anchor (stale predecessor-window values)"
+                ),
+            )
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_single_slice_cold_crop_scrub_falls_back_to_evaluation(qtbot):
+    """A non-resident single-slice crop window keeps the ordinary evaluation."""
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    win = make_backend_window(qtbot, _uniform_source(), backend="wgpu", require_gpu_atlas=True)
+    win.resize(780, 760)
+    try:
+        win.show()
+        win._set_view_state(_single_slice_cropped_state(win, 94))
+        win.update_image_view()
+        _busy_pump_until(
+            lambda: _crop_settled(win, 94),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+            "single-slice cold cropped fill",
+        )
+        before = _preparation_completed(win)
+        win._on_slice_text_changed(0, "96:296")
+        _busy_pump_until(
+            lambda: _crop_settled(win, 96),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
+            "single-slice cold scrub",
+        )
+        assert _preparation_completed(win) - before > 0, (
+            "a non-resident single-slice crop window must still schedule its producers"
+        )
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_single_slice_slice_change_does_not_reuse_residency(qtbot):
+    """Advancing the slider index is a content change, never a resident rebind.
+
+    The non-montage anchor's content key folds the non-displayed axis slice
+    index (``source_anchoring_for_view`` zeroes only the DISPLAYED axes'
+    windows), so a new plane cannot be served by the predecessor's pixels.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    win = make_backend_window(qtbot, _uniform_source(), backend="wgpu", require_gpu_atlas=True)
+    win.resize(780, 760)
+    try:
+        win.show()
+        _single_slice_fill_full_plane_then_crop(win, 94)
+        before = _preparation_completed(win)
+        target = int(win.view_state.slice_indices[2]) + 5
+        win._set_view_state(win.view_state.with_slice(2, target))
+        win.update_image_view()
+
+        def slice_settled() -> bool:
+            session = getattr(win.renderer, "_frame_session", None)
+            if session is None or session.plan is None:
+                return False
+            if int(session.view_state.slice_indices[2]) != target:
+                return False
+            return frame_session_settled(win)
+
+        _busy_pump_until(
+            slice_settled, INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0, "single-slice re-slice"
+        )
+        assert _preparation_completed(win) - before > 0, (
+            "a content-identity change must not be served by a resident rebind"
+        )
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
 def test_resident_crop_rebind_flag_reads_settings_object():
     """The pipeline reads the first-class setting, not a raw QSettings key."""
 

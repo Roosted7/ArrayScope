@@ -1192,6 +1192,45 @@ class FrameSession:
         else:
             self.lifecycle.fallback_ready(int(ref.payload.tile_number), ref)
 
+    def _rebind_reslice_planes(self, previous, new_anchor, canonical) -> dict[str, object] | None:
+        """Window-shifted CPU planes for a rebind, or ``None`` to decline.
+
+        A page-backed presentation carries no exact CPU planes (the montage
+        case): nothing describes the old window, so the anchor shift alone is
+        the whole rebind.  An exact single-tile presentation DOES carry them,
+        indexed window-locally by ``TiledValueSource.value_at``; shifting the
+        anchor over them would report the predecessor window's values.  Those
+        planes are re-sliced out of the memoized whole plane, and the rebind is
+        declined outright when no whole plane backs this content key.
+        """
+
+        if getattr(previous, "semantic_data", None) is None:
+            return {}
+        if canonical is None:
+            return None
+        y0, y1, x0, x1 = (int(value) for value in new_anchor.source_rect)
+        planes: dict[str, object] = {}
+        for name in (
+            "image",
+            "texture_data",
+            "semantic_data",
+            "semantic_histogram_data",
+            "histogram_data",
+        ):
+            source = getattr(canonical, name, None)
+            if source is None:
+                planes[name] = None
+                continue
+            array = np.asarray(source)
+            if array.shape[0] < y1 or array.shape[1] < x1:
+                return None
+            # Copy, not a view: a strided window would defeat the backend's
+            # identity dedup and any fallback upload.
+            planes[name] = np.ascontiguousarray(array[y0:y1, x0:x1])
+        if planes.get("image") is None:
+            return None
+        return planes
+
     def lifecycle_snapshot(self):
         return self.lifecycle.snapshot()
 
@@ -2219,6 +2258,7 @@ class FrameSession:
         physical_resident_fn,
         tile_numbers,
         previous_by_tile=None,
+        canonical_by_tile=None,
     ) -> tuple[int, ...]:
         """Short-circuit a crop-window scrub to a pure rebind (ADR 0055 G3).
 
@@ -2260,6 +2300,7 @@ class FrameSession:
         if not plan_tiles:
             return ()
         previous_by_tile = dict(previous_by_tile or {})
+        canonical_by_tile = dict(canonical_by_tile or {})
         rebound: list[int] = []
         for raw_number in tuple(tile_numbers or ()):
             tile_number = int(raw_number)
@@ -2306,9 +2347,20 @@ class FrameSession:
                 # Nothing shifted (or this tile is already rebound to the new
                 # window): leave the existing state untouched.
                 continue
+            # Exact CPU planes are window-local; a rebind must re-slice them
+            # for the new window or decline (see _rebind_reslice_planes).
+            canonical = canonical_by_tile.get(tile_number)
+            if canonical is not None and canonical.source_anchor.content_key != (
+                new_anchor.content_key
+            ):
+                canonical = None
+            planes = self._rebind_reslice_planes(previous, new_anchor, canonical)
+            if planes is None:
+                continue
+            texture_data = planes.get("texture_data", previous.texture_data)
             new_identity = self.tile_payload_identity(
                 identity_tile,
-                texture_data=previous.texture_data,
+                texture_data=texture_data,
                 texture_kind=previous.texture_kind,
                 shader_mapping=previous.shader_mapping,
                 lod=previous.lod,
@@ -2318,6 +2370,7 @@ class FrameSession:
                 previous,
                 source_anchor=new_anchor,
                 tile_identity=new_identity,
+                **planes,
             )
             # The residency seam returns True only when the binding is
             # source-anchored over resident pages (or the native fast path);

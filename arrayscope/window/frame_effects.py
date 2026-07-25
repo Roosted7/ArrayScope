@@ -482,15 +482,22 @@ class FramePipelineEffects:
         and no producer is scheduled.  The residency seam is backend-owned
         physical truth (``tiledPayloadResident``); backends without it keep the
         ordinary per-tile evaluation.
+
+        Montage and single-slice presentations share this path.  The montage
+        gate this replaced assumed the single-tile path "composes the
+        source-anchored plane differently"; measured, it does not.  Both build
+        a crop-local payload whose ``source_anchor`` names a sub-rect of the
+        SAME canonical source plane, and ``_wgpu_payload_binding`` resolves
+        both through one ``("wgpu-source-plane", content_key)`` page identity —
+        a cropped montage tile is just as crop-local as a single-slice payload
+        (both measured at a 200x200 native shape for a 200x200 window on a
+        336x336 plane).  The non-montage anchor differs only in where its
+        content key comes from (``source_anchoring_for_view`` directly, rather
+        than the per-source-index cache), and that key folds the slider index,
+        so advancing the slice still declines.
         """
 
         if not self._resident_crop_rebind_enabled():
-            return
-        # Restricted to genuine montage presentations, where a physically
-        # resident crop rebind is verified pixel-correct against the CPU oracle.
-        # The single-tile (non-montage) path composes the source-anchored plane
-        # differently and is left on its ordinary (already cheap) evaluation.
-        if getattr(self.session, "montage_axis", None) is None:
             return
         win = getattr(self.renderer, "win", None)
         img_view = getattr(win, "img_view", None)
@@ -508,7 +515,60 @@ class FramePipelineEffects:
             physical_resident_fn=resident_fn,
             tile_numbers=tile_numbers,
             previous_by_tile=previous_by_tile,
+            canonical_by_tile=self._remember_canonical_plane_payloads(previous_by_tile),
         )
+
+    # A montage whose tiles carried exact semantics would otherwise pin one
+    # whole source plane per tile; the rebind only ever needs a handful.
+    _CANONICAL_PLANE_MEMO_LIMIT = 4
+    # The memo holds a STRONG reference (a weak one dies the moment the crop
+    # replaces the whole-plane payload, which is exactly when the scrub starts),
+    # so it must state what it can pin.  A plane above this keeps its ordinary
+    # evaluation rather than pinning hundreds of MB to save one producer.
+    _CANONICAL_PLANE_MEMO_MAX_BYTES = 64 * 1024 * 1024
+
+    def _remember_canonical_plane_payloads(self, previous_by_tile) -> dict[int, object]:
+        """Track whole-plane payloads that can re-slice exact CPU semantics.
+
+        A source-anchored rebind may only reuse canonical pages that some
+        earlier payload uploaded WHOLE, and that same whole-plane payload is
+        the only thing that can re-slice exact CPU semantics for a shifted
+        window (``_rebind_reslice_planes``).  Only payloads covering their
+        entire source plane and carrying exact semantics qualify — precisely
+        the backend's ``supplies_complete_pages`` precondition, mirrored on the
+        CPU side.
+
+        The memo lives on the RENDERER, not the session: a crop retarget builds
+        a fresh ``FrameSession`` every step (measured: session ids 2, 3, 4, 5
+        across one scrub), so a session-owned memo is empty exactly when the
+        scrub needs it.  The renderer outlives the sessions, like the committed
+        frame the predecessor wrappers already come from.
+        """
+
+        memo = getattr(self.renderer, "_resident_crop_canonical_planes", None)
+        if memo is None:
+            memo = {}
+            self.renderer._resident_crop_canonical_planes = memo
+        for tile_number, payload in dict(previous_by_tile or {}).items():
+            if str(getattr(payload, "quality", "exact") or "exact") != "exact":
+                continue
+            if getattr(payload, "semantic_data", None) is None:
+                continue
+            anchor = getattr(payload, "source_anchor", None)
+            plane_shape = tuple(getattr(anchor, "plane_shape", None) or ())
+            source_rect = tuple(getattr(anchor, "source_rect", None) or ())
+            if len(plane_shape) != 2 or len(source_rect) != 4:
+                continue
+            y0, y1, x0, x1 = (int(value) for value in source_rect)
+            if (y0, x0) != (0, 0) or (y1, x1) != (int(plane_shape[0]), int(plane_shape[1])):
+                continue
+            if int(np.asarray(payload.semantic_data).nbytes) > self._CANONICAL_PLANE_MEMO_MAX_BYTES:
+                continue
+            key = int(tile_number)
+            if key not in memo and len(memo) >= self._CANONICAL_PLANE_MEMO_LIMIT:
+                continue
+            memo[key] = payload
+        return memo
 
     def prepare_rung(self, intent, step) -> bool:
         tile = self._tile_for_step(step)
