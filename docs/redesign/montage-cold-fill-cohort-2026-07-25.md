@@ -144,14 +144,28 @@ down from 571–686 ms). That bar belongs to queue row 1.
   `session_viewport_shape_matches` allows ±1 while
   `session_window_size_matches` demands exact equality.
 
-  The same stale number sizes the screenshot compositor:
-  `_managed_weston_output_size` reads `panels.window_size` so that "the window
+  The same stale number sized the screenshot compositor:
+  `_managed_weston_output_size` read `panels.window_size` so that "the window
   fills the output and one capture is the window". At 940 against a 948-tall
-  window that identity is broken by 8 px — a likely source of previously
-  observed full-window pixel mismatches attributed to Qt chrome.
+  window that identity was short by 8 px on every exact-window capture.
 
-- With `--session-fixture ""` the crop stages (`display_x_axis_slice`,
-  `display_y_axis_slice`) crash in `_wgpu_payload_lod_geometry`
-  (`source=(100, 336)`, `declared=(51, 168)`, `expected=(50, 168)`) — an
-  edge-bin geometry mismatch that **reproduces unchanged on `65a9540`** and is
-  therefore pre-existing and unrelated to this work. Untriaged.
+  **Fixed** (`d52019c`): the gate follows viewport shape and axis orientation,
+  the window sizes stay in the record with their chrome delta, and the
+  screenshot output is derived as pinned viewport plus *measured* chrome.
+  Chrome is measured on a real compositor because it is not portable — this
+  build is 153×209 under Wayland and 153×235 under the offscreen QPA plugin.
+
+- **The crop stages' `_wgpu_payload_lod_geometry` crash was an artifact of the
+  workaround, not a defect.** With the gate fixed,
+  `display_x_axis_slice`/`display_y_axis_slice` run to completion; the
+  `source=(100, 336)` / `expected=(50, 168)` edge-bin mismatch only appeared
+  under `--session-fixture ""`, whose different montage geometry produced that
+  odd 100-row source.
+
+- **Newly visible standing red:** those two stages now run, and both fail
+  `display_axis_all_dimension_pixels_match_cpu_reference`. This is
+  **pre-existing** — it reproduces on `65a9540` with only the gate fix
+  cherry-picked, i.e. before any of this session's perf work. The geometry
+  gate had been masking it by killing every fixture run before those stages
+  were reached. Untriaged, and a plausible match for previously-noticed
+  "pixel mismatch" reports.
