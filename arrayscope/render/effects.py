@@ -209,6 +209,104 @@ def _evaluate_native_tile_result(
     return result
 
 
+#: Share of the GPU tile-residency byte policy one montage's whole canonical
+#: source planes may claim.  The warm plane REPLACES the crop-local upload
+#: rather than adding to it (``_wgpu_reusable_native_texture``), so this is the
+#: montage's whole physical working set, not an extra allocation on top of it.
+#: Half leaves headroom for the predecessor set a crop scrub hands off from.
+CANONICAL_PLANE_WARM_BUDGET_SHARE = 0.5
+
+
+def canonical_plane_residency_source(
+    session,
+    tile,
+    *,
+    shader_display: bool,
+    cancellation_token=None,
+    evaluation_context=None,
+    stage_cache=None,
+    stage_materializer=None,
+):
+    """Whole canonical source-plane values for GPU warming, or ``None``.
+
+    A view that is cropped from the first frame onward never presents its whole
+    source plane, so nothing ever uploads a canonical
+    ``("wgpu-source-plane", content_key)`` page: every window binds crop-local
+    under an identity that folds its own source rect, and the resident-crop
+    rebind therefore declines every shifted window with ``pages_not_resident``.
+    Evaluating the window-free state once breaks that: the whole plane is
+    uploaded under the window-INVARIANT identity, and every subsequent crop step
+    is a source-origin rebind with no producer at all.
+
+    This is residency data only.  The presented evaluation, its pages, and its
+    window-exact level evidence are untouched — widening those would move the
+    auto-level window from the crop to the plane, which is exactly the maturity
+    regression the capability is gated for.  Values are safe to reuse across the
+    window shift because anchoring is granted only for display axes the
+    operation chain commutes with (``pipeline_windowable_display_axes``), so
+    ``plane[y0:y1, x0:x1]`` is bit-identical to the window's own evaluation.
+
+    Declines (returns ``None``) when the view is not anchored, is not actually
+    cropped, or when one montage of these planes would exceed its share of the
+    tile-residency byte policy — a large-plane montage keeps the crop-local
+    upload and the rebind stays inert there by design.
+    """
+
+    anchoring = getattr(session, "source_anchoring", None)
+    if anchoring is None:
+        return None
+    from arrayscope.display.source_anchoring import canonical_plane_view_state
+
+    plane_state = canonical_plane_view_state(tile.view_state, anchoring)
+    if plane_state is None:
+        return None
+    if not _canonical_plane_warm_fits_budget(session, plane_state):
+        return None
+    _check_render_cancelled(cancellation_token)
+    result = evaluate_image_snapshot(
+        session.document,
+        plane_state,
+        colormap_lut=session.colormap_lut,
+        cancellation_token=cancellation_token,
+        shader_display=bool(shader_display),
+        # Neither is consumed: the plane feeds page uploads, never a display
+        # window or a level tracker.  A provisional histogram over the WHOLE
+        # plane would also be window-wrong evidence if anything later read it.
+        provisional_histogram=False,
+        stage_cache=stage_cache,
+        stage_document_key=stage_document_key(session.document),
+        evaluation_context=evaluation_context,
+        canonical_orientation=bool(getattr(session, "canonical_orientation", False)),
+    )
+    _check_render_cancelled(cancellation_token)
+    return render_lod.canonical_value_source_for_rendered(
+        rendered_tile_from_evaluation_result(tile, result),
+        shader_display=bool(shader_display),
+    )
+
+
+def _canonical_plane_warm_fits_budget(session, plane_state) -> bool:
+    """Would one montage of whole planes stay inside the residency policy?"""
+
+    budget = int(getattr(session, "tile_residency_budget_bytes", 0) or 0)
+    if budget <= 0:
+        return False
+    shape = tuple(int(size) for size in (getattr(plane_state, "shape", None) or ()))
+    image_axes = tuple(int(axis) for axis in (getattr(plane_state, "image_axes", None) or ()))
+    if len(image_axes) != 2 or len(shape) <= max(image_axes):
+        return False
+    plane_bytes = 1
+    for axis in image_axes:
+        plane_bytes *= int(shape[axis])
+    plane_bytes *= max(1, int(np.dtype(getattr(session, "output_dtype", np.float32)).itemsize))
+    # The PLANNED tile count, not the currently visible one: the plan is the
+    # montage window whose planes all become resident as the user scrolls it,
+    # and a budget that only counted today's viewport would admit a montage it
+    # cannot hold.
+    planned = max(1, len(tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())))
+    return plane_bytes * planned <= int(budget * CANONICAL_PLANE_WARM_BUDGET_SHARE)
+
+
 def evaluate_target_tile(
     session,
     tile,
@@ -221,6 +319,7 @@ def evaluate_target_tile(
     cancellation_token=None,
     shader_display: bool,
     evaluation_context=None,
+    warm_canonical_plane: bool = False,
 ):
     """Evaluate the current display target for one montage tile.
 
@@ -250,6 +349,7 @@ def evaluate_target_tile(
         evaluation_context=evaluation_context,
         stage_cache=stage_cache,
         stage_materializer=stage_materializer,
+        warm_canonical_plane=bool(warm_canonical_plane),
     )
 
 
@@ -265,6 +365,7 @@ def evaluate_preview_tile(
     evaluation_context=None,
     stage_cache=None,
     stage_materializer=None,
+    warm_canonical_plane: bool = False,
 ):
     """Evaluate a display-only payload for a cold tile."""
 
@@ -279,6 +380,7 @@ def evaluate_preview_tile(
         evaluation_context=evaluation_context,
         stage_cache=stage_cache,
         stage_materializer=stage_materializer,
+        warm_canonical_plane=bool(warm_canonical_plane),
     )
 
 
@@ -1400,6 +1502,7 @@ def _evaluate_tile_native_output_preview(
     evaluation_context,
     stage_cache=None,
     stage_materializer=None,
+    warm_canonical_plane: bool = False,
 ):
     level = preview_evaluation_level(session, demand) if level is None else int(level)
     result = _evaluate_native_tile_result(
@@ -1444,6 +1547,24 @@ def _evaluate_tile_native_output_preview(
         mapping=mapping,
     )
     _check_render_cancelled(cancellation_token)
+    residency_source = source if getattr(session, "source_anchoring", None) is not None else None
+    if warm_canonical_plane and residency_source is not None:
+        # ``source`` is the WINDOW's plane. On an uncropped view that already is
+        # the canonical plane and warms the window-invariant pages; on a cropped
+        # one it is rejected downstream for not matching ``plane_shape``, and
+        # the canonical pages stay forever cold. Widen to the plane the anchor's
+        # content key already names so the crop scrub has something to rebind.
+        plane = canonical_plane_residency_source(
+            session,
+            tile,
+            shader_display=bool(shader_display),
+            cancellation_token=cancellation_token,
+            evaluation_context=evaluation_context,
+            stage_cache=stage_cache,
+            stage_materializer=stage_materializer,
+        )
+        if plane is not None:
+            residency_source = plane
     return (
         key,
         pages,
@@ -1452,7 +1573,7 @@ def _evaluate_tile_native_output_preview(
         texture_kind,
         None,
         rough_level_stats,
-        source if getattr(session, "source_anchoring", None) is not None else None,
+        residency_source,
     )
 
 

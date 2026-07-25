@@ -302,6 +302,8 @@ class FramePipelineEffects:
                 session.tile_semantic_source_id(tile.source_index) if demand is not None else None
             )
 
+            warm_canonical_plane = self._resident_crop_rebind_enabled()
+
             def evaluate_preview(token=None):
                 if demand is None or semantic_source_id is None:
                     return None
@@ -316,6 +318,7 @@ class FramePipelineEffects:
                     evaluation_context=self.renderer.win._evaluation_context(
                         ComputeLane.MONTAGE_TILE, token
                     ),
+                    warm_canonical_plane=warm_canonical_plane,
                 )
 
             return evaluate_preview
@@ -363,6 +366,7 @@ class FramePipelineEffects:
             return evaluate_materialization
 
         semantic_source_id = session.tile_semantic_source_id(tile.source_index)
+        warm_canonical_plane = self._resident_crop_rebind_enabled()
 
         def evaluate_target(token=None, semantic_source_id=semantic_source_id):
             demand = session.lod_policy_decision.demand
@@ -379,6 +383,7 @@ class FramePipelineEffects:
                 evaluation_context=self.renderer.win._evaluation_context(
                     ComputeLane.MONTAGE_TILE, token
                 ),
+                warm_canonical_plane=warm_canonical_plane,
             )
 
         return evaluate_target
@@ -4978,13 +4983,35 @@ def vispy_payload_upload_nbytes(payload) -> int:
     return max(1, int(total))
 
 
+def wgpu_native_plane_warm_payload(payload) -> bool:
+    """Will this payload's commit upload a whole canonical plane instead?
+
+    Mirrors ``_wgpu_reusable_native_texture``'s decision on the pipeline side,
+    where no binding is available: a payload warms the canonical plane when it
+    carries the WHOLE plane and presents less than all of it — either reduced
+    (a coarser level) or cropped (a sub-rect of the plane), or both.
+    """
+
+    native = getattr(payload, "native_residency_data", None)
+    if native is None:
+        return False
+    anchor = getattr(payload, "source_anchor", None)
+    plane_shape = tuple(int(value) for value in (getattr(anchor, "plane_shape", ()) or ()))
+    if len(plane_shape) != 2 or tuple(int(value) for value in np.shape(native)[:2]) != plane_shape:
+        return False
+    if int(getattr(getattr(payload, "lod", None), "level", 0) or 0) > 0:
+        return True
+    source_rect = tuple(int(value) for value in (getattr(anchor, "source_rect", ()) or ()))
+    return len(source_rect) == 4 and source_rect != (0, plane_shape[0], 0, plane_shape[1])
+
+
 def wgpu_payload_upload_nbytes(payload) -> int:
     """Physical bytes for WGPU, including hidden exact source-page warming."""
 
-    native = getattr(payload, "native_residency_data", None)
-    if native is not None and int(getattr(getattr(payload, "lod", None), "level", 0) or 0) > 0:
+    if wgpu_native_plane_warm_payload(payload):
         # The WGPU warm path uses the exact native pages instead of also
-        # uploading the redundant reduced payload.
+        # uploading the redundant reduced/cropped payload.
+        native = getattr(payload, "native_residency_data", None)
         return max(1, int(getattr(np.asarray(native), "nbytes", 0) or 0))
     return vispy_payload_upload_nbytes(payload)
 
@@ -5035,8 +5062,7 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
     wgpu_native_prefetch = bool(
         capabilities.name == "wgpu"
         and any(
-            getattr(payload, "native_residency_data", None) is not None
-            and int(getattr(getattr(payload, "lod", None), "level", 0) or 0) > 0
+            wgpu_native_plane_warm_payload(payload)
             for payload in dict(getattr(session, "display_tile_payloads", {}) or {}).values()
         )
     )

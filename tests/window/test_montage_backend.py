@@ -3103,22 +3103,42 @@ def test_vispy_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transact
     assert limits["upsert_cost_fn"](payload) == texture.nbytes
 
 
-def test_wgpu_native_source_prefetch_stays_in_bounded_two_tile_cohorts():
+def _wgpu_native_warm_payload(*, lod_level: int, source_rect):
+    """A payload whose commit uploads its whole canonical plane, not its texture.
+
+    The source anchor is not decoration here: the warm path keys the canonical
+    pages off ``anchor.content_key``/``plane_shape``, so a whole-plane array
+    without an anchor names no pages and warms nothing.
+    """
+
     from arrayscope.display.lod import LodInfo
-    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
+
+    native = np.zeros((336, 336), dtype=np.float32)
+    factor = 1 << int(lod_level)
+    y0, y1, x0, x1 = source_rect
+    window = ((y1 - y0) // factor, (x1 - x0) // factor)
+    return DisplayTilePayload(
+        0,
+        0,
+        np.zeros(window, dtype=np.float32),
+        None,
+        ("source", 0),
+        lod=LodInfo(int(lod_level), factor, (y1 - y0, x1 - x0), window),
+        native_residency_data=native,
+        source_anchor=PayloadSourceAnchor(
+            content_key=("src-anchored", 0),
+            source_rect=tuple(source_rect),
+            plane_shape=native.shape,
+        ),
+    )
+
+
+def test_wgpu_native_source_prefetch_stays_in_bounded_two_tile_cohorts():
     from arrayscope.window import frame_effects as montage_commit
 
     native = np.zeros((336, 336), dtype=np.float32)
-    reduced = np.zeros((84, 84), dtype=np.float32)
-    payload = DisplayTilePayload(
-        0,
-        0,
-        reduced,
-        None,
-        ("source", 0),
-        lod=LodInfo(2, 4, native.shape, reduced.shape),
-        native_residency_data=native,
-    )
+    payload = _wgpu_native_warm_payload(lod_level=2, source_rect=(0, 336, 0, 336))
     session = SimpleNamespace(
         display_committed=True,
         dirty_payloads=dict.fromkeys(range(50)),
@@ -3148,6 +3168,60 @@ def test_wgpu_native_source_prefetch_stays_in_bounded_two_tile_cohorts():
     assert limits["max_upserts"] == 2
     assert limits["max_upsert_bytes"] == 3 * 1024 * 1024
     assert limits["upsert_cost_fn"](payload) == native.nbytes
+
+
+def test_wgpu_cropped_native_warm_is_costed_as_its_whole_plane():
+    """A CROPPED exact payload warms the plane too, and must be costed as one.
+
+    A view cropped from its first frame warms the canonical plane at level 0 —
+    it presents a sub-rect of pixels it fully owns.  Costing that commit by its
+    small crop texture would let the pacing admit 4-8 tiles per callback while
+    each secretly uploads a whole plane, which is the accounting mistake the
+    reduced path already learned (272 previews planned, 1088 native pages
+    installed).  Cost and cohort follow the plane, not the window.
+    """
+
+    from arrayscope.window import frame_effects as montage_commit
+
+    native = np.zeros((336, 336), dtype=np.float32)
+    cropped = _wgpu_native_warm_payload(lod_level=0, source_rect=(38, 238, 66, 266))
+    whole = _wgpu_native_warm_payload(lod_level=0, source_rect=(0, 336, 0, 336))
+
+    assert montage_commit.wgpu_native_plane_warm_payload(cropped) is True
+    assert montage_commit.wgpu_payload_upload_nbytes(cropped) == native.nbytes
+    # An exact payload that already IS its whole plane uploads that plane
+    # through its ordinary source-anchored binding; it is not a hidden warm.
+    assert montage_commit.wgpu_native_plane_warm_payload(whole) is False
+    assert montage_commit.wgpu_payload_upload_nbytes(whole) == native.nbytes
+
+    session = SimpleNamespace(
+        display_committed=True,
+        dirty_payloads=dict.fromkeys(range(50)),
+        pending_payload_upserts={},
+        display_tile_payloads=dict.fromkeys(range(50), cropped),
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="wgpu",
+                persistent_tile_residency=True,
+                tile_residency_kind="gpu_atlas",
+                shader_windowing=True,
+            )
+        ),
+        _viewport_interaction_active=False,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=32, byte_cap=32 * 1024 * 1024, budget_ms=8.0
+            )
+        ),
+    )
+    window.win = window
+
+    limits = montage_commit._persistent_tile_upsert_limits(window, session)
+    assert limits["max_upserts"] == 2
+    assert limits["max_upsert_bytes"] == 3 * 1024 * 1024
+    assert limits["upsert_cost_fn"](cropped) == native.nbytes
 
 
 def test_vispy_idle_upsert_cohort_scales_to_large_backlog():

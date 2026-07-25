@@ -157,4 +157,43 @@ def source_anchoring_for_view(
     )
 
 
-__all__ = ["SourceAnchoring", "contiguous_range_start", "source_anchoring_for_view"]
+def canonical_plane_view_state(view_state, anchoring):
+    """The whole-plane state an anchored crop's ``content_key`` already names.
+
+    ``source_anchoring_for_view`` strips every anchored axis' window before it
+    keys the content, so the content key is a promise about the WHOLE source
+    plane while the view only ever evaluates its window. Evaluating this state
+    redeems that promise: the values it produces are, on an anchored axis,
+    exactly the window's values at a source-coordinate offset (that is what
+    ``pipeline_windowable_display_axes`` certifies), so a crop can be presented
+    out of whole-plane pages instead of a crop-local upload.
+
+    Returns ``None`` when no anchored axis is actually cropped — the ordinary
+    evaluation already covers the plane, and widening would be a no-op copy.
+    """
+
+    image_axes = tuple(int(axis) for axis in (getattr(view_state, "image_axes", None) or ()))
+    starts = tuple(getattr(anchoring, "anchored_starts", ()) or ())
+    ranges = tuple(getattr(view_state, "axis_range_indices", ()) or ())
+    if len(image_axes) != 2 or len(starts) != 2:
+        return None
+    widened = view_state
+    cropped = False
+    for axis, start in zip(image_axes, starts, strict=True):
+        if start is None:
+            # A non-anchored axis keeps its window folded into the content key,
+            # so widening it would name a plane no key ever promised.
+            continue
+        if axis >= len(ranges) or ranges[axis] is None:
+            continue
+        widened = widened.with_axis_range(axis, None)
+        cropped = True
+    return widened if cropped else None
+
+
+__all__ = [
+    "SourceAnchoring",
+    "canonical_plane_view_state",
+    "contiguous_range_start",
+    "source_anchoring_for_view",
+]

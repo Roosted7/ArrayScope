@@ -82,6 +82,23 @@ local page would relabel predecessor texels as current. Residency and
 acknowledgement may never make that substitution: uncertain or absent content
 is non-drawable, not a license to show another window's pixels.
 
+Which of those two systems a view lands in is a *production* decision, not only
+a binding one. A view cropped from its first frame never presents a whole
+source plane, so under a crop-local upload the canonical pages stay cold
+forever and no crop scrub can ever rebind. Anchoring already certifies that the
+operation chain commutes with slicing on the anchored display axes — that is
+what lets the content key drop those axes' windows — so the window-free state
+the key names can simply be evaluated. With the opt-in `resident_crop_rebind`
+capability a cropped tile's evaluation produces that whole canonical plane
+(`canonical_plane_residency_source`) and carries it as
+`native_residency_data`; the commit uploads it under the window-invariant
+identity and binds the window as a source origin inside it. The *presented*
+evaluation, its pages, and its window-exact level evidence are untouched —
+widening those would move the auto-level window from the crop to the plane.
+Widening is declined when one montage of such planes would exceed its share of
+the tile-residency byte policy; those views keep their crop-local upload, and
+the rebind stays inert for them by design.
+
 Presentation command order is semantic data, not a backend preference. The
 canonical flow is `montage_priority_focus` → `TilePriorityContext` /
 `tile_priority_key` → ordered materialized rows → ordered

@@ -8,12 +8,19 @@ producer per tile per step) even though the pixels are already resident.  With
 the opt-in ``resident_crop_rebind`` capability the planner rebinds the resident
 pages before the ladder plans, scheduling ZERO producers for the resident tiles.
 
+Residency is not a gift a cropped view receives: a view cropped from its first
+frame onward never presents a whole source plane, so under a crop-local upload
+nothing would ever be resident to rebind.  The same capability therefore widens
+a cropped tile's evaluation to the whole canonical plane its anchor's content
+key already names, so the first fill warms the window-invariant pages once and
+every later crop step is a pure source-origin rebind.
+
 The capability is gated OFF by default: the rebind reuses the predecessor
 window's auto-level evidence (the maturity contract) instead of re-anchoring, so
 it is only pixel-exact against the CPU oracle while the level window is stable
 (verified here with statistically uniform data).  A crop whose pages are NOT
-resident, or any pixel-affecting identity change, falls through to the ordinary
-evaluation.
+resident, any pixel-affecting identity change, or a montage of planes too large
+for the residency byte policy falls through to the ordinary evaluation.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from __future__ import annotations
 from time import perf_counter
 
 import numpy as np
+import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.tools.framebuffer_reference import assert_wgpu_frame_matches_cpu_reference
@@ -137,23 +145,27 @@ def test_resident_crop_scrub_schedules_no_producers(qtbot):
         restore_default_backend(settings)
 
 
-def test_cold_crop_scrub_falls_back_to_evaluation(qtbot):
-    """A crop window whose pages are NOT resident keeps the ordinary evaluation.
+def test_crop_scrub_without_the_capability_still_evaluates(qtbot):
+    """With the capability OFF nothing changes: no warm, no rebind, producers.
 
-    Starting already cropped never builds the canonical full-plane pages, so
-    each shifted window is a cold local identity.  The residency probe withholds
-    the rebind and the planner schedules the missing producers, proving the
-    short-circuit is strictly residency-gated (partial residency => only the
-    missing work runs; here nothing is resident, so all of it does).
+    Widening a cropped evaluation to its whole canonical plane exists only to
+    feed the rebind, so it is gated by the same capability.  Default-OFF must
+    therefore be bit-for-bit the pre-warm behaviour: crop-local payloads
+    (``native_residency_data`` describes the WINDOW, not the plane), no
+    canonical page ever uploaded, and one producer per tile per scrub step.
     """
 
+    # Spelled out rather than relied upon: another window in this process can
+    # flush its own QSettings after the fixture clears them, and the point of
+    # this gate is the OFF path, not which default produced it.
     settings = use_wgpu_backend(
-        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": False}
     )
     win = make_backend_window(qtbot, _uniform_source(), backend="wgpu", require_gpu_atlas=True)
     win.resize(780, 760)
     try:
         win.show()
+        assert bool(getattr(win.app_settings, "resident_crop_rebind", False)) is False
         win._set_view_state(_cropped_state(win, 94))
         win.update_image_view()
         _busy_pump_until(
@@ -161,6 +173,18 @@ def test_cold_crop_scrub_falls_back_to_evaluation(qtbot):
             INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
             "cold cropped fill",
         )
+        session = win.renderer._frame_session
+        payload = session.display_tile_payloads[0]
+        assert payload.source_anchor.plane_shape == (336, 336)
+        native = payload.native_residency_data
+        assert native is None or tuple(np.shape(native)[:2]) != (336, 336), (
+            "the capability is off, so no evaluation may be widened to the plane"
+        )
+        assert not any(
+            key.document_generation[0] == "wgpu-source-plane"
+            for key in win.img_view._wgpu_executor.page_table.resident_keys()
+        ), "a crop-local commit must not warm canonical source-plane pages when off"
+
         before = _preparation_completed(win)
         win._on_slice_text_changed(0, "96:296")
         _busy_pump_until(
@@ -171,6 +195,9 @@ def test_cold_crop_scrub_falls_back_to_evaluation(qtbot):
         assert _preparation_completed(win) - before > 0, (
             "a non-resident crop window must still schedule its producers"
         )
+        totals = dict(getattr(win.renderer, "resident_crop_rebind_totals", None) or {})
+        assert totals.get("gate:disabled", 0) > 0
+        assert totals.get("rebound", 0) == 0
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
     finally:
         win.close()
@@ -518,6 +545,106 @@ def test_single_slice_slice_change_does_not_reuse_residency(qtbot):
         restore_default_backend(settings)
 
 
+# --- Canonical-plane warming (what makes a born-cropped view rebindable) ----
+
+
+def _anchored_state():
+    from arrayscope.core.view_state import ViewState
+
+    return ViewState(
+        ndim=3,
+        shape=(336, 336, 272),
+        image_axes=(0, 1),
+        line_axis=None,
+        slice_indices=(0, 0, 30),
+        axis_flipped=(False, False, False),
+        axis_fftshifted=(False, False, False),
+    )
+
+
+def _anchoring(*, starts):
+    from arrayscope.display.source_anchoring import SourceAnchoring
+
+    return SourceAnchoring(anchored_starts=starts, content_key=("key",))
+
+
+def test_canonical_plane_view_state_drops_only_anchored_windows():
+    """Widening is legal exactly where the content key already dropped a window.
+
+    An anchored axis' window is stripped from the content key, so the key is a
+    promise about the whole plane and evaluating it redeems that promise.  A
+    NON-anchored axis keeps its window folded into the key (the chain does not
+    commute with slicing there), so widening it would name a plane no key ever
+    described — and would silently hand the backend foreign pixels.
+    """
+
+    from arrayscope.display.source_anchoring import canonical_plane_view_state
+
+    state = _anchored_state()
+    state = state.with_axis_range(0, indices=tuple(range(38, 238)), text="38:238")
+    state = state.with_axis_range(1, indices=tuple(range(66, 266)), text="66:266")
+
+    both = canonical_plane_view_state(state, _anchoring(starts=(38, 66)))
+    assert both is not None
+    assert both.axis_range_indices[0] is None
+    assert both.axis_range_indices[1] is None
+
+    # Y anchored, X not: only Y widens.
+    partial = canonical_plane_view_state(state, _anchoring(starts=(38, None)))
+    assert partial is not None
+    assert partial.axis_range_indices[0] is None
+    assert tuple(partial.axis_range_indices[1]) == tuple(range(66, 266))
+
+    # No anchored axis is cropped: the ordinary evaluation already covers the
+    # plane, so there is nothing to widen and no second evaluation to pay for.
+    assert canonical_plane_view_state(_anchored_state(), _anchoring(starts=(0, 0))) is None
+    assert canonical_plane_view_state(state, _anchoring(starts=(None, None))) is None
+
+
+def test_canonical_plane_warm_declines_a_montage_larger_than_the_budget():
+    """A montage of whole planes that cannot be held keeps its crop-local upload.
+
+    The warm plane REPLACES the crop-local page upload, so the budget question
+    is whether the montage's whole physical working set fits the tile-residency
+    byte policy — not whether one extra plane does.  Above the share, widening
+    would only churn the page pool, so the crop stays local and the rebind stays
+    inert there by design (it declines with ``pages_not_resident``).
+    """
+
+    import types
+
+    from arrayscope.render.effects import canonical_plane_residency_source
+
+    state = _anchored_state().with_axis_range(0, indices=tuple(range(38, 238)), text="38:238")
+    tile = types.SimpleNamespace(view_state=state, source_index=30)
+    plane_bytes = 336 * 336 * 4
+
+    def session(*, tiles, budget):
+        return types.SimpleNamespace(
+            source_anchoring=_anchoring(starts=(38, 0)),
+            tile_residency_budget_bytes=int(budget),
+            output_dtype=np.dtype(np.float32),
+            plan=types.SimpleNamespace(tiles=tuple(range(tiles))),
+            document=None,
+            colormap_lut=None,
+            canonical_orientation=False,
+        )
+
+    # Two planes at exactly the share: admitted (it would reach the evaluator).
+    fits = session(tiles=2, budget=int(plane_bytes * 2 / 0.5))
+    # One more tile than the share holds: declined before any evaluation, so a
+    # ``document=None`` session cannot even be asked to evaluate.
+    over = session(tiles=3, budget=int(plane_bytes * 2 / 0.5))
+    assert canonical_plane_residency_source(over, tile, shader_display=True) is None
+    assert (
+        canonical_plane_residency_source(session(tiles=2, budget=0), tile, shader_display=True)
+        is None
+    )
+    with pytest.raises(AttributeError):
+        # Proves the budget, not an unrelated guard, is what declined ``over``.
+        canonical_plane_residency_source(fits, tile, shader_display=True)
+
+
 def test_resident_crop_rebind_flag_reads_settings_object():
     """The pipeline reads the first-class setting, not a raw QSettings key."""
 
@@ -781,18 +908,33 @@ def test_disabling_the_capability_releases_the_pinned_canonical_planes(qtbot):
         restore_default_backend(settings)
 
 
-def test_born_cropped_montage_records_why_it_cannot_rebind(qtbot):
-    """A montage that is never uncropped records the residency decline.
+def test_born_cropped_montage_warms_canonical_planes_and_rebinds(qtbot):
+    """A montage that is NEVER uncropped still rebinds: it warms its own planes.
 
     This is the field shape (2026-07-25 diagnostics: 336x336x272 float32, raw
-    scalar, 50 tiles, crop windows on BOTH displayed axes from the first
-    snapshot onward, presented at LOD level 1).  Nothing ever presents the whole
-    source plane, so no canonical ``("wgpu-source-plane", content_key)`` page is
-    ever uploaded — every window binds crop-local under an identity that folds
-    its own source rect — and the residency probe correctly refuses every
-    shifted window.  The rebind is therefore inert for that workflow, and the
-    only way to tell it apart from "the feature never ran" is the decline
-    histogram this pins: ``pages_not_resident``, not a closed gate.
+    scalar, crop windows on BOTH displayed axes from the first snapshot onward,
+    presented at LOD level 1).  It used to be the one shape the rebind could not
+    serve: nothing ever presented a whole source plane, so no canonical
+    ``("wgpu-source-plane", content_key)`` page was ever uploaded, every window
+    bound crop-local under an identity folding its own source rect, and the
+    residency probe declined every shifted window with ``pages_not_resident``.
+
+    The evaluation is now widened to the plane the anchor's content key already
+    names (``canonical_plane_residency_source``), so the first fill uploads
+    whole canonical planes and every later crop step is a pure origin rebind.
+    Measured on this fixture (100 tiles, offscreen Vulkan), scrubbing the
+    displayed dimension one row at a time:
+
+    ==========================  ==========================  ================
+    capability                  producers per step          ms per step
+    ==========================  ==========================  ================
+    off (crop-local, before)    100                         2460-6548
+    on (canonical warm, after)  0                           300-365
+    ==========================  ==========================  ================
+
+    The cold born-cropped fill itself is unchanged (3707 ms off / 3698 ms on):
+    widening replaces the crop-local evaluation instead of adding to it, so
+    first-pixel latency does not pay for the scrub's speed.
     """
 
     settings = use_wgpu_backend(
@@ -809,20 +951,35 @@ def test_born_cropped_montage_records_why_it_cannot_rebind(qtbot):
             INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
             "born-cropped fill",
         )
-        before = _preparation_completed(win)
-        win._on_slice_text_changed(0, "39:239")
-        _busy_pump_until(
-            lambda: _crop_settled(win, 39),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
-            "born-cropped scrub",
+        session = win.renderer._frame_session
+        payload = session.display_tile_payloads[0]
+        assert payload.source_anchor.source_rect == (38, 238, 66, 266)
+        assert tuple(np.shape(payload.native_residency_data)[:2]) == (336, 336), (
+            "a cropped evaluation must carry the whole canonical plane for warming"
         )
-        assert _preparation_completed(win) - before > 0
+        assert any(
+            key.document_generation[0] == "wgpu-source-plane"
+            for key in win.img_view._wgpu_executor.page_table.resident_keys()
+        ), "the cropped commit must upload canonical source-plane pages"
+
+        for step in range(3):
+            start = 39 + step
+            before = _preparation_completed(win)
+            win._on_slice_text_changed(0, f"{start}:{start + 200}")
+            _busy_pump_until(
+                lambda start=start: _crop_settled(win, start),
+                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
+                f"born-cropped scrub {start}",
+            )
+            assert _preparation_completed(win) - before == 0, (
+                "a born-cropped scrub over warmed canonical planes must rebind, not evaluate"
+            )
 
         totals = dict(getattr(win.renderer, "resident_crop_rebind_totals", None) or {})
         assert totals.get("gate:attempted", 0) > 0, "the seed must run, not be gated out"
-        assert totals.get("rebound", 0) == 0
-        assert totals.get("pages_not_resident", 0) > 0, (
-            "the decline must name physical residency, so a field JSONL says why"
+        assert totals.get("rebound", 0) > 0
+        assert totals.get("pages_not_resident", 0) == 0, (
+            "the residency decline this workflow used to record must be gone"
         )
 
         # The same counters must reach the diagnostics snapshot the field
@@ -831,7 +988,10 @@ def test_born_cropped_montage_records_why_it_cannot_rebind(qtbot):
 
         snapshot = collect_runtime_diagnostics_snapshot(win)
         assert snapshot.montage.resident_crop_rebind_last_gate == "attempted"
-        assert snapshot.montage.resident_crop_rebind_totals.get("pages_not_resident", 0) > 0
+        assert snapshot.montage.resident_crop_rebind_totals.get("rebound", 0) > 0
+
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+        assert_wgpu_frame_matches_cpu_reference(win)
     finally:
         win.close()
         restore_default_backend(settings)

@@ -1999,14 +1999,27 @@ class WgpuImageView2D(ImageViewShell):
         still owns its exact semantic plane. Uploading that plane through the
         same bounded tile commit populates the already-budgeted L0 pages once;
         a later displayed-axis crop then becomes only a source-window rebind.
-        Narrow/cold crops never enter here because their binding is local, and
-        display-ready/windowed RGB is skipped because ``semantic_data`` alone
+        Display-ready/windowed RGB is skipped because ``semantic_data`` alone
         does not carry its paired luminance representation.
+
+        The qualifying test is the CANONICAL plane shape, which is also what
+        ``_wgpu_native_prefetch_page_keys`` keys and what the caller uploads
+        into: whether this payload presents all of that plane is a separate
+        question, answered by the source origin the caller binds at. A cropped
+        payload whose evaluation was widened to the plane
+        (``canonical_plane_residency_source``) carries exactly that array while
+        presenting a sub-rect. Demanding a whole-plane ``source_rect`` as well
+        is what left a born-cropped montage on crop-local pages forever:
+        nothing ever presents its whole plane, so nothing ever warmed the
+        canonical one. A window-local ``semantic_data`` cannot slip through —
+        it matches ``plane_shape`` only when the window IS the plane.
         """
 
-        if int(selected_lod) <= 0:
-            return None
         if representation not in {SCALAR_R32F, COMPLEX_RG32F}:
+            return None
+        if int(selected_lod) <= 0 and binding.source_anchored:
+            # An exact native binding already resolved canonical pages on its
+            # own path; replacing it here would only duplicate that geometry.
             return None
         semantic = getattr(payload, "native_residency_data", None)
         if semantic is None:
@@ -2014,17 +2027,12 @@ class WgpuImageView2D(ImageViewShell):
         if semantic is None:
             return None
         semantic = np.asarray(semantic)
-        if tuple(int(value) for value in semantic.shape[:2]) != binding.plane_shape:
-            anchor = getattr(payload, "source_anchor", None)
-            plane_shape = tuple(getattr(anchor, "plane_shape", ()) or ())
-            source_rect = tuple(getattr(anchor, "source_rect", ()) or ())
-            if tuple(int(value) for value in semantic.shape[:2]) != plane_shape or source_rect != (
-                0,
-                plane_shape[0],
-                0,
-                plane_shape[1],
-            ):
-                return None
+        anchor = getattr(payload, "source_anchor", None)
+        plane_shape = tuple(int(value) for value in (getattr(anchor, "plane_shape", ()) or ()))
+        if len(plane_shape) != 2:
+            return None
+        if tuple(int(value) for value in semantic.shape[:2]) != plane_shape:
+            return None
         kind = (
             TexturePlaneKind.COMPLEX_RG32F
             if representation == COMPLEX_RG32F
@@ -3478,25 +3486,47 @@ def _wgpu_native_prefetch_page_count(
     representation: str,
     selected_lod: int,
 ) -> int:
-    """Native source pages carried alongside a reduced presentation."""
+    """Native source pages carried alongside a presentation of part of them.
 
-    if int(selected_lod) <= 0 or representation not in {SCALAR_R32F, COMPLEX_RG32F}:
+    Two presentations warm the canonical plane instead of uploading their own
+    texture: a REDUCED one (the payload owns finer pixels than it presents) and
+    a CROPPED one at any level (the payload owns a wider plane than it
+    presents). Both replace their texture upload with the plane's pages, so
+    both must be counted as the plane — under-counting turns the pool's
+    retention preference into a correctness ceiling.
+    """
+
+    if representation not in {SCALAR_R32F, COMPLEX_RG32F}:
         return 0
     source = getattr(payload, "native_residency_data", None)
     if source is None:
         source = getattr(payload, "semantic_data", None)
     anchor = getattr(payload, "source_anchor", None)
-    plane_shape = tuple(getattr(anchor, "plane_shape", ()) or ())
+    plane_shape = tuple(int(value) for value in (getattr(anchor, "plane_shape", ()) or ()))
     if (
         source is None
         or len(plane_shape) != 2
-        or tuple(int(value) for value in np.shape(source)[:2])
-        != tuple(int(value) for value in plane_shape)
+        or tuple(int(value) for value in np.shape(source)[:2]) != plane_shape
     ):
+        return 0
+    if int(selected_lod) <= 0 and _wgpu_anchor_covers_plane(anchor):
+        # An exact whole-plane payload IS its canonical plane; its ordinary
+        # source-anchored binding uploads those pages, and the generic texture
+        # count already describes them.
         return 0
     from arrayscope.gpu.wgpu_executor import PAGE
 
     return -(-int(plane_shape[0]) // PAGE) * -(-int(plane_shape[1]) // PAGE)
+
+
+def _wgpu_anchor_covers_plane(anchor) -> bool:
+    """Does this anchor's window span its whole canonical source plane?"""
+
+    plane_shape = tuple(int(value) for value in (getattr(anchor, "plane_shape", ()) or ()))
+    source_rect = tuple(int(value) for value in (getattr(anchor, "source_rect", ()) or ()))
+    if len(plane_shape) != 2 or len(source_rect) != 4:
+        return False
+    return source_rect == (0, plane_shape[0], 0, plane_shape[1])
 
 
 def _wgpu_payload_capacity_page_count(

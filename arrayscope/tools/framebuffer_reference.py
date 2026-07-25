@@ -301,7 +301,12 @@ def _native_reference_values(win, session, tile, payload) -> np.ndarray:
     if native is None:
         native = payload.semantic_data
     if native is not None:
-        return np.asarray(native)
+        # ``native_residency_data`` describes the whole CANONICAL plane, which
+        # is wider than what a cropped payload draws (the crop-warm path
+        # uploads the plane and binds the window's source origin into it).  The
+        # oracle compares the payload's own window, so take that window out of
+        # the plane; the values themselves stay independent worker output.
+        return _window_of_plane(np.asarray(native), payload)
 
     # A resident native source plane can outlive the exact RenderedTile that
     # populated it.  A later reduced page-backed payload may therefore draw
@@ -328,6 +333,22 @@ def _native_reference_values(win, session, tile, payload) -> np.ndarray:
     value = result.value
     semantic = getattr(value, "semantic_data", None)
     return np.asarray(value.data if semantic is None else semantic)
+
+
+def _window_of_plane(values: np.ndarray, payload) -> np.ndarray:
+    """The payload's own source window out of a whole-plane value array."""
+
+    anchor = getattr(payload, "source_anchor", None)
+    plane_shape = tuple(int(size) for size in (getattr(anchor, "plane_shape", ()) or ()))
+    source_rect = tuple(int(edge) for edge in (getattr(anchor, "source_rect", ()) or ()))
+    if len(plane_shape) != 2 or len(source_rect) != 4:
+        return values
+    if tuple(int(size) for size in values.shape[:2]) != plane_shape:
+        return values
+    y0, y1, x0, x1 = source_rect
+    if (y0, x0) == (0, 0) and (y1, x1) == plane_shape:
+        return values
+    return values[y0:y1, x0:x1]
 
 
 def _assert_exact_tile_coverage(required, reports) -> None:

@@ -225,3 +225,65 @@ Artifacts:
 - `/tmp/arrayscope-physical-visual-fixed.I2rsbq/`
 - `/tmp/arrayscope-profile-final.L4Mxmx/result.jsonl`
 - `/tmp/arrayscope-profile-final.L4Mxmx/trace.jsonl`
+
+## 2026-07-25 born-cropped views: warm the canonical plane, then rebind
+
+The resident-crop rebind landed with a structural hole that only the field
+workflow hit. The 2026-07-25 engagement investigation proved it: a view that is
+cropped from the first frame onward uploads only crop-local pages, whose plane
+identity folds their own source rect, so `tiledPayloadResident` refused every
+shifted window and the seed declined with `pages_not_resident` on every tile of
+every step. The rebind was inert for exactly the workflow it was built for.
+
+The fix is a production decision, not a binding one. Anchoring is granted only
+for display axes the operation chain commutes with, and
+`source_anchoring_for_view` therefore strips those axes' windows before it keys
+the content — the content key is already a promise about the WHOLE plane.
+`canonical_plane_residency_source` redeems it: when the capability is on and a
+displayed-axis crop is active, the tile's evaluation produces the window-free
+plane, which rides along as `native_residency_data` and replaces the crop-local
+page upload in the commit. The presented pages, texture, and window-exact level
+evidence are unchanged; the widened array is residency data only.
+
+Bindings and accounting followed:
+
+- `_wgpu_reusable_native_texture` qualified a warm plane by whole-plane
+  `source_rect` as well as shape. A cropped payload presents a sub-rect of a
+  plane it fully owns, and the caller already binds the window's source origin
+  into it, so the shape against `anchor.plane_shape` is the whole test. (A
+  window-local `semantic_data` cannot slip through it: that matches
+  `plane_shape` only when the window IS the plane.)
+- capacity, upload bytes, and the commit cohort keyed the warm on
+  `lod.level > 0`. A cropped level-0 payload warms too, so all three now ask
+  one predicate — carries the whole plane, presents less than all of it.
+- the CPU-reference oracle read `native_residency_data` as the payload's own
+  values. It now takes the payload's source window out of the plane.
+
+Budget: widening is refused when one montage of whole planes would exceed half
+the tile-residency byte policy (`CANONICAL_PLANE_WARM_BUDGET_SHARE`). The warm
+plane replaces the crop-local upload rather than adding to it, so the question
+is the montage's whole physical working set, not one extra plane. On the field
+fixture that admits 297 planes against a planned 100.
+
+Measured, offscreen Vulkan, `(336, 336, 272)` float32 raw scalar, 100 montage
+tiles, both displayed axes cropped from the first frame, scrubbing the primary
+displayed dimension one row per step:
+
+| capability | cold born-cropped fill | producers / step | ms / step |
+|---|---:|---:|---:|
+| off (crop-local) | 3707 ms | 100 | 2460–6548 |
+| on (canonical warm) | 3698 ms | 0 | 300–365 |
+
+First-pixel latency does not pay for the scrub's speed: the widened evaluation
+replaces the crop-local one instead of adding a second pass, and measured on
+this fixture a whole-plane tile evaluation costs the same 0.6 ms as its 200×200
+crop (both are fixed-overhead bound, not pixel bound).
+
+Still open, and deliberately not claimed here: an EXACT (level-0) born-cropped
+montage. Its payloads carry window-local CPU semantics, so the rebind needs a
+whole plane in the canonical-plane memo to re-slice, and the exact path does not
+yet carry `native_residency_data` (that would mean widening
+`_evaluate_native_tile_result`'s result through `RenderedTile`, and one native
+plane cannot serve an RGB `image` and a value `semantic_data` at once).
+Measured on a 64×64×60 fixture, 50 tiles: 50 producers and 598–630 ms per step,
+declining with `no_reslicable_plane` — physically rebindable, semantically not.
