@@ -314,6 +314,14 @@ class DisplayTilePayload:
     # while a reduced page-backed presentation is drawn. It is not semantic
     # presentation data and does not satisfy reads from this payload.
     native_residency_data: np.ndarray | None = None
+    # A resident crop rebind re-presents this payload at a shifted
+    # ``source_anchor`` without evaluating the new window, so its carried level
+    # evidence (``level_stats``/``level_data``, and any CPU plane the rebind
+    # could not re-slice) still describes the PREDECESSOR window. The pixels are
+    # correct — they come from the resident pages — but the statistics are not,
+    # so level-evidence consumers must ignore them and wait for the semantic
+    # evidence owner's window-exact sample.
+    level_evidence_window_stale: bool = False
 
     def __post_init__(self) -> None:
         quality = str(self.quality or "exact")

@@ -21,6 +21,13 @@ it is only pixel-exact against the CPU oracle while the level window is stable
 (verified here with statistically uniform data).  A crop whose pages are NOT
 resident, any pixel-affecting identity change, or a montage of planes too large
 for the residency byte policy falls through to the ordinary evaluation.
+A rebound window re-anchors its own auto levels: the evidence it carries
+describes the PREDECESSOR window, so it is demoted to preview quality and the
+semantic level-evidence owner re-samples the new window off the display lane.
+The capability is still gated OFF by default because that owner is not admitted
+on an operation-pipeline montage, which the last test here pins.  A crop whose
+pages are NOT resident, or any pixel-affecting identity change, falls through to
+the ordinary evaluation.
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ import numpy as np
 import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from arrayscope.display.model.montage_levels import LevelEvidenceQuality
 from arrayscope.tools.framebuffer_reference import assert_wgpu_frame_matches_cpu_reference
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from arrayscope.window.frame_effects import canonical_plane_memo_bytes
@@ -992,6 +1000,283 @@ def test_born_cropped_montage_warms_canonical_planes_and_rebinds(qtbot):
 
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
         assert_wgpu_frame_matches_cpu_reference(win)
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+# --- Level re-anchoring on a rebind-only scrub ------------------------------
+# A rebound window is presented without any evaluation sampling it, so nothing
+# in the payload path describes its value range.  The semantic level-evidence
+# owner re-samples the source instead: window-exact, kernel-side, and off the
+# display lane.  Gradient data is the discriminating fixture — every crop window
+# has a different range, so a reused predecessor window is visible in the levels
+# while statistically uniform data would hide it.
+
+_GRADIENT_TILE_INDICES = tuple(range(50))
+
+
+def _gradient_source() -> np.ndarray:
+    # A row gradient shared by every tile: shifting the row window by one moves
+    # the exact auto-level window by ten, so stale evidence cannot be mistaken
+    # for sampling noise.
+    yy, xx = np.mgrid[0:64, 0:64].astype(np.float32)
+    planes = tuple(yy * 10.0 + xx + float(index) for index in range(60))
+    return np.stack(planes, axis=2).astype(np.float32)
+
+
+def _gradient_window_bounds(start: int) -> tuple[float, float]:
+    window = _gradient_source()[start : start + 40, 12:52, :][:, :, list(_GRADIENT_TILE_INDICES)]
+    return float(window.min()), float(window.max())
+
+
+def _gradient_cropped_state(win, start: int):
+    state = win.view_state
+    state = state.with_axis_range(
+        0, indices=tuple(range(start, start + 40)), text=f"{start}:{start + 40}"
+    )
+    state = state.with_axis_range(1, indices=tuple(range(12, 52)), text="12:52")
+    return state.with_montage_axis(2, columns=10, indices=_GRADIENT_TILE_INDICES, text="0:50")
+
+
+def _gradient_crop_settled(win, start: int) -> bool:
+    session = getattr(win.renderer, "_frame_session", None)
+    if session is None or session.plan is None:
+        return False
+    ranges = tuple(getattr(session.view_state, "axis_range_indices", None) or ())
+    indices = tuple(ranges[0] or ()) if ranges else ()
+    if not indices or int(indices[0]) != int(start):
+        return False
+    return frame_session_settled(win)
+
+
+def _gradient_levels_anchored(win, start: int) -> bool:
+    """Settled, carrying this window's mature evidence, AND showing it.
+
+    The tracker reaching full refined coverage and the display publishing that
+    window are separate turns, so a gate on the tracker alone would sample the
+    predecessor's levels and read as a re-anchor failure.
+    """
+
+    if not _gradient_crop_settled(win, start):
+        return False
+    session = win.renderer._frame_session
+    summary = win.renderer._montage_level_tracker().summary_for(session.level_key)
+    if (
+        summary is None
+        or int(summary.evidence_quality) != int(LevelEvidenceQuality.REFINED)
+        or len(summary.source_indices) != len(_GRADIENT_TILE_INDICES)
+        or summary.bounds is None
+    ):
+        return False
+    displayed = tuple(round(float(value), 4) for value in win.img_view.getLevels())
+    return displayed == tuple(round(float(value), 4) for value in summary.bounds)
+
+
+def _gradient_scrub(win, starts, *, deadline_ms) -> list[dict]:
+    """Fill the whole plane, crop, scrub, and report each settled step."""
+
+    full = win.view_state.with_montage_axis(
+        2, columns=10, indices=_GRADIENT_TILE_INDICES, text="0:50"
+    )
+    win._set_view_state(full)
+    win.update_image_view()
+    _busy_pump_until(
+        lambda: frame_session_settled(win),
+        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+        "full-plane fill",
+    )
+    first = int(starts[0])
+    win._apply_slice_state(
+        0,
+        _gradient_cropped_state(win, first),
+        reason="slice-range",
+        interactive=True,
+        immediate_axis_only=False,
+    )
+    _busy_pump_until(
+        lambda: _gradient_levels_anchored(win, first),
+        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+        "cropped fill",
+    )
+
+    steps = []
+    for start in tuple(starts)[1:]:
+        start = int(start)
+        before = _preparation_completed(win)
+        started = perf_counter()
+        win._on_slice_text_changed(0, f"{start}:{start + 40}")
+        _busy_pump_until(
+            lambda start=start: _gradient_levels_anchored(win, start),
+            deadline_ms / 1000.0,
+            f"gradient scrub {start}",
+        )
+        steps.append(
+            {
+                "start": start,
+                "producers": _preparation_completed(win) - before,
+                "levels": tuple(round(float(value), 4) for value in win.img_view.getLevels()),
+                "anchor_ms": (perf_counter() - started) * 1000.0,
+            }
+        )
+    return steps
+
+
+def test_rebound_crop_window_reanchors_its_own_auto_levels(qtbot):
+    """A rebind-only scrub settles on the NEW window's exact auto levels.
+
+    This is the caveat the capability was gated on.  A rebound wrapper carries
+    the level evidence of the window it was sampled in, and a scrub clones
+    forward from one ancestor, so admitting that evidence republished the FIRST
+    window's bounds under every later window's ``level_key`` — measured on this
+    fixture as 10:50's ``(112, 590)`` surviving 11:51, 12:52 and 13:53 unchanged.
+
+    The rebound payloads are therefore evidence-blind by construction, and the
+    semantic level-evidence owner re-samples the window from the source.  It is
+    a statistics lane, not a display lane, so the whole point of the rebind
+    survives: still ZERO display-preparation producers per step.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    win = make_backend_window(qtbot, _gradient_source(), backend="wgpu", require_gpu_atlas=True)
+    win.resize(790, 780)
+    try:
+        win.show()
+        steps = _gradient_scrub(win, (10, 11, 12, 13), deadline_ms=INTERACTION_SETTLE_HARD_LIMIT_MS)
+        for step in steps:
+            assert step["producers"] == 0, (
+                f"window {step['start']}: re-anchoring must not schedule display producers "
+                f"({step['producers']} scheduled)"
+            )
+            assert step["levels"] == pytest.approx(_gradient_window_bounds(step["start"])), (
+                f"window {step['start']}: auto levels describe a different window "
+                f"(a stale predecessor summary)"
+            )
+
+        session = win.renderer._frame_session
+        assert session.level_evidence_reanchor is True
+        assert session.semantic_level_evidence_diagnostics()["blocking_reason"] == "ready"
+        assert all(
+            payload.level_evidence_window_stale
+            for payload in session.display_tile_payloads.values()
+        ), "every rebound wrapper must declare that its evidence predates its window"
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_rebind_and_evaluation_paths_settle_identical_levels(qtbot):
+    """Path independence: the fast path may not change what the levels ARE.
+
+    The rebind and the ordinary evaluation reach the same window by different
+    routes — resident pages versus fresh per-tile producers — and produce their
+    level evidence from different owners.  Only the schedule may differ.
+    """
+
+    def settled_levels(*, rebind: bool) -> list[tuple[float, float]]:
+        settings = use_wgpu_backend(
+            extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": rebind}
+        )
+        win = make_backend_window(qtbot, _gradient_source(), backend="wgpu", require_gpu_atlas=True)
+        win.resize(790, 780)
+        try:
+            win.show()
+            steps = _gradient_scrub(
+                win,
+                (10, 11, 12),
+                # The evaluation path re-runs every tile, so it needs the cold
+                # budget; the rebind path is measured for speed separately.
+                deadline_ms=INTERACTION_SETTLE_HARD_LIMIT_MS * 4,
+            )
+            return [step["levels"] for step in steps]
+        finally:
+            win.close()
+            restore_default_backend(settings)
+
+    rebound = settled_levels(rebind=True)
+    evaluated = settled_levels(rebind=False)
+    assert rebound == evaluated
+    assert rebound == [
+        pytest.approx(_gradient_window_bounds(11)),
+        pytest.approx(_gradient_window_bounds(12)),
+    ]
+
+
+def test_operation_pipeline_montage_keeps_the_predecessor_window_levels(qtbot):
+    """The re-anchor does NOT reach operation-pipeline montages — pinned, not fixed.
+
+    Levels for a rebound window come from the semantic evidence owner, and that
+    owner is unreachable on a montage with an operation pipeline: its refinement
+    work is never admitted (measured under ``CenteredFFT(axis=2)`` — armed target,
+    ``verdict``/``side-work`` refusals, zero completed batches, with or without
+    the rebind).  So a rebound crop window here can only be as good as its
+    demoted placeholder, which is precisely why the capability stays default OFF.
+
+    What must hold is that this degrades honestly: the placeholder keeps the
+    successor population COMPLETE but IMMATURE, so the display holds the
+    predecessor's window instead of republishing the ancestor window's bounds
+    under this window's key, and the histogram still has a source.  Dropping the
+    placeholder outright left this montage with no evidence at all.
+    """
+
+    from arrayscope.operations.pipeline import CenteredFFT
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    win = make_backend_window(qtbot, _gradient_source(), backend="wgpu", require_gpu_atlas=True)
+    win.resize(790, 780)
+    try:
+        win.show()
+        win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
+        win._set_document(win.operation_coordinator.document)
+        win._coerce_channel_for_current_dtype()
+
+        full = win.view_state.with_montage_axis(
+            2, columns=10, indices=_GRADIENT_TILE_INDICES, text="0:50"
+        )
+        win._set_view_state(full)
+        win.update_image_view()
+        _busy_pump_until(
+            lambda: frame_session_settled(win),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+            "fft full-plane fill",
+        )
+        win._apply_slice_state(
+            0,
+            _gradient_cropped_state(win, 10),
+            reason="slice-range",
+            interactive=True,
+            immediate_axis_only=False,
+        )
+        _busy_pump_until(
+            lambda: _gradient_crop_settled(win, 10),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+            "fft cropped fill",
+        )
+        held = tuple(round(float(value), 4) for value in win.img_view.getLevels())
+
+        for start in (11, 12):
+            win._on_slice_text_changed(0, f"{start}:{start + 40}")
+            _busy_pump_until(
+                lambda start=start: _gradient_crop_settled(win, start),
+                INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
+                f"fft scrub {start}",
+            )
+            assert tuple(round(float(value), 4) for value in win.img_view.getLevels()) == held, (
+                "an unreachable re-anchor must hold the predecessor window, not remap"
+            )
+
+        session = win.renderer._frame_session
+        assert session.level_evidence_reanchor is True, "the rebind must still arm the owner"
+        summary = win.renderer._montage_level_tracker().summary_for(session.level_key)
+        assert summary is not None, "the demoted placeholder must remain as the histogram source"
+        assert int(summary.evidence_quality) == int(LevelEvidenceQuality.ROUGH_PREVIEW), (
+            "a rebound window's carried evidence must never claim target quality"
+        )
+        assert len(summary.source_indices) == len(_GRADIENT_TILE_INDICES)
     finally:
         win.close()
         restore_default_backend(settings)

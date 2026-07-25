@@ -704,20 +704,65 @@ class LevelStatsService:
             blocking_batch_limit=int(MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH),
             background_batch_limit=int(MONTAGE_LEVEL_STATS_BACKGROUND_BATCH),
         )
-        visible_dependency = bool(
-            _montage_level_evidence_requires_refined(self, session)
-            and not bool(getattr(session, "display_committed", False))
-        )
         progress = SemanticLevelEvidenceProgress(
             target=target,
-            current_batch_limit=(
-                target.blocking_batch_limit if visible_dependency else target.background_batch_limit
-            ),
+            current_batch_limit=self._semantic_level_evidence_batch_limit(session, target),
         )
         session.semantic_level_evidence_target = target
         session.semantic_level_evidence_progress = progress
         self._montage_level_tracker().ensure_expected(session.level_key, expected)
         return target
+
+    def _semantic_level_evidence_batch_limit(self, session, target) -> int:
+        """How many sources one bounded evidence pass may claim.
+
+        The background trickle (two sources per GUI round-trip) is sized for
+        work nobody is waiting on.  Two cases are waited on.  The first is a
+        cold CPU-windowed frame, whose first pixels need the full window source.
+        The second is a resident crop rebind: it presents a window that no
+        evaluation sampled, so this owner is the ONLY producer of the new
+        window's levels and the display holds the predecessor's until it lands.
+        Measured on a 50-tile row-gradient scrub, the sampling itself costs
+        ~28 ms in total while the trickle spread it over 25 round-trips —
+        ~160 ms of scheduling for ~1 ms of work per batch.  Both waited-on cases
+        therefore take the blocking batch size; nothing else changes.
+        """
+
+        visible_dependency = bool(
+            _montage_level_evidence_requires_refined(self, session)
+            and not bool(getattr(session, "display_committed", False))
+        )
+        reanchor = bool(getattr(session, "level_evidence_reanchor", False))
+        return int(
+            target.blocking_batch_limit
+            if (visible_dependency or reanchor)
+            else target.background_batch_limit
+        )
+
+    def rearm_crop_rebind_level_evidence(self, session) -> bool:
+        """Re-anchor levels for a window that was rebound rather than evaluated.
+
+        A resident crop rebind commits the new window with zero kernel
+        evaluations, so nothing in the ordinary payload path ever samples it and
+        the maturity contract keeps re-publishing the predecessor's window.
+        Arming the semantic evidence target here makes the owner's window-exact
+        sample the successor evidence: it is keyed by ``session.level_key``,
+        which folds the crop window (``axis_range_indices`` rides in the scope
+        state), so the new window gets its own tracker entry and supersedes the
+        predecessor summary by arriving rather than by outranking it.
+
+        Deliberately not a display evaluation: the owner samples the source
+        through the operations evaluator on a statistics lane, so a rebound
+        scrub step still schedules zero ``display_preparation`` producers.
+        """
+
+        target = self._ensure_semantic_level_evidence_target(session)
+        progress = getattr(session, "semantic_level_evidence_progress", None)
+        if target is None or progress is None:
+            return False
+        progress.current_batch_limit = self._semantic_level_evidence_batch_limit(session, target)
+        self._schedule_semantic_level_evidence(session)
+        return True
 
     def _take_semantic_level_evidence_sources(self, session) -> tuple[int, ...]:
         target = self._ensure_semantic_level_evidence_target(session)
@@ -768,9 +813,7 @@ class LevelStatsService:
         progress = getattr(session, "semantic_level_evidence_progress", None)
         if target is None or progress is None or progress.inflight_generation is not None:
             return
-        progress.current_batch_limit = int(
-            target.blocking_batch_limit if visible_dependency else target.background_batch_limit
-        )
+        progress.current_batch_limit = self._semantic_level_evidence_batch_limit(session, target)
         if len(progress.covered_sources) >= target.target_population:
             progress.blocking_reason = "ready"
             if self._montage_level_tracker().cached_histogram_data(target.level_key) is None:
@@ -1048,6 +1091,13 @@ class LevelStatsService:
         for tile_number in payloads or ():
             payload = payloads.get(int(tile_number)) if isinstance(payloads, dict) else None
             rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))
+            # A rebound wrapper's statistics describe the window it was sampled
+            # in, not the one it is now anchored to.  An ordinary evaluation for
+            # the same tile lands in ``rendered_tiles`` and takes precedence
+            # above, so this only demotes the rebind's own carried evidence.
+            window_stale = rendered is None and bool(
+                getattr(payload, "level_evidence_window_stale", False)
+            )
             if rendered is None and payload is not None:
                 tile = tiles_by_number.get(int(tile_number))
                 if tile is not None and hasattr(payload, "semantic_data"):
@@ -1069,6 +1119,20 @@ class LevelStatsService:
                 rendered,
                 refined=bool(require_refined),
             )
+            if window_stale:
+                # Demote, do not drop.  Preview quality is exactly what this is:
+                # a real summary of real values that does not describe the window
+                # on screen.  Keeping it means the successor population is
+                # COMPLETE but IMMATURE, which is the maturity contract's own
+                # signal to keep showing the predecessor's window/histogram until
+                # one target-quality population arrives — instead of republishing
+                # the ancestor window's bounds as if they were this window's
+                # (measured on a row gradient: 10:50's ``(112, 590)`` survived
+                # 11:51, 12:52 and 13:53 unchanged).  Dropping it instead would
+                # leave nothing at all on any session whose semantic evidence
+                # owner never gets scheduled — an operation-pipeline montage —
+                # which is a worse trade than a demoted placeholder.
+                quality = LevelEvidenceQuality.ROUGH_PREVIEW
             if getattr(
                 rendered, "level_stats", None
             ) is not None and self._update_montage_level_bounds_from_prepared(
@@ -1129,7 +1193,13 @@ class LevelStatsService:
         self._montage_pending_level_tiles_last_session = len(
             getattr(session, "pending_level_tiles", ()) or ()
         )
-        if merged or pending:
+        if merged or pending or bool(getattr(session, "level_evidence_reanchor", False)):
+            # A rebind re-anchor merges nothing here BY CONSTRUCTION — every one
+            # of its payloads was skipped above — so the ordinary
+            # "something-changed" wakeup would never fire and the owner it
+            # depends on would never be scheduled.  The commit edge is the first
+            # moment the shader gate (first pass published, side work settled)
+            # can be open, so it must reach the scheduler on merge-count zero.
             self._schedule_montage_cached_level_stats(session)
         return int(merged + resident_merged)
 

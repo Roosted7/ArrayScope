@@ -765,6 +765,12 @@ class FrameSession:
     # The source id makes the acceptance about THIS payload: once the slot holds
     # anything else, the entry stops matching and proves nothing.
     resident_crop_rebound_source_ids: dict[int, object] = field(default_factory=dict)
+    # This session presented a window no evaluation ever sampled (a resident crop
+    # rebind), so its level evidence must be re-anchored from the source rather
+    # than inherited from the payloads.  Set by ``rebind_resident_crop_tiles``;
+    # read by the semantic evidence owner, which promotes itself from trickle
+    # batches to the blocking batch size while it holds.
+    level_evidence_reanchor: bool = False
     # First presented tile numbers in presentation order (capped): makes
     # priority-order violations observable in diagnostics logs.
     presented_order: list[int] = field(default_factory=list)
@@ -2409,12 +2415,21 @@ class FrameSession:
         a content key that folds document generation, operation, slice index,
         complex mode and fftshift; any of those changing makes the new content
         key differ from the predecessor's and the tile falls through to a normal
-        evaluation.  The wrapper is cloned, never re-anchored, so level and
-        histogram evidence (``level_data``/``level_stats``/
-        ``presentation_identity``) is reused unchanged.  Where residency is only
-        partial — a preview-quality predecessor, or a level below the demanded
-        one — the clone rebinds what is resident while the ladder still schedules
-        the missing exact/finer rung.
+        evaluation.  Where residency is only partial — a preview-quality
+        predecessor, or a level below the demanded one — the clone rebinds what
+        is resident while the ladder still schedules the missing exact/finer
+        rung.
+
+        Levels: the clone's carried level evidence (``level_stats``/
+        ``level_data``) was sampled from the PREDECESSOR window, so every rebound
+        wrapper is stamped ``level_evidence_window_stale`` and the level-evidence
+        consumer ignores it.  Admitting it instead does not merely lag the
+        window: because a scrub clones forward from the same ancestor wrapper,
+        every step re-published the FIRST window's bounds under the new
+        window's ``level_key`` (measured on a row gradient: windows 11:51/12:52/
+        13:53 all settled at 10:50's ``(112, 590)``).  ``level_evidence_reanchor``
+        arms the semantic evidence owner to re-sample this window instead —
+        window-exact, kernel-side, and off the display lane.
         """
 
         stats: dict[str, int] = {"considered": 0, "rebound": 0}
@@ -2516,6 +2531,7 @@ class FrameSession:
                 previous,
                 source_anchor=new_anchor,
                 tile_identity=new_identity,
+                level_evidence_window_stale=True,
                 **planes,
             )
             # The residency seam returns True only when the binding is
@@ -2537,6 +2553,7 @@ class FrameSession:
             rebound.append(tile_number)
             stats["rebound"] += 1
         if rebound:
+            self.level_evidence_reanchor = True
             self.invalidate_tile_states()
         return tuple(rebound)
 

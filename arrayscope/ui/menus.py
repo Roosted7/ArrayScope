@@ -488,10 +488,12 @@ class WindowMenuMixin:
         resident_crop_rebind_action.setToolTip(
             "When you scrub a crop window over montage data that is already "
             "loaded, reuse the loaded pixels instead of recomputing every tile "
-            "(much faster scrubbing). Caveat: automatic brightness/contrast can "
-            "lag on data whose value range varies strongly across the crop "
-            "window, until the next full pass re-measures it. Takes effect on "
-            "your next crop-window scrub; no restart needed."
+            "(much faster scrubbing). Automatic brightness/contrast keeps the "
+            "previous window's setting for a moment, then re-measures the new "
+            "one in a single step. Caveat: on a montage with an operation "
+            "applied, that re-measurement does not run and the brightness stays "
+            "on the previous window until you change something else. Takes "
+            "effect on your next crop-window scrub; no restart needed."
         )
         resident_crop_rebind_action.setChecked(
             bool(getattr(self.app_settings, "resident_crop_rebind", False))

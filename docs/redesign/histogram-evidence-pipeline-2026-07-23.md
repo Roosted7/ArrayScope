@@ -188,3 +188,67 @@ Until one of those lands the rebind stays default OFF (opt-in via the raw
   complete incumbent.
 - Timing gates remain device evidence. CI asserts matrix shape and
   correctness, never wall-clock thresholds.
+
+## Addendum 2026-07-25 — the semantic evidence owner as route 2, measured
+
+Route 2 above (kernel-side CPU sampling of the cropped window) does not need to
+be built: `LevelStatsService._ensure_semantic_level_evidence_target` +
+`evaluate_level_evidence_snapshot` already are it. They sample the source
+through the operations evaluator on `WorkLane.HISTOGRAM_REFINEMENT`, bounded to
+`REFINED_TILE_SAMPLE_LIMIT` pixels per source, and they key on
+`session.level_key`.
+
+**Keying, checked first.** `montage_level_key` folds the whole scope `ViewState`,
+and the crop window lives in `axis_range_indices`, so every crop window gets its
+own tracker entry. `_montage_level_family_key` strips only the montage
+population, so the per-source memory cache is window-scoped too. New-window
+evidence therefore supersedes the predecessor summary by *arriving under its own
+key*, not by outranking anything. There is no key collision to resolve.
+
+**The collision was inside the key, not between keys.** A rebound wrapper is a
+`replace()` of its predecessor, so it carries that window's `level_stats`, and
+`_queue_montage_level_stats_for_payloads` merged them under the NEW key at
+target quality. Because a scrub clones forward from one ancestor, every step
+republished the FIRST window's bounds: on a 50-tile row gradient, `10:50`'s
+`(112, 590)` survived `11:51`, `12:52` and `13:53` unchanged — the display even
+stepped *backwards* after a re-anchor had already corrected it.
+
+The fix is a demotion, not a drop: a rebound wrapper is stamped
+`level_evidence_window_stale` and its evidence is admitted at
+`ROUGH_PREVIEW`. The successor population is then COMPLETE but IMMATURE, which
+is the maturity contract's own signal to hold the predecessor's window until one
+target-quality population lands — so the re-anchor happens once, atomically.
+`FrameSession.level_evidence_reanchor` arms the owner at the same seam and
+promotes it from the two-source background trickle to the blocking batch size.
+
+Measured, 50-tile 64x64 row gradient, wgpu, `resident_crop_rebind` on:
+
+| | settle | producers | levels at settle | window-exact at |
+|---|---|---|---|---|
+| rebind, before | 125-171 ms | 0 | ancestor window | 155-186 ms after settle |
+| rebind, after | 100-135 ms | 0 | predecessor window | 80-100 ms after settle |
+| ordinary evaluation | 570-750 ms | 50 | window-exact | at settle |
+
+Both paths settle on identical window-exact levels (`caf435b7` path
+independence). The 100-tile 336x336x272 field repro is unchanged in per-step
+cost within run-to-run spread (28 baseline steps mean 449 ms, 40 changed steps
+mean 480 ms, one outlier run carrying all of the difference; excluding it,
+448 ms), still zero `display_preparation` producers, with a ~200-400 ms
+statistics-lane tail after the last step.
+
+### Why the default stays OFF
+
+The route does not reach **operation-pipeline montages**. Under
+`CenteredFFT(axis=2)` the owner is armed but never admitted — `verdict` and
+`_montage_side_work_visible_settled` refusals, zero completed batches — with or
+without the rebind; under `CenteredFFT(axis=0)` the content key changes per
+window so the rebind declines outright and the owner is never even armed
+(`blocking_reason: inactive`). A crop scrub on such a montage can only be as
+good as its demoted placeholder: it holds the predecessor's window and keeps a
+histogram source, which is honest, but it is not the window-exact re-anchor the
+plain-montage case now gets.
+
+That is the escape clause of this design, and it is why the capability remains
+opt-in. Making refinement admissible on an operation-pipeline montage is the
+work that would close it; it is a scheduling change in the montage settle
+contract, not another evidence route, and it is out of scope here.

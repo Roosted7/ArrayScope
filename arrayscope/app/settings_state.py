@@ -99,9 +99,11 @@ class AppSettingsState:
     wgpu_clip_indicator: bool = False
     # Experimental montage fast path: a displayed-axis crop-window scrub whose
     # new source window is already physically resident short-circuits to a pure
-    # page rebind (no re-evaluation). Default OFF — it reuses the predecessor
-    # window's auto-level evidence, so auto levels can lag on data whose value
-    # range varies strongly across the crop until the next full evaluation.
+    # page rebind (no re-evaluation). A rebound window re-anchors its auto levels
+    # from the semantic evidence owner, but that owner is not admitted on a
+    # montage with an operation pipeline, where the levels stay on the
+    # predecessor window. Default OFF until that gap closes (see
+    # docs/redesign/histogram-evidence-pipeline-2026-07-23.md).
     resident_crop_rebind: bool = False
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
