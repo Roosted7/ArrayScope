@@ -1139,9 +1139,60 @@ class FrameSession:
             for tile, target in sorted(targets.items())
         )
         if getattr(self, "_lifecycle_target_signature", None) != target_signature:
-            self.lifecycle.retarget(targets)
+            # Adopting new targets prunes the presentable payloads of every
+            # source-changed record, so the "already reported" memo below can
+            # no longer speak for those slots.
+            self._forget_recorded_payloads(self.lifecycle.retarget(targets))
             self._lifecycle_target_signature = target_signature
         return targets
+
+    def _recorded_payloads(self, container: str, payloads) -> dict[int, object]:
+        """Per-container memo of the payload object last reported per slot.
+
+        The memo belongs to one mapping object: ``tile_presentation_state`` is
+        replaced wholesale, and its successor has reported nothing yet.  Pinning
+        the mapping keeps that reset while dropping the previous scheme's
+        ``id()`` keys, which never expired — a long scrub accumulated one dead
+        entry per slot per replaced mapping, and a recycled ``id()`` could
+        silently suppress a report.
+        """
+
+        memo = getattr(self, "_lifecycle_payload_objects", None)
+        if memo is None:
+            memo = {}
+            self._lifecycle_payload_objects = memo
+        owner, recorded = memo.get(str(container), (None, None))
+        if recorded is None or owner is not payloads:
+            recorded = {}
+            memo[str(container)] = (payloads, recorded)
+        return recorded
+
+    def _note_display_payload_recorded(self, tile_number: int, payload) -> None:
+        """Prime the safety-net scan for a payload this site already reported.
+
+        ``sync_lifecycle_scope`` re-reports every payload object it has not yet
+        seen for a (container, slot) pair.  A mutation site that reports the
+        payload itself primes the memo so the scan does not repeat the
+        lifecycle edge: an index-window retarget installed and reported all
+        ~100 remapped payloads, and the scan then reported every one of them a
+        second time — a straight duplicate, on the trace bus as well.
+
+        The prime is only as good as the current target set.  Any later target
+        adoption invalidates it through ``_forget_recorded_payloads``.
+        """
+
+        self._recorded_payloads("display", self.display_tile_payloads)[int(tile_number)] = payload
+
+    def _forget_recorded_payloads(self, tile_numbers) -> None:
+        """Drop memo entries for slots whose presentable payloads were pruned."""
+
+        memo = getattr(self, "_lifecycle_payload_objects", None)
+        if not memo:
+            return
+        for tile_number in tuple(tile_numbers or ()):
+            index = int(tile_number)
+            for _owner, recorded in memo.values():
+                recorded.pop(index, None)
 
     def sync_lifecycle_scope(self) -> None:
         targets = self._sync_lifecycle_targets()
@@ -1163,21 +1214,16 @@ class FrameSession:
         # settlement query: that made each query O(visible tiles * payload
         # identity construction), and a 272-tile fill performed millions of
         # redundant conversions.
-        seen = getattr(self, "_lifecycle_payload_objects", None)
-        if seen is None:
-            seen = {}
-            self._lifecycle_payload_objects = seen
-        payload_sets = (
-            getattr(self, "display_tile_payloads", {}),
-            getattr(getattr(self, "tile_presentation_state", None), "payloads", {}),
-        )
-        for payloads in payload_sets:
+        for container, payloads in (
+            ("display", getattr(self, "display_tile_payloads", {})),
+            ("state", getattr(getattr(self, "tile_presentation_state", None), "payloads", {})),
+        ):
+            recorded = self._recorded_payloads(container, payloads)
             for tile_number, payload in tuple((payloads or {}).items()):
-                marker = id(payload)
-                key = (id(payloads), int(tile_number))
-                if seen.get(key) == marker:
+                index = int(tile_number)
+                if recorded.get(index) is payload:
                     continue
-                seen[key] = marker
+                recorded[index] = payload
                 self.record_tile_payload(payload)
         self._rearm_required_first_pixel_payloads()
 
@@ -1583,6 +1629,7 @@ class FrameSession:
                     self.tile_source_ids[index] = new_source
                 self.lifecycle.remember_presentable(index, payload)
                 self.record_tile_payload(payload)
+                self._note_display_payload_recorded(index, payload)
                 self.pending_payload_upserts[index] = None
                 self.pending_removals.discard(index)
                 self.skipped_tiles.discard(index)

@@ -332,3 +332,28 @@ def test_partial_backend_ack_settles_only_confirmed_region():
     assert lifecycle.row(0).target_settled
     assert not lifecycle.row(1).target_settled
     assert not lifecycle.visible_target_settled()
+
+
+def test_retarget_reports_the_tiles_whose_presentable_history_it_pruned():
+    """The pruned set is the contract a payload-report memo has to honour.
+
+    Callers memoize "this payload object was already reported for this slot" to
+    keep an index-window scrub from reporting every remapped payload twice.  A
+    source retarget prunes ``presentable_payloads``, so the return value has to
+    name exactly the records whose memo entry is no longer trustworthy — a
+    quieter return would let a caller suppress the report that puts the payload
+    back.
+    """
+
+    lifecycle = TileLifecycle()
+    assert lifecycle.retarget({0: _target(source=10), 1: _target(1, source=20)}) == ()
+
+    # An unchanged target and a pure LOD retarget keep the history intact.
+    assert lifecycle.retarget({0: _target(source=10), 1: _target(1, source=20)}) == ()
+    assert lifecycle.retarget({0: _target(source=10, level=2)}) == ()
+
+    lifecycle.target_ready(0, _payload(("tile", 10), source=10))
+    assert lifecycle.row(0).presentable_payloads
+
+    assert lifecycle.retarget({0: _target(source=11, level=2)}) == (0,)
+    assert not lifecycle.row(0).presentable_payloads

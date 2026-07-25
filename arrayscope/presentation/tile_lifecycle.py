@@ -525,10 +525,18 @@ class TileLifecycle:
     # ledger to reconcile.
     row = record
 
-    def retarget(self, targets: Mapping[int, TileTarget]) -> None:
-        """Atomically adopt the current visible target set."""
+    def retarget(self, targets: Mapping[int, TileTarget]) -> tuple[int, ...]:
+        """Atomically adopt the current visible target set.
+
+        Returns the tiles whose semantic source changed — exactly the records
+        whose ``presentable_payloads`` were pruned below.  A caller that
+        memoizes "this payload object was already reported for this slot" MUST
+        forget those tiles: the prune can drop the very payload the memo claims
+        the record holds, and the safety-net scan is what puts it back.
+        """
 
         wanted = {int(tile): target for tile, target in dict(targets).items()}
+        pruned: list[int] = []
         for tile_number, target in wanted.items():
             rec = self.record(tile_number)
             if rec.target == target:
@@ -568,6 +576,7 @@ class TileLifecycle:
                     if source_id == rec.backend_source_id
                     or int(getattr(payload, "source_index", -1)) == int(target.source_index)
                 }
+                pruned.append(tile_number)
                 # Physical backend truth survives retarget for diagnostics,
                 # but it is no longer a semantically presented current tile.
                 rec.presented_source_id = None
@@ -594,6 +603,7 @@ class TileLifecycle:
             rec.task_claim = None
             rec.stage_producer_key = None
             _trace_lifecycle(rec, "target_released")
+        return tuple(pruned)
 
     def fallback_ready(self, tile_number: int, payload: TilePayloadRef | object) -> None:
         ref = _coerce_payload_ref(payload)

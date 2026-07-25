@@ -5475,6 +5475,94 @@ def test_partial_index_window_derives_reuse_map_from_payload_identity():
     assert [session.display_tile_payloads[index].source_index for index in (0, 1)] == [2, 3]
 
 
+def _resident_remap_session(count=4):
+    """A session whose sources are resident only as lifecycle payloads."""
+
+    session = _session(count=count)
+    old_source_ids = {index: ("src", index) for index in range(count)}
+    _state, delta = session.build_tile_presentation(old_source_ids)
+    _acknowledge(session, delta)
+    session.mark_presented(tuple(delta.upserts))
+    session.tile_source_ids = dict(old_source_ids)
+    session.rendered_tiles.clear()
+    return session
+
+
+def _counting(session, name):
+    """Replace one session method with a call-counting wrapper."""
+
+    original = getattr(session, name)
+    calls: list[object] = []
+
+    def wrapper(*args, **kwargs):
+        calls.append(args[0] if args else None)
+        return original(*args, **kwargs)
+
+    setattr(session, name, wrapper)
+    return calls
+
+
+def test_index_window_retarget_reports_each_remapped_payload_once():
+    """The remap and its scope sync must not both report the same payload.
+
+    ``retarget_index_window`` installs a remapped payload and reports it to the
+    lifecycle; ``sync_lifecycle_scope``'s safety-net scan then re-reported the
+    very same object because its memo still held the predecessor.  Every
+    remapped tile therefore paid two payload normalizations and emitted two
+    identical lifecycle trace edges — measured at ~5 ms of a ~29 ms retarget on
+    a 100-tile montage, and a doubled statement on the trace bus.
+    """
+
+    session = _resident_remap_session()
+    reported = _counting(session, "record_tile_payload")
+
+    stats = _retarget(
+        session,
+        _shifted_plan(count=2, offset=2),
+        new_source_ids={0: ("src", 2), 1: ("src", 3)},
+        cached_tiles={},
+    )
+
+    assert stats["remapped"] == 2
+    assert sorted(int(payload.tile_number) for payload in reported) == [0, 1]
+    # Reporting once is only correct if the payload is genuinely current.
+    for index in (0, 1):
+        payload = session.display_tile_payloads[index]
+        assert session.lifecycle.payload_is_current(index, payload)
+        assert payload.source_id in session.lifecycle.peek(index).presentable_payloads
+
+
+def test_index_window_retarget_reports_again_when_targets_move_under_it():
+    """A later target adoption invalidates the "already reported" memo.
+
+    Adopting a new semantic source prunes the record's presentable payloads, so
+    a memo entry claiming the slot's payload was already reported would suppress
+    the report that puts it back — the tile would lose its first-pixel fallback.
+    """
+
+    session = _resident_remap_session()
+    _retarget(
+        session,
+        _shifted_plan(count=2, offset=2),
+        new_source_ids={0: ("src", 2), 1: ("src", 3)},
+        cached_tiles={},
+    )
+
+    # No target movement: the scan trusts the remap's report and stays quiet.
+    quiet = _counting(session, "record_tile_payload")
+    session.sync_lifecycle_scope()
+    assert quiet == []
+
+    # The targets move to a different semantic source window underneath the
+    # primed memo; the scan must report every live payload again.
+    session.visible_tiles = tuple(
+        replace(tile, source_index=int(tile.source_index) + 10) for tile in session.visible_tiles
+    )
+    reported = _counting(session, "record_tile_payload")
+    session.sync_lifecycle_scope()
+    assert sorted(int(payload.tile_number) for payload in reported) == [0, 1]
+
+
 def test_retarget_index_window_demotes_misses_with_immediate_invalidation():
     """A miss exposes no predecessor payload after surface invalidation."""
 
