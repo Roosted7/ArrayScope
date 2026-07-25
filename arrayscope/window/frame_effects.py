@@ -18,6 +18,7 @@ from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordi
 from arrayscope.display.model.commit import CommitKind, DisplayPayload, PresentationInput
 from arrayscope.display.model.frame import (
     TiledValueSource,
+    canonical_plane_payload_for,
     display_tile_payload_can_commit_frame,
     display_tile_payload_has_semantics,
 )
@@ -541,7 +542,8 @@ class FramePipelineEffects:
             physical_resident_fn=resident_fn,
             tile_numbers=tile_numbers,
             previous_by_tile=previous_by_tile,
-            canonical_by_tile=self._remember_canonical_plane_payloads(previous_by_tile),
+            canonical_by_tile=self._canonical_plane_memo(),
+            remember_canonical=self._remember_canonical_plane_payload,
         )
         if rebound:
             # A rebound window is presented without any evaluation sampling it,
@@ -611,16 +613,8 @@ class FramePipelineEffects:
     # at the budget and keeps its ordinary evaluation.
     _CANONICAL_PLANE_MEMO_MAX_BYTES = 64 * 1024 * 1024
 
-    def _remember_canonical_plane_payloads(self, previous_by_tile) -> dict[int, object]:
-        """Track whole-plane payloads that can re-slice exact CPU semantics.
-
-        A source-anchored rebind may only reuse canonical pages that some
-        earlier payload uploaded WHOLE, and that same whole-plane payload is
-        the only thing that can re-slice exact CPU semantics for a shifted
-        window (``_rebind_reslice_planes``).  Only payloads covering their
-        entire source plane and carrying exact semantics qualify — precisely
-        the backend's ``supplies_complete_pages`` precondition, mirrored on the
-        CPU side.
+    def _canonical_plane_memo(self) -> dict[int, object]:
+        """The renderer-owned memo of whole planes a rebind can re-slice.
 
         The memo lives on the RENDERER, not the session: a crop retarget builds
         a fresh ``FrameSession`` every step (measured: session ids 2, 3, 4, 5
@@ -633,33 +627,61 @@ class FramePipelineEffects:
         if memo is None:
             memo = {}
             self.renderer._resident_crop_canonical_planes = memo
-        pinned_bytes = canonical_plane_memo_bytes(memo)
-        for tile_number, payload in dict(previous_by_tile or {}).items():
-            if str(getattr(payload, "quality", "exact") or "exact") != "exact":
-                continue
-            if getattr(payload, "semantic_data", None) is None:
-                continue
-            anchor = getattr(payload, "source_anchor", None)
-            plane_shape = tuple(getattr(anchor, "plane_shape", None) or ())
-            source_rect = tuple(getattr(anchor, "source_rect", None) or ())
-            if len(plane_shape) != 2 or len(source_rect) != 4:
-                continue
-            y0, y1, x0, x1 = (int(value) for value in source_rect)
-            if (y0, x0) != (0, 0) or (y1, x1) != (int(plane_shape[0]), int(plane_shape[1])):
-                continue
-            plane_bytes = int(np.asarray(payload.semantic_data).nbytes)
-            key = int(tile_number)
-            replaced = memo.get(key)
-            replaced_bytes = (
-                0
-                if replaced is None or getattr(replaced, "semantic_data", None) is None
-                else int(np.asarray(replaced.semantic_data).nbytes)
-            )
-            if pinned_bytes - replaced_bytes + plane_bytes > self._CANONICAL_PLANE_MEMO_MAX_BYTES:
-                continue
-            pinned_bytes += plane_bytes - replaced_bytes
-            memo[key] = payload
         return memo
+
+    def _remember_canonical_plane_payload(self, tile_number: int, committed):
+        """Pin one committed payload's whole plane, or return ``None``.
+
+        A source-anchored rebind may only reuse canonical pages that some
+        earlier payload uploaded WHOLE, and a whole plane is likewise the only
+        thing that can re-slice exact CPU semantics for a shifted window
+        (``_rebind_reslice_planes``).  Two payloads supply one: a payload that
+        covers its entire source plane (the backend's
+        ``supplies_complete_pages`` precondition, mirrored on the CPU side),
+        and a CROPPED payload whose evaluation was widened to the plane it
+        presents a sub-rect of (``canonical_plane_payload_for``).  Without the
+        second, a view cropped from its first frame onward has no whole-plane
+        payload anywhere in its history and every step declined with
+        ``no_reslicable_plane``.
+
+        The rebind calls this only once it has proven the predecessor's content
+        key is the window's CURRENT one, which is what keeps a retired
+        generation out: after a document or operation change the committed
+        frame still holds the previous identity's payloads, and pinning those
+        would silently re-fill the memo the change just released.
+        """
+
+        memo = self._canonical_plane_memo()
+        if str(getattr(committed, "quality", "exact") or "exact") != "exact":
+            return None
+        if getattr(committed, "semantic_data", None) is None:
+            return None
+        anchor = getattr(committed, "source_anchor", None)
+        plane_shape = tuple(getattr(anchor, "plane_shape", None) or ())
+        source_rect = tuple(getattr(anchor, "source_rect", None) or ())
+        if len(plane_shape) != 2 or len(source_rect) != 4:
+            return None
+        y0, y1, x0, x1 = (int(value) for value in source_rect)
+        payload = committed
+        if (y0, x0) != (0, 0) or (y1, x1) != (int(plane_shape[0]), int(plane_shape[1])):
+            # A cropped payload never covers its plane; it can still carry one.
+            # Memoize the carried plane, not the window.
+            payload = canonical_plane_payload_for(committed)
+            if payload is None:
+                return None
+        plane_bytes = int(np.asarray(payload.semantic_data).nbytes)
+        key = int(tile_number)
+        replaced = memo.get(key)
+        replaced_bytes = (
+            0
+            if replaced is None or getattr(replaced, "semantic_data", None) is None
+            else int(np.asarray(replaced.semantic_data).nbytes)
+        )
+        pinned_bytes = canonical_plane_memo_bytes(memo)
+        if pinned_bytes - replaced_bytes + plane_bytes > self._CANONICAL_PLANE_MEMO_MAX_BYTES:
+            return None
+        memo[key] = payload
+        return payload
 
     def _release_canonical_plane_payloads(self, reason: str) -> None:
         """Unpin every memoized whole plane and say why.

@@ -285,6 +285,65 @@ def canonical_plane_residency_source(
     )
 
 
+def _with_canonical_plane_residency(
+    session,
+    tile,
+    result,
+    *,
+    shader_display: bool,
+    cancellation_token=None,
+    evaluation_context=None,
+    stage_cache=None,
+    stage_materializer=None,
+):
+    """Carry the whole canonical plane on an EXACT cropped tile result.
+
+    A reduced cropped payload presents pages and owns no exact CPU plane, so
+    warming the canonical plane was enough to make its window shifts pure
+    rebinds.  An exact payload also carries window-local CPU semantics, which a
+    shifted window cannot reuse: the rebind must re-cut them from a whole plane
+    or decline (``no_reslicable_plane``).  The same widened evaluation answers
+    both — the plane warms the window-invariant pages AND becomes the memo's
+    re-slice source (``canonical_plane_payload_for``).
+
+    Declined when this tile's display plane is not its value plane.  The
+    residency array is ONE plane, and the CPU roles it stands in for must all
+    be that plane: a CPU-colormapped RGB ``image`` and a value
+    ``semantic_data`` are two different planes and a single native array cannot
+    honestly serve both.  Those views keep their ordinary evaluation.
+    """
+
+    if not _native_plane_serves_every_display_role(result.value):
+        return result
+    plane = canonical_plane_residency_source(
+        session,
+        tile,
+        shader_display=bool(shader_display),
+        cancellation_token=cancellation_token,
+        evaluation_context=evaluation_context,
+        stage_cache=stage_cache,
+        stage_materializer=stage_materializer,
+    )
+    if plane is None:
+        return result
+    return replace(result, native_residency_data=plane)
+
+
+def _native_plane_serves_every_display_role(value) -> bool:
+    """Is this evaluation's display plane also its value plane?"""
+
+    data = getattr(value, "data", None)
+    if data is None:
+        return False
+    for name in ("semantic_data", "lod_source_data"):
+        plane = getattr(value, name, None)
+        if plane is not None and plane is not data:
+            return False
+    # A separately scaled histogram plane is display evidence the canonical
+    # plane does not carry; re-cutting a window from it would invent one.
+    return getattr(value, "histogram_data", None) is None
+
+
 def _canonical_plane_warm_fits_budget(session, plane_state) -> bool:
     """Would one montage of whole planes stay inside the residency policy?"""
 
@@ -330,13 +389,25 @@ def evaluate_target_tile(
     """
 
     if int(level) <= 0:
-        return _evaluate_native_tile_result(
+        result = _evaluate_native_tile_result(
             session,
             tile,
             stage_cache=stage_cache,
             stage_materializer=stage_materializer,
             cancellation_token=cancellation_token,
             evaluation_context=evaluation_context,
+        )
+        if not warm_canonical_plane:
+            return result
+        return _with_canonical_plane_residency(
+            session,
+            tile,
+            result,
+            shader_display=shader_display,
+            cancellation_token=cancellation_token,
+            evaluation_context=evaluation_context,
+            stage_cache=stage_cache,
+            stage_materializer=stage_materializer,
         )
     return evaluate_preview_tile(
         session,

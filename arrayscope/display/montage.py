@@ -286,6 +286,11 @@ class RenderedTilePayload:
     level_data: np.ndarray | None = None
     level_stats: object | None = None
     quality: str = "exact"
+    # Whole canonical source plane carried by a CROPPED tile: residency data
+    # for the backend's reusable pages, and the only source a later window
+    # shift can re-cut this tile's window-local CPU planes from. Never the
+    # presented values — ``image`` remains this tile's own window.
+    native_residency_data: np.ndarray | None = None
 
     def nbytes(self) -> int:
         total = int(self.image.nbytes)
@@ -293,6 +298,8 @@ class RenderedTilePayload:
             total += int(self.histogram_data.nbytes)
         if isinstance(self.semantic_data, np.ndarray) and self.semantic_data is not self.image:
             total += int(self.semantic_data.nbytes)
+        if isinstance(self.native_residency_data, np.ndarray):
+            total += int(self.native_residency_data.nbytes)
         if (
             isinstance(self.lod_source_data, np.ndarray)
             and self.lod_source_data is not self.image
@@ -330,6 +337,7 @@ class RenderedTilePayload:
             level_data=self.level_data,
             level_stats=self.level_stats,
             quality=self.quality,
+            native_residency_data=self.native_residency_data,
         )
 
 
@@ -350,6 +358,11 @@ class RenderedTile:
     level_data: np.ndarray | None = None
     level_stats: object | None = None
     quality: str = "exact"
+    # Whole canonical source plane carried by a CROPPED tile: residency data
+    # for the backend's reusable pages, and the only source a later window
+    # shift can re-cut this tile's window-local CPU planes from. Never the
+    # presented values — ``image`` remains this tile's own window.
+    native_residency_data: np.ndarray | None = None
 
     def nbytes(self) -> int:
         total = int(self.image.nbytes)
@@ -357,6 +370,8 @@ class RenderedTile:
             total += int(self.histogram_data.nbytes)
         if isinstance(self.semantic_data, np.ndarray) and self.semantic_data is not self.image:
             total += int(self.semantic_data.nbytes)
+        if isinstance(self.native_residency_data, np.ndarray):
+            total += int(self.native_residency_data.nbytes)
         if (
             isinstance(self.lod_source_data, np.ndarray)
             and self.lod_source_data is not self.image
@@ -393,6 +408,7 @@ class RenderedTile:
             level_data=self.level_data,
             level_stats=self.level_stats,
             quality=self.quality,
+            native_residency_data=self.native_residency_data,
         )
 
 

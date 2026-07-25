@@ -503,6 +503,87 @@ def display_tile_payload_has_semantics(payload) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class CanonicalPlanePayload:
+    """One whole source plane, under the payload names a rebind re-slices.
+
+    A resident crop rebind re-presents a payload at a shifted window without
+    evaluating it, so any exact CPU plane it carries — indexed window-locally —
+    must be re-cut from the whole plane instead.  A payload that covers its
+    whole plane is that source itself; a payload of a view that is cropped from
+    its first frame onward never covers one, and carries the plane alongside as
+    ``native_residency_data`` for GPU warming.  This wraps that array so both
+    sources answer to the same attribute names.
+
+    One array standing in for image, texture, and semantics is a CHECKED
+    property, not an assumption: ``canonical_plane_payload_for`` admits only
+    payloads whose display plane IS their value plane.  A CPU-windowed RGB
+    image and its value ``semantic_data`` are two different planes, and one
+    native array cannot serve both.
+    """
+
+    source_anchor: PayloadSourceAnchor
+    image: np.ndarray
+    quality: str = "exact"
+
+    @property
+    def texture_data(self) -> np.ndarray:
+        return self.image
+
+    @property
+    def semantic_data(self) -> np.ndarray:
+        return self.image
+
+    @property
+    def histogram_data(self) -> None:
+        return None
+
+    @property
+    def semantic_histogram_data(self) -> None:
+        return None
+
+
+def canonical_plane_payload_for(payload) -> CanonicalPlanePayload | None:
+    """Wrap a payload's carried whole plane, or ``None`` when it cannot serve.
+
+    The payload must present a sub-rect of a plane it also carries whole, and
+    every CPU plane it presents must be the same array — the shader-display
+    shape, where the display plane is the value plane and no separately scaled
+    histogram exists.  Anything else (a CPU-colormapped RGB image, a paired
+    histogram plane, a reduced texture) needs planes this single array cannot
+    supply, so it is refused rather than approximated.
+    """
+
+    native = getattr(payload, "native_residency_data", None)
+    anchor = getattr(payload, "source_anchor", None)
+    if native is None or anchor is None or anchor.plane_shape is None:
+        return None
+    image = getattr(payload, "image", None)
+    if image is None or getattr(payload, "semantic_data", None) is not image:
+        return None
+    texture = getattr(payload, "texture_data", None)
+    if texture is not None and texture is not image:
+        return None
+    if (
+        getattr(payload, "histogram_data", None) is not None
+        or getattr(payload, "semantic_histogram_data", None) is not None
+    ):
+        return None
+    plane = np.asarray(native)
+    plane_shape = tuple(int(value) for value in anchor.plane_shape)
+    if tuple(int(value) for value in plane.shape[:2]) != plane_shape:
+        return None
+    if plane.dtype != np.asarray(image).dtype or plane.ndim != np.asarray(image).ndim:
+        return None
+    return CanonicalPlanePayload(
+        source_anchor=replace(
+            anchor,
+            source_rect=(0, plane_shape[0], 0, plane_shape[1]),
+        ),
+        image=plane,
+    )
+
+
 def display_tile_payload_can_commit_frame(payload) -> bool:
     """Return whether a tiled payload can publish the current display frame.
 

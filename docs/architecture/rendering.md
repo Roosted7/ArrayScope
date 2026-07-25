@@ -99,6 +99,18 @@ Widening is declined when one montage of such planes would exceed its share of
 the tile-residency byte policy; those views keep their crop-local upload, and
 the rebind stays inert for them by design.
 
+Physical residency is only half of a rebind. A reduced payload is page-backed
+and owns no exact CPU plane, so shifting its anchor is the whole operation; an
+EXACT payload also carries semantics that `TiledValueSource` indexes
+window-locally, and every CPU consumer (hover, ROI, profiles, export, the
+CPU-reference oracle) would otherwise read the predecessor window. Those planes
+are re-cut from the same carried canonical plane, which the rebind memoizes per
+tile (`canonical_plane_payload_for`). One array may stand in for image,
+texture, and semantics only where the display plane IS the value plane — the
+shader-display shape. A CPU-colormapped RGB image and its value plane are two
+different planes; such a view is refused the widening and keeps its ordinary
+per-window evaluation rather than being served an approximation.
+
 Presentation command order is semantic data, not a backend preference. The
 canonical flow is `montage_priority_focus` → `TilePriorityContext` /
 `tile_priority_key` → ordered materialized rows → ordered

@@ -13,7 +13,10 @@ frame onward never presents a whole source plane, so under a crop-local upload
 nothing would ever be resident to rebind.  The same capability therefore widens
 a cropped tile's evaluation to the whole canonical plane its anchor's content
 key already names, so the first fill warms the window-invariant pages once and
-every later crop step is a pure source-origin rebind.
+every later crop step is a pure source-origin rebind.  That one plane also
+answers the exact path's second requirement: an exact payload carries CPU
+semantics indexed window-locally, which the rebind re-cuts from the same plane
+instead of leaving the shifted window reading its predecessor's values.
 
 The capability is gated OFF by default: the rebind reuses the predecessor
 window's auto-level evidence (the maturity contract) instead of re-anchoring, so
@@ -38,6 +41,7 @@ import numpy as np
 import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from arrayscope.display.model.frame import PayloadSourceAnchor
 from arrayscope.display.model.montage_levels import LevelEvidenceQuality
 from arrayscope.tools.framebuffer_reference import assert_wgpu_frame_matches_cpu_reference
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
@@ -480,13 +484,24 @@ def test_single_slice_rebind_hover_reads_the_new_window_value(qtbot):
         restore_default_backend(settings)
 
 
-def test_single_slice_cold_crop_scrub_falls_back_to_evaluation(qtbot):
-    """A non-resident single-slice crop window keeps the ordinary evaluation."""
+def test_born_cropped_single_slice_warms_its_plane_and_rebinds(qtbot):
+    """A born-cropped single-slice view warms its plane, exactly like a montage.
+
+    This shape used to be the standing example of a crop window nothing could
+    rebind: never having presented a whole plane, its first fill uploaded
+    crop-local pages and the successor window declined with
+    ``pages_not_resident``.  The widened evaluation is not a montage feature —
+    the seed serves both presentations through one canonical source-plane
+    identity — so the single-slice view warms and rebinds on the same terms.
+    A crop that genuinely cannot warm (the capability off, a montage of planes
+    over the byte share, a changed content key) is covered by its own tests.
+    """
 
     settings = use_wgpu_backend(
         extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
     )
-    win = make_backend_window(qtbot, _uniform_source(), backend="wgpu", require_gpu_atlas=True)
+    data = _uniform_source()
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     win.resize(780, 760)
     try:
         win.show()
@@ -495,19 +510,32 @@ def test_single_slice_cold_crop_scrub_falls_back_to_evaluation(qtbot):
         _busy_pump_until(
             lambda: _crop_settled(win, 94),
             INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "single-slice cold cropped fill",
+            "born-cropped single-slice fill",
         )
+        slice_index = int(win.view_state.slice_indices[2])
+        payload = win.renderer._frame_session.display_tile_payloads[0]
+        assert tuple(np.shape(payload.native_residency_data)[:2]) == (336, 336)
+
         before = _preparation_completed(win)
         win._on_slice_text_changed(0, "96:296")
         _busy_pump_until(
             lambda: _crop_settled(win, 96),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
-            "single-slice cold scrub",
+            INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
+            "born-cropped single-slice scrub",
         )
-        assert _preparation_completed(win) - before > 0, (
-            "a non-resident single-slice crop window must still schedule its producers"
+        assert _preparation_completed(win) - before == 0, (
+            "a born-cropped single-slice scrub over its warmed plane must rebind"
+        )
+        rebound = win.renderer._frame_session.display_tile_payloads[0]
+        assert rebound.source_anchor.source_rect == (96, 296, 66, 266)
+        np.testing.assert_allclose(
+            np.asarray(rebound.semantic_data),
+            data[96:296, 66:266, slice_index],
+            atol=1e-6,
+            err_msg="the rebound single-slice payload does not describe its own anchor",
         )
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+        assert_wgpu_frame_matches_cpu_reference(win)
     finally:
         win.close()
         restore_default_backend(settings)
@@ -651,6 +679,70 @@ def test_canonical_plane_warm_declines_a_montage_larger_than_the_budget():
     with pytest.raises(AttributeError):
         # Proves the budget, not an unrelated guard, is what declined ``over``.
         canonical_plane_residency_source(fits, tile, shader_display=True)
+
+
+def test_one_native_plane_may_not_stand_in_for_two_display_planes():
+    """The widening is refused when the display plane is not the value plane.
+
+    An exact rebind re-cuts image, texture and semantics from the ONE carried
+    plane, which is honest only where they are the same plane (the shader
+    display, where windowing happens on the GPU).  A CPU-colormapped RGB image
+    and its value ``semantic_data`` are two different planes, and no single
+    native array can serve both — such a view keeps its ordinary evaluation
+    instead of being served an approximation.
+    """
+
+    import types
+
+    from arrayscope.display.model.frame import canonical_plane_payload_for
+    from arrayscope.render.effects import _native_plane_serves_every_display_role
+
+    values = np.zeros((8, 8), np.float32)
+    assert _native_plane_serves_every_display_role(
+        types.SimpleNamespace(data=values, semantic_data=values, histogram_data=None)
+    )
+    assert not _native_plane_serves_every_display_role(
+        # CPU-colormapped: the display plane is RGB, the values are not.
+        types.SimpleNamespace(
+            data=np.zeros((8, 8, 3), np.uint8), semantic_data=values, histogram_data=None
+        )
+    )
+    assert not _native_plane_serves_every_display_role(
+        # A separately scaled histogram plane the canonical plane never carries.
+        types.SimpleNamespace(data=values, semantic_data=values, histogram_data=values.copy())
+    )
+
+    anchor = PayloadSourceAnchor(content_key=("key",), source_rect=(2, 6, 2, 6), plane_shape=(8, 8))
+    window = np.zeros((4, 4), np.float32)
+    assert (
+        canonical_plane_payload_for(
+            types.SimpleNamespace(
+                native_residency_data=values,
+                source_anchor=anchor,
+                image=window,
+                semantic_data=window,
+                texture_data=window,
+                histogram_data=None,
+                semantic_histogram_data=None,
+            )
+        ).source_anchor.source_rect
+        # The memo entry describes the WHOLE plane, not the window it came from.
+        == (0, 8, 0, 8)
+    )
+    assert (
+        canonical_plane_payload_for(
+            types.SimpleNamespace(
+                native_residency_data=values,
+                source_anchor=anchor,
+                image=window,
+                semantic_data=window.copy(),
+                texture_data=window,
+                histogram_data=None,
+                semantic_histogram_data=None,
+            )
+        )
+        is None
+    ), "distinct display and value planes cannot both come from one native array"
 
 
 def test_resident_crop_rebind_flag_reads_settings_object():
@@ -798,6 +890,95 @@ def test_exact_montage_crop_scrub_rebinds_every_visible_tile(qtbot):
                 "every tile of an exact resident crop scrub must rebind, not re-evaluate"
             )
 
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+        assert_wgpu_frame_matches_cpu_reference(win)
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_born_cropped_exact_montage_rebinds_without_a_whole_plane_frame(qtbot):
+    """An EXACT montage that is never uncropped rebinds from its carried planes.
+
+    The reduced born-cropped montage was served by warming the canonical plane
+    for the pages alone: its payloads are page-backed and own no exact CPU
+    plane, so shifting the anchor is the whole rebind.  An exact payload also
+    carries window-local CPU semantics (``TiledValueSource`` indexes them
+    window-locally), which the shifted window cannot reuse — and with no frame
+    ever presenting a whole plane there was nothing to re-cut them from, so
+    every tile of every step declined with ``no_reslicable_plane`` (measured on
+    this fixture: 50 producers and 598-630 ms per step).
+
+    The exact evaluation now carries the same widened plane the reduced one
+    does, which both warms the window-invariant pages and becomes the memo's
+    re-slice source, so a born-cropped exact scrub schedules no producer at all.
+    """
+
+    settings = use_wgpu_backend(
+        extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
+    )
+    data = _exact_source()
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
+    win.resize(790, 780)
+    try:
+        win.show()
+        win._set_view_state(_exact_cropped_state(win, 10))
+        win.update_image_view()
+        _busy_pump_until(
+            lambda: _exact_crop_settled(win, 10),
+            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
+            "born-cropped exact fill",
+        )
+        session = win.renderer._frame_session
+        payload = session.display_tile_payloads[0]
+        assert payload.quality == "exact"
+        assert payload.semantic_data is not None, (
+            "this fixture must exercise the exact path (window-local CPU semantics)"
+        )
+        assert payload.source_anchor.source_rect == (10, 50, 12, 52)
+        assert tuple(np.shape(payload.native_residency_data)[:2]) == (64, 64), (
+            "a cropped exact evaluation must carry the whole canonical plane"
+        )
+        assert any(
+            key.document_generation[0] == "wgpu-source-plane"
+            for key in win.img_view._wgpu_executor.page_table.resident_keys()
+        ), "the cropped exact commit must upload canonical source-plane pages"
+
+        for step in range(3):
+            start = 11 + step
+            before = _preparation_completed(win)
+            win._on_slice_text_changed(0, f"{start}:{start + 40}")
+            _busy_pump_until(
+                lambda start=start: _exact_crop_settled(win, start),
+                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
+                f"born-cropped exact scrub {start}",
+            )
+            assert _preparation_completed(win) - before == 0, (
+                "a born-cropped exact scrub must rebind every tile, not re-evaluate"
+            )
+            payloads = win.renderer._frame_session.display_tile_payloads
+            for tile_number in (0, 27, 49):
+                rebound = payloads[tile_number]
+                assert rebound.source_anchor.source_rect == (start, start + 40, 12, 52)
+                np.testing.assert_allclose(
+                    np.asarray(rebound.semantic_data),
+                    data[start : start + 40, 12:52, int(rebound.source_index)],
+                    atol=1e-6,
+                    err_msg=(
+                        f"window {start}, tile {tile_number}: the rebound payload's semantic "
+                        "plane does not describe its own anchor"
+                    ),
+                )
+
+        assert _pinned_canonical_planes(win)[0] == len(_EXACT_TILE_INDICES), (
+            "each tile's carried plane must be pinned, since each re-slices its own window"
+        )
+        totals = dict(getattr(win.renderer, "resident_crop_rebind_totals", None) or {})
+        assert totals.get("rebound", 0) > 0
+        assert totals.get("no_reslicable_plane", 0) == 0, (
+            "the semantic decline this workflow used to record must be gone"
+        )
+        assert totals.get("pages_not_resident", 0) == 0
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
         assert_wgpu_frame_matches_cpu_reference(win)
     finally:

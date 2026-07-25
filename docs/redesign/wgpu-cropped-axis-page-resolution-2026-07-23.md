@@ -287,3 +287,61 @@ yet carry `native_residency_data` (that would mean widening
 plane cannot serve an RGB `image` and a value `semantic_data` at once).
 Measured on a 64×64×60 fixture, 50 tiles: 50 producers and 598–630 ms per step,
 declining with `no_reslicable_plane` — physically rebindable, semantically not.
+
+## 2026-07-25 exact born-cropped views: the same plane, re-cut on the CPU
+
+The exact path now carries that widened plane. It rides the ordinary tile result
+(`EvaluationResult` → `store_montage_tile_result` → `RenderedTile` →
+`_ensure_display_tile_payload`) as `native_residency_data`, so one array does
+both jobs: the commit warms the window-invariant pages with it, and the memo
+re-cuts this tile's window-local CPU planes out of it on the next step.
+
+The representation split is resolved by refusal, not by carrying two planes.
+The widening is granted only when the evaluation's display plane IS its value
+plane — `data is semantic_data is lod_source_data`, with no separately scaled
+histogram — which is the shader-display shape, and the memo re-checks the same
+property on the committed payload before it re-slices
+(`canonical_plane_payload_for`). A CPU-colormapped RGB `image` and a value
+`semantic_data` are two different planes; those views keep their ordinary
+evaluation instead of being served an approximation. A histogram plane is not
+invented from a plane that never carried one.
+
+The memo's admission moved with it. It used to pin every whole-plane payload of
+the committed frame on sight; a cropped payload's carried plane is admissible
+too, but the committed frame right after a document or operation change still
+holds the RETIRED identity's payloads, so pinning on sight would silently
+re-fill the memo that change had just released. Admission now happens inside the
+rebind, at the one point where the predecessor's content key has already been
+proven to be this window's own. Correctness never depended on it — the
+content-key check refuses to re-slice a stale plane — but the release accounting
+did.
+
+Measured, offscreen Vulkan, `(64, 64, 60)` float32 raw scalar, 50 exact tiles,
+both displayed axes cropped from the first frame, scrubbing one row per step,
+fresh process per row:
+
+| capability | cold born-cropped fill | producers / step | ms / step |
+|---|---:|---:|---:|
+| off (crop-local) | 1997–3107 ms | 50 | 908–2265 |
+| on (canonical warm) | 2362–4787 ms | 0 | 98–212 |
+
+Unlike the reduced path, the first fill does pay something here: the exact
+window's own evaluation is still needed for the presented payload and its
+window-exact level evidence, so the plane is a second pass rather than a
+replacement. This harness' cold-fill variance is wide (whichever row runs first
+in a process costs ~3.5 s either way), so only the direction is claimed.
+
+Known and unclaimed: a backend without source-anchored page residency pays that
+second pass and cannot use it. PyQtGraph's `payload_resident` matches on the
+acknowledged tile identity and the physical source array, both of which a rebind
+changes, so it declines every candidate. That is how the reduced path already
+behaves with the capability on; the capability remains the WGPU resident-crop
+fast path, default off.
+
+The single-slice presentation gets this on the same terms — the seed serves both
+presentations through one canonical source-plane identity — so a born-cropped
+single-slice scrub now rebinds too. The test that pinned the opposite
+(`test_single_slice_cold_crop_scrub_falls_back_to_evaluation`) was retired
+because its premise, a born-cropped window nothing can rebind, no longer exists;
+fallback remains covered by the capability-off, budget-decline, and
+content-key-change tests.

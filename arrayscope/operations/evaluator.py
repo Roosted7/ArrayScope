@@ -121,6 +121,11 @@ class EvaluationResult:
     degraded: bool = False
     region_plan: object | None = None
     compute_path: str = "direct"
+    # Optional whole canonical source plane evaluated alongside a cropped
+    # window purely to warm reusable backend pages and to re-cut CPU planes
+    # for a later window shift. It is never the presented value: ``value``
+    # remains this tile's own window.
+    native_residency_data: object | None = None
 
 
 @dataclass(frozen=True)
@@ -834,6 +839,7 @@ class OperationEvaluator:
             lod=getattr(result.value, "lod", None),
             level_data=level_data,
             level_stats=level_stats,
+            native_residency_data=getattr(result, "native_residency_data", None),
         )
         self._display_cache.last_eval_ms = result.eval_ms
         self.last_region_plan = result.region_plan

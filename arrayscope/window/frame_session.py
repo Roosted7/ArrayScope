@@ -1299,11 +1299,14 @@ class FrameSession:
 
         A page-backed presentation carries no exact CPU planes (the montage
         case): nothing describes the old window, so the anchor shift alone is
-        the whole rebind.  An exact single-tile presentation DOES carry them,
-        indexed window-locally by ``TiledValueSource.value_at``; shifting the
-        anchor over them would report the predecessor window's values.  Those
-        planes are re-sliced out of the memoized whole plane, and the rebind is
-        declined outright when no whole plane backs this content key.
+        the whole rebind.  An exact presentation DOES carry them, indexed
+        window-locally by ``TiledValueSource.value_at``; shifting the anchor
+        over them would report the predecessor window's values.  Those planes
+        are re-sliced out of the memoized whole plane, and the rebind is
+        declined outright when no whole plane backs this content key.  The memo
+        supplies one either from a payload that presented the whole plane or
+        from the plane a cropped payload carries alongside its window
+        (``canonical_plane_payload_for``).
         """
 
         if getattr(previous, "semantic_data", None) is None:
@@ -2115,6 +2118,10 @@ class FrameSession:
         semantic_histogram = (
             exact_histogram if semantic_histogram is None else np.asarray(semantic_histogram)
         )
+        # Residency data only: a cropped exact evaluation carries the whole
+        # canonical plane so the backend warms window-invariant pages and a
+        # later window shift has something to re-cut its CPU planes from.
+        native_residency = getattr(rendered, "native_residency_data", None)
         previous = self.display_tile_payloads.get(tile_number)
         acknowledged_previous = dict(
             getattr(self.tile_presentation_state, "payloads", {}) or {}
@@ -2164,6 +2171,7 @@ class FrameSession:
             and previous.semantic_histogram_data is semantic_histogram
             and previous.level_data is exact_level_data
             and previous.level_stats is level_stats
+            and previous.native_residency_data is native_residency
             and _shader_mapping_key(previous.shader_mapping) == _shader_mapping_key(mapping)
         ):
             current_identity = self.tile_payload_identity(
@@ -2227,6 +2235,7 @@ class FrameSession:
             page_backing=page_backing,
             level_data=exact_level_data,
             level_stats=level_stats,
+            native_residency_data=native_residency,
             tile_identity=self.tile_payload_identity(
                 identity_tile,
                 texture_data=texture_data,
@@ -2391,6 +2400,7 @@ class FrameSession:
         tile_numbers,
         previous_by_tile=None,
         canonical_by_tile=None,
+        remember_canonical=None,
     ) -> tuple[int, ...]:
         """Short-circuit a crop-window scrub to a pure rebind (ADR 0055 G3).
 
@@ -2514,6 +2524,11 @@ class FrameSession:
             ):
                 decline("canonical_content_key_changed")
                 canonical = None
+            if canonical is None and callable(remember_canonical):
+                # Only here: the predecessor's content key has just been proven
+                # to be this window's own, so pinning its plane cannot pin a
+                # retired document/operation generation.
+                canonical = remember_canonical(tile_number, previous)
             planes = self._rebind_reslice_planes(previous, new_anchor, canonical)
             if planes is None:
                 decline("no_reslicable_plane")
