@@ -758,6 +758,13 @@ class FrameSession:
     # NOT avoid; a decline reason distinguishes "never called" from "called and
     # declined per tile" without a debugger.
     resident_crop_rebind_stats: dict[str, int] = field(default_factory=dict)
+    # ``{tile_number: source_id}`` for tiles this session presented by resident
+    # crop rebind rather than by evaluation.  A rebound tile has no
+    # ``RenderedTile`` — that is the entire point — so ``mark_presented`` would
+    # otherwise refuse to mirror its presentation into the tile-state tuple.
+    # The source id makes the acceptance about THIS payload: once the slot holds
+    # anything else, the entry stops matching and proves nothing.
+    resident_crop_rebound_source_ids: dict[int, object] = field(default_factory=dict)
     # First presented tile numbers in presentation order (capped): makes
     # priority-order violations observable in diagnostics logs.
     presented_order: list[int] = field(default_factory=list)
@@ -1860,10 +1867,25 @@ class FrameSession:
                 payload is not None and str(getattr(payload, "quality", "exact")) == "preview"
             )
             target_lod_presented = _payload_is_reduced_target(payload)
+            # A resident crop rebind presents real, physically resident pixels
+            # with no evaluation, so the slot has no ``RenderedTile`` and none of
+            # the tests above admit it.  Dropping it here left the session's
+            # tile-state mirror stale at UNLOADED while the lifecycle held the
+            # tile as presented: the display geometry then answered every
+            # ``require_loaded`` query with "tile loading...", so hover and the
+            # readout reported nothing over a tile that was drawn, current, and
+            # carrying its own exact CPU semantics.
+            rebound_source_id = self.resident_crop_rebound_source_ids.get(index)
+            rebound_presented = (
+                rebound_source_id is not None
+                and payload is not None
+                and getattr(payload, "source_id", None) == rebound_source_id
+            )
             if (
                 index not in self.rendered_tiles
                 and not preview_presented
                 and not target_lod_presented
+                and not rebound_presented
             ):
                 continue
             if (
@@ -2413,6 +2435,7 @@ class FrameSession:
             self.pending_payload_upserts[tile_number] = None
             self.dirty_payloads[tile_number] = None
             self.lifecycle.remember_presentable(tile_number, candidate)
+            self.resident_crop_rebound_source_ids[tile_number] = candidate.source_id
             rebound.append(tile_number)
             stats["rebound"] += 1
         if rebound:
