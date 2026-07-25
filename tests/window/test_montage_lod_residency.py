@@ -5563,6 +5563,39 @@ def test_index_window_retarget_reports_again_when_targets_move_under_it():
     assert sorted(int(payload.tile_number) for payload in reported) == [0, 1]
 
 
+def test_index_window_retarget_publishes_its_lifecycle_targets_once():
+    """The remap moves payloads between slots the targets already name.
+
+    Publishing the targets before the per-tile remap and rebuilding the whole
+    set afterwards cost a typed target identity per tile twice over.  The second
+    build is skipped only while the target inputs are provably unmoved, so the
+    guard must decline the moment one of them does move.
+    """
+
+    session = _resident_remap_session()
+    syncs = _counting(session, "_sync_lifecycle_targets")
+
+    _retarget(
+        session,
+        _shifted_plan(count=2, offset=2),
+        new_source_ids={0: ("src", 2), 1: ("src", 3)},
+        cached_tiles={},
+    )
+
+    assert len(syncs) == 1
+
+    snapshot = session._lifecycle_target_inputs()
+    assert session._lifecycle_targets_still_current(snapshot)
+    # A rebuilt visible set declines even when it compares equal: the guard is
+    # deliberately identity-based, so "unsure" always falls back to a recompute.
+    session.visible_tiles = tuple(tile for tile in session.visible_tiles)
+    assert not session._lifecycle_targets_still_current(snapshot)
+
+    snapshot = session._lifecycle_target_inputs()
+    session.skipped_tiles.add(0)
+    assert not session._lifecycle_targets_still_current(snapshot)
+
+
 def test_retarget_index_window_demotes_misses_with_immediate_invalidation():
     """A miss exposes no predecessor payload after surface invalidation."""
 

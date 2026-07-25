@@ -1194,8 +1194,45 @@ class FrameSession:
             for _owner, recorded in memo.values():
                 recorded.pop(index, None)
 
-    def sync_lifecycle_scope(self) -> None:
-        targets = self._sync_lifecycle_targets()
+    def _lifecycle_target_inputs(self) -> tuple[object, ...]:
+        """Everything ``_sync_lifecycle_targets`` reads that a caller can move.
+
+        The rest of that computation reads the document, the semantic/level
+        keys and the display-mode flags, none of which change under a caller
+        that is mid-method.  A caller still holding an unchanged snapshot
+        therefore holds targets identical to what a recompute would yield.
+        """
+
+        return (
+            self.visible_tiles,
+            frozenset(self.skipped_tiles),
+            getattr(self, "lod_policy_decision", None),
+        )
+
+    def _lifecycle_targets_still_current(self, snapshot: tuple[object, ...]) -> bool:
+        """Whether targets computed under ``snapshot`` are still authoritative.
+
+        ``visible_tiles`` and the policy decision are compared by identity, not
+        equality: both are replaced wholesale rather than mutated, so identity
+        is exactly as strong here and does not walk 100 tiles per call.  A
+        rebuilt-but-equal tuple simply falls through to a recompute.
+        """
+
+        visible, skipped, decision = snapshot
+        return bool(
+            self.visible_tiles is visible
+            and getattr(self, "lod_policy_decision", None) is decision
+            and frozenset(self.skipped_tiles) == skipped
+        )
+
+    def sync_lifecycle_scope(self, *, targets=None) -> None:
+        # ``targets`` is a caller-supplied result of ``_sync_lifecycle_targets``
+        # that the caller has proven still current (see
+        # ``_lifecycle_target_inputs``).  Rebuilding a 100-tile target set costs
+        # a typed identity per tile, and an index-window retarget publishes its
+        # targets before the per-tile remap and then lands here immediately
+        # afterwards.
+        targets = self._sync_lifecycle_targets() if targets is None else targets
         required = {int(tile) for tile in self.required_tile_numbers()}
         scheduling_scope_signature = tuple(
             (tile, target.source_index, target.semantic_source_id)
@@ -1542,7 +1579,8 @@ class FrameSession:
             int(tile.montage_index) for tile in self.visible_tiles
         )
         self._selected_lod_factor()
-        self._sync_lifecycle_targets()
+        published_targets = self._sync_lifecycle_targets()
+        published_target_inputs = self._lifecycle_target_inputs()
         hits = misses = unchanged = remapped = 0
         changed_slots: set[int] = set()
         plan_tiles_by_number = {
@@ -1705,7 +1743,20 @@ class FrameSession:
                     retained_state,
                     revision=int(getattr(self.tile_presentation_state, "revision", 0)),
                 )
-        self.sync_lifecycle_scope()
+        # The remap above publishes no new semantic targets: it moves payloads,
+        # renderer maps and lifecycle presentation state between slots the
+        # targets already name.  When it also left the target inputs alone —
+        # the loop's only reach into them is ``skipped_tiles.discard`` — the
+        # set published before the loop is still exactly what a recompute
+        # yields, and rebuilding 100 typed target identities to learn that is
+        # the second most expensive thing this method does.
+        self.sync_lifecycle_scope(
+            targets=(
+                published_targets
+                if self._lifecycle_targets_still_current(published_target_inputs)
+                else None
+            )
+        )
         self.update_level_presentation_scope()
         self.mark_ladder_swaps_for_viewport()
         # Retargeting is itself a presentation-producing mutation. A final
