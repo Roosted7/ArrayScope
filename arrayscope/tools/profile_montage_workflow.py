@@ -5771,6 +5771,33 @@ def _physical_tile_timeline_metrics(
     }
 
 
+def _commit_raised_failure(win) -> str | None:
+    """The run's cause of death when the presentation commit threw.
+
+    A commit that raises arms no wakeup, so the montage stops and the stall
+    guard fires four seconds later describing a lost wakeup — the same dump a
+    real page-pool exhaustion and a typo'd ``AttributeError`` both produced
+    (dossier ``redesign/wgpu-pool-layer-leak-2026-07-26.md`` §5a). The throw is
+    the failure; the no-progress state is its consequence. Returns ``None``
+    when the last commit did not raise, so a genuine stall still reports as
+    one.
+    """
+
+    recorded = getattr(getattr(win, "renderer", None), "_last_montage_commit_exception", None)
+    if not recorded:
+        return None
+    return (
+        "COMMIT RAISED: the montage presentation commit threw and armed no "
+        "wakeup, so the montage stopped. This is the failure — any no-progress "
+        "state below is its consequence.\n"
+        f"  exception: {recorded.get('type')}: {recorded.get('message')}\n"
+        f"  session: {recorded.get('session_id')} key={recorded.get('semantic_key')}\n"
+        f"  committing {recorded.get('committing_tile_count')} tile(s), "
+        f"first: {recorded.get('committing_tiles')}\n"
+        f"{recorded.get('traceback', '')}"
+    )
+
+
 def _wait_for_montage_complete(
     app,
     QtCore,
@@ -6208,6 +6235,9 @@ def _wait_for_montage_complete(
                 }
             )
         active_samples = tuple(samples)
+    _commit_raised = _commit_raised_failure(win)
+    if _commit_raised is not None:
+        raise RuntimeError(_commit_raised)
     if post_visible_blockers:
         _stall_prefix = (
             "STALL GUARD: montage fully visible but completion gates "

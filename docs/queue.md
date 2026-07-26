@@ -59,28 +59,31 @@ with reasons recorded in the ledger: sigpy `nufft`/`espirit`/`fwt`/`iwt` and
 Safe to pick up alongside the numbered queue; each is self-contained.
 
 - **An exception on the presentation-commit path is laundered into an
-  anonymous stall** (found 2026-07-26 while root-causing the 272-tile FFT
-  montage stall — [dossier](redesign/wgpu-pool-layer-leak-2026-07-26.md) §5).
-  `_on_presentation_gate` disarms the gate *before* calling
-  `commit_pending_session`, which re-arms only by reaching
-  `_rearm_if_backlog()` on its way out; the handler is the outermost Python
-  frame of a `QEvent`, so Qt prints the traceback and continues. Any exception
-  between those two points therefore destroys every wakeup with a live
-  backlog, and the run dies four seconds later on the profiler's STALL GUARD
-  with a dump that describes a lost wakeup and says nothing about the throw.
-  Demonstrated twice with unrelated causes (a `RuntimeError` from page-pool
-  exhaustion and an `AttributeError` from a typo'd probe) producing
-  **byte-identical** stall signatures — same tile, same 271/272, same
-  `gate_no_progress=1`. This inverts ADR 0051: the pool error is *designed* to
-  be loud and the gate makes it the least informative failure the system has.
-  Do **not** fix by catching and re-arming — that hides genuine exhaustion.
-  The decision to make is what a commit exception should do instead
-  (terminate the process loudly? fail the frame with the original traceback
-  attached to the stall dump?), which is an ADR 0051 failure-semantics call,
-  not a bug fix. **Exit gate:** an injected exception on the commit path
-  surfaces its own traceback as the run's cause of death, in the profiler and
-  in the app; the STALL GUARD never again reports a lost wakeup for a frame
-  that actually threw.
+  anonymous stall — DONE 2026-07-26.** Found while root-causing the 272-tile
+  FFT montage stall; a `RuntimeError` from page-pool exhaustion and an
+  `AttributeError` from a typo'd probe produced **byte-identical** stall
+  signatures, so the dump could not tell a lost wakeup from a throw. Resolved
+  as a contract amendment to ADR 0051 rather than new machinery
+  ([dossier](redesign/wgpu-pool-layer-leak-2026-07-26.md) §5a): **a commit
+  that raises is a terminal bail with outcome `raised` and no armed wakeup.**
+  The commit path was simply the one place using neither of the two
+  vocabularies the repo already had — `_note_commit_bail(outcome, wakeup=…)`
+  (nine call sites) and `handle_ui_exception` (fifteen). It now uses both, and
+  the profiler reports `COMMIT RAISED` with the exception, its traceback, and
+  the session and tiles it was committing, instead of a STALL GUARD.
+  **The answer came out narrower than the brief in two places, both argued in
+  §5a:** the gate is *not* re-armed after a throw (owner/armed are cleared
+  before the commit and the drain flag resets in a `finally`, so a throw
+  corrupts no state — re-arming would only replay a delta about to throw
+  again), and no poison mark is needed (nothing retries, so the terminal
+  record *is* the mark). Evidence:
+  `tests/window/test_commit_failure_semantics.py` — five fault-injection
+  tests including a live montage window whose commit throws from inside
+  `_present_tile_delta`; all five fail on the unfixed tree. Declined as
+  separate decisions: partial commits, dropping the offending tile, and any
+  transient-vs-permanent (e.g. `SURFACE_LOST`) retry policy.
+- **wgpu shader legibility — Stage A (grid / trust signals) — offscreen green,
+  ring-4 OWED** (branch `claude/wgpu-shader-stage-a`). Four fragment-shader
 - **wgpu shader legibility — Stage A (grid / trust signals) — offscreen green,
   ring-4 OWED** (branch `claude/wgpu-shader-stage-a`). Four fragment-shader
   visuals in `_RENDER_WGSL` + its BC-pool twin (and the CPU mirror in

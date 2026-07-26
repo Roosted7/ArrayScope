@@ -8,7 +8,7 @@ from time import perf_counter, thread_time
 import numpy as np
 import pyqtgraph.Qt as Qt
 
-from arrayscope.app.errors import handle_ui_exception
+from arrayscope.app.errors import handle_ui_exception, traceback_text
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS
 from arrayscope.core.trace import emit_trace
@@ -1242,7 +1242,29 @@ class FramePipelineEffects:
             emit_trace("presentation_gate", action="fired-not-current", owner_session=owner[0])
             return
         emit_trace("presentation_gate", action="fired-commit", owner_session=owner[0])
-        self.commit_pending_session()
+        try:
+            self.commit_pending_session()
+        except Exception as exc:
+            # This is the outermost Python frame of a QEvent: without this,
+            # Qt prints the traceback and continues, and the failure reaches
+            # the operator only as an anonymous stall four seconds later.
+            # Route it through the same policy every other Qt callback uses —
+            # loud by default, fatal under ARRAYSCOPE_STRICT_UI.
+            #
+            # Note what is deliberately absent: no re-arm. The gate's owner
+            # and armed flags were cleared above and `commit_pending_session`
+            # resets its drain flag in a `finally`, so a throw corrupts no
+            # gate state and a later session can still arm. What it strands
+            # is this session's backlog, and re-arming that would replay a
+            # delta about to throw again (ADR 0051; dossier
+            # wgpu-pool-layer-leak-2026-07-26 §5a).
+            emit_trace(
+                "presentation_gate",
+                action="fired-raised",
+                owner_session=owner[0],
+                exception_type=type(exc).__name__,
+            )
+            handle_ui_exception("montage presentation commit", exc)
 
     def admit_tile_result(self, tile, result) -> int:
         """Admit one native target result into session/lifecycle state.
@@ -2536,8 +2558,48 @@ class FramePipelineEffects:
                     publish_first_pass_histogram and histogram_plot_data is not None
                 ),
             )
+        except BaseException as exc:
+            # A throw is an early commit return that names neither its outcome
+            # nor its wakeup, so it was the one commit exit invisible to the
+            # trace. It reported `commit_outcome='started'` forever and the
+            # stall guard four seconds later described a lost wakeup — the
+            # same dump a real page-pool exhaustion and a typo'd AttributeError
+            # both produced (dossier wgpu-pool-layer-leak-2026-07-26 §5a).
+            # Name it like every other terminal bail and re-raise: the policy
+            # decision about fatality belongs to the gate, not to this frame.
+            self._note_commit_raised(exc, dirty_tiles=dirty_tiles)
+            raise
         finally:
             _finish_presentation_commit(renderer)
+
+    def _note_commit_raised(self, exc: BaseException, *, dirty_tiles=()) -> None:
+        """Record a commit throw as the terminal bail it is.
+
+        Deliberately NOT a wakeup: re-arming would replay a delta that is
+        about to throw again at full flush rate, which is the rescue ADR 0051
+        forbids. The record is the mark; nothing retries, so nothing needs a
+        separate poison flag.
+        """
+
+        renderer = self.renderer
+        session = self.session
+        tiles = tuple(int(tile) for tile in tuple(dirty_tiles or ()))
+        renderer._last_montage_commit_exception = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": traceback_text(exc),
+            "session_id": int(getattr(session, "session_id", 0) or 0),
+            "semantic_key": repr(getattr(session, "key", None)),
+            "committing_tiles": tiles[:16],
+            "committing_tile_count": len(tiles),
+        }
+        self._note_commit_bail(
+            "raised",
+            wakeup="none (terminal)",
+            exception_type=type(exc).__name__,
+            exception_message=str(exc),
+            committing_tile_count=len(tiles),
+        )
 
     def _configure_wgpu_evidence_obligation(self) -> None:
         """Install, defer, or clear the phase-1 resident-histogram obligation."""

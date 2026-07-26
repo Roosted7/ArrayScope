@@ -1,9 +1,11 @@
 # The 272-tile FFT montage stall — one leaked pool layer (2026-07-26)
 
-**Status:** root-caused and fixed. The fix is one line in
-[`gpu/wgpu_executor.py`](../../arrayscope/gpu/wgpu_executor.py) plus a
-regression test; §5 records a second, unfixed defect that turned a loud
-`RuntimeError` into an opaque stall and is queued separately.
+**Status:** both defects root-caused and fixed. The stall itself is one line
+in [`gpu/wgpu_executor.py`](../../arrayscope/gpu/wgpu_executor.py) plus a
+regression test (§2, §6). §5 is the second defect it exposed — the
+presentation gate laundering *any* commit exception into the same opaque
+stall — and **§5a is its decision**, a contract amendment to ADR 0051, landed
+2026-07-26 with five fault-injection tests.
 
 `arrayscope.tools.profile_montage_workflow --backend wgpu --stages
 load_data,fft_full_tiled_montage` died on main (`f9f9229`) with
@@ -153,15 +155,82 @@ same anonymous four-second freeze.
 
 That inverts ADR 0051's intent. The pool error is *designed* to be loud
 ("rescues hide bugs"); the gate silently converts it into the least
-informative failure the system has. The fix is not to catch and re-arm — that
-would hide genuine exhaustion — but to make a commit exception terminate
-loudly instead of dissolving into a stall. Queued, not done here: it is a
-policy decision about ADR 0051's failure semantics, not a bug fix.
+informative failure the system has.
 
-One cheap improvement did land with the fix: `_evict_one_unpinned` now reports
-`unaccounted=<n>` — layers neither bound nor free. A genuinely full pool reads
-`unaccounted=0`; this defect read `unaccounted=1`. Had that counter existed,
-the dump would have named the leak on the first run.
+One cheap improvement landed with the pool fix: `_evict_one_unpinned` now
+reports `unaccounted=<n>` — layers neither bound nor free. A genuinely full
+pool reads `unaccounted=0`; this defect read `unaccounted=1`. Had that counter
+existed, the dump would have named the leak on the first run. §5a is the same
+move one level up.
+
+## 5a. Decision — a commit exception is a *named terminal bail*, not a retry
+
+Contract amendment to [ADR 0051](../decisions/0051-single-owner-tile-lifecycle.md).
+Written before the code, because it changes what the single-owner lifecycle
+promises when an effect executor throws.
+
+### The conclusion is narrower than "make the gate exception-safe"
+
+Two things the repo already has turn out to cover almost all of this, and the
+defect is that the commit path is the one place using neither:
+
+1. **`_note_commit_bail(outcome, wakeup=...)`** — "every early commit return
+   names its outcome AND its armed wakeup." Nine call sites already do this.
+   A throw is precisely an early commit return that names *neither*.
+2. **`handle_ui_exception(context, exc)`** (`app/errors.py`) — the app-wide
+   policy for an exception on a Qt callback: log with attribution, and
+   re-raise under `ARRAYSCOPE_STRICT_UI`. Fifteen call sites use it. The
+   presentation commit is the conspicuous omission.
+
+So the amendment is a *vocabulary* change, not new machinery:
+
+> **A commit that raises is a terminal bail with outcome `raised` and no
+> armed wakeup.** It must name itself in the same trace stream, under the
+> same policy, as every other commit outcome. It must not be retried.
+
+### Three sub-questions, answered
+
+**(a) Must the gate be re-armed after a throw?** *No — and re-arming would be
+the bug.* This is where I disagree with the sketch. `_on_presentation_gate`
+clears `_montage_presentation_gate_owner` and `_montage_presentation_gate_armed`
+**before** calling the commit, and `commit_pending_session` resets
+`_montage_commit_drain_active` in a `finally`. I checked each: a throw leaks
+no gate ownership and corrupts no flag, so a later session can still arm
+normally. There is no state to repair. What a throw leaves behind is one
+session's stranded backlog — and re-arming it would replay a delta that is
+about to throw again, at full flush rate. That is the "rescue" ADR 0051
+forbids, and the sketch's own "must not silently retry work that will throw
+again" argues against it.
+
+**(b) Does a poisoned target need marking?** *No separate mark is needed,
+because there is nothing to suppress.* A poison flag earns its keep only when
+something would otherwise retry the poisoned work. Since (a) says nothing
+retries, the terminal outcome record **is** the mark. Adding a poison set here
+would be state whose only reader is a retry path we have deliberately chosen
+not to have.
+
+**(c) Should the failure be fatal?** *It should obey the existing policy, not
+invent a new one.* `handle_ui_exception` already encodes the repo's answer:
+loud-and-continue by default, fatal under `ARRAYSCOPE_STRICT_UI`. Routing the
+commit through it makes the commit path consistent with every other callback
+rather than special.
+
+### What this buys, concretely
+
+The two failure modes stop being confusable. Before, both a real
+`RuntimeError` and a typo'd `AttributeError` produced
+`commit_outcome='started'` and a stall dump about a lost wakeup. After, the
+dump reports the exception, its type, and the tile and session it was
+committing — and `commit_outcome` reads `raised` rather than the misleading
+`started`, which had been a genuine signal nobody was interpreting.
+
+### Scope explicitly declined
+
+Not attempting recovery of any kind: no partial commit, no dropping the
+offending tile and committing the rest, no transient-vs-permanent
+classification (a `SURFACE_LOST` retry policy is a separate decision with its
+own evidence). Those are all rescues, and this defect exists because a rescue
+path — Qt's swallow-and-continue — was already doing one silently.
 
 ## 6. The fix
 
