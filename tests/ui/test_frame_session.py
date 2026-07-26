@@ -111,6 +111,23 @@ def test_first_pass_physical_completion_uses_required_tiles():
     assert session.first_pass_pixels_presented()
 
 
+def test_first_pass_completion_uses_adopted_targets_not_extra_frame_regions():
+    session = _session()
+    session.visible_tiles = (session.plan.tiles[0],)
+    session.visible_tile_numbers = frozenset({0})
+    session.frame_plan = SimpleNamespace(active_region_ids=(0, 1, 2, 3))
+
+    _present_exact_tiles(session, 0)
+
+    assert session.required_tile_numbers() == (0, 1, 2, 3)
+    assert session.scheduling_policy.verdict.required_tiles == (0,)
+    assert session.observe_physically_presented_first_pass_quality(
+        session.tile_presentation_state.payloads
+    )
+    assert session.first_pass_quality == "exact"
+    assert session.first_pass_pixels_presented()
+
+
 def test_visible_first_pixels_use_the_canonical_required_scope():
     session = _session()
     session.visible_tile_numbers = frozenset({0, 1})

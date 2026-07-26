@@ -984,7 +984,7 @@ class FrameSession:
         current_payloads = dict(payloads or {})
         backend_identities = dict(self.lifecycle.backend_presented_identities)
         qualities: set[str] = set()
-        for tile_number in self.required_tile_numbers():
+        for tile_number in self.first_pass_required_tile_numbers():
             index = int(tile_number)
             payload = current_payloads.get(index)
             if payload is None or backend_identities.get(index) != tile_ack_identity(payload):
@@ -1019,6 +1019,13 @@ class FrameSession:
             or (self.first_pass_quality == "preview" and observed == "exact")
         )
 
+    def first_pass_required_tile_numbers(self) -> tuple[int, ...]:
+        """Return the lifecycle-backed scope adopted by the phase owner."""
+
+        return tuple(
+            int(tile) for tile in self.scheduling_policy.verdict.required_tiles
+        )
+
     def first_pass_accepts_quality(self, quality: str) -> bool:
         """Whether a current payload proves its slot for the latched pass.
 
@@ -1040,7 +1047,15 @@ class FrameSession:
         )
 
     def first_pass_pixels_presented(self) -> bool:
-        """Whether every required target is acknowledged at the latched quality."""
+        """Whether every adopted coverage target is acknowledged at the latched quality.
+
+        ``FramePlan.active_region_ids`` can be broader than the lifecycle
+        target set.  An ordinary 2D frame, for example, may be split into
+        several presentation regions while still owning one logical source
+        target.  The scheduling policy has already intersected those regions
+        with the current lifecycle targets; re-deriving the set here can keep
+        COVERAGE open forever on region ids that have no evaluation target.
+        """
 
         quality = self.first_pass_quality
         backend_identities = dict(self.lifecycle.backend_presented_identities)
@@ -1048,7 +1063,7 @@ class FrameSession:
             int(getattr(tile, "montage_index", offset)): tile
             for offset, tile in enumerate(tuple(getattr(self.plan, "tiles", ()) or ()))
         }
-        tile_numbers = tuple(self.required_tile_numbers())
+        tile_numbers = self.first_pass_required_tile_numbers()
         if quality is None or not tile_numbers:
             return False
         for tile_number in tile_numbers:

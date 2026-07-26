@@ -250,9 +250,7 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
     )
     try:
         win.renderer._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4))
-        win.render(reason="test-tiled-roi")
-        _process_events(qtbot, count=30)
-        assert getattr(win._committed_display_frame, "is_tiled", False)
+        _render_committed_tiled_frame(win, qtbot, reason="test-tiled-roi")
 
         win.layout_manager.set_managed_dock_visible(
             win.inspection_dock, False, reason="test", preserve_canvas=False
@@ -260,7 +258,10 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         _process_events(qtbot, count=10)
         calls.clear()
         win.img_view.createRoi("rectangle", rect=(1, 1, 3, 3))
-        _process_events(qtbot, count=20)
+        qtbot.waitUntil(
+            lambda: len(calls) == 1,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
 
         assert len(calls) == 1
         assert win._roi_inspection_priority.name == "HIDDEN_ROI"
