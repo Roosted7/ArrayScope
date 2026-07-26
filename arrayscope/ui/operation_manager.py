@@ -116,14 +116,24 @@ class OperationManagerDialog(QtWidgets.QDialog):
         hint.setObjectName("OperationsMetaLabel")
         left.addWidget(hint)
 
-        tree_buttons = QtWidgets.QHBoxLayout()
         self.new_button = QtWidgets.QToolButton(self)
         set_button_icon(self.new_button, "add", tooltip="New operation")
+        self.new_button.setText("New")
+        self.new_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         # Compatibility for callers of the original manager API; this is now
         # an in-manager creation action, never a modal import editor.
         self.add_button = self.new_button
         self.duplicate_button = QtWidgets.QToolButton(self)
         set_button_icon(self.duplicate_button, "data_object", tooltip="Duplicate selected to edit")
+        self.duplicate_button.setText("Duplicate")
+        self.duplicate_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        primary_buttons = QtWidgets.QHBoxLayout()
+        primary_buttons.addWidget(self.new_button)
+        primary_buttons.addWidget(self.duplicate_button)
+        primary_buttons.addStretch(1)
+        left.addLayout(primary_buttons)
+
+        tree_buttons = QtWidgets.QHBoxLayout()
         self.remove_button = QtWidgets.QToolButton(self)
         set_button_icon(self.remove_button, "delete", tooltip="Hide")
         self.unhide_button = QtWidgets.QToolButton(self)
@@ -137,8 +147,6 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.reset_all_button = QtWidgets.QToolButton(self)
         set_button_icon(self.reset_all_button, "refresh", tooltip="Reset layout and unhide all")
         for button in (
-            self.new_button,
-            self.duplicate_button,
             self.remove_button,
             self.unhide_button,
             self.open_file_button,
@@ -203,6 +211,9 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.callable_combo = QtWidgets.QComboBox(self)
         source_form.addRow("Callable", self.callable_combo)
         source_layout.addLayout(source_form)
+        self.callable_hint = QtWidgets.QLabel("", self)
+        self.callable_hint.setObjectName("OperationsMetaLabel")
+        source_layout.addWidget(self.callable_hint)
 
         storage_row = QtWidgets.QHBoxLayout()
         self.copy_radio = QtWidgets.QRadioButton("Copy into ArrayScope", self)
@@ -227,7 +238,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
         for column in range(6):
             header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        for column, width in enumerate((82, 58, 62, 48, 48, 48)):
+        for column, width in enumerate((70, 54, 58, 38, 38, 42)):
             header.resizeSection(column, width)
         self.params_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.params_table.setMinimumHeight(215)
@@ -453,16 +464,29 @@ class OperationManagerDialog(QtWidgets.QDialog):
             try:
                 self.label_edit.clear()
                 self.id_label.clear()
+                self.group_combo.clear()
                 self.description_edit.clear()
+                self.icon_edit.clear()
+                self.icon_preview.clear()
+                self.requires_axis_check.setChecked(False)
                 self.changes_shape_label.clear()
+                self.common_check.setChecked(False)
                 self.source_path_edit.clear()
                 self.callable_combo.clear()
+                self.callable_hint.clear()
+                self.copy_radio.setChecked(False)
+                self.link_radio.setChecked(False)
+                self.copy_radio.setVisible(False)
+                self.link_radio.setVisible(False)
+                self.storage_hint.clear()
                 self.params_table.setRowCount(0)
             finally:
                 self._suppress = False
             item = self.tree.currentItem()
             problem = item.toolTip(0) if item is not None and item.data(0, _VIRTUAL_ROLE) else ""
-            self.status_label.setText(problem or "Select an operation to edit it.")
+            self.status_label.setText(
+                f"Operation problem — {problem}" if problem else "Select an operation to edit it."
+            )
             self._sync_button_states()
             return
         try:
@@ -580,6 +604,8 @@ class OperationManagerDialog(QtWidgets.QDialog):
             operation_id = str(definition.get("id") or "")
             path = library.user_operation_source_path(operation_id) or ""
             self.source_path_edit.setText(path)
+            self.source_path_edit.setToolTip(path)
+            self.source_path_edit.setCursorPosition(len(path))
             if path:
                 try:
                     infos = library.introspect_python_source(path)
@@ -591,14 +617,26 @@ class OperationManagerDialog(QtWidgets.QDialog):
             if callable_name and self.callable_combo.findText(callable_name) < 0:
                 self.callable_combo.addItem(callable_name)
             self.callable_combo.setCurrentText(callable_name)
+            count = len(self._source_infos)
+            self.callable_hint.setText(
+                f"{count} top-level callable{'s' if count != 1 else ''} found (AST only)."
+            )
             is_link = str(source.get("mode") or "import") == "link"
+            self.copy_radio.setVisible(True)
+            self.link_radio.setVisible(True)
             self.link_radio.setChecked(is_link)
             self.copy_radio.setChecked(not is_link)
         else:
-            self.source_path_edit.setText(self._system_source_text(source))
+            source_text = self._system_source_text(source)
+            self.source_path_edit.setText(source_text)
+            self.source_path_edit.setToolTip(source_text)
+            self.source_path_edit.setCursorPosition(0)
             callable_name = str(source.get("class") or source.get("name") or source.get("id") or "")
             if callable_name:
                 self.callable_combo.addItem(callable_name)
+            self.callable_hint.setText("Registered system implementation.")
+            self.copy_radio.setVisible(False)
+            self.link_radio.setVisible(False)
             self.copy_radio.setChecked(False)
             self.link_radio.setChecked(False)
         self._update_storage_hint()

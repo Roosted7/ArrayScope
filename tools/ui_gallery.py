@@ -540,24 +540,71 @@ def s_operation_manager(ctx: Ctx):
     (src_dir / "smooth.py").write_text(
         "def smooth(data, axis, width: int = 3):\n"
         '    """Moving-average smooth along an axis."""\n'
+        "    return data\n\n\n"
+        "def sharpen(data, amount: float = 0.25):\n"
+        '    """Sharpen with an editable strength."""\n'
         "    return data\n"
     )
     user_op_id = library.import_custom_operation(str(src_dir / "smooth.py"), "smooth")
+    library.update_user_operation(
+        user_op_id,
+        parameters=[
+            {
+                "name": "width",
+                "label": "Width",
+                "kind": "int",
+                "default": 3,
+                "minimum": 1,
+                "maximum": 15,
+                "step": 2,
+                "description": "Odd smoothing window.",
+            }
+        ],
+    )
     library.set_operation_hidden("fftshift", True)
     library.refresh_user_operations()
 
-    win = ctx.window(_volume3d(), size=(900, 700))
+    win = ctx.window(_volume3d(), size=(900, 760))
     dialog = OperationManagerDialog(win)
     dialog.show()
     ctx.pump(8)
     if not dialog.select_operation("centered_fft"):
         raise RuntimeError("centered_fft not present in operation manager tree")
     ctx.pump(6)
-    ctx.shot(dialog, "manager_tree")
+    ctx.shot(dialog, "system_read_only")
+
     if not dialog.select_operation(user_op_id):
         raise RuntimeError(f"user op {user_op_id!r} not present in operation manager tree")
     ctx.pump(6)
-    ctx.shot(dialog, "manager_user_editor")
+    ctx.shot(dialog, "user_full_parameters")
+
+    dialog.new_button.click()
+    ctx.pump(6)
+    ctx.shot(dialog, "new_empty")
+
+    if not dialog.select_operation("centered_fft"):
+        raise RuntimeError("centered_fft disappeared before duplicate gallery state")
+    dialog.duplicate_button.click()
+    ctx.pump(6)
+    ctx.shot(dialog, "duplicate_prefilled")
+
+    dialog.new_button.click()
+    ctx.pump(4)
+    dialog._populate_source_file(str(src_dir / "smooth.py"))
+    ctx.pump(6)
+    ctx.shot(dialog, "source_callable_picker")
+
+    problems_item = None
+    for index in range(dialog.tree.topLevelItemCount()):
+        group = dialog.tree.topLevelItem(index)
+        if group.text(0) == "Problems" and group.childCount():
+            problems_item = group.child(0)
+            break
+    if problems_item is None:
+        raise RuntimeError("Problems group not present in operation manager tree")
+    dialog.tree.setCurrentItem(problems_item)
+    ctx.pump(6)
+    ctx.shot(dialog, "problems")
     dialog.close()
 
 
