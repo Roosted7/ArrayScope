@@ -40,6 +40,7 @@ def export_operation_definition(operation: str | OperationEntry) -> dict[str, An
         definition.setdefault("version", 1)
         definition["tier"] = "user"
         definition["parameters"] = _parameter_payloads(entry.parameters)
+        definition["input_slots"] = _input_slot_payloads(entry.input_slots)
         definition["unavailable_reason"] = entry.unavailable_reason
         return definition
 
@@ -202,6 +203,7 @@ def _definition_from_entry(
         "requires_axis": bool(entry.requires_axis),
         "changes_shape": bool(entry.changes_shape),
         "parameters": _parameter_payloads(entry.parameters),
+        "input_slots": _input_slot_payloads(entry.input_slots),
         "unavailable_reason": entry.unavailable_reason,
         "tier": tier,
     }
@@ -220,6 +222,18 @@ def _parameter_payloads(parameters: tuple[OperationParameter, ...]) -> list[dict
             "description": parameter.description,
         }
         for parameter in parameters
+    ]
+
+
+def _input_slot_payloads(input_slots) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": slot.name,
+            "label": slot.label,
+            "description": slot.description,
+            "accepts": list(slot.accepts),
+        }
+        for slot in input_slots
     ]
 
 

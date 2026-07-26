@@ -7,6 +7,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from arrayscope.operations.input_slots import OperationInputSlot, ResolvedSlot, SlotBinding
 from arrayscope.operations.pipeline import (
     CenteredFFT,
     CenteredIFFT,
@@ -114,6 +115,7 @@ class OperationEntry:
     description: str = ""
     icon: str = "data_array"
     unavailable_reason: str = ""
+    input_slots: tuple[OperationInputSlot, ...] = ()
 
 
 OPERATION_REGISTRY = {
@@ -793,6 +795,7 @@ def _pack_operation_entry(spec) -> OperationEntry:
         description=getattr(spec, "description", ""),
         icon=getattr(spec, "icon", "data_array"),
         unavailable_reason=spec.current_unavailable_reason(),
+        input_slots=tuple(getattr(spec, "input_slots", ()) or ()),
     )
 
 
@@ -846,7 +849,15 @@ def get_operation_entry(operation_id: str) -> OperationEntry:
     raise ValueError(f"unknown operation id: {operation_id}")
 
 
-def create_operation(operation_id: str, axis=None, parameters: Mapping[str, object] | None = None):
+def create_operation(
+    operation_id: str,
+    axis=None,
+    parameters: Mapping[str, object] | None = None,
+    *,
+    slot_bindings: Mapping[str, SlotBinding | Mapping[str, object]] | None = None,
+    slot_resolver=None,
+    resolved_slots: Mapping[str, ResolvedSlot] | None = None,
+):
     if operation_id not in OPERATION_REGISTRY:
         from arrayscope.operations import plugins
 
@@ -858,12 +869,28 @@ def create_operation(operation_id: str, axis=None, parameters: Mapping[str, obje
             # region-honor adjudication, recipe round-trip) works with no entry
             # point.  Re-primed each call -> robust to ``_reset_plugin_cache``.
             plugins._SPEC_CACHE[operation_id] = spec
-            return plugins.create_plugin_operation(operation_id, axis=axis, parameters=parameters)
+            return plugins.create_plugin_operation(
+                operation_id,
+                axis=axis,
+                parameters=parameters,
+                slot_bindings=slot_bindings,
+                slot_resolver=slot_resolver,
+                resolved_slots=resolved_slots,
+            )
 
         if plugins.is_plugin_operation_id(operation_id):
-            return plugins.create_plugin_operation(operation_id, axis=axis, parameters=parameters)
+            return plugins.create_plugin_operation(
+                operation_id,
+                axis=axis,
+                parameters=parameters,
+                slot_bindings=slot_bindings,
+                slot_resolver=slot_resolver,
+                resolved_slots=resolved_slots,
+            )
 
     entry = get_operation_entry(operation_id)
+    if slot_bindings or resolved_slots:
+        raise ValueError(f"built-in operation {operation_id} does not declare input slots")
     parameters = dict(parameters or {})
     kwargs = {}
 
@@ -929,6 +956,16 @@ def operation_parameter_value(operation, name):
     return getattr(operation, name, None)
 
 
+def operation_slot_bindings(operation) -> dict[str, SlotBinding]:
+    """Read bound auxiliary sources without exposing process-local slot data."""
+
+    from arrayscope.operations.plugins import PluginOperation
+
+    if not isinstance(operation, PluginOperation):
+        return {}
+    return dict(operation.slot_bindings)
+
+
 def describe_operation(operation) -> str:
     operation_id = operation_id_for(operation)
     entry = get_operation_entry(operation_id)
@@ -940,4 +977,8 @@ def describe_operation(operation) -> str:
         parts = [f"{label} {axis}"] if label.endswith(" over axis") else [f"{label} · axis {axis}"]
     for parameter in entry.parameters:
         parts.append(f"{parameter.name}={operation_parameter_value(operation, parameter.name)}")
+    for slot in entry.input_slots:
+        binding = operation_slot_bindings(operation).get(slot.name)
+        label = "" if binding is None else binding.label
+        parts.append(f"{slot.name}={label or (binding.kind if binding is not None else 'unbound')}")
     return " ".join(parts)

@@ -19,8 +19,9 @@ cross-field interdependence register a small provider below, keyed by op id.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from arrayscope.operations.input_slots import SlotBinding, SlotSourceOption
 from arrayscope.operations.registry import OperationEntry, OperationParameter
 
 Shape = tuple[int, ...]
@@ -49,6 +50,18 @@ class DerivedValue:
     text: str
 
 
+@dataclass
+class SlotField:
+    """One required auxiliary source rendered beside ordinary parameters."""
+
+    name: str
+    label: str
+    description: str
+    accepts: tuple[str, ...]
+    options: tuple[SlotSourceOption, ...] = ()
+    binding: SlotBinding = field(default_factory=lambda: SlotBinding(""))
+
+
 def _coerce(kind: str, value) -> int | float:
     if kind == "int":
         return int(value)
@@ -71,11 +84,13 @@ class ParameterForm:
         self,
         fields: list[ParameterField],
         *,
+        slot_fields: list[SlotField] | None = None,
         adjust: Callable[[ParameterForm, str], None] | None = None,
         derive: Callable[[ParameterForm], list[DerivedValue]] | None = None,
         validate: Callable[[ParameterForm], str | None] | None = None,
     ) -> None:
         self.fields = fields
+        self.slot_fields = list(slot_fields or ())
         self._adjust = adjust
         self._derive = derive
         self._validate = validate
@@ -90,6 +105,16 @@ class ParameterForm:
         """The parameter mapping to hand to ``create_operation``."""
 
         return {candidate.name: candidate.value for candidate in self.fields}
+
+    def bindings(self) -> dict[str, SlotBinding]:
+        return {candidate.name: candidate.binding for candidate in self.slot_fields}
+
+    def set_binding(self, name: str, binding: SlotBinding) -> None:
+        for candidate in self.slot_fields:
+            if candidate.name == name:
+                candidate.binding = SlotBinding.from_payload(binding)
+                return
+        raise KeyError(name)
 
     def set_value(self, name: str, value) -> None:
         """Set one field's value (coerced), then apply interdependence."""
@@ -112,6 +137,20 @@ class ParameterForm:
                 return f"{candidate.label} must be at least {candidate.minimum}."
             if candidate.maximum is not None and candidate.value > candidate.maximum:
                 return f"{candidate.label} must be at most {candidate.maximum}."
+        for candidate in self.slot_fields:
+            if not candidate.binding.is_bound:
+                return f"{candidate.label} requires an input."
+            if candidate.binding.kind not in candidate.accepts:
+                return (
+                    f"{candidate.label} does not accept "
+                    f"{candidate.binding.kind.replace('-', ' ')} inputs."
+                )
+            selected = next(
+                (option for option in candidate.options if option.binding == candidate.binding),
+                None,
+            )
+            if selected is not None and not selected.available:
+                return selected.unavailable_reason or f"{candidate.label} is unavailable."
         if self._validate is not None:
             return self._validate(self)
         return None
@@ -387,7 +426,12 @@ _FORM_PROVIDERS: dict[str, Callable[..., ParameterForm]] = {
 
 
 def build_parameter_form(
-    entry: OperationEntry, *, shape: Shape | None = None, axis: int | None = None
+    entry: OperationEntry,
+    *,
+    shape: Shape | None = None,
+    axis: int | None = None,
+    slot_options: dict[str, tuple[SlotSourceOption, ...]] | None = None,
+    slot_bindings: dict[str, SlotBinding] | None = None,
 ) -> ParameterForm | None:
     """Build the parameter form for ``entry`` in the current array context.
 
@@ -396,9 +440,25 @@ def build_parameter_form(
     parameterized op gets the metadata-driven default form.
     """
 
-    if not entry.parameters:
+    if not entry.parameters and not entry.input_slots:
         return None
-    provider = _FORM_PROVIDERS.get(entry.id)
-    if provider is not None:
-        return provider(entry, shape=shape, axis=axis)
-    return _default_form(entry, shape=shape, axis=axis)
+    provider = _FORM_PROVIDERS.get(entry.id) if entry.parameters else None
+    form = (
+        provider(entry, shape=shape, axis=axis)
+        if provider is not None
+        else _default_form(entry, shape=shape, axis=axis)
+    )
+    options_by_name = dict(slot_options or {})
+    bindings_by_name = dict(slot_bindings or {})
+    form.slot_fields = [
+        SlotField(
+            name=slot.name,
+            label=slot.label,
+            description=slot.description,
+            accepts=slot.accepts,
+            options=tuple(options_by_name.get(slot.name, ())),
+            binding=bindings_by_name.get(slot.name, SlotBinding("")),
+        )
+        for slot in entry.input_slots
+    ]
+    return form

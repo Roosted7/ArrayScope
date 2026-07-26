@@ -42,8 +42,22 @@ class OperationCoordinator:
         self.evaluator.set_document(document)
         return self.document
 
-    def append_operation(self, operation_id, axis=None, parameters=None):
-        operation = create_operation(operation_id, axis=axis, parameters=parameters or {})
+    def append_operation(
+        self,
+        operation_id,
+        axis=None,
+        parameters=None,
+        *,
+        slot_bindings=None,
+        slot_resolver=None,
+    ):
+        operation = create_operation(
+            operation_id,
+            axis=axis,
+            parameters=parameters or {},
+            slot_bindings=slot_bindings,
+            slot_resolver=slot_resolver,
+        )
         return self.set_document(self.document.with_operation(operation))
 
     def undo(self):
@@ -68,8 +82,23 @@ class OperationCoordinator:
         steps = set_step_enabled(self.document.steps, index, enabled, self.base_data.shape)
         return self.set_document(self._document(steps=steps))
 
-    def replace_operation(self, index, operation_id, axis=None, parameters=None):
-        operation = create_operation(operation_id, axis=axis, parameters=parameters or {})
+    def replace_operation(
+        self,
+        index,
+        operation_id,
+        axis=None,
+        parameters=None,
+        *,
+        slot_bindings=None,
+        slot_resolver=None,
+    ):
+        operation = create_operation(
+            operation_id,
+            axis=axis,
+            parameters=parameters or {},
+            slot_bindings=slot_bindings,
+            slot_resolver=slot_resolver,
+        )
         steps = replace_step_operation(self.document.steps, index, operation, self.base_data.shape)
         return self.set_document(self._document(steps=steps))
 

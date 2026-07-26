@@ -159,6 +159,7 @@ def characterize_operation(
     *,
     axis: int | None = None,
     params=None,
+    slots=None,
     exact_input=None,
 ) -> OperationCharacterization:
     """Jointly adjudicate shape, dtype, and windowability with one cache."""
@@ -166,12 +167,18 @@ def characterize_operation(
     input_shape = tuple(int(size) for size in input_shape)
     input_dtype = np.dtype(dtype)
     param_map = dict(params or {})
+    slot_map = dict(slots or {})
+    slot_signature = tuple(
+        (str(name), getattr(source, "signature", _freeze(source)))
+        for name, source in sorted(slot_map.items())
+    )
     key = (
         str(getattr(spec, "id", "<anonymous>")),
         axis,
         _freeze(param_map),
         input_shape,
         input_dtype.str,
+        slot_signature,
         _freeze(_source_identity(spec)),
     )
     cached = _CHARACTERIZATION_CACHE.get(key)
@@ -179,7 +186,17 @@ def characterize_operation(
         _CHARACTERIZATION_STATS["cache_hits"] += 1
         return cached
 
-    fn = spec.resolve_fn(axis, param_map)
+    slot_arrays = {
+        name: source.materialize() if hasattr(source, "materialize") else np.asarray(source)
+        for name, source in slot_map.items()
+    }
+    # Duck-typed incumbent specs may still expose resolve_fn(axis, params).
+    # Only a slot-bearing characterization requires the new third argument.
+    fn = (
+        spec.resolve_fn(axis, param_map, slot_arrays)
+        if slot_map
+        else spec.resolve_fn(axis, param_map)
+    )
     probe_shapes = _probe_shapes(input_shape)
     started = perf_counter_ns()
     observations = []
@@ -262,7 +279,7 @@ def characterize_operation(
             reason = rule.detail
 
     region_honored = False
-    if bool(getattr(spec, "region_capable", False)):
+    if bool(getattr(spec, "region_capable", False)) and not slot_map:
         _CHARACTERIZATION_STATS["region_verified"] += 1
         conformance = _verify_region_from_observation(
             spec,

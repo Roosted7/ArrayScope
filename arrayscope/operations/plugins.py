@@ -31,6 +31,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from importlib.metadata import EntryPoint, entry_points
+from inspect import signature
 
 import numpy as np
 
@@ -39,6 +40,12 @@ from arrayscope.operations.capabilities import (
     OperationClass,
     OperationKind,
     default_chunkable_axes,
+)
+from arrayscope.operations.input_slots import (
+    OperationInputSlot,
+    ResolvedSlot,
+    SlotBinding,
+    unresolved_slot,
 )
 from arrayscope.operations.plugin_conformance import (
     CharacterizationMismatch,
@@ -72,6 +79,14 @@ _SPEC_CACHE: dict[str, PluginOperationSpec] = {}
 _REGION_PROBE_SHAPE = (5, 4, 3)
 
 
+def _accepts_arguments(function, *arguments) -> bool:
+    try:
+        signature(function).bind(*arguments)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def region_conformance_stats() -> dict[str, int]:
     """Observable Tier-2 gate tally: verified / honored / rejected claims."""
 
@@ -98,10 +113,17 @@ class PluginOperationSpec:
     id: str
     label: str
     fn: Callable[..., object] | None = None
-    build: Callable[[int | None, Mapping[str, object]], Callable[..., object]] | None = None
+    build: (
+        Callable[
+            [int | None, Mapping[str, object], Mapping[str, np.ndarray]],
+            Callable[..., object],
+        ]
+        | None
+    ) = None
     output_shape: Callable[[Shape, int | None, Mapping[str, object]], Shape] | None = None
     output_dtype: Callable[[object], object] | None = None
     parameters: tuple[OperationParameter, ...] = ()
+    input_slots: tuple[OperationInputSlot, ...] = ()
     requires_axis: bool = False
     changes_shape: bool = False
     # Presentation metadata mirrored onto the synthesized OperationEntry so pack
@@ -140,16 +162,48 @@ class PluginOperationSpec:
     def __post_init__(self) -> None:
         if (self.fn is None) == (self.build is None):
             raise ValueError(f"plugin operation {self.id!r} must declare exactly one of fn / build")
+        slot_names = [slot.name for slot in self.input_slots]
+        if len(slot_names) != len(set(slot_names)):
+            raise ValueError(f"plugin operation {self.id!r} has duplicate input-slot names")
+        parameter_names = {parameter.name for parameter in self.parameters}
+        overlap = sorted(parameter_names & set(slot_names))
+        if overlap:
+            raise ValueError(
+                f"plugin operation {self.id!r} reuses parameter names as input slots: {overlap}"
+            )
+        if self.input_slots and self.build is not None:
+            try:
+                signature(self.build).bind(None, {}, {})
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"plugin operation {self.id!r} declares input slots, so build() "
+                    "must accept (axis, params, slots)"
+                ) from exc
 
-    def resolve_fn(self, axis: int | None, params: Mapping[str, object]) -> Callable[..., object]:
+    def resolve_fn(
+        self,
+        axis: int | None,
+        params: Mapping[str, object],
+        slots: Mapping[str, np.ndarray] | None = None,
+    ) -> Callable[..., object]:
         reason = self.current_unavailable_reason()
         if reason:
             raise RuntimeError(f"operation {self.id!r} is unavailable: {reason}")
         if self.build is not None:
-            built = self.build(axis, dict(params))
+            arguments = (axis, dict(params), dict(slots or {}))
+            if not self.input_slots and not _accepts_arguments(self.build, *arguments):
+                # Slotless third-party builders predate Bundle E's third
+                # argument. Their two-argument contract remains valid; a
+                # slot-bearing definition is validated above and never takes
+                # this incumbent path.
+                built = self.build(*arguments[:2])
+            else:
+                built = self.build(*arguments)
             if not callable(built):
                 raise TypeError(f"plugin operation {self.id!r} build() did not return a callable")
             return built
+        if slots:
+            return lambda data: self.fn(data, **dict(slots))  # type: ignore[misc]
         return self.fn  # type: ignore[return-value]
 
     def current_unavailable_reason(self) -> str:
@@ -186,6 +240,8 @@ class PluginOperation:
     plugin_id: str
     axis: int | None = None
     params: tuple[tuple[str, object], ...] = ()
+    slot_bindings: tuple[tuple[str, SlotBinding], ...] = ()
+    resolved_slots: tuple[tuple[str, ResolvedSlot], ...] = ()
     _shape_hint: Shape | None = field(default=None, compare=False, repr=False)
     _dtype_hint: object = field(default=None, compare=False, repr=False)
     _characterization_hint: OperationCharacterization | None = field(
@@ -198,6 +254,27 @@ class PluginOperation:
     def _params(self) -> dict[str, object]:
         return dict(self.params)
 
+    def _slot_inputs(self) -> dict[str, ResolvedSlot]:
+        return dict(self.resolved_slots)
+
+    def _slot_arrays(self) -> dict[str, np.ndarray]:
+        reason = self.current_unavailable_reason()
+        if reason:
+            raise RuntimeError(f"operation {self.plugin_id!r} is unavailable: {reason}")
+        return {name: source.materialize() for name, source in self.resolved_slots}
+
+    def current_unavailable_reason(self) -> str:
+        reason = self._spec().current_unavailable_reason()
+        if reason:
+            return reason
+        for slot in self._spec().input_slots:
+            source = self._slot_inputs().get(slot.name)
+            if source is None:
+                return f"Input “{slot.label}” is not bound."
+            if source.unavailable_reason:
+                return source.unavailable_reason
+        return ""
+
     def _characterize(self, shape: Shape, dtype, *, exact_input=None) -> OperationCharacterization:
         characterization = characterize_operation(
             self._spec(),
@@ -205,6 +282,7 @@ class PluginOperation:
             np.dtype(dtype),
             axis=self.axis,
             params=self._params(),
+            slots=self._slot_inputs(),
             exact_input=exact_input,
         )
         object.__setattr__(self, "_shape_hint", tuple(shape))
@@ -219,6 +297,8 @@ class PluginOperation:
         return characterization.output_shape, characterization.output_dtype
 
     def _region_honored(self, shape: Shape | None = None, dtype=None) -> bool:
+        if self.slot_bindings:
+            return False
         if shape is None:
             shape = self._shape_hint or _REGION_PROBE_SHAPE
         if dtype is None:
@@ -234,7 +314,7 @@ class PluginOperation:
     def apply(self, data):
         array = np.asarray(data)
         characterization = self._characterize(array.shape, array.dtype)
-        fn = self._spec().resolve_fn(self.axis, self._params())
+        fn = self._spec().resolve_fn(self.axis, self._params(), self._slot_arrays())
         result = np.asarray(fn(data))
         predicted_shape = characterization.output_shape
         predicted_dtype = characterization.output_dtype
@@ -293,7 +373,7 @@ class PluginOperation:
         characterization = self._characterize(
             input_shape, np.dtype("float32") if input_dtype is None else input_dtype
         )
-        if characterization.region_honored:
+        if characterization.region_honored and not self.slot_bindings:
             # Tier-2 (verified windowable): a per-region ELEMENTWISE stage, the
             # same shape the built-in pointwise ops (Conjugate) use.  It blocks
             # and expands no axis, so a display-axis window shift is a subset of
@@ -456,11 +536,18 @@ def plugin_operation_entry(operation_id: str) -> OperationEntry:
         description=spec.description,
         icon=spec.icon,
         unavailable_reason=spec.current_unavailable_reason(),
+        input_slots=tuple(spec.input_slots),
     )
 
 
 def create_plugin_operation(
-    operation_id: str, axis=None, parameters: Mapping[str, object] | None = None
+    operation_id: str,
+    axis=None,
+    parameters: Mapping[str, object] | None = None,
+    *,
+    slot_bindings: Mapping[str, SlotBinding | Mapping[str, object]] | None = None,
+    slot_resolver=None,
+    resolved_slots: Mapping[str, ResolvedSlot] | None = None,
 ) -> PluginOperation:
     """Build a bound :class:`PluginOperation` (loads the plugin spec)."""
 
@@ -491,7 +578,46 @@ def create_plugin_operation(
             value = float(value)
         bound_params.append((parameter.name, value))
 
-    return PluginOperation(plugin_id=operation_id, axis=resolved_axis, params=tuple(bound_params))
+    raw_bindings = dict(slot_bindings or {})
+    supplied_resolved = dict(resolved_slots or {})
+    declared_names = {slot.name for slot in spec.input_slots}
+    extras = sorted((set(raw_bindings) | set(supplied_resolved)) - declared_names)
+    if extras:
+        raise ValueError(f"plugin operation {operation_id} has unknown input slots: {extras}")
+    bound_slots: list[tuple[str, SlotBinding]] = []
+    sources: list[tuple[str, ResolvedSlot]] = []
+    for slot in spec.input_slots:
+        binding = SlotBinding.from_payload(raw_bindings.get(slot.name, {}))
+        if binding.kind and binding.kind not in slot.accepts:
+            raise ValueError(
+                f"input slot {slot.name!r} does not accept binding kind {binding.kind!r}"
+            )
+        source = supplied_resolved.get(slot.name)
+        if source is None and slot_resolver is not None and binding.is_bound:
+            try:
+                source = slot_resolver(slot, binding)
+            except Exception as exc:
+                source = unresolved_slot(
+                    binding,
+                    f"Input “{slot.label}” cannot resolve: {exc}",
+                )
+        if source is None:
+            reason = (
+                f"Input “{slot.label}” is not bound."
+                if not binding.is_bound
+                else f"Input “{slot.label}” cannot resolve in this document."
+            )
+            source = unresolved_slot(binding, reason)
+        bound_slots.append((slot.name, binding))
+        sources.append((slot.name, source))
+
+    return PluginOperation(
+        plugin_id=operation_id,
+        axis=resolved_axis,
+        params=tuple(bound_params),
+        slot_bindings=tuple(bound_slots),
+        resolved_slots=tuple(sources),
+    )
 
 
 def recipe_item_for_plugin_operation(operation: PluginOperation, *, enabled: bool) -> dict:
@@ -502,6 +628,8 @@ def recipe_item_for_plugin_operation(operation: PluginOperation, *, enabled: boo
         item["axis"] = int(operation.axis)
     if operation.params:
         item["parameters"] = dict(operation.params)
+    if operation.slot_bindings:
+        item["inputs"] = {name: binding.to_payload() for name, binding in operation.slot_bindings}
     item["enabled"] = bool(enabled)
     return item
 

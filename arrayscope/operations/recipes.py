@@ -62,15 +62,17 @@ def operation_to_recipe_item(operation_or_step):
     return item
 
 
-def operations_from_recipe(recipe, base_shape, *, imported: bool = False):
+def operations_from_recipe(recipe, base_shape, *, imported: bool = False, slot_resolver=None):
     return tuple(
         step.operation
-        for step in steps_from_recipe(recipe, base_shape, imported=imported)
+        for step in steps_from_recipe(
+            recipe, base_shape, imported=imported, slot_resolver=slot_resolver
+        )
         if step.enabled
     )
 
 
-def steps_from_recipe(recipe, base_shape, *, imported: bool = False):
+def steps_from_recipe(recipe, base_shape, *, imported: bool = False, slot_resolver=None):
     if not isinstance(recipe, dict):
         raise ValueError("recipe must be a JSON object")
     version = recipe.get("version")
@@ -99,15 +101,28 @@ def steps_from_recipe(recipe, base_shape, *, imported: bool = False):
                 operation_id,
                 axis=item.get("axis"),
                 parameters=item.get("parameters", {}),
+                slot_bindings=item.get("inputs", {}),
+                slot_resolver=slot_resolver,
             )
             enabled = bool(item.get("enabled", True)) if version == RECIPE_VERSION else True
             if quarantined:
+                enabled = False
+            binding_reason = str(
+                getattr(operation, "current_unavailable_reason", lambda: "")() or ""
+            )
+            if binding_reason:
                 enabled = False
             if enabled:
                 shape = operation.output_shape(shape)
         except Exception as exc:
             raise ValueError(f"operation {index} ({operation_id}) is incompatible: {exc}") from exc
-        steps.append(OperationStep(operation=operation, enabled=enabled))
+        steps.append(
+            OperationStep(
+                operation=operation,
+                enabled=enabled,
+                unavailable_reason=binding_reason,
+            )
+        )
 
     return tuple(steps)
 
@@ -123,20 +138,22 @@ def dumps_recipe(operations, **kwargs) -> str:
     return json.dumps(recipe, **options)
 
 
-def loads_recipe(text: str, base_shape, *, imported: bool = False):
+def loads_recipe(text: str, base_shape, *, imported: bool = False, slot_resolver=None):
     return tuple(
         step.operation
-        for step in loads_recipe_steps(text, base_shape, imported=imported)
+        for step in loads_recipe_steps(
+            text, base_shape, imported=imported, slot_resolver=slot_resolver
+        )
         if step.enabled
     )
 
 
-def loads_recipe_steps(text: str, base_shape, *, imported: bool = False):
+def loads_recipe_steps(text: str, base_shape, *, imported: bool = False, slot_resolver=None):
     try:
         recipe = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON recipe: {exc}") from exc
-    return steps_from_recipe(recipe, base_shape, imported=imported)
+    return steps_from_recipe(recipe, base_shape, imported=imported, slot_resolver=slot_resolver)
 
 
 def save_recipe(path, operations):
@@ -151,11 +168,21 @@ def save_recipe(path, operations):
     os.replace(temporary_path, path)
 
 
-def load_recipe(path, base_shape):
+def load_recipe(path, base_shape, *, slot_resolver=None):
     with open(path, encoding="utf-8") as recipe_file:
-        return loads_recipe(recipe_file.read(), base_shape, imported=True)
+        return loads_recipe(
+            recipe_file.read(),
+            base_shape,
+            imported=True,
+            slot_resolver=slot_resolver,
+        )
 
 
-def load_recipe_steps(path, base_shape):
+def load_recipe_steps(path, base_shape, *, slot_resolver=None):
     with open(path, encoding="utf-8") as recipe_file:
-        return loads_recipe_steps(recipe_file.read(), base_shape, imported=True)
+        return loads_recipe_steps(
+            recipe_file.read(),
+            base_shape,
+            imported=True,
+            slot_resolver=slot_resolver,
+        )

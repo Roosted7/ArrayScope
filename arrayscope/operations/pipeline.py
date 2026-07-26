@@ -1355,6 +1355,7 @@ class SplitComplexAxis:
 class OperationStep:
     operation: ArrayOperation
     enabled: bool = True
+    unavailable_reason: str = ""
     step_id: str = field(default_factory=lambda: uuid4().hex)
 
 
@@ -1501,6 +1502,7 @@ def _coerce_step(step) -> OperationStep:
         return OperationStep(
             step.operation,
             enabled=bool(step.enabled),
+            unavailable_reason=str(getattr(step, "unavailable_reason", "") or ""),
             step_id=str(getattr(step, "step_id", uuid4().hex)),
         )
     return OperationStep(step)
