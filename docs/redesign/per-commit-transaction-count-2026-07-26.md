@@ -350,6 +350,73 @@ build without them at 9–10 and 1258–1454.
   dossier's warning is stronger than "~700 ms" — sequential single-shot
   processes on this machine drift far enough to invert a sign.
 
+### 8.4 The literal payload-object predicate does not hold — no fast path landed
+
+Attempted on local `main` at `6ad55232`, then reverted completely. The required
+predicate was deliberately literal: the same payload objects, representation,
+mapping mode, immutable layout owner, transpose state, and page-table binding
+generation. The page-table generation is the honest O(1) resident-set key: it
+changes on bind, eviction, re-admission, and slot remap, so it is stronger than
+comparing resident keys while avoiding an O(1,088) key walk.
+
+It never opened on the two target commits. In a real-Wayland raw-montage pass,
+both final metadata-only transactions presented 272 tiles with zero delta but
+**all 272 payload wrapper objects differed** from the preceding committed set.
+The sampled mismatches retained the same image object, source ID, and LOD; what
+changed was the `DisplayTilePayload` wrapper. This is not accidental churn:
+`FrameSession.bind_payloads_to_level_generation()` uses
+`replace(payload, presentation_identity=...)`, because
+`DisplayCommitter._validate_presentation()` requires every active wrapper to
+name the transaction's new level generation. The state builder then rehydrates
+the acknowledged payload map from those current wrappers when backend identity
+already matches. A level-only publication therefore cannot simultaneously
+carry the new presentation identity and retain `DisplayTilePayload` object
+identity under the current model.
+
+Direct evidence:
+
+- unmodified `--repeat 3`: the six final zero-delta commits cost
+  `88.8, 105.0, 89.5, 87.1, 93.1, 89.9 ms` (median **89.7 ms**), all with
+  `resident_rebinds=272`;
+- predicate probe, one pass: the two final zero-delta commits cost 89.5 and
+  83.7 ms and each reported **272/272 object-identity mismatches**;
+- fault injection: forcing the mapping-only branch across a changed one-tile
+  payload left the predecessor's 0.2 pixels in place where the CPU oracle
+  required 0.8, and the framebuffer oracle failed as intended.
+
+A backend-local substitute based on array identity plus selected wrapper fields
+would be the forbidden deep-equivalence predicate under another name. A
+durable token would have to become a separate canonical physical-binding
+identity owned by payload construction and propagated through level wrappers,
+floor reconstruction, resident crop rebind, representation/complex mapping,
+transpose, and atomic successor handoff. That crosses the payload/lifecycle and
+active ADR 0059 ladder owners excluded from this slice; a quick token attempted
+at the level-wrapper seam also failed because floor payload reconstruction
+creates fresh wrappers independently.
+
+The future identity has to make every binding-changing case explicit:
+
+- page eviction, re-admission, or slot remap changes the page-table generation;
+- LOD changes the physical image/page identity;
+- crop/window shift, transpose, sampling, or geometry changes the immutable
+  layout identity;
+- representation, complex mapping, colormap, or LUT changes the shader/mapping
+  identity;
+- atomic successor handoff changes the owning session/presentation identity.
+
+The forced stale-pixel case proves that bypassing any one of those guards must
+turn the framebuffer oracle red. Because the literal predicate failed before
+the fast path could open on the real target, this slice does not claim or land
+the rest of that safety matrix as tests.
+
+Therefore **no production code, counter schema, or test change landed**. Scroll
+and zoompan timing A/Bs were not run: the candidate took zero fast paths on the
+target raw metadata commits, so interaction timings could not answer a shipping
+question. Re-run this gate after ADR 0059 lands, because its coarse-rung payload
+construction may change both wrapper stability and the transaction population.
+Artifacts remain gitignored under
+`tests/artifacts/unchanged-binding-fast-path-2026-07-26/`.
+
 ## Reproduce
 
 ```

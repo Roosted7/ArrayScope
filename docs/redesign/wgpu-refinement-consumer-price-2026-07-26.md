@@ -280,7 +280,16 @@ The bounded implementation target is:
 3. **Presentation:** when page keys, representation, sampling, geometry, and
    mapping are physically unchanged, skip the tile-rebind transaction. A
    level/histogram-only update must update its uniforms/metadata without
-   re-enumerating 272 tile bindings.
+   re-enumerating 272 tile bindings. **Follow-up on `6ad55232`: the literal
+   payload-object predicate does not hold today.** Both final metadata-only
+   commits carried 272 fresh `DisplayTilePayload` wrappers because the new
+   level generation is part of each wrapper's required presentation identity,
+   even though sampled wrappers retained the same image object, source ID, and
+   LOD. A one-pass predicate probe reported 272/272 object mismatches on both
+   commits, so no fast path landed; see per-commit dossier §8.4. The missing
+   prerequisite is a canonical physical-binding identity separate from the
+   level-bearing wrapper, owned across payload construction/lifecycle rather
+   than inferred in the WGPU backend.
 4. **Fallback:** retain the existing CPU display rung for PyQtGraph and for
    WGPU paths where the renderer proves that the target changes the physical
    binding. ADR 0059 work may change that predicate; rerun this gate after it
