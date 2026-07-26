@@ -1550,6 +1550,99 @@ def test_coarse_target_trace_metrics_withholds_t1_t2_for_partial_coverage():
     assert result["coarse_target_target_ack_last_ms"] == 20.0
 
 
+def test_coarse_target_ack_oracle_does_not_wait_for_target_fill_completion():
+    from arrayscope.tools.profile_montage_workflow import _coarse_target_trace_metrics
+
+    events = (
+        {
+            "kind": "input",
+            "action": "phase_start",
+            "phase": "fft_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 30,
+            "ts_ns": 3_000_000_000,
+        },
+        {
+            "kind": "scheduling_phase",
+            "event": "scope_started",
+            "generation": 1,
+            "required_tiles": 2,
+            "required_tile_numbers": (0, 1),
+            "sequence": 31,
+            "ts_ns": 3_005_000_000,
+        },
+        {
+            "kind": "kernel_start",
+            "rung": 0,
+            "task_seq": 5,
+            "scheduling_generation": 1,
+            "sequence": 32,
+            "ts_ns": 3_010_000_000,
+        },
+        {
+            "kind": "kernel_finish",
+            "rung": 0,
+            "task_seq": 5,
+            "scheduling_generation": 1,
+            "sequence": 33,
+            "ts_ns": 3_020_000_000,
+        },
+        {
+            "kind": "backend_ack",
+            "accepted": True,
+            "quality": "preview",
+            "tile": 0,
+            "sequence": 34,
+            "ts_ns": 3_030_000_000,
+        },
+        {
+            "kind": "backend_ack",
+            "accepted": True,
+            "quality": "preview",
+            "tile": 1,
+            "sequence": 35,
+            "ts_ns": 3_040_000_000,
+        },
+        {
+            "kind": "kernel_start",
+            "rung": 2,
+            "sequence": 36,
+            "ts_ns": 3_050_000_000,
+        },
+        {
+            "kind": "backend_ack",
+            "accepted": True,
+            "quality": "exact",
+            "tile": 0,
+            "sequence": 37,
+            "ts_ns": 3_060_000_000,
+        },
+        {
+            "kind": "input",
+            "action": "phase_complete",
+            "phase": "fft_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 38,
+            "ts_ns": 3_070_000_000,
+        },
+    )
+
+    result = _coarse_target_trace_metrics(
+        events,
+        phase="fft_full_tiled_montage",
+        backend="wgpu",
+        phase_start_sequence=30,
+        requested_tiles=2,
+    )
+
+    assert result["coarse_target_ack_ordered"] is True
+    assert result["coarse_target_execution_ordered"] is True
+    assert result["coarse_target_order_status"] == "ordered"
+    assert result["coarse_target_t1_ms"] == 40.0
+    assert result["coarse_target_t2_ms"] is None
+    assert result["coarse_target_target_ack_tiles"] == 1
+
+
 def test_coarse_target_trace_metrics_rejects_target_work_from_predecessor_scope():
     from arrayscope.tools.profile_montage_workflow import _coarse_target_trace_metrics
 

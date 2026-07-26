@@ -5881,7 +5881,7 @@ def _coarse_target_trace_metrics(
         preview_present
         and requested_tiles > 0
         and preview_tiles == required_tile_set
-        and target_tiles == required_tile_set
+        and bool(target_tiles)
         and preview_ack_max_ns is not None
         and target_ack_min_ns is not None
         and preview_ack_max_ns < target_ack_min_ns
@@ -10419,49 +10419,65 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     # JSONL trace artifact. Keep a larger profiler-only ring so a pathological
     # overlap run fails on its two named clauses instead of merely losing its
     # phase-start marker.
-    configure_trace(trace, ring_events=PROFILE_TRACE_RING_EVENTS)
+    # Keep trace timestamps and the mandatory ordering oracle on the live
+    # bounded ring, but serialize JSONL only after each workflow run. A
+    # line-buffered sink encoded and flushed thousands of lifecycle rows on
+    # the interaction's critical path, adding hundreds of milliseconds to T1
+    # and making the instrumentation decide the near-instant gate.
+    configure_trace(None, ring_events=PROFILE_TRACE_RING_EVENTS)
     all_records: list[dict[str, object]] = []
     repeats = max(1, int(args.repeat))
+    trace_has_rows = False
     try:
         for repeat_index, backend in (
             (index, backend)
             for index in range(repeats)
             for backend in (PROFILE_DEFAULT_BACKENDS if args.backend == "all" else (args.backend,))
         ):
-            all_records.extend(
-                run_profile_montage_workflow(
-                    repeat_index=repeat_index,
-                    data_path=args.data,
-                    backend=backend,
-                    wgpu_present_method=str(args.wgpu_present_method),
-                    wgpu_power_preference=str(args.wgpu_power_preference),
-                    texture_codec=str(args.texture_codec),
-                    wgpu_minification_filter=bool(args.wgpu_minification_filter),
-                    enable_coarse_rung=bool(args.enable_coarse_rung),
-                    disable_coarse_rung=bool(args.disable_coarse_rung),
-                    jsonl=jsonl,
-                    timeout_s=bounded_interaction_settle_timeout_s(args.timeout_s),
-                    max_tiles=None if args.max_tiles <= 0 else args.max_tiles,
-                    scroll_max_tiles=args.scroll_max_tiles,
-                    columns=None if args.columns <= 0 else args.columns,
-                    load_mode=args.load_mode,
-                    profiler_type=args.profiler_type,
-                    profiler_artifact_paths=tuple(args.profiler_artifact or ()),
-                    stages=stages,
-                    screenshot_dir=args.screenshot_dir,
-                    screenshot_interval_s=float(args.screenshot_interval_s),
-                    session_fixture=None
-                    if not str(args.session_fixture).strip()
-                    else args.session_fixture,
-                    verbose_tile_trace=bool(args.verbose_tile_trace),
-                    synthetic_scene=args.synthetic_scene,
-                    synthetic_shape=tuple(args.synthetic_shape),
-                    physical_sample_seed=args.physical_sample_seed,
+            try:
+                all_records.extend(
+                    run_profile_montage_workflow(
+                        repeat_index=repeat_index,
+                        data_path=args.data,
+                        backend=backend,
+                        wgpu_present_method=str(args.wgpu_present_method),
+                        wgpu_power_preference=str(args.wgpu_power_preference),
+                        texture_codec=str(args.texture_codec),
+                        wgpu_minification_filter=bool(args.wgpu_minification_filter),
+                        enable_coarse_rung=bool(args.enable_coarse_rung),
+                        disable_coarse_rung=bool(args.disable_coarse_rung),
+                        jsonl=jsonl,
+                        timeout_s=bounded_interaction_settle_timeout_s(args.timeout_s),
+                        max_tiles=None if args.max_tiles <= 0 else args.max_tiles,
+                        scroll_max_tiles=args.scroll_max_tiles,
+                        columns=None if args.columns <= 0 else args.columns,
+                        load_mode=args.load_mode,
+                        profiler_type=args.profiler_type,
+                        profiler_artifact_paths=tuple(args.profiler_artifact or ()),
+                        stages=stages,
+                        screenshot_dir=args.screenshot_dir,
+                        screenshot_interval_s=float(args.screenshot_interval_s),
+                        session_fixture=None
+                        if not str(args.session_fixture).strip()
+                        else args.session_fixture,
+                        verbose_tile_trace=bool(args.verbose_tile_trace),
+                        synthetic_scene=args.synthetic_scene,
+                        synthetic_shape=tuple(args.synthetic_shape),
+                        physical_sample_seed=args.physical_sample_seed,
+                    )
                 )
-            )
-    finally:
-        from arrayscope.core.trace import close_trace
+            finally:
+                if trace is not None:
+                    from arrayscope.core.trace import TRACE
 
+                    if TRACE.snapshot():
+                        TRACE.drain(trace, append=trace_has_rows)
+                        trace_has_rows = True
+    finally:
+        from arrayscope.core.trace import TRACE, close_trace
+
+        if trace is not None and TRACE.snapshot():
+            TRACE.drain(trace, append=trace_has_rows)
         close_trace()
     print(_workflow_timing_summary(tuple(all_records)), end="")
     print(_workflow_repeat_spread_summary(tuple(all_records)), end="")

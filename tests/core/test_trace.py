@@ -44,6 +44,30 @@ def test_trace_ring_only_bus_dumps_complete_parseable_jsonl(tmp_path):
     assert rows[0]["key"] == "Decimal('2')"
 
 
+def test_trace_ring_can_drain_to_one_appended_jsonl_without_resetting_sequence(tmp_path):
+    from arrayscope.core.trace import TraceBus
+
+    path = tmp_path / "trace.jsonl"
+    bus = TraceBus()
+    bus.configure(ring_events=4)
+    bus.emit("kernel_start", task_seq=1)
+    bus.emit("kernel_finish", task_seq=1)
+    bus.drain(path)
+    assert bus.snapshot() == ()
+
+    bus.emit("kernel_start", task_seq=2)
+    bus.drain(path, append=True)
+    bus.close()
+
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["sequence"] for row in rows] == [1, 2, 3]
+    assert [row["kind"] for row in rows] == [
+        "kernel_start",
+        "kernel_finish",
+        "kernel_start",
+    ]
+
+
 def test_trace_dump_survives_an_event_that_cannot_encode(tmp_path):
     """A pathological field costs its own row, not the whole stall dump.
 

@@ -120,14 +120,30 @@ class TraceBus:
         with self._lock:
             return tuple(dict(event) for event in self._ring)
 
-    def dump(self, path: str | Path) -> Path:
+    @staticmethod
+    def _write_events(
+        path: str | Path,
+        events,
+        *,
+        append: bool,
+    ) -> Path:
         output = Path(path)
         output.parent.mkdir(parents=True, exist_ok=True)
-        events = self.snapshot()
-        with output.open("w", encoding="utf-8") as handle:
+        with output.open("a" if append else "w", encoding="utf-8") as handle:
             for event in events:
                 handle.write(_encode(event) + "\n")
         return output
+
+    def dump(self, path: str | Path, *, append: bool = False) -> Path:
+        return self._write_events(path, self.snapshot(), append=append)
+
+    def drain(self, path: str | Path, *, append: bool = False) -> Path:
+        """Write and clear the current ring without resetting event sequence."""
+
+        with self._lock:
+            events = tuple(dict(event) for event in self._ring)
+            self._ring.clear()
+        return self._write_events(path, events, append=append)
 
 
 TRACE = TraceBus()
