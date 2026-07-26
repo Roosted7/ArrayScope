@@ -5157,6 +5157,35 @@ def wgpu_native_plane_warm_payload(payload) -> bool:
     return len(source_rect) == 4 and source_rect != (0, plane_shape[0], 0, plane_shape[1])
 
 
+def wgpu_page_rounded_nbytes(texture) -> int:
+    """Bytes a WGPU texture upload PHYSICALLY writes: whole pages, always.
+
+    ``_wgpu_page_block`` zero-fills a full ``(PAGE, PAGE)`` block and
+    ``write_texture`` writes extent ``(PAGE, PAGE, 1)``, so a payload's logical
+    ``nbytes`` is never what the upload costs.  A 336² float32 plane is four
+    256² pages: 451 584 B logical against 1 048 576 B written, a **2.32×**
+    undercharge.  A reduced 21² payload that does not warm its plane is worse
+    still — 1 764 B against one whole page.
+
+    Every byte-governed decision in the commit path (``max_upsert_bytes``, the
+    admission cost function, residency accounting) takes this as its input, so
+    a cap denominated in bytes could not mean what it said while the input was
+    wrong by a factor of two.  Measured 2026-07-26; harmless until then only
+    because ``_idle_backlog_cohort``'s item ceiling of 32 happened to bind
+    first, and 32 MiB ÷ 1 MiB is also 32.
+    """
+
+    from arrayscope.gpu.wgpu_executor import PAGE
+
+    data = np.asarray(texture)
+    if data.ndim < 2:
+        return int(data.nbytes)
+    rows, columns = (int(value) for value in data.shape[:2])
+    pages = -(-rows // PAGE) * -(-columns // PAGE)
+    texel_nbytes = int(data.itemsize) * int(np.prod(data.shape[2:], dtype=int))
+    return pages * PAGE * PAGE * texel_nbytes
+
+
 def wgpu_payload_upload_nbytes(payload) -> int:
     """Physical bytes for WGPU, including hidden exact source-page warming."""
 
@@ -5164,8 +5193,19 @@ def wgpu_payload_upload_nbytes(payload) -> int:
         # The WGPU warm path uses the exact native pages instead of also
         # uploading the redundant reduced/cropped payload.
         native = getattr(payload, "native_residency_data", None)
-        return max(1, int(getattr(np.asarray(native), "nbytes", 0) or 0))
-    return vispy_payload_upload_nbytes(payload)
+        return max(1, wgpu_page_rounded_nbytes(native))
+    texture = getattr(payload, "texture_data", None)
+    if texture is None:
+        texture = getattr(payload, "image", None)
+    if texture is None:
+        return vispy_payload_upload_nbytes(payload)
+    # The histogram array rides the same accounting as VisPy's: it is separate
+    # from the page grid, so it is charged as itself, not rounded.
+    total = wgpu_page_rounded_nbytes(texture)
+    histogram = getattr(payload, "histogram_data", None)
+    if histogram is not None and histogram is not texture:
+        total += int(getattr(np.asarray(histogram), "nbytes", 0) or 0)
+    return max(1, int(total))
 
 
 def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:

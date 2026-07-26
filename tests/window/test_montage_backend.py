@@ -3173,7 +3173,11 @@ def test_wgpu_native_source_prefetch_stays_in_bounded_two_tile_cohorts_mid_gestu
 
     assert limits["max_upserts"] == 2
     assert limits["max_upsert_bytes"] == 3 * 1024 * 1024
-    assert limits["upsert_cost_fn"](payload) == native.nbytes
+    # Four whole 256² pages, not the 336² plane's own 451 584 B: the mid-gesture
+    # cap of 3 MiB admits three such warms, so the two-tile item clamp is still
+    # what binds here — but the byte cap no longer thinks it admits six.
+    assert native.nbytes == 336 * 336 * 4
+    assert limits["upsert_cost_fn"](payload) == 4 * 256 * 256 * 4
 
 
 def test_wgpu_idle_plane_warm_keeps_its_backlog_cohort():
@@ -3205,8 +3209,14 @@ def test_wgpu_idle_plane_warm_keeps_its_backlog_cohort():
 
     assert limits["max_upserts"] == 32
     assert limits["max_upsert_bytes"] == 32 * 1024 * 1024
-    # Hidden warming stays governed by bytes, not by a blanket item clamp.
-    assert limits["upsert_cost_fn"](payload) == native.nbytes
+    # Hidden warming stays governed by bytes, not by a blanket item clamp — and
+    # the bytes are the ones the upload physically writes: a 336² float32 plane
+    # is four whole 256² pages, not its own 451 584 B.
+    assert native.nbytes == 336 * 336 * 4
+    assert limits["upsert_cost_fn"](payload) == 4 * 256 * 256 * 4
+    # 32 MiB of pages is exactly 32 such tiles, so the byte cap now reaches the
+    # same cohort the item ceiling does instead of admitting 2.32× more.
+    assert limits["max_upsert_bytes"] // limits["upsert_cost_fn"](payload) == 32
 
 
 def test_wgpu_cropped_native_warm_is_costed_as_its_whole_plane():
@@ -3226,12 +3236,17 @@ def test_wgpu_cropped_native_warm_is_costed_as_its_whole_plane():
     cropped = _wgpu_native_warm_payload(lod_level=0, source_rect=(38, 238, 66, 266))
     whole = _wgpu_native_warm_payload(lod_level=0, source_rect=(0, 336, 0, 336))
 
+    plane_pages = 4 * 256 * 256 * 4  # a 336² float32 plane is four whole pages
+
     assert montage_commit.wgpu_native_plane_warm_payload(cropped) is True
-    assert montage_commit.wgpu_payload_upload_nbytes(cropped) == native.nbytes
+    assert montage_commit.wgpu_payload_upload_nbytes(cropped) == plane_pages
     # An exact payload that already IS its whole plane uploads that plane
     # through its ordinary source-anchored binding; it is not a hidden warm.
+    # Same plane, same pages, same charge — the two routes must not disagree
+    # about what a commit costs just because one of them is the warm.
     assert montage_commit.wgpu_native_plane_warm_payload(whole) is False
-    assert montage_commit.wgpu_payload_upload_nbytes(whole) == native.nbytes
+    assert montage_commit.wgpu_payload_upload_nbytes(whole) == plane_pages
+    assert native.nbytes * 2 < plane_pages < native.nbytes * 3
 
     session = SimpleNamespace(
         display_committed=True,
@@ -3245,7 +3260,45 @@ def test_wgpu_cropped_native_warm_is_costed_as_its_whole_plane():
     )
     assert limits["max_upserts"] == 2
     assert limits["max_upsert_bytes"] == 3 * 1024 * 1024
-    assert limits["upsert_cost_fn"](cropped) == native.nbytes
+    assert limits["upsert_cost_fn"](cropped) == plane_pages
+
+
+def test_wgpu_upload_cost_is_whole_pages_on_every_route():
+    """A WGPU upload writes whole 256² pages; the charge must say so.
+
+    ``_wgpu_page_block`` zero-fills a full ``(PAGE, PAGE)`` block and
+    ``write_texture`` writes that extent, so logical ``nbytes`` never described
+    what a commit paid.  Every byte-governed decision (``max_upsert_bytes``,
+    the admission cost function) reads this number, so an unrounded charge made
+    a cap in bytes mean something other than what it said — by 2.32× on the
+    plane warm that dominates a zoomed-out montage, and by far more on a
+    reduced payload that fits inside one page.
+    """
+
+    from arrayscope.window import frame_effects as montage_commit
+
+    page_bytes = 256 * 256 * 4
+
+    # 336² float32 spans a 2×2 page grid however it is presented.
+    assert montage_commit.wgpu_page_rounded_nbytes(np.zeros((336, 336), np.float32)) == (
+        4 * page_bytes
+    )
+    # A level-4 tile is 21² — one page, not 1 764 B.  This is the route that
+    # made a byte cap admit 148× more tiles than it could pay for.
+    assert montage_commit.wgpu_page_rounded_nbytes(np.zeros((21, 21), np.float32)) == page_bytes
+    # Exactly page-sized stays exactly one page: no off-by-one page.
+    assert montage_commit.wgpu_page_rounded_nbytes(np.zeros((256, 256), np.float32)) == page_bytes
+    assert montage_commit.wgpu_page_rounded_nbytes(np.zeros((257, 256), np.float32)) == (
+        2 * page_bytes
+    )
+    # Per-texel width follows the representation: complex is two floats, RGB8
+    # three bytes.
+    assert montage_commit.wgpu_page_rounded_nbytes(np.zeros((336, 336), np.complex64)) == (
+        8 * page_bytes
+    )
+    assert montage_commit.wgpu_page_rounded_nbytes(np.zeros((300, 300, 3), np.uint8)) == (
+        4 * 256 * 256 * 3
+    )
 
 
 def test_vispy_idle_upsert_cohort_scales_to_large_backlog():
