@@ -104,11 +104,16 @@ Meanwhile the tools people actually want a BART/sigpy bridge *for* — `pics`,
 more than one input array or non-array metadata.
 
 **Caution for whoever picks this up:** the commit that added the BART ops
-reports verifying semantics against a runnable `bart` binary. This machine has
-neither `bart` on `PATH` nor `BART_TOOLBOX_PATH` set, so that verification is
-not reproducible here. Treat BART numeric anchors as unverified until re-run on
-a machine with the toolbox, and keep the fake-`bart` argv shims as the
-load-bearing tests.
+reported verifying semantics against a runnable binary, but no retained output
+made that claim independently reproducible; its guarded tests concerned
+now-removed unary wrappers, not today's `ecalib`, `walsh`, and `pics`
+definitions. The fake-`bart` tests remain load-bearing integration oracles only.
+Current numeric evidence comes from
+[`tools/validate_bart_numerics.py`](../../tools/validate_bart_numerics.py) and
+the [2026-07-26 real-toolbox review](../reviews/2026-07-26-bart-numeric-validation.md).
+That first real run found and fixed two semantic defects rather than weakening
+the gate: PICS needed `-S` to restore output scale, and BART `walsh` returns
+packed calibration covariance for `ecaltwo`, not sensitivity maps.
 
 #### System operations cannot teach
 
@@ -266,7 +271,7 @@ for each editor state reviewed.
 user-editable runtime, and ops can name the environment they need.
 
 - **Command-template runtime.** Generalize `run_bart` into a runtime that takes
-  a command template (`bart pics -i {iters} {in} {out}`), an array-handoff
+  a command template (`bart pics -S -i {iters} {in} {out}`), an array-handoff
   format (cfl / npy / nifti / raw), a timeout, and the existing concurrent-drain
   and cancellation behaviour. Placeholders cover inputs, outputs, and every
   declared parameter. Quoting/escaping is explicit and tested; a template is

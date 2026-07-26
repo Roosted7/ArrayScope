@@ -296,8 +296,40 @@ The pack registers three genuinely BART-native, readable command definitions:
 `bart:ecalib`, `bart:walsh`, and the multi-input `bart:pics`. All three use
 Bundle D's empirical characterization and are available when the configured
 `bart` executable resolves. PICS takes primary k-space plus a required
-`sensitivities` slot and hands both off as distinct cfl inputs. The cfl handoff
-remains complex64 because that is BART's format.
+`sensitivities` slot, passes `-S` so BART restores quantitative scale, and hands
+both arrays off as distinct cfl inputs. `bart:walsh` is deliberately named for
+what the BART command returns: packed Hermitian coil-covariance matrices for a
+subsequent `ecaltwo`, not sensitivity maps. The cfl handoff remains complex64
+because that is BART's format.
+
+### Real-toolbox numeric validation
+
+The fake executable in `tests/operations/test_bart_pack.py` remains the oracle
+for argv ordering, cfl handoff, concurrent pipe draining, cancellation,
+timeout, and cleanup. It is not numeric evidence. Run the real-toolbox gate
+from the repository root with:
+
+```bash
+conda run -n arrayscope python tools/validate_bart_numerics.py \
+    --bart-toolbox-path /path/to/bart
+```
+
+If a local BART build needs libraries outside the system loader path, add one
+or more `--library-path /path/to/lib` arguments. The harness runs all three
+registered definitions on deterministic `24 x 24`, four-coil, fully sampled
+data, prints a pass/fail table, and exits non-zero for an unavailable toolbox,
+a command error, or a failed numeric check.
+
+| operation | independent reference or invariant | acceptance |
+|---|---|---|
+| `bart:ecalib` | foreground maps have unit coil norm and span the analytically known rank-one coil subspace; phase gauge is ignored | max norm error `<= 2e-5`; minimum subspace correlation `>= 0.999` |
+| `bart:walsh` | unpacked covariance is Hermitian positive semidefinite and its dominant eigenspace matches the known conjugated coil vector | relative eigenvalue floor `>= -1e-6`; minimum dominant fraction and subspace correlation `>= 0.999` |
+| `bart:pics` | NumPy centered unitary inverse FFT followed by direct SENSE combination of normalized maps | relative L2 `<= 1e-5`; max absolute error `<= 5e-5` |
+
+These tolerances were chosen before the corrected run from the complex64 error
+model and the exact rank-one construction, not fitted to observed output. The
+dated measurements and refusal boundary are in the
+[BART numeric validation review](reviews/2026-07-26-bart-numeric-validation.md).
 
 ## User-defined operations (no packaging required)
 
@@ -419,14 +451,15 @@ Reusable environments live beside wrappers in `operations/environments.json`:
   "version": 1,
   "environments": [
     {
-      "id": "recon",
-      "name": "Recon tools",
-      "interpreter": "/opt/recon/bin/python",
+      "id": "bart",
+      "name": "BART toolbox",
+      "interpreter": "",
       "conda_env": "",
       "venv_path": "",
-      "working_directory": "/data/reconstruction",
+      "working_directory": "",
       "variables": {
-        "BART_TOOLBOX_PATH": "/opt/bart",
+        "PATH": "/opt/bart:/usr/local/bin:/usr/bin:/bin",
+        "LD_LIBRARY_PATH": "/opt/bart-libs",
         "OMP_NUM_THREADS": "4"
       }
     }
@@ -440,7 +473,13 @@ general command. Resolution is lazy. Missing interpreters, vanished conda
 environments, invalid working directories, and commands absent from the
 effective `PATH` make referencing operations unavailable; they do not defer a
 crash until Apply. `BART_TOOLBOX_PATH` has no special resolver anymore—it is an
-ordinary variable on a named environment.
+ordinary variable on a named environment and does not locate the executable.
+The shipped BART definitions consume the record whose id is exactly `bart`;
+create it in **Operations manager → Advanced → Environments**, put the toolbox
+directory on its literal `PATH`, and add any required loader variables. Values
+are stored literally, so `$PATH` is not expanded; include every path the child
+needs. With no `bart` record, the definitions fall back to the ArrayScope
+process's `PATH`.
 
 `changes_shape` is presentation metadata, not a shape promise. It may be
 `true`: the operation is characterized on first use and the discovered

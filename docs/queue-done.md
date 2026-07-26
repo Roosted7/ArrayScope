@@ -99,8 +99,11 @@ blocks graduated during cleanups are preserved after it.
   grace — **measured 22 ms kill** (<1 s gate), no orphan, temp dir always cleaned;
   OPAQUE heaviest-admission cost class. `bart:pics` deferred (multi-input, doesn't
   fit unary `fn`). Evidence: `f1c07682` (+ arch-guard barrier fix `ed24d457`);
-  16 tests run against the live bart binary. bart installed at `~/projects/bart/`
-  (MKL from the conda pkgs cache).
+  the landing record reported 16 tests against a live binary at
+  `~/projects/bart/` (MKL from the conda pkgs cache), but retained output does
+  not reproduce that claim and those now-removed unary wrappers do not validate
+  today's `ecalib`/`walsh`/`pics` contracts. Current evidence:
+  [real-BART numeric review](reviews/2026-07-26-bart-numeric-validation.md).
 
 - 2026-07-22 — **Plugin ops v2 — sigpy pack (queue step 9):** first shipped as
   `sigpy:fft`/`ifft` (`14329efa`), then **removed the same day** (`3107ef0c`) as

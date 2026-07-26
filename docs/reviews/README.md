@@ -2,6 +2,7 @@
 
 Reviews are dated assessments and trace interpretations. They may identify risks or recommend direction, but the current source of truth remains tested code, accepted ADRs, and the live architecture/roadmap.
 
+- [BART numeric validation](2026-07-26-bart-numeric-validation.md): real-toolbox ECALIB/Walsh/PICS references, the two semantic defects found, exact tolerances, and the refusal boundary (2026-07-26).
 - [2026-07-19 course review](2026-07-19-course-review.md): whole-project review and reshaped course — engine-bet status, bug-archaeology roots, backend verdict (VisPy retirement, PyQtGraph roles, QPainter end-state), competitive whitespace, Programs A–F (2026-07-19).
 - [T1/V1 adversarial review](2026-07-14-t1-v1-adversarial-review.md): hardening of the import guard, workflow harness, and trace_verify; the idle re-commit/re-ack livelock finding (2026-07-14, addenda through P8/P9).
 - [UI visual audit](2026-07-10-ui-visual-audit.md): dated visual findings (2026-07-10).
