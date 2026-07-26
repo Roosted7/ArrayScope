@@ -154,6 +154,307 @@ class Conjugate:
 
 
 @dataclass(frozen=True)
+class Magnitude:
+    def apply(self, data):
+        return np.abs(data)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _real_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape))
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return np.abs(data)
+
+
+@dataclass(frozen=True)
+class Phase:
+    def apply(self, data):
+        return np.angle(data)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        return np.angle(np.empty((1,), dtype=np.dtype(input_dtype))).dtype
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape))
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return np.angle(data)
+
+
+@dataclass(frozen=True)
+class RealPart:
+    def apply(self, data):
+        return np.real(data)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _real_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape), real_linear=True)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return np.real(data)
+
+
+@dataclass(frozen=True)
+class ImaginaryPart:
+    def apply(self, data):
+        return np.imag(data)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _real_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape), real_linear=True)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return np.imag(data)
+
+
+@dataclass(frozen=True)
+class LogMagnitude:
+    epsilon: float
+
+    def apply(self, data):
+        return _log_magnitude(data, self.epsilon)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _floating_real_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape), temp_multiplier=2.0)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return _log_magnitude(data, self.epsilon)
+
+
+@dataclass(frozen=True)
+class Scale:
+    factor: float
+
+    def apply(self, data):
+        return _preserving_result(np.asarray(data) * self.factor, data)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape), real_linear=True)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return self.apply(data)
+
+
+@dataclass(frozen=True)
+class Offset:
+    value: float
+
+    def apply(self, data):
+        return _preserving_result(np.asarray(data) + self.value, data)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape))
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return self.apply(data)
+
+
+@dataclass(frozen=True)
+class Power:
+    exponent: float
+
+    def apply(self, data):
+        with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+            return _preserving_result(np.power(data, self.exponent), data)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape))
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return self.apply(data)
+
+
+@dataclass(frozen=True)
+class Clip:
+    minimum: float
+    maximum: float
+
+    def apply(self, data):
+        minimum, maximum = _ordered_bounds(self.minimum, self.maximum)
+        array = np.asarray(data)
+        if np.iscomplexobj(array):
+            result = np.clip(array.real, minimum, maximum) + 1j * np.clip(
+                array.imag, minimum, maximum
+            )
+        else:
+            result = np.clip(array, minimum, maximum)
+        return _preserving_result(result, array)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape), temp_multiplier=2.0)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return self.apply(data)
+
+
+@dataclass(frozen=True)
+class SoftThreshold:
+    threshold: float
+
+    def apply(self, data):
+        return _soft_threshold(data, self.threshold)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape), temp_multiplier=3.0)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return _soft_threshold(data, self.threshold)
+
+
+@dataclass(frozen=True)
+class HardThreshold:
+    threshold: float
+
+    def apply(self, data):
+        return _hard_threshold(data, self.threshold)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _elementwise_capabilities(len(input_shape), temp_multiplier=2.0)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del input_shape
+        return output_region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, output_region, evaluation_context
+        return _hard_threshold(data, self.threshold)
+
+
+@dataclass(frozen=True)
 class Mean:
     axis: int
 
@@ -816,6 +1117,67 @@ def _same_dtype(input_dtype):
     return None if input_dtype is None else np.dtype(input_dtype)
 
 
+def _real_dtype(input_dtype):
+    if input_dtype is None:
+        return None
+    return np.asarray(np.real(np.empty((1,), dtype=np.dtype(input_dtype)))).dtype
+
+
+def _floating_real_dtype(input_dtype):
+    if input_dtype is None:
+        return None
+    real_dtype = _real_dtype(input_dtype)
+    if _is_integer_dtype(real_dtype):
+        return np.dtype(np.float32)
+    return real_dtype
+
+
+def _preserving_result(result, source):
+    source_dtype = np.asarray(source).dtype
+    return np.asarray(result).astype(source_dtype, copy=False)
+
+
+def _ordered_bounds(minimum, maximum):
+    minimum = float(minimum)
+    maximum = float(maximum)
+    if minimum > maximum:
+        raise ValueError("minimum must be less than or equal to maximum")
+    return minimum, maximum
+
+
+def _log_magnitude(data, epsilon):
+    epsilon = float(epsilon)
+    if epsilon <= 0:
+        raise ValueError("epsilon must be greater than zero")
+    dtype = _floating_real_dtype(np.asarray(data).dtype)
+    magnitude = np.abs(data).astype(dtype, copy=False)
+    return np.log(np.maximum(magnitude, dtype.type(epsilon))).astype(dtype, copy=False)
+
+
+def _soft_threshold(data, threshold):
+    threshold = float(threshold)
+    if threshold < 0:
+        raise ValueError("threshold must be non-negative")
+    array = np.asarray(data)
+    magnitude = np.abs(array)
+    scale = np.zeros_like(magnitude)
+    np.divide(
+        np.maximum(magnitude - threshold, 0),
+        magnitude,
+        out=scale,
+        where=magnitude != 0,
+    )
+    return _preserving_result(array * scale, array)
+
+
+def _hard_threshold(data, threshold):
+    threshold = float(threshold)
+    if threshold < 0:
+        raise ValueError("threshold must be non-negative")
+    array = np.asarray(data)
+    return np.where(np.abs(array) >= threshold, array, array.dtype.type(0))
+
+
 def _is_integer_dtype(dtype) -> bool:
     return np.dtype(dtype).kind in "biu"
 
@@ -855,4 +1217,17 @@ def _capabilities(
         notes=tuple(notes),
         lod_commuting=bool(lod_commuting),
         real_linear=bool(real_linear),
+    )
+
+
+def _elementwise_capabilities(
+    ndim: int, *, temp_multiplier: float = 1.0, real_linear: bool = False
+) -> OperationCapabilities:
+    return _capabilities(
+        OperationKind.ELEMENTWISE,
+        ndim=ndim,
+        temp_multiplier=temp_multiplier,
+        can_fuse=True,
+        lod_commuting=True,
+        real_linear=real_linear,
     )
