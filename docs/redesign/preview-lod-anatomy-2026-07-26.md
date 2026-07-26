@@ -422,6 +422,17 @@ montage-axis transform re-runs the whole transform once per tile, so first
 pixels land *later* than the old exact ones and the exact rung never lands at
 all. Previews appearing was never the goal; previews appearing *cheaply* was.
 
+**Correction (ADR 0059).** The symptom above is reported correctly and the
+cause is not. Those 271 per-tile rungs were not running *reduced-input*
+evaluations at all: `fbbb6f64` deleted the reduced-input branch of
+`evaluate_preview_tile` on 2026-07-16, leaving it an unconditional call to
+`_evaluate_tile_native_output_preview`. So the 65.5 s was 271 full **native**
+FFT evaluations, each then reduced — not 271 cheap reduced ones. Reduced-input
+evaluation of this pipeline costs 36.5 ms whole-volume at level 4 (of which the
+transform is 1.0 ms and the box mean 35.5 ms). The same commit added the
+`resident` guard of §6c, so it disabled *both* routes ADR 0050 designed and
+`evaluate_at=reduced` has been unreachable anywhere in the tree since.
+
 So the per-tile gate is now asked the question it always claimed to ask.
 `frame_runtime`'s comment already said "pipelines whose display-LOD result is
 independently tileable"; the code asked whether the pipeline commutes, and
@@ -957,6 +968,21 @@ Two consequences worth stating plainly:
    but the ladder is not the intended owner of an FFT preview and should not
    become one. The intended owner is the shared transform route, i.e. gate 2,
    which the axis-aware session owns.
+
+   **[ADR 0059 disagrees with this one, on later evidence.]** Two facts found
+   after it was written invert the conclusion. First, "a per-tile rung re-runs
+   the whole transform per tile" is true of the code as it stands but not of
+   the design: `fbbb6f64` deleted `evaluate_preview_tile`'s reduced-input
+   branch, so those rungs run *native* evaluations. Reduced-input evaluation of
+   the whole volume costs 36.5 ms at level 4. Second, every tile's reduced read
+   for a montage-axis transform is byte-identical (checked on an 8-tile
+   montage: all tiles return the same `(4, 4, 8)` array covering the whole
+   montage axis), so the existing stage cache would collapse 272 requests into
+   one evaluation with 271 attaches — exactly what makes the *native* per-tile
+   path fast today. The ladder can therefore own an FFT preview cheaply, and
+   the shared route turns out to be a second, serial implementation of the
+   sharing the stage cache already provides. ADR 0059 keeps the merge and
+   retires the shared route instead.
 2. The early return in `submit_shared_transform_floor` used to read
    "commuting pipelines get per-tile FLOOR/DESIRED rungs" and report
    `per-tile rungs own reduced input` — a hand-off to an owner that refuses the

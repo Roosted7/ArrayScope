@@ -86,6 +86,7 @@ Status terminology:
 | [0056](0056-sparse-virtual-multiresolution-pyramid.md) | Sparse virtual multiresolution pyramid | Accepted; canonical page route/cache/backend cutover implemented on the G5 landing candidate; final real-Wayland/stress acceptance pending. |
 | [0057](0057-renderer-command-protocol.md) | Renderer command protocol (wgpu backend) | Accepted; implemented — wgpu backend live behind explicit pin with native overlays/glyph text, G6 compute, and opt-in screen presentation; promotion evidence is queue row 3d. |
 | [0058](0058-canonical-tile-orientation-and-display-transpose.md) | Canonical tile orientation and display-only axis swap | Accepted; implemented for wgpu (shader UV swap) and PyQtGraph (transposed view). An X/Y swap is an instant display transform like a flip; VisPy keeps the legacy re-render path. |
+| [0059](0059-coarse-rung-and-shared-reduced-stage.md) | One coarse rung, fed by a shared reduced-input stage | Proposed. Merges FLOOR/PREVIEW into one rung whose level is a retention decision only (the compute-driven level is dropped on measurement), restores the reduced-input evaluation `fbbb6f64` deleted, and retires the shared-transform scheduling path in favour of the existing stage cache. Supersedes the scheduling half of ADR 0050's reduce-before-ops section. |
 
 ## Adding or changing a decision
 
