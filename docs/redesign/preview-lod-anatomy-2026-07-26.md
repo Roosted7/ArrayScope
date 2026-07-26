@@ -213,6 +213,16 @@ The refinement gets 2 transactions because everything it needs is already
 resident; the preview gets 18–21 because tiles trickle in from workers under
 byte/item cohort caps. **That is the whole 3 s.**
 
+> **AMENDED 2026-07-26** by
+> [per-commit-transaction-count](per-commit-transaction-count-2026-07-26.md).
+> Two clauses above are wrong. "Regardless of how many tiles it carries" holds
+> only over the narrow range sampled here; measured across 32 → 212 → 236 items
+> a commit costs 95 → 261 → 380 ms, so the delta terms are small but real
+> (≈ 0.5 ms/item + 0.63 ms/MB on ≈ 90 ms of whole-montage fixed cost). And
+> "tiles trickle in from workers" is refuted directly: every preview evaluation
+> completes 178 ms *before* the drain starts. The caps are the whole story, and
+> the binding one is the **byte** cap, not the item cohort.
+
 ## 5. What this rules out, and what it points at
 
 **Ruled out twice over — lowering or adapting the preview *level* on raw
@@ -247,6 +257,10 @@ never done, §5.2's is about work done too many times.
    4.0–4.9 s wall-clock spread. First question to answer: why does an
    incremental worker-fed pass take 18 transactions where a
    fully-resident pass takes 2 — cohort byte/item caps, or arrival pacing?
+   **Answered and measured 2026-07-26** — caps, not arrival pacing; and the
+   *byte* cap, not the item cohort. Worth −32% of this stage, diagnosed but not
+   landed for want of a defensible bound:
+   [per-commit-transaction-count](per-commit-transaction-count-2026-07-26.md).
 3. **Pack coarse tiles into shared pages** — 21×21 tiles tile a 256² page
    12×12 = 144 per page, so the whole 272-tile preview montage is 2 pages
    instead of 272. Still the strongest structural idea, but for the
@@ -971,11 +985,22 @@ point of pushing the gate string down a layer.
 
 ## Open questions, left open deliberately
 
-- **Why 18 transactions for the preview and 2 for the refinement.** This is
-  §5.1 and the only thing worth measuring next. Candidates: the cohort byte cap
-  (`_idle_backlog_cohort` / `_persistent_tile_upsert_limits`), the item clamp's
-  interactive arm, or simply worker arrival pacing forcing a commit per
-  completion wave.
+- ~~**Why 18 transactions for the preview and 2 for the refinement**~~ —
+  **ANSWERED 2026-07-26:**
+  [per-commit-transaction-count](per-commit-transaction-count-2026-07-26.md).
+  The item ceiling `min(32, backlog)` in `_idle_backlog_cohort` sets the preview's
+  count; `TileAdmissionQueue`'s free-item bypass (a resident retarget skips every
+  cap) sets the refinement's. Worker arrival pacing is **refuted on the clock** —
+  all 340 preview evaluations finish at 4702 ms and the first cold commit starts
+  at 4880 ms, so no commit in the drain was ever starved.
+  Two things there amend this dossier: **the item ceiling is not the lever, the
+  byte cap is** (lifting the ceiling alone cuts 9 batches to 5 and measures flat
+  to worse; lifting both gives 4 batches and −32% stage over 6 order-balanced
+  passes), and §4c's "120–170 ms almost regardless of how many tiles it carries"
+  is **retracted** — it extrapolates the cohort dossier's 2-tile regime. A
+  212-tile commit costs 261 ms and a 236-tile one 380 ms; the win is not linear
+  in transaction count, it is won at the *last* transaction. Nothing was landed:
+  the safe bound for the byte cap is not established by this workload.
 - ~~**Why FLOOR evaluates up to 373 times for 272 tiles**~~ — measured at
   exactly 272 over the page-pool-layer-leak fix (§10b). Probably that leak;
   reopen if the over-count returns.
