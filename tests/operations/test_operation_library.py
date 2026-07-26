@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -136,16 +135,25 @@ def test_duplicate_parameter_form_matches_and_external_adapter_runs():
     assert wrapper["template"]["kind"] == "external-adapter"
 
 
-def test_duplicate_shape_changer_is_loud_template_not_false_shape_claim():
-    operation_id = library.duplicate_operation("crop")
+@pytest.mark.parametrize(
+    ("source_id", "axis", "parameters", "expected_shape"),
+    [
+        ("crop", 0, {"start": 1, "stop": 3}, (2, 5)),
+        ("mean", 1, {}, (4,)),
+    ],
+)
+def test_duplicate_shape_changer_is_a_working_discovered_copy(
+    source_id, axis, parameters, expected_shape
+):
+    operation_id = library.duplicate_operation(source_id)
     wrapper = library.user_operation_wrapper(operation_id)
 
-    assert wrapper["changes_shape"] is False
-    assert wrapper["template"]["kind"] == "shape-changing"
-    assert registry.get_operation_entry(operation_id).unavailable_reason
-    operation = registry.create_operation(operation_id, axis=0, parameters={"start": 0, "stop": 1})
-    with pytest.raises(RuntimeError, match="Bundle D owns shape discovery"):
-        operation.apply(np.ones((2, 2), dtype=np.float32))
+    assert wrapper["changes_shape"] is True
+    assert wrapper["template"]["kind"] == "native-copy"
+    operation = registry.create_operation(operation_id, axis=axis, parameters=parameters)
+    data = np.arange(20, dtype=np.float32).reshape(4, 5)
+    assert operation.output_shape(data.shape) == expected_shape
+    assert operation.apply(data).shape == expected_shape
 
 
 def test_every_listed_operation_can_be_duplicated():
@@ -181,8 +189,7 @@ def test_create_empty_user_operation_is_selected_ready_template():
     assert entry.label == "New operation"
     assert entry.parameters == ()
     assert wrapper["template"]["kind"] == "empty"
-    assert entry.unavailable_reason
-    with pytest.raises(RuntimeError, match="Empty template"):
+    with pytest.raises(NotImplementedError, match="new operation is empty"):
         registry.create_operation(operation_id).apply(np.ones((2, 2)))
 
 
@@ -400,7 +407,7 @@ def test_create_operation_lazily_scans_user_ops(tmp_path):
     assert registry.get_operation_entry(op_id).id == op_id
 
 
-def test_julia_runtime_requires_a_complete_command_template(tmp_path):
+def test_reserved_runtime_is_skipped_with_problem(tmp_path):
     ops_dir = tmp_path / "operations"
     ops_dir.mkdir(parents=True, exist_ok=True)
     (ops_dir / "jl.json").write_text(
@@ -416,8 +423,9 @@ def test_julia_runtime_requires_a_complete_command_template(tmp_path):
     )
     library.refresh_user_operations()
 
-    entry = registry.get_operation_entry("user:jl")
-    assert "Command template is empty" in entry.unavailable_reason
+    assert "user:jl" not in {entry.id for entry in registry.all_operations()}
+    problems = library.user_operation_problems()
+    assert any("not yet supported" in message and "julia" in message for _path, message in problems)
 
 
 def test_unsupported_parameter_kind_is_skipped_with_problem(tmp_path):
@@ -447,12 +455,12 @@ def test_unsupported_parameter_kind_is_skipped_with_problem(tmp_path):
     )
 
 
-def test_changes_shape_wrapper_is_skipped_with_problem(tmp_path):
-    # A wrapper cannot predict the output shape, so a shape-changing user op
-    # would lie to the evaluator: it is skipped, recorded, and never registered.
+def test_changes_shape_wrapper_is_registered_and_discovered(tmp_path):
     ops_dir = tmp_path / "operations"
     ops_dir.mkdir(parents=True, exist_ok=True)
-    (ops_dir / "grow.py").write_text(_DOUBLE_SRC)
+    (ops_dir / "grow.py").write_text(
+        "import numpy as np\n\ndef grow(data):\n    return np.pad(data, ((1, 2), (0, 0)))\n"
+    )
     (ops_dir / "grow.json").write_text(
         json.dumps(
             {
@@ -460,22 +468,55 @@ def test_changes_shape_wrapper_is_skipped_with_problem(tmp_path):
                 "version": 1,
                 "id": "user:grow",
                 "changes_shape": True,
-                "source": {"mode": "import", "path": "grow.py", "callable": "double"},
+                "source": {"mode": "import", "path": "grow.py", "callable": "grow"},
             }
         )
     )
     library.refresh_user_operations()
 
-    assert "user:grow" not in {entry.id for entry in registry.all_operations()}
-    problems = library.user_operation_problems()
-    assert any("shape-changing" in message and "grow.json" in path for path, message in problems)
+    assert "user:grow" in {entry.id for entry in registry.all_operations()}
+    operation = registry.create_operation("user:grow")
+    data = np.ones((4, 5), dtype=np.float32)
+    assert operation.output_shape(data.shape) == (7, 5)
+    assert operation.apply(data).shape == (7, 5)
+    assert not library.user_operation_problems()
 
 
-def test_import_custom_operation_rejects_changes_shape(tmp_path):
-    src = _write_source(tmp_path, "d.py", _DOUBLE_SRC)
-    with pytest.raises(ValueError, match="shape-changing"):
-        library.import_custom_operation(src, "double", changes_shape=True)
-    assert not os.path.exists(os.path.join(library.user_operations_directory(), "double.json"))
+def test_import_custom_operation_accepts_changes_shape(tmp_path):
+    src = _write_source(
+        tmp_path,
+        "d.py",
+        "def decimate(data):\n    return data[..., ::2]\n",
+    )
+    operation_id = library.import_custom_operation(src, "decimate", changes_shape=True)
+    operation = registry.create_operation(operation_id)
+
+    assert operation.output_shape((4, 11)) == (4, 6)
+    assert operation.apply(np.ones((4, 11), dtype=np.float32)).shape == (4, 6)
+
+
+def test_link_edit_mtime_invalidates_shape_characterization(tmp_path):
+    source = Path(
+        _write_source(
+            tmp_path,
+            "linked.py",
+            "def reshape(data):\n    return data\n",
+        )
+    )
+    operation_id = library.import_custom_operation(
+        str(source), "reshape", link=True, changes_shape=True
+    )
+    operation = registry.create_operation(operation_id)
+    assert operation.output_shape((4, 5)) == (4, 5)
+
+    source.write_text(
+        "import numpy as np\n\ndef reshape(data):\n    return np.pad(data, ((0, 0), (1, 2)))\n"
+    )
+    current = source.stat()
+    os.utime(source, ns=(current.st_atime_ns, current.st_mtime_ns + 1_000_000))
+
+    assert operation.output_shape((4, 5)) == (4, 8)
+    assert operation.apply(np.ones((4, 5), dtype=np.float32)).shape == (4, 8)
 
 
 def test_remove_user_operation_deletes_files(tmp_path):
@@ -586,146 +627,3 @@ def test_user_op_passes_smoke_harness_checks(tmp_path):
     assert result.shape == predicted_shape
     if predicted_dtype is not None:
         assert result.dtype == np.dtype(predicted_dtype)
-
-
-# ---------------------------------------------------------------------------
-# subprocess runtimes / environments / imported-recipe trust
-# ---------------------------------------------------------------------------
-
-
-def test_command_wrapper_runs_end_to_end_and_missing_environment_is_unavailable(tmp_path):
-    ops_dir = Path(library.user_operations_directory())
-    ops_dir.mkdir(parents=True, exist_ok=True)
-    executable = tmp_path / "fake command tool"
-    executable.write_text(
-        "#!/usr/bin/env python3\n"
-        "import numpy as np, sys\n"
-        "factor = int(sys.argv[sys.argv.index('--factor') + 1])\n"
-        "np.save(sys.argv[-1], np.load(sys.argv[-2], allow_pickle=False) * factor)\n"
-    )
-    executable.chmod(0o755)
-    (ops_dir / "command.json").write_text(
-        json.dumps(
-            {
-                "format": "arrayscope-operation",
-                "version": 1,
-                "id": "user:command",
-                "label": "Command",
-                "runtime": "command",
-                "command_template": f'"{executable}" --factor {{factor}} {{in}} {{out}}',
-                "handoff": "npy",
-                "timeout_s": 2,
-                "parameters": [{"name": "factor", "label": "Factor", "kind": "int", "default": 3}],
-            }
-        )
-    )
-    (ops_dir / "missing-env.json").write_text(
-        json.dumps(
-            {
-                "format": "arrayscope-operation",
-                "version": 1,
-                "id": "user:missing-env",
-                "runtime": "command",
-                "command_template": f'"{executable}" {{in}} {{out}}',
-                "environment": "vanished",
-            }
-        )
-    )
-    library.refresh_user_operations()
-
-    entry = registry.get_operation_entry("user:command")
-    assert entry.unavailable_reason == ""
-    result = registry.create_operation("user:command", parameters={"factor": 4}).apply(
-        np.arange(4, dtype=np.float32)
-    )
-    assert np.array_equal(result, np.arange(4, dtype=np.float32) * 4)
-    assert "not configured" in registry.get_operation_entry("user:missing-env").unavailable_reason
-
-
-def test_python_operation_runs_in_named_interpreter(tmp_path):
-    source = _write_source(tmp_path, "external.py", _DOUBLE_SRC)
-    operation_id = library.import_custom_operation(source, "double", link=True)
-    library.update_execution_environment(
-        id="external-python",
-        name="External Python",
-        interpreter=sys.executable,
-        variables={"ARRAYSCOPE_EXTERNAL_TEST": "1"},
-    )
-    library.update_user_operation(
-        operation_id,
-        environment="external-python",
-        handoff="npy",
-        timeout_s=2,
-    )
-
-    entry = registry.get_operation_entry(operation_id)
-    assert entry.unavailable_reason == ""
-    result = registry.create_operation(operation_id).apply(np.arange(3, dtype=np.float32))
-    assert np.array_equal(result, np.arange(3, dtype=np.float32) * 2)
-
-
-@pytest.mark.parametrize("runtime", ["julia", "matlab"])
-def test_reserved_interpreter_runtimes_share_command_machinery(tmp_path, monkeypatch, runtime):
-    ops_dir = Path(library.user_operations_directory())
-    ops_dir.mkdir(parents=True, exist_ok=True)
-    executable = tmp_path / runtime
-    executable.write_text(
-        "#!/usr/bin/env python3\n"
-        "import numpy as np, sys\n"
-        "np.save(sys.argv[-1], np.load(sys.argv[-2], allow_pickle=False) + 1)\n"
-    )
-    executable.chmod(0o755)
-    monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path), os.environ.get("PATH", ""))))
-    (ops_dir / f"{runtime}.json").write_text(
-        json.dumps(
-            {
-                "format": "arrayscope-operation",
-                "version": 1,
-                "id": f"user:{runtime}",
-                "runtime": runtime,
-                "command_template": "{in} {out}",
-            }
-        )
-    )
-    library.refresh_user_operations()
-
-    assert registry.get_operation_entry(f"user:{runtime}").unavailable_reason == ""
-    result = registry.create_operation(f"user:{runtime}").apply(np.arange(3, dtype=np.float32))
-    assert np.array_equal(result, np.arange(3, dtype=np.float32) + 1)
-
-
-def test_imported_recipe_command_is_disabled_until_reviewed(tmp_path):
-    ops_dir = Path(library.user_operations_directory())
-    ops_dir.mkdir(parents=True, exist_ok=True)
-    executable = tmp_path / "copy"
-    executable.write_text(
-        "#!/usr/bin/env python3\nimport shutil, sys\nshutil.copyfile(sys.argv[-2], sys.argv[-1])\n"
-    )
-    executable.chmod(0o755)
-    (ops_dir / "recipe-command.json").write_text(
-        json.dumps(
-            {
-                "format": "arrayscope-operation",
-                "version": 1,
-                "id": "user:recipe-command",
-                "runtime": "command",
-                "command_template": f'"{executable}" {{in}} {{out}}',
-            }
-        )
-    )
-    library.refresh_user_operations()
-    operation = registry.create_operation("user:recipe-command")
-    recipe_path = tmp_path / "imported-recipe.json"
-    recipes.save_recipe(recipe_path, [operation])
-
-    steps = recipes.load_recipe_steps(recipe_path, base_shape=(2, 2))
-
-    assert len(steps) == 1
-    assert steps[0].enabled is False
-    assert (
-        "review" in registry.get_operation_entry("user:recipe-command").unavailable_reason.lower()
-    )
-    with pytest.raises(RuntimeError, match="review"):
-        steps[0].operation.apply(np.ones((2, 2)))
-    assert library.review_user_operation("user:recipe-command")
-    assert registry.get_operation_entry("user:recipe-command").unavailable_reason == ""

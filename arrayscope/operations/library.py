@@ -34,7 +34,7 @@ Each user op is a wrapper JSON ``<slug>.json`` in
             "callable": "function_name",
         },
         "requires_axis": true,
-        "changes_shape": false,  # reserved: must be false (see below)
+        "changes_shape": false,
         "parameters": [
             {
                 "name": ...,
@@ -52,10 +52,9 @@ Each user op is a wrapper JSON ``<slug>.json`` in
 ``runtime`` values ``"python"``, ``"command"``, ``"julia"``, and ``"matlab"``
 are concrete.  Command-backed operations use explicit tokenization plus an
 ``npy`` or ``cfl`` array handoff; Python can name an out-of-process execution
-environment.  ``changes_shape`` is still **reserved and must be ``false``**:
-a wrapper cannot yet supply a trustworthy ``output_shape`` adapter, so a
-shape-changing op could not predict its output shape and would lie to the
-evaluator; a ``true`` value is registered unavailable pending shape discovery.
+environment.  Shape and dtype are discovered by bounded characterization when
+an input signature is first planned, so ``changes_shape`` is presentation
+metadata rather than a declared adapter.
 A broken wrapper or code file **never** breaks startup: it is caught, logged, recorded in
 :func:`user_operation_problems`, and skipped, so the rest of the library loads.
 
@@ -146,7 +145,7 @@ _user_problems: list[tuple[str, str]] = []
 # Imported user modules cached by (abspath, mtime) so a "link"-mode edit is
 # picked up (a bumped mtime is a fresh key -> re-import) while an unchanged file
 # imports once.
-_module_cache: dict[tuple[str, float], object] = {}
+_module_cache: dict[tuple[str, int], object] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -493,15 +492,6 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
     parameters = _parameters_from_payload(payload.get("parameters", ()))
     requires_axis = bool(payload.get("requires_axis", False))
     changes_shape = bool(payload.get("changes_shape", False))
-    if changes_shape:
-        # A user wrapper cannot supply an ``output_shape`` adapter, so the spec
-        # would fall back to the identity predictor -- its ``evaluate_shape``
-        # would then diverge from ``apply`` and lie to the evaluator. Reject it
-        # here (recorded as a problem, skipped) until wrappers can predict shape.
-        raise ValueError(
-            "shape-changing user operations are not yet supported "
-            "(the wrapper cannot predict the output shape)"
-        )
 
     template = payload.get("template")
     unavailable_reason = ""
@@ -584,6 +574,7 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
         runtime=runtime,
         runtime_config=runtime_config,
         environment_id=environment_id,
+        source_identity=lambda: _python_source_identity(code_path),
     )
 
 
@@ -793,8 +784,8 @@ def _load_user_module(path: str, slug: str):
     """Import the user code file, caching by (abspath, mtime) for link-edit pickup."""
 
     abspath = os.path.abspath(path)
-    mtime = os.path.getmtime(abspath)
-    key = (abspath, mtime)
+    mtime_ns = os.stat(abspath).st_mtime_ns
+    key = (abspath, mtime_ns)
     cached = _module_cache.get(key)
     if cached is not None:
         return cached
@@ -806,6 +797,15 @@ def _load_user_module(path: str, slug: str):
     spec.loader.exec_module(module)
     _module_cache[key] = module
     return module
+
+
+def _python_source_identity(path: str) -> tuple[str, str, int | None]:
+    abspath = os.path.abspath(path)
+    try:
+        mtime_ns = os.stat(abspath).st_mtime_ns
+    except OSError:
+        mtime_ns = None
+    return "python-file", abspath, mtime_ns
 
 
 @dataclass(frozen=True)
@@ -1109,16 +1109,14 @@ def create_empty_user_operation() -> str:
 def duplicate_operation(operation_id: str) -> str:
     """Duplicate any operation into a selected, editable ``user:`` copy.
 
-    Native shape-preserving implementations are copied into a standalone
-    function. Pack and entry-point operations get a working adapter that names
-    their provider dependency. Shape-changing operations become an explicit
-    blocked template until Bundle D's discovered-shape contract exists; the
-    wrapper never lies by declaring them shape-preserving.
+    Native implementations are copied into a standalone function. Pack and
+    entry-point operations get a working adapter that names their provider
+    dependency. Shape-changing copies use the same discovery contract as any
+    other user operation.
     """
 
     from arrayscope.operations.operation_definitions import (
         adapter_template_source,
-        blocked_shape_template_source,
         export_operation_definition,
         native_editable_source,
     )
@@ -1174,19 +1172,7 @@ def duplicate_operation(operation_id: str) -> str:
         return duplicate_id
 
     template: dict[str, str]
-    if entry.changes_shape:
-        source_text = blocked_shape_template_source(entry, callable_name)
-        reason = (
-            "Template only — the original changes shape. Bundle D owns shape "
-            "discovery, so this copy is blocked instead of lying to the evaluator."
-        )
-        template = {
-            "kind": "shape-changing",
-            "source_id": entry.id,
-            "message": reason,
-            "reason": reason,
-        }
-    elif tier == "builtin":
+    if tier == "builtin":
         source_text = native_editable_source(entry, callable_name)
         template = {
             "kind": "native-copy",
@@ -1235,8 +1221,7 @@ def duplicate_operation(operation_id: str) -> str:
         "runtime": SUPPORTED_RUNTIME,
         "source": {"mode": "import", "path": source_name, "callable": callable_name},
         "requires_axis": bool(definition.get("requires_axis", False)),
-        # Bundle D owns shape discovery. Never persist a false shape claim.
-        "changes_shape": False,
+        "changes_shape": bool(definition.get("changes_shape", False)),
         "parameters": list(definition.get("parameters") or ()),
         "template": template,
     }
@@ -1344,12 +1329,6 @@ def import_custom_operation(
     the remaining non-data args (default + annotation-guessed kind), ``label``
     from the function name, ``description`` from the docstring.
     """
-
-    if changes_shape:
-        raise ValueError(
-            "shape-changing user operations are not yet supported "
-            "(the wrapper cannot predict the output shape)"
-        )
 
     infos = {info.name: info for info in introspect_python_source(py_path)}
     info = infos.get(callable_name)

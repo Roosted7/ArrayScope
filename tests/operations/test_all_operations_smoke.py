@@ -19,7 +19,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from arrayscope.operations import plugins, registry
+from arrayscope.operations import library, plugins, registry
 from arrayscope.operations.parameter_forms import build_parameter_form
 
 # Generic context used unless an op overrides it below.
@@ -62,6 +62,17 @@ def _clean_pack_state():
     plugins._reset_plugin_cache()
 
 
+@pytest.fixture
+def shape_changing_user_operation(tmp_path, monkeypatch):
+    operations_dir = tmp_path / "operations"
+    monkeypatch.setattr(library, "user_operations_directory", lambda: str(operations_dir))
+    source = tmp_path / "decimate.py"
+    source.write_text("def decimate(data):\n    return data[..., ::2]\n")
+    operation_id = library.import_custom_operation(str(source), "decimate", changes_shape=True)
+    yield operation_id
+    library.remove_user_operation(operation_id)
+
+
 def _context_for(operation_id: str):
     override = _EXPECTATIONS.get(operation_id, {})
     shape = override.get("shape", _DEFAULT_SHAPE)
@@ -88,9 +99,10 @@ def test_demoted_numpy_wrapper_packs_only_expose_real_bart_examples():
     assert all(entry.unavailable_reason for entry in bart_entries.values())
 
 
-def test_every_operation_builds_and_applies_without_crashing():
+def test_every_operation_builds_and_applies_without_crashing(shape_changing_user_operation):
     entries = registry.all_operations()
     assert entries, "no operations registered"
+    assert shape_changing_user_operation in {entry.id for entry in entries}
 
     for entry in entries:
         if entry.unavailable_reason:

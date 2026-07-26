@@ -175,32 +175,6 @@ def adapter_template_source(entry: OperationEntry, callable_name: str) -> str:
     )
 
 
-def blocked_shape_template_source(entry: OperationEntry, callable_name: str) -> str:
-    """Return an explicit non-lying template for a shape-changing operation."""
-
-    args = ["data"]
-    if entry.requires_axis:
-        args.append("axis")
-    for parameter in entry.parameters:
-        if parameter.default is None:
-            args.append(parameter.name)
-        else:
-            args.append(f"{parameter.name}={parameter.default!r}")
-    message = (
-        f"This copy of {entry.id!r} is a template because the source operation "
-        "changes shape. User-operation shape discovery lands in Bundle D; "
-        "implement a shape-preserving body for now or wait for that support."
-    )
-    return (
-        '"""Shape-changing operation template.\n\n'
-        f"Original implementation: {entry.operation_type.__module__}."
-        f"{entry.operation_type.__qualname__}\n"
-        '"""\n\n\n'
-        f"def {callable_name}({', '.join(args)}):\n"
-        f"    raise RuntimeError({message!r})\n"
-    )
-
-
 def empty_template_source(callable_name: str) -> str:
     """Source for a new, deliberately unfinished user operation."""
 
