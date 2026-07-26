@@ -330,6 +330,8 @@ def test_failed_exact_upload_keeps_preview_member(qt_app, monkeypatch):
         )
 
     assert 0 in layer.preview_atlas_active_tiles
+    assert not owner.tile_items[0].isVisible()
+    assert layer.physically_visible_tile_count == count
     assert (
         layer.tile_truth_physical_rows()[0]["physical_acknowledged_identity"]
         == previews[0].source_id

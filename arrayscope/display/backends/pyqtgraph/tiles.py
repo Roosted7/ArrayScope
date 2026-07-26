@@ -968,18 +968,31 @@ class MontageTileLayer:
         transposed: bool = False,
     ) -> TileLayerUpdateStats:
         if tile_payloads is not None:
-            return self._update_direct_payload_presentation(
-                tile_payloads,
-                geometry=geometry,
-                levels=levels,
-                rgb_already_windowed=rgb_already_windowed,
-                dirty_tiles=dirty_tiles,
-                tile_source_ids=tile_source_ids,
-                tile_delta=tile_delta,
-                tile_residency_budget_bytes=tile_residency_budget_bytes,
-                frame_plan=frame_plan,
-                transposed=transposed,
-            )
+            try:
+                return self._update_direct_payload_presentation(
+                    tile_payloads,
+                    geometry=geometry,
+                    levels=levels,
+                    rgb_already_windowed=rgb_already_windowed,
+                    dirty_tiles=dirty_tiles,
+                    tile_source_ids=tile_source_ids,
+                    tile_delta=tile_delta,
+                    tile_residency_budget_bytes=tile_residency_budget_bytes,
+                    frame_plan=frame_plan,
+                    transposed=transposed,
+                )
+            except Exception:
+                # An exact ImageItem is installed above the preview atlas. If
+                # a later exact upload raises, hide every attempted overlay
+                # whose atlas member is still active before Qt can repaint.
+                # The aggregate preview therefore remains the complete
+                # physical frame after a failed transaction.
+                for tile_number in self.preview_atlas_active_tiles:
+                    state = self._states.get(int(tile_number))
+                    if state is not None:
+                        state.item.setVisible(False)
+                        state.visible = False
+                raise
         raise ValueError("PyQtGraph tiled presentation requires typed tile payloads")
 
     def _update_direct_payload_presentation(
@@ -1072,24 +1085,18 @@ class MontageTileLayer:
             # The session re-arms those exact upserts and rebuilds the
             # transaction; mutating here would turn a recoverable rejection
             # into a partial/black frame.
-            physically_presented = tuple(
-                sorted(
-                    int(state.tile_number)
-                    for state in self._states.values()
-                    if _state_is_physically_visible(state)
-                )
-            )
-            resident_items = self._resident_count()
+            physically_presented = self._physically_presented_tiles()
+            resident_items = self._resident_count() + len(self.preview_atlas_active_tiles)
             return TileLayerUpdateStats(
                 visible_items=len(physically_presented),
                 presented_tiles=physically_presented,
-                presented_identities=_direct_presented_identities(self._states),
+                presented_identities=self._presented_identities(),
                 committed_upserts=(),
                 identity_rejected_items=len(identity_rejected_tiles),
                 identity_rejected_tiles=tuple(identity_rejected_tiles),
                 resident_items=int(resident_items),
                 storage_capacity=int(resident_items),
-                cpu_shadow_bytes=int(self._resident_bytes),
+                cpu_shadow_bytes=int(self._resident_bytes) + self._preview_atlas_nbytes(),
                 budget_bytes=int(tile_residency_budget_bytes or 0),
                 warm_resident_items=max(
                     0,
@@ -1985,27 +1992,21 @@ class MontageTileLayer:
             active_tiles={int(tile) for tile, state in self._states.items() if state.visible},
         )
         resident_items = self._resident_count()
-        physically_presented = tuple(
-            sorted(
-                int(state.tile_number)
-                for state in self._states.values()
-                if _state_is_physically_visible(state)
-            )
-        )
+        physically_presented = self._physically_presented_tiles()
         return TileLayerUpdateStats(
             visible_items=len(physically_presented),
             presented_tiles=physically_presented,
-            presented_identities=_direct_presented_identities(self._states, payloads),
+            presented_identities=self._presented_identities(payloads),
             updated_tiles=tuple(updated_tiles),
             items_created=int(items_created),
             items_updated=int(items_updated),
             items_skipped=int(items_skipped),
             rgb_window_tiles=int(rgb_window_tiles),
             image_replacements=int(image_replacements),
-            resident_items=int(resident_items),
-            storage_capacity=int(resident_items),
+            resident_items=int(resident_items) + len(self.preview_atlas_active_tiles),
+            storage_capacity=int(resident_items) + len(self.preview_atlas_active_tiles),
             storage_evictions=int(storage_evictions),
-            cpu_shadow_bytes=int(self._resident_bytes),
+            cpu_shadow_bytes=int(self._resident_bytes) + self._preview_atlas_nbytes(),
             budget_bytes=int(tile_residency_budget_bytes or 0),
             near_resident_items=len(
                 tuple(
