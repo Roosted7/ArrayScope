@@ -10,7 +10,7 @@ from time import perf_counter
 
 import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
-from pyqtgraph.Qt import QtGui
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.lod import LodInfo
@@ -26,16 +26,384 @@ from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.shader_mapping import (
     ShaderComponent,
     ShaderDisplayMode,
+    ShaderMapping,
     TexturePlaneKind,
     apply_phase_lut,
+    common_shader_mapping,
     cpu_display_rgba,
+    default_gray_lut,
     mapped_scalar,
+    shader_mapping_with_lut,
 )
 from arrayscope.display.tile_layout import tile_layout_map
 from arrayscope.gpu.keys import REDUCER_PHASE_VECTOR, DataChunkKey
 from arrayscope.gpu.page_table import PageResolution
 
 RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
+PYQTGRAPH_PREVIEW_ATLAS_MIN_TILES = 256
+PYQTGRAPH_PREVIEW_ATLAS_PAGE_EXTENT = 256
+
+
+@dataclass(frozen=True)
+class _PreviewAtlasDrawPart:
+    page_index: int
+    source_rect: tuple[float, float, float, float]
+    world_rect: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class _PreviewAtlasTile:
+    tile_number: int
+    source_index: int
+    acknowledged_identity: object
+    source_id: object
+    parts: tuple[_PreviewAtlasDrawPart, ...]
+    page_resolutions: tuple[PageResolution, ...]
+    physical_lod: LodInfo
+    physical_quality: str
+    raw_shape: tuple[int, ...]
+    raw_dtype: str
+    real_plane_identity: object
+    imag_plane_identity: object
+
+
+class _CompactPreviewAtlasItem(QtWidgets.QGraphicsObject):
+    """One Qt-raster item drawing a compact set of reduced preview pages."""
+
+    def __init__(
+        self,
+        raw_pages: tuple[np.ndarray, ...],
+        tiles: Mapping[int, _PreviewAtlasTile],
+        *,
+        mapping: ShaderMapping,
+    ):
+        super().__init__()
+        self._raw_pages = tuple(np.ascontiguousarray(page) for page in raw_pages)
+        self._tiles = {int(tile): state for tile, state in dict(tiles).items()}
+        self._active_tiles = set(self._tiles)
+        self._mapping = mapping
+        self._images: tuple[QtGui.QImage, ...] = ()
+        self._bounding_rect = _preview_atlas_bounding_rect(self._tiles.values())
+        self._rebuild_images()
+
+    @property
+    def active_tiles(self) -> frozenset[int]:
+        return frozenset(self._active_tiles)
+
+    @property
+    def page_count(self) -> int:
+        return len(self._images)
+
+    @property
+    def resident_nbytes(self) -> int:
+        raw = sum(int(page.nbytes) for page in self._raw_pages)
+        rgba = sum(int(image.sizeInBytes()) for image in self._images)
+        return raw + rgba
+
+    @property
+    def tiles(self) -> Mapping[int, _PreviewAtlasTile]:
+        return self._tiles
+
+    @property
+    def mapping(self) -> ShaderMapping:
+        return self._mapping
+
+    def set_active_tiles(self, tiles) -> None:
+        active = {int(tile) for tile in tiles if int(tile) in self._tiles}
+        if active == self._active_tiles:
+            return
+        self._active_tiles = active
+        self.update()
+
+    def set_mapping(self, mapping: ShaderMapping) -> None:
+        if mapping.identity_key == self._mapping.identity_key:
+            return
+        self._mapping = mapping
+        self._rebuild_images()
+        self.update()
+
+    def boundingRect(self):
+        return QtCore.QRectF(self._bounding_rect)
+
+    def paint(self, painter, _option, _widget=None):
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, False)
+        for tile_number in sorted(self._active_tiles):
+            tile = self._tiles[tile_number]
+            for part in tile.parts:
+                source_x, source_y, source_w, source_h = part.source_rect
+                world_x, world_y, world_w, world_h = part.world_rect
+                painter.drawImage(
+                    QtCore.QRectF(world_x, world_y, world_w, world_h),
+                    self._images[int(part.page_index)],
+                    QtCore.QRectF(source_x, source_y, source_w, source_h),
+                )
+        painter.restore()
+
+    def _rebuild_images(self) -> None:
+        images: list[QtGui.QImage] = []
+        for page in self._raw_pages:
+            rgba = np.ascontiguousarray(cpu_display_rgba(page, self._mapping))
+            height, width = (int(value) for value in rgba.shape[:2])
+            image = QtGui.QImage(
+                rgba.data,
+                width,
+                height,
+                int(rgba.strides[0]),
+                QtGui.QImage.Format.Format_RGBA8888,
+            ).copy()
+            images.append(image)
+        self._images = tuple(images)
+
+
+def _preview_atlas_bounding_rect(tiles) -> QtCore.QRectF:
+    rectangles = [part.world_rect for tile in tiles for part in tile.parts]
+    if not rectangles:
+        return QtCore.QRectF()
+    x0 = min(float(rect[0]) for rect in rectangles)
+    y0 = min(float(rect[1]) for rect in rectangles)
+    x1 = max(float(rect[0]) + float(rect[2]) for rect in rectangles)
+    y1 = max(float(rect[1]) + float(rect[3]) for rect in rectangles)
+    return QtCore.QRectF(x0, y0, x1 - x0, y1 - y0)
+
+
+def _rect_intersection_yx(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> tuple[int, int, int, int] | None:
+    y0 = max(int(left[0]), int(right[0]))
+    y1 = min(int(left[1]), int(right[1]))
+    x0 = max(int(left[2]), int(right[2]))
+    x1 = min(int(left[3]), int(right[3]))
+    if y1 <= y0 or x1 <= x0:
+        return None
+    return (y0, y1, x0, x1)
+
+
+def _stored_edge_for_source(
+    source_edge: int,
+    *,
+    source_start: int,
+    source_stop: int,
+    stored_start: int,
+    stored_stop: int,
+) -> float:
+    source_extent = int(source_stop) - int(source_start)
+    if source_extent <= 0:
+        raise ValueError("source draw-block extent must be positive")
+    return float(stored_start) + (
+        (int(source_edge) - int(source_start))
+        * (int(stored_stop) - int(stored_start))
+        / float(source_extent)
+    )
+
+
+def _pack_preview_pages(
+    pages: tuple[tuple[object, np.ndarray], ...],
+    *,
+    extent: int = PYQTGRAPH_PREVIEW_ATLAS_PAGE_EXTENT,
+) -> tuple[tuple[np.ndarray, ...], dict[object, tuple[int, int, int]]]:
+    """Shelf-pack small scalar pages into a few fixed-size CPU atlas planes."""
+
+    extent = int(extent)
+    if extent <= 0:
+        raise ValueError("preview atlas extent must be positive")
+    atlases: list[np.ndarray] = []
+    placements: dict[object, tuple[int, int, int]] = {}
+    current = None
+    x = y = row_height = 0
+    dtype = None
+    for key, source in pages:
+        values = np.asarray(source)
+        if values.ndim != 2 or np.iscomplexobj(values):
+            raise ValueError("compact PyQtGraph preview atlas requires scalar 2D pages")
+        height, width = (int(value) for value in values.shape)
+        if height <= 0 or width <= 0 or height > extent or width > extent:
+            raise ValueError("preview page does not fit the compact atlas extent")
+        if dtype is None:
+            dtype = values.dtype
+        elif np.dtype(values.dtype) != np.dtype(dtype):
+            raise ValueError("compact preview pages must share one scalar dtype")
+        if current is None or (x + width > extent and y + row_height + height > extent):
+            current = np.zeros((extent, extent), dtype=dtype)
+            atlases.append(current)
+            x = y = row_height = 0
+        elif x + width > extent:
+            x = 0
+            y += row_height
+            row_height = 0
+        if y + height > extent:
+            current = np.zeros((extent, extent), dtype=dtype)
+            atlases.append(current)
+            x = y = row_height = 0
+        current[y : y + height, x : x + width] = values
+        placements[key] = (len(atlases) - 1, x, y)
+        x += width
+        row_height = max(row_height, height)
+    return tuple(atlases), placements
+
+
+def _compact_preview_mapping(
+    payloads: Mapping[int, DisplayTilePayload],
+    *,
+    levels: tuple[float, float],
+    lookup_table: np.ndarray,
+) -> ShaderMapping:
+    mapping = common_shader_mapping(
+        getattr(payload, "shader_mapping", None) for payload in payloads.values()
+    )
+    mapping = ShaderMapping() if mapping is None else mapping
+    if mapping.display_mode is not ShaderDisplayMode.SCALAR:
+        raise ValueError(
+            "PyQtGraph complex/RGB aggregate preview is deferred: its CPU-composited "
+            "display plane needs a reduced RGB payload format"
+        )
+    mapping = replace(mapping, levels=(float(levels[0]), float(levels[1])))
+    return shader_mapping_with_lut(mapping, lookup_table)
+
+
+def _build_compact_preview_item(
+    payloads: Mapping[int, DisplayTilePayload],
+    *,
+    layout: Mapping[int, object],
+    levels: tuple[float, float],
+    lookup_table: np.ndarray,
+) -> _CompactPreviewAtlasItem:
+    """Build one immutable physical candidate before swapping any visible pixels."""
+
+    payloads = {int(tile): payload for tile, payload in dict(payloads).items()}
+    page_rows: list[tuple[object, np.ndarray]] = []
+    pages_by_tile_key: dict[tuple[int, object], object] = {}
+    for tile_number, payload in payloads.items():
+        if str(getattr(payload, "quality", "exact") or "exact") != "preview":
+            raise ValueError("compact preview transaction contains target-quality payload")
+        if getattr(payload, "texture_kind", None) is not TexturePlaneKind.SCALAR_R32F:
+            raise ValueError(
+                "PyQtGraph complex/RGB aggregate preview is deferred: its CPU-composited "
+                "display plane needs a reduced RGB payload format"
+            )
+        backing = getattr(payload, "page_backing", None)
+        resolved = getattr(backing, "resolved_page_set", None)
+        if backing is None or resolved is None:
+            raise ValueError("compact preview requires complete canonical page backing")
+        materialized = backing.materialized_by_key()
+        for key in resolved.actual_keys:
+            page = materialized[key]
+            atlas_key = (int(tile_number), key)
+            pages_by_tile_key[atlas_key] = page
+            page_rows.append((atlas_key, np.asarray(page.values)))
+
+    raw_pages, placements = _pack_preview_pages(tuple(page_rows))
+    tiles: dict[int, _PreviewAtlasTile] = {}
+    for tile_number, payload in payloads.items():
+        region = layout.get(int(tile_number))
+        if region is None:
+            raise ValueError("compact preview payload has no current layout region")
+        backing = payload.page_backing
+        resolved_set = backing.resolved_page_set
+        if resolved_set is None:
+            raise ValueError("compact preview payload has incomplete page coverage")
+        plan_by_key = {plan.key: plan for plan in backing.requested_plans}
+        coverage_y0, coverage_y1, coverage_x0, coverage_x1 = (
+            int(value) for value in backing.source_coverage_yx
+        )
+        coverage_h = coverage_y1 - coverage_y0
+        coverage_w = coverage_x1 - coverage_x0
+        region_x, region_y = int(region.x), int(region.y)
+        region_w = min(int(region.width), coverage_w)
+        region_h = min(int(region.height), coverage_h)
+        parts: list[_PreviewAtlasDrawPart] = []
+        for resolution in resolved_set.resolutions:
+            target_plan = plan_by_key[resolution.target_key]
+            actual_page = pages_by_tile_key[(int(tile_number), resolution.actual_key)]
+            actual_plan = actual_page.plan
+            page_index, atlas_x, atlas_y = placements[(int(tile_number), resolution.actual_key)]
+            mapped_area = 0
+            target_area = sum(
+                (block.source_rect_yx[1] - block.source_rect_yx[0])
+                * (block.source_rect_yx[3] - block.source_rect_yx[2])
+                for block in target_plan.draw_blocks
+            )
+            for target_block in target_plan.draw_blocks:
+                for actual_block in actual_plan.draw_blocks:
+                    intersection = _rect_intersection_yx(
+                        target_block.source_rect_yx,
+                        actual_block.source_rect_yx,
+                    )
+                    if intersection is None:
+                        continue
+                    by0, by1, bx0, bx1 = intersection
+                    asy0, asy1, asx0, asx1 = actual_block.stored_rect_yx
+                    aby0, aby1, abx0, abx1 = actual_block.source_rect_yx
+                    actual_y0 = _stored_edge_for_source(
+                        by0,
+                        source_start=aby0,
+                        source_stop=aby1,
+                        stored_start=asy0,
+                        stored_stop=asy1,
+                    )
+                    actual_y1 = _stored_edge_for_source(
+                        by1,
+                        source_start=aby0,
+                        source_stop=aby1,
+                        stored_start=asy0,
+                        stored_stop=asy1,
+                    )
+                    actual_x0 = _stored_edge_for_source(
+                        bx0,
+                        source_start=abx0,
+                        source_stop=abx1,
+                        stored_start=asx0,
+                        stored_stop=asx1,
+                    )
+                    actual_x1 = _stored_edge_for_source(
+                        bx1,
+                        source_start=abx0,
+                        source_stop=abx1,
+                        stored_start=asx0,
+                        stored_stop=asx1,
+                    )
+                    mapped_area += (by1 - by0) * (bx1 - bx0)
+                    parts.append(
+                        _PreviewAtlasDrawPart(
+                            page_index=int(page_index),
+                            source_rect=(
+                                float(atlas_x) + actual_x0,
+                                float(atlas_y) + actual_y0,
+                                actual_x1 - actual_x0,
+                                actual_y1 - actual_y0,
+                            ),
+                            world_rect=(
+                                region_x + ((bx0 - coverage_x0) * region_w) / float(coverage_w),
+                                region_y + ((by0 - coverage_y0) * region_h) / float(coverage_h),
+                                ((bx1 - bx0) * region_w) / float(coverage_w),
+                                ((by1 - by0) * region_h) / float(coverage_h),
+                            ),
+                        )
+                    )
+            if mapped_area != target_area:
+                raise RuntimeError(
+                    "compact preview page geometry does not completely cover its target"
+                )
+        first_page = pages_by_tile_key[(int(tile_number), resolved_set.resolutions[0].actual_key)]
+        raw = np.asarray(first_page.values)
+        real_plane, imag_plane = array_plane_identities(raw)
+        tiles[int(tile_number)] = _PreviewAtlasTile(
+            tile_number=int(tile_number),
+            source_index=int(payload.source_index),
+            acknowledged_identity=getattr(payload, "tile_identity", None) or payload.source_id,
+            source_id=payload.source_id,
+            parts=tuple(parts),
+            page_resolutions=tuple(resolved_set.resolutions),
+            physical_lod=payload.lod,
+            physical_quality="preview",
+            raw_shape=tuple(int(value) for value in raw.shape),
+            raw_dtype=str(raw.dtype),
+            real_plane_identity=plane_identity_record(real_plane),
+            imag_plane_identity=plane_identity_record(imag_plane),
+        )
+    mapping = _compact_preview_mapping(payloads, levels=levels, lookup_table=lookup_table)
+    return _CompactPreviewAtlasItem(raw_pages, tiles, mapping=mapping)
 
 
 @dataclass(frozen=True)
@@ -408,6 +776,9 @@ class MontageTileLayer:
         self._resident_serial = 0
         self._resident_bytes = 0
         self._rgb_source_cache_budget_bytes = RGB_SOURCE_CACHE_BUDGET_BYTES
+        self._lookup_table = default_gray_lut()
+        self._preview_atlas_item: _CompactPreviewAtlasItem | None = None
+        self._preview_atlas_decline_reason = ""
 
     @property
     def states(self) -> dict[int, TileLayerItemState]:
@@ -423,18 +794,69 @@ class MontageTileLayer:
         the concrete item and its installed image instead.
         """
 
-        return sum(
+        direct = sum(
             1
             for state in self._states.values()
             if _state_is_physically_visible(state)
             and getattr(state.item, "image", None) is not None
             and int(np.size(state.item.image)) > 0
         )
+        return direct + len(self.preview_atlas_active_tiles)
+
+    @property
+    def preview_atlas_active_tiles(self) -> frozenset[int]:
+        item = self._preview_atlas_item
+        if item is None or not item.isVisible():
+            return frozenset()
+        return item.active_tiles
+
+    @property
+    def preview_atlas_page_count(self) -> int:
+        item = self._preview_atlas_item
+        return 0 if item is None else int(item.page_count)
+
+    @property
+    def preview_atlas_decline_reason(self) -> str:
+        return str(self._preview_atlas_decline_reason)
 
     def tile_truth_physical_rows(self) -> dict[int, dict[str, object]]:
         """Describe the arrays and mapping the visible ImageItems draw now."""
 
         rows: dict[int, dict[str, object]] = {}
+        atlas = self._preview_atlas_item
+        if atlas is not None and atlas.isVisible():
+            for tile_number in atlas.active_tiles:
+                state = atlas.tiles[int(tile_number)]
+                rows[int(tile_number)] = {
+                    "physical_texture_kind": TexturePlaneKind.SCALAR_R32F.value,
+                    "physical_storage_mode": "compact_preview_atlas",
+                    "physical_texture_dtype": state.raw_dtype,
+                    "physical_texture_shape": state.raw_shape,
+                    "physical_real_plane_identity": state.real_plane_identity,
+                    "physical_imag_plane_identity": state.imag_plane_identity,
+                    "physical_mapping_mode": "scalar_levels",
+                    "physical_component_mode": atlas.mapping.component.value,
+                    "physical_levels": tuple(float(value) for value in atlas.mapping.levels),
+                    "physical_acknowledged_identity": state.acknowledged_identity,
+                    "physical_lod_level": int(state.physical_lod.level),
+                    "physical_lod_factor": int(state.physical_lod.factor),
+                    "physical_quality": state.physical_quality,
+                    "physical_page_bindings": tuple(
+                        {
+                            "target_key": resolution.target_key,
+                            "actual_key": resolution.actual_key,
+                            "actual_lod": resolution.actual_key.lod,
+                            "scale": tuple(float(value) for value in resolution.scale),
+                            "offset": tuple(float(value) for value in resolution.offset),
+                            "quality": (
+                                "exact"
+                                if resolution.actual_key == resolution.target_key
+                                else "fallback"
+                            ),
+                        }
+                        for resolution in state.page_resolutions
+                    ),
+                }
         for tile_number, state in self._states.items():
             image = getattr(state.item, "image", None)
             if not _state_is_physically_visible(state) or image is None:
@@ -496,12 +918,22 @@ class MontageTileLayer:
     def set_lookup_table(self, lut) -> None:
         """Apply the frame colormap to every resident scalar tile item."""
 
+        self._lookup_table = np.ascontiguousarray(np.asarray(lut))
+        atlas = self._preview_atlas_item
+        if atlas is not None:
+            atlas.set_mapping(
+                shader_mapping_with_lut(
+                    atlas.mapping,
+                    self._lookup_table,
+                )
+            )
         for state in self._states.values():
             image = getattr(state.item, "image", None)
             if image is not None and np.asarray(image).ndim == 2:
                 state.item.setLookupTable(lut)
 
     def clear(self) -> None:
+        self._remove_preview_atlas()
         for state in tuple(self._states.values()):
             self.layer_owner.remove_tile_item(state.tile_number)
         self._states.clear()
@@ -514,6 +946,8 @@ class MontageTileLayer:
     def hide_all(self) -> None:
         """Hide every mapped tile while retaining its physical residency."""
 
+        if self._preview_atlas_item is not None:
+            self._preview_atlas_item.setVisible(False)
         for tile_number in tuple(self._states):
             self._hide_tile(int(tile_number))
 
@@ -565,6 +999,16 @@ class MontageTileLayer:
         layout = tile_layout_map(geometry, frame_plan=frame_plan)
         if not layout:
             return TileLayerUpdateStats()
+        compact = self._try_compact_preview_transaction(
+            tile_payloads,
+            layout=layout,
+            levels=levels,
+            tile_delta=tile_delta,
+            transposed=transposed,
+            tile_residency_budget_bytes=tile_residency_budget_bytes,
+        )
+        if compact is not None:
+            return compact
         requested_active = (
             {
                 int(tile)
@@ -593,7 +1037,8 @@ class MontageTileLayer:
         # pixels and stay in ``active`` via the resident-visibility seed below,
         # exactly as they would have through the general (skip) path.
         level_only_drain = bool(getattr(tile_delta, "level_only_drain", False))
-        if level_only_drain:
+        atlas_tiles = self.preview_atlas_active_tiles
+        if level_only_drain or atlas_tiles:
             resolve_items = tuple(
                 (int(tile), tile_payloads[int(tile)])
                 for tile in requested_upserts
@@ -1076,6 +1521,19 @@ class MontageTileLayer:
         for tile_number in tuple(self._states):
             if int(tile_number) not in active:
                 self._hide_tile(tile_number)
+        atlas = self._preview_atlas_item
+        if atlas is not None:
+            exact_replacements = {
+                int(tile)
+                for tile in committed_upserts
+                if str(getattr(drawable_payloads.get(int(tile)), "quality", "") or "") == "exact"
+                and int(tile) in active
+            }
+            atlas.set_active_tiles(
+                (set(atlas.active_tiles).intersection(requested_active)) - exact_replacements
+            )
+            if not atlas.active_tiles:
+                self._remove_preview_atlas()
         self._prune_rgb_source_cache()
         storage_evictions += self._prune_resident_items(
             budget_bytes=int(tile_residency_budget_bytes or 0),
@@ -1083,19 +1541,13 @@ class MontageTileLayer:
         )
         resident_items = self._resident_count()
         resident_bytes = int(self._resident_bytes)
-        physically_presented = tuple(
-            sorted(
-                int(state.tile_number)
-                for state in self._states.values()
-                if _state_is_physically_visible(state)
-            )
-        )
+        physically_presented = self._physically_presented_tiles()
         committed_upserts.intersection_update(physically_presented)
 
         return TileLayerUpdateStats(
             visible_items=len(physically_presented),
             presented_tiles=physically_presented,
-            presented_identities=_direct_presented_identities(self._states, drawable_payloads),
+            presented_identities=self._presented_identities(drawable_payloads),
             committed_upserts=tuple(int(tile) for tile in sorted(committed_upserts)),
             identity_rejected_items=len(identity_rejected_tiles),
             identity_rejected_tiles=tuple(identity_rejected_tiles),
@@ -1107,10 +1559,10 @@ class MontageTileLayer:
             image_replacements=int(image_replacements),
             existing_items_shown=int(existing_items_shown),
             relocated_tiles=int(relocated_tiles),
-            resident_items=int(resident_items),
-            storage_capacity=int(resident_items),
+            resident_items=int(resident_items) + len(self.preview_atlas_active_tiles),
+            storage_capacity=int(resident_items) + len(self.preview_atlas_active_tiles),
             storage_evictions=int(storage_evictions),
-            cpu_shadow_bytes=int(resident_bytes),
+            cpu_shadow_bytes=int(resident_bytes) + self._preview_atlas_nbytes(),
             budget_bytes=int(tile_residency_budget_bytes or 0),
             warm_resident_items=max(0, int(resident_items) - len(physically_presented)),
             level_updates=int(level_updates),
@@ -1118,6 +1570,178 @@ class MontageTileLayer:
             upload_ms=(perf_counter() - update_start) * 1000.0,
             level_update_pending_items=max(0, int(level_update_pending_items) - int(level_updates)),
         )
+
+    def _try_compact_preview_transaction(
+        self,
+        tile_payloads: Mapping[int, DisplayTilePayload],
+        *,
+        layout: Mapping[int, object],
+        levels: tuple[float, float],
+        tile_delta,
+        transposed: bool,
+        tile_residency_budget_bytes: int,
+    ) -> TileLayerUpdateStats | None:
+        """Present one complete large raw preview as one physical Qt item.
+
+        The backend deliberately does not acknowledge a prefix.  The render
+        pipeline must deliver the complete current required set in one delta;
+        only then is the immutable atlas candidate built and swapped.
+        """
+
+        if tile_delta is None:
+            return None
+        planned = {int(tile) for tile in tuple(getattr(tile_delta, "planned_tiles", ()) or ())}
+        upserts = {
+            int(tile): payload
+            for tile, payload in dict(getattr(tile_delta, "upserts", {}) or {}).items()
+        }
+        preview_upserts = {
+            int(tile): payload
+            for tile, payload in upserts.items()
+            if str(getattr(payload, "quality", "exact") or "exact") == "preview"
+        }
+        if len(planned) < PYQTGRAPH_PREVIEW_ATLAS_MIN_TILES or not preview_upserts:
+            return None
+        if len(preview_upserts) != len(upserts):
+            return None
+        active = {int(tile) for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())}
+        required = planned
+        if active != required or set(preview_upserts) != required:
+            self._preview_atlas_decline_reason = "awaiting-complete-preview-transaction"
+            physically_presented = self._physically_presented_tiles()
+            return TileLayerUpdateStats(
+                visible_items=len(physically_presented),
+                presented_tiles=physically_presented,
+                presented_identities=self._presented_identities(),
+                committed_upserts=(),
+                resident_items=len(self._states) + len(self.preview_atlas_active_tiles),
+                storage_capacity=len(self._states) + len(self.preview_atlas_active_tiles),
+                cpu_shadow_bytes=int(self._resident_bytes) + self._preview_atlas_nbytes(),
+                budget_bytes=int(tile_residency_budget_bytes or 0),
+            )
+        target_identities = dict(getattr(tile_delta, "target_identities", {}) or {})
+        identity_rejected = tuple(
+            sorted(
+                int(tile)
+                for tile, payload in preview_upserts.items()
+                if not acknowledged_identity_satisfies_target(
+                    getattr(payload, "tile_identity", None) or payload.source_id,
+                    target_identities.get(int(tile)),
+                )
+            )
+        )
+        if identity_rejected:
+            self._preview_atlas_decline_reason = "preview-target-identity-rejected"
+            return TileLayerUpdateStats(
+                presented_tiles=self._physically_presented_tiles(),
+                presented_identities=self._presented_identities(),
+                committed_upserts=(),
+                identity_rejected_items=len(identity_rejected),
+                identity_rejected_tiles=identity_rejected,
+            )
+        if transposed:
+            self._preview_atlas_decline_reason = "display-axis-transpose-not-yet-aggregated"
+            return None
+        candidate_payloads = {
+            int(tile): tile_payloads[int(tile)]
+            for tile in sorted(required)
+            if int(tile) in tile_payloads
+        }
+        if set(candidate_payloads) != required:
+            self._preview_atlas_decline_reason = "awaiting-complete-preview-payload-state"
+            return TileLayerUpdateStats(
+                presented_tiles=self._physically_presented_tiles(),
+                presented_identities=self._presented_identities(),
+                committed_upserts=(),
+            )
+        try:
+            candidate = _build_compact_preview_item(
+                candidate_payloads,
+                layout=layout,
+                levels=levels,
+                lookup_table=self._lookup_table,
+            )
+        except ValueError as exc:
+            reason = str(exc)
+            if "complex/RGB aggregate preview is deferred" not in reason:
+                raise
+            self._preview_atlas_decline_reason = "reduced-rgb-preview-format-deferred"
+            return TileLayerUpdateStats(
+                presented_tiles=self._physically_presented_tiles(),
+                presented_identities=self._presented_identities(),
+                committed_upserts=(),
+            )
+
+        add_item = getattr(self.layer_owner, "add_montage_preview_item", None)
+        if not callable(add_item):
+            raise RuntimeError("PyQtGraph layer owner lacks compact preview item ownership")
+        old = self._preview_atlas_item
+        add_item(candidate)
+        candidate.setVisible(True)
+        self._preview_atlas_item = candidate
+        if old is not None and old is not candidate:
+            remove_item = getattr(self.layer_owner, "remove_montage_preview_item", None)
+            if callable(remove_item):
+                remove_item(old)
+        for tile_number in tuple(self._states):
+            self._hide_tile(int(tile_number))
+        self._preview_atlas_decline_reason = ""
+        presented = tuple(sorted(candidate.active_tiles))
+        identities = {
+            int(tile): candidate.tiles[int(tile)].acknowledged_identity for tile in presented
+        }
+        return TileLayerUpdateStats(
+            visible_items=len(presented),
+            presented_tiles=presented,
+            presented_identities=identities,
+            committed_upserts=presented,
+            updated_tiles=presented,
+            items_created=1,
+            items_updated=1,
+            resident_items=len(presented),
+            storage_capacity=len(presented),
+            cpu_shadow_bytes=int(candidate.resident_nbytes),
+            budget_bytes=int(tile_residency_budget_bytes or 0),
+            page_count=int(candidate.page_count),
+            upload_ms=0.0,
+        )
+
+    def _presented_identities(
+        self,
+        payloads: Mapping[int, DisplayTilePayload] | None = None,
+    ) -> dict[int, object]:
+        identities: dict[int, object] = {}
+        atlas = self._preview_atlas_item
+        if atlas is not None and atlas.isVisible():
+            identities.update(
+                {
+                    int(tile): atlas.tiles[int(tile)].acknowledged_identity
+                    for tile in atlas.active_tiles
+                }
+            )
+        identities.update(_direct_presented_identities(self._states, payloads))
+        return identities
+
+    def _physically_presented_tiles(self) -> tuple[int, ...]:
+        direct = {
+            int(state.tile_number)
+            for state in self._states.values()
+            if _state_is_physically_visible(state)
+        }
+        return tuple(sorted(direct.union(self.preview_atlas_active_tiles)))
+
+    def _preview_atlas_nbytes(self) -> int:
+        item = self._preview_atlas_item
+        return 0 if item is None else int(item.resident_nbytes)
+
+    def _remove_preview_atlas(self) -> None:
+        item = self._preview_atlas_item
+        if item is None:
+            return
+        self._preview_atlas_item = None
+        remove_item = getattr(self.layer_owner, "remove_montage_preview_item", None)
+        if callable(remove_item):
+            remove_item(item)
 
     def update_levels(
         self,
@@ -1127,6 +1751,9 @@ class MontageTileLayer:
         histogram_data=None,
     ) -> TileLayerUpdateStats:
         levels = (float(levels[0]), float(levels[1]))
+        atlas = self._preview_atlas_item
+        if atlas is not None:
+            atlas.set_mapping(replace(atlas.mapping, levels=levels))
         image_array = None if image is None else np.asarray(image)
         hist_array = None if histogram_data is None else np.asarray(histogram_data)
         items_updated = 0
@@ -1147,25 +1774,24 @@ class MontageTileLayer:
                 items_skipped += 1
         self._prune_rgb_source_cache()
         resident_items = self._resident_count()
-        physically_presented = tuple(
-            sorted(
-                int(state.tile_number)
-                for state in self._states.values()
-                if _state_is_physically_visible(state)
-            )
-        )
+        physically_presented = self._physically_presented_tiles()
         return TileLayerUpdateStats(
             visible_items=len(physically_presented),
             presented_tiles=physically_presented,
-            presented_identities=_direct_presented_identities(self._states),
+            presented_identities=self._presented_identities(),
             items_updated=items_updated,
             items_skipped=items_skipped,
             rgb_window_tiles=rgb_window_tiles,
             level_updates=processed,
-            resident_items=int(resident_items),
-            storage_capacity=int(resident_items),
-            cpu_shadow_bytes=int(self._resident_bytes),
-            warm_resident_items=max(0, int(resident_items) - len(physically_presented)),
+            resident_items=int(resident_items) + len(self.preview_atlas_active_tiles),
+            storage_capacity=int(resident_items) + len(self.preview_atlas_active_tiles),
+            cpu_shadow_bytes=int(self._resident_bytes) + self._preview_atlas_nbytes(),
+            warm_resident_items=max(
+                0,
+                int(resident_items)
+                + len(self.preview_atlas_active_tiles)
+                - len(physically_presented),
+            ),
             level_update_processed_items=processed,
             upload_ms=(perf_counter() - update_start) * 1000.0,
         )
@@ -1397,6 +2023,20 @@ class MontageTileLayer:
 
         source_id = _direct_payload_source_id(payload.source_id, payload)
         identity = getattr(payload, "tile_identity", None) or payload.source_id
+        atlas = self._preview_atlas_item
+        atlas_state = (
+            None
+            if atlas is None or int(payload.tile_number) not in atlas.active_tiles
+            else atlas.tiles.get(int(payload.tile_number))
+        )
+        if atlas_state is not None and (
+            atlas_state.acknowledged_identity == identity
+            or acknowledged_identity_satisfies_target(
+                atlas_state.acknowledged_identity,
+                identity,
+            )
+        ):
+            return True
         backing = getattr(payload, "page_backing", None)
         for state in self._states.values():
             if (
@@ -1445,6 +2085,8 @@ class MontageTileLayer:
     def payload_commit_slot_owned(self, payload: DisplayTilePayload) -> bool:
         """Return whether an onscreen holder owns this tile's atomic swap."""
 
+        if int(payload.tile_number) in self.preview_atlas_active_tiles:
+            return True
         state = self._states.get(int(payload.tile_number))
         return bool(state is not None and _state_is_physically_visible(state))
 

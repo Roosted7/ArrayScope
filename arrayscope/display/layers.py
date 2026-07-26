@@ -6,6 +6,7 @@ import contextlib
 
 Z_IMAGE = 0
 Z_BOUNDS = -1000
+Z_TILE_PREVIEW = -1
 Z_TILE_IMAGE = 0
 Z_ROI = 40
 Z_PROFILE_MARKER = 60
@@ -21,6 +22,7 @@ class ViewLayerOwner:
         self._tile_items: dict[int, object] = {}
         self._roi_items: dict[str, object] = {}
         self._image_item = None
+        self._montage_preview_item = None
         self._montage_overlay_item = None
 
     def add_image_item(self, item) -> None:
@@ -59,6 +61,22 @@ class ViewLayerOwner:
         item = self._tile_items.pop(int(tile_number), None)
         if item is not None:
             self._remove_item(item)
+
+    def add_montage_preview_item(self, item) -> None:
+        """Install one compact backing below exact per-tile ImageItems."""
+
+        existing = self._montage_preview_item
+        self._add_item(item, Z_TILE_PREVIEW)
+        self._montage_preview_item = item
+        if existing is not None and existing is not item:
+            self._remove_item(existing)
+
+    def remove_montage_preview_item(self, item=None) -> None:
+        existing = self._montage_preview_item
+        if existing is None or (item is not None and item is not existing):
+            return
+        self._montage_preview_item = None
+        self._remove_item(existing)
 
     def add_roi_item(self, roi_id: str, item) -> None:
         roi_id = str(roi_id)
