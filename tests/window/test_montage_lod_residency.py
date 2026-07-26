@@ -8332,7 +8332,10 @@ def test_resident_mode_records_why_the_reduced_input_preview_never_runs():
     )
 
     assert int(getattr(renderer, "_montage_preview_reduced_blocked", 0)) == 1
-    assert getattr(renderer, "_montage_preview_reduced_last_gate", "") == "resident lod policy mode"
+    assert (
+        getattr(renderer, "_montage_preview_reduced_last_gate", "")
+        == "resident policy keeps the parallel per-tile target"
+    )
     assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0)) == 0
     assert int(getattr(renderer, "_montage_preview_reduced_failures", 0)) == 0
 
@@ -8361,4 +8364,56 @@ def test_commuting_pipeline_is_not_counted_as_a_refused_reduced_preview():
     assert (
         getattr(renderer, "_montage_preview_reduced_last_gate", "")
         == "per-tile rungs own reduced input"
+    )
+
+
+def test_montage_axis_fft_with_known_display_axes_reaches_the_shared_route():
+    """The ownership split, pinned on the shape the app actually runs.
+
+    The fixtures above leave `view_state` None, so the commuting predicate
+    falls back to its axis-blind answer and never exercised the case gate 1
+    created: display axes (0, 1) with the transform on the montage axis, where
+    the pipeline commutes exactly and is NOT tile-local.
+
+    Asking the commuting question for per-tile ownership sent exactly that
+    montage to an owner that plans no rung for it -- the shared route disowned
+    it (`per-tile rungs own reduced input`, scheduled 0) while the per-tile
+    ladder planned zero preview rungs, so nobody produced.  Ownership must land
+    on tile-locality, which routes it here and lets the policy gate answer.
+    """
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.render import effects as render_effects
+
+    data = np.ones((TILE, TILE, 8), dtype=np.float32)
+    view_state = ViewState.from_shape(data.shape).with_image_axes(0, 1)
+    session = _session(count=2, mode=LOD_POLICY_RESIDENT, pyramid=LodPageCache(max_bytes=1 << 20))
+    session.plan = replace(
+        session.plan,
+        axis=2,
+        tiles=tuple(replace(tile, view_state=view_state) for tile in session.plan.tiles),
+    )
+    session.montage_axis = 2
+    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    seed = session.plan.tiles[0]
+
+    # Exactly commuting, and exactly not tile-local -- the pair gate 1 split.
+    assert render_effects.preview_pipeline_commutes_for_display_lod(session, seed) is True
+    assert render_effects.preview_pipeline_is_tile_local(session, seed) is False
+
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+    assert (
+        effects.submit_shared_transform_floor(
+            LodAdmissionScope(visible_tile_numbers=frozenset({0, 1}))
+        )
+        == 0
+    )
+
+    # It must reach the policy gate and be counted as refused there -- NOT be
+    # silently handed to the per-tile ladder, which cannot serve it.
+    assert int(getattr(renderer, "_montage_preview_reduced_blocked", 0)) == 1
+    assert (
+        getattr(renderer, "_montage_preview_reduced_last_gate", "")
+        == "resident policy keeps the parallel per-tile target"
     )

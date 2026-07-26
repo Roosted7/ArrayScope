@@ -915,7 +915,7 @@ class FramePipelineEffects:
         if cached is not None and cached[0] == cache_key:
             return bool(cached[1])
         owns = bool(
-            not render_effects.preview_pipeline_commutes_for_display_lod(self.session, tile)
+            not render_effects.preview_pipeline_is_tile_local(self.session, tile)
             and render_effects.shared_preview_is_useful(
                 self.session,
                 tile,
@@ -1303,10 +1303,15 @@ class FramePipelineEffects:
         if not plan_tiles:
             return self._preview_reduced_blocked("no planned tiles")
         seed = plan_tiles[0]
-        if render_effects.preview_pipeline_commutes_for_display_lod(session, seed):
-            # Commuting pipelines get per-tile FLOOR/DESIRED rungs. Not a
+        if render_effects.preview_pipeline_is_tile_local(session, seed):
+            # Tile-local pipelines get per-tile FLOOR/DESIRED rungs. Not a
             # refusal of reduced-input preview — a different owner for it,
             # measured by the ladder's own per-(rung, level) timings.
+            #
+            # This asks tile-locality, not commuting, because the ladder's
+            # `reduced_input_available` does: asking the commuting question
+            # here disowned every montage-axis FFT to a per-tile owner that
+            # plans no rung for it, so neither side produced.
             self._preview_reduced_gate("per-tile rungs own reduced input")
             return 0
         if not render_effects.shared_preview_is_useful(session, seed, demand):
@@ -1405,7 +1410,8 @@ class FramePipelineEffects:
 
         session = self.session
         if str(getattr(session, "lod_policy_mode", "")) == "resident":
-            return "resident lod policy mode"
+            # Named for the measured reason, not the mode: dossier 6c.
+            return "resident policy keeps the parallel per-tile target"
         if not render_effects.can_evaluate_reduced_preview(session, seed):
             return "pipeline does not support reduced display lod"
         preview_level = int(render_effects.preview_evaluation_level(session, demand))

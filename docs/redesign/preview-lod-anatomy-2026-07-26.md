@@ -1,9 +1,11 @@
 # Preview LOD — what the rung actually costs (2026-07-26)
 
-**Status:** measurement only, no code changed. Answers the standing
+**Status:** measurement, now with the landings it licensed (§6a gate 1, §6c
+gate 2, §10 counters). Answers the standing
 `TODO(redesign R3)` in [`render/ladder.py`](../../arrayscope/render/ladder.py)
 ("re-derive `preview_level` bounds from fresh A/B evidence before changing
-defaults") with the evidence it asks for.
+defaults") with the evidence it asks for, and R3 plan item 6 ("re-decide
+shared transform preview on a fresh A/B") with §6c.
 
 Two findings, in increasing order of importance. On a **raw** wgpu montage the
 preview rung buys nothing and a lower or adaptive preview *level* is measured
@@ -17,6 +19,13 @@ the per-rung evaluation cost: a 16× input reduction buys only ~2.5× on raw
 data, and on the FFT stage — now that its stall *and* its gate 1 are fixed —
 the counters find that **gate 1 alone still produces no preview**, while 8 s of
 FFT evaluation is computed and discarded every run.
+
+**§6c adjudicates gate 2 and closes the §6 thesis with a correction.** Opening
+the shared route does produce the preview — 272 presentations, first pixel 2.5×
+earlier — and costs 2.1× on full refinement, because the per-tile route's
+`cache_stage` already shares the one expensive FFT and parallelises the rest.
+The order-of-magnitude prize §6 predicted was priced against duplicate work
+that the stage cache had already removed.
 
 Field report that opened this: *"loading the NIfTI with a full montage over
 the third dimension takes many seconds. It often runs two quality levels, but
@@ -407,6 +416,103 @@ Two findings in passing:
   width over 64 bins, and consecutive float32 edges collapse.
   `_histogram_edge_bounds` guarded `high == low` but not "narrower than float32
   can resolve". Fixed and pinned separately; the defect is latent on main.
+
+### 6c. Gate 2, adjudicated: the guard is accidental, and it is still right
+
+**Verdict: the `resident` refusal at `effects.py:976` is not a correctness
+gate — and it stays, now carrying the A/B that R3 asked for.**
+
+Provenance first, as required. The refusal entered in `fbbb6f64` (2026-07-16,
+"Migrate live LOD ownership to canonical pages") as two lines inside a 24-file
+migration with an empty commit body. The same commit *kept the route alive*,
+porting `evaluate_shared_preview` from `pyramid_key_for_rendered` to
+`page_set_key_for_rendered` — you do not migrate a path you mean to kill. Nine
+days earlier, `0017361e` had built this route and benchmarked it **in resident
+mode**: "FFT preview floor lands for all 272 tiles at 2.6 s (previously no
+first pass), settled 4.24 s (was 6.08 s post-storm fix, 42.8 s before it)". No
+test pins the refusal and no ADR clause states a hazard for it. ADR 0050's
+"not scheduler-enabled until shared transform preview removes the duplicate
+per-tile work" is about the *evaluator* routes and names this route as the
+**remedy**, not the risk. What it actually is: the provisional default for R3
+plan item 6, "re-decide shared transform preview on a fresh A/B … the
+remaining decision is policy/evidence only." That A/B had never been run.
+
+It is run now. Four arms, wgpu, `fft_full_tiled_montage`, on the tip where the
+stage completes (272/272 — the earlier 271/272 stall is fixed, so §6a's
+numbers do not transfer and everything here is re-baselined):
+
+| arm | first tile | preview floor | full refined | elapsed | GUI max | previews |
+|---|---:|---:|---:|---:|---:|---:|
+| baseline | 3646 | none | **5198** | 5471 | 1481 | 0 |
+| A: ownership split only | 3596 | none | 5196 | 5565 | 1403 | 0 |
+| B: guard removed | **1433** | **4532** | 11145 | 11370 | **593** | **272** |
+| C: shared preview, per-tile target | 3022 | none | 5104 | 11253 | 1236 | **0** |
+
+One run per arm above. Arm A's claim is that it changes nothing, so it was
+re-checked as an order-balanced pair (shipped first, baseline second, to
+cancel the ~700 ms second-run penalty this machine shows): full refined
+5196/5459 ms shipped against 5198/5342 ms baseline, elapsed 5565/5768 against
+5471/5722 — means within 70 ms on both. Arm B's +6 s on refinement is an order
+of magnitude outside that spread. `first tile` is the noisiest column here
+(baseline alone spans 2523–3646 ms) and no claim rests on it except arm B's,
+which is 2–3× outside its range.
+
+Arm B is what the dossier asked for and it works: 272 preview presentations
+from **4** submissions, the first pixel 2.5× earlier, the GUI 2.5× calmer. It
+also pushes full refinement from 5198 ms to 11145 ms — past ground rule 3's
+5 s hard limit. That is not a trade this lane may take silently.
+
+**The reason is not the one ADR 0050 anticipated.** The duplicate per-tile
+work it feared is already gone: `CenteredFFT` declares `cache_stage=True`, so
+the per-tile route evaluates **one** native FFT stage (baseline's single
+921 ms worker task) and fans out 272 parallel ~2.6 ms slices. Total worker
+time barely moves between the arms — 3.03 s baseline against 3.74 s in arm B —
+but arm B packs it into **5 serial batches** (514 ms median, 1222 ms max)
+where the baseline had 466 parallel tasks. And for a montage-axis transform
+the shared route cannot be split into more batches to recover parallelism,
+because every batch must re-read every montage plane: **batching is
+duplication here.** The route trades away parallelism to delete work the stage
+cache had already deleted.
+
+Arm C tested the obvious repair — let the shared route own only the preview
+rung and leave the target to the parallel per-tile ladder — and it is worse
+than both: the per-tile rungs outrun the shared preview, which presents **0 of
+272** tiles while still paying its full evaluation (elapsed 11253 ms). The
+barrier in `submit_shared_transform_floor` (every preview row acknowledged
+before the shared target is admitted) is exactly what its own comment says it
+is, load-bearing against "the center refines while the outer preview is still
+black" — and it is also what serializes the route. Preview and target are one
+unit here; splitting them just wastes the preview.
+
+So gate 2 is shut for a stated, measured reason rather than a mode name, and
+the counter says so: `montage_quality_preview_reduced_last_gate` now reads
+`resident policy keeps the parallel per-tile target`.
+
+**What actually unblocks the FFT preview** is neither gate: it is a *parallel*
+shared form. The route needs either batches that share one reduced-volume
+evaluation instead of re-reading planes per batch, or an overlap of the
+acknowledge-all barrier so refinement starts before the preview pass finishes.
+Both are §7's `CoarseRung(level, retained, evaluate_at)` territory. Until one
+exists, the per-tile stage-cached route is simply the better implementation of
+the same idea, and the preview's remaining prize on this montage is smaller
+than §6 assumed — the 16× compute saving is real, but it is a saving against
+work that is already shared and already parallel.
+
+#### The bug arm A fixed
+
+Arm A changes no pixels and is not cosmetic. Gate 1 made
+`preview_pipeline_commutes_for_display_lod` axis-aware but left two ownership
+sites (`_shared_transform_owns_tile_display_target`,
+`submit_shared_transform_floor`) still asking it as a proxy for "the per-tile
+route owns this". Once the montage-axis FFT started commuting, the shared
+route **disowned** it (`per-tile rungs own reduced input`, scheduled 0,
+blocked 0) while the per-tile ladder — correctly gated on tile-locality —
+planned no rung for it either. Ownership had moved and nobody produced, and
+the counter reported a healthy-looking zero. Both sites now ask
+`preview_pipeline_is_tile_local`, so the refusal is attributed to the policy
+gate that is really making it (`blocked=24`). The unit fixtures never caught
+this because they leave `view_state` None, which makes the commuting predicate
+fall back to its axis-blind answer; a test with real display axes now pins it.
 
 ### 6b. How to subsample, and what a crop does to it
 

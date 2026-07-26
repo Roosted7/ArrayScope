@@ -973,6 +973,50 @@ def preview_is_useful(session, tile, demand, *, upload_preview_useful: bool = Fa
 
 
 def shared_preview_is_useful(session, tile, demand, *, upload_preview_useful: bool = False) -> bool:
+    """Whether the shared reduced-volume route should serve this tile.
+
+    The `resident` refusal below is a POLICY decision carrying measurements,
+    not the correctness gate its provenance suggests, and not a silence.
+
+    Provenance: it entered in `fbbb6f64` as two unexplained lines inside a
+    24-file canonical-page migration that, in the same commit, kept
+    `evaluate_shared_preview` alive by porting it to page-set keys.  Nine days
+    earlier `0017361e` had built this route and benchmarked it *in resident
+    mode* -- "FFT preview floor lands for all 272 tiles at 2.6 s (previously
+    no first pass), settled 4.24 s (was 6.08 s)".  No test and no ADR clause
+    pins it, and R3's plan listed the open item as "re-decide shared transform
+    preview on a fresh A/B ... the remaining decision is policy/evidence
+    only".  So it was a provisional default awaiting an A/B.
+
+    That A/B is now run (dossier section 6c, four arms).  Opening this route on
+    the 272-tile FFT montage delivers the first pixel 2.5x earlier (3596 ->
+    1433 ms), 272 preview presentations from 4 submissions, and a 2.4x calmer
+    GUI (event-loop max 1403 -> 593 ms) -- and pushes full refinement from
+    5196 ms to 11145 ms, past ground rule 3's 5 s hard limit.  So it stays
+    shut, now for a stated reason.
+
+    The reason is structural, and it is NOT the duplicate per-tile work ADR
+    0050 feared.  `CenteredFFT` declares `cache_stage=True`, so the per-tile
+    route already evaluates ONE native FFT stage (baseline's single 921 ms
+    task) and fans out 272 parallel ~2.6 ms slices: the duplication was
+    removed by the stage cache years before this route could remove it.  What
+    the shared route does instead is replace 466 parallel tasks with 5 serial
+    ones (2.63 s of work in 514 ms median batches), and for a montage-axis
+    transform it cannot be split into more batches without each batch
+    re-reading every montage plane -- batching IS duplication here.  It trades
+    away parallelism to remove work that is already gone.
+
+    Handing only the preview to this route and leaving the target per-tile was
+    also measured, and is worse than either: the per-tile rungs outrun the
+    shared preview, which then presents 0 of 272 tiles while still costing its
+    full evaluation.  The barrier this function's caller keeps -- every preview
+    row acknowledged before the shared target is admitted -- is what makes the
+    route coherent, and it is also what serializes it.
+
+    Unblocking it needs a parallel shared form (or an overlap of that
+    barrier), not a change here.  Until then the honest gate is this one.
+    """
+
     if str(getattr(session, "lod_policy_mode", "")) == "resident":
         return False
     if not can_evaluate_reduced_preview(session, tile):
