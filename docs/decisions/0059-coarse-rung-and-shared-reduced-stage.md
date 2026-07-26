@@ -284,10 +284,28 @@ Implemented on local `main` at `6ad55232`.
   declined rather than substituting a full native FFT plane. The physical page
   allocation is still 256×256 per 21×21 logical tile, as expected.
 - The same five-pass branch cohort's median complete coarse-floor fill was
-  **5321.4 ms**, only 10.7 ms before the full-refined median. This is not a
-  first-pixel speedup claim: admission remains dominant, and the 21×21 source
-  is visibly blocky when drawn at roughly 57 px. The now-default minification
-  filter correctly does not engage while that source is magnified.
+  **5321.4 ms**, only 10.7 ms before the full-refined median. **That comparison
+  understates the result and should not be read as the first-pixel outcome:**
+  both terms are *whole-fill* medians, so they measure when the LAST tile
+  reaches each rung, and a progressive fill can never show a gain that way.
+  Per-tile, from the ACK trace of one FFT pass on this tip, the coarse rung is
+  a genuine preview rather than a flash:
+
+  | | ms |
+  |---|---:|
+  | first coarse ACK carrying the operation key | **3124** |
+  | first exact ACK carrying it | **5169** |
+  | per-tile coarse→exact gap | min 274, p25 606, **median 875**, p75 1874, max 2674 |
+  | tiles whose gap is under 50 ms | **0 of 272** |
+
+  So the first FFT pixel arrives about **2.0 s earlier** than the 5076 ms
+  measured on the pre-branch tip, and every tile shows its coarse rung for at
+  least 274 ms. Admission still dominates the *settle* time, which is why the
+  whole-fill medians barely move — but the rung is early where earliness is
+  the point. The 21×21 source is visibly blocky when drawn at roughly 57 px,
+  and the now-default minification filter correctly does not engage while that
+  source is magnified, so what a user sees is blocky-then-sharp with a median
+  875 ms between them.
 - A three-pass in-process raw run (`--repeat 3`) reported only
   `tile already has committable coverage` and `allow_preview false` as coarse
   refusal reasons; `floor already covers this level` is gone.
