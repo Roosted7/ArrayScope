@@ -8,6 +8,7 @@ pipeline/kernel contract from the concrete montage backend bridge.
 
 from __future__ import annotations
 
+import collections
 from types import SimpleNamespace
 
 from arrayscope.display.lod import LodDemand
@@ -578,3 +579,62 @@ def test_large_visible_plan_admission_is_chunked_and_completion_driven():
     assert len(effects.evaluated) == 80
     assert not pipeline._pending_admissions
     assert not pipeline._admission_continuation_armed
+
+
+def test_rung_provenance_rides_the_task_spec_without_changing_identity():
+    """The trace needs (rung, level) on kernel events; identity stays the key.
+
+    Attributing evaluation cost to a rung from the trace alone otherwise means
+    parsing a `_RungKey` repr.
+    """
+
+    kernel = CaptureKernel()
+    effects = StubEffects(tiles=1)
+    pipeline = FramePipeline(kernel, effects, LodLadder())
+
+    pipeline.retarget(intent(), demand(1), scope(0, missing=1))
+
+    assert kernel.specs
+    for spec in kernel.specs:
+        assert spec.rung == int(spec.key.rung)
+        assert spec.level == int(spec.key.level)
+
+
+def test_rung_evaluation_timings_account_every_evaluated_rung():
+    kernel, effects, pipeline = make_pipeline(tiles=2)
+
+    pipeline.retarget(intent(), demand(1), scope(0, 1, missing=2))
+    drain(kernel)
+
+    rows = pipeline.rung_timings.rows()
+    assert rows
+    evaluated = collections.Counter(
+        (int(rung), int(level)) for _tile, rung, level in effects.evaluated
+    )
+    assert {(int(row["rung"]), int(row["level"])): int(row["calls"]) for row in rows} == dict(
+        evaluated
+    )
+    # Rows carry the ladder's own name for the rung so a reader never has to
+    # remember that 0 is FLOOR.
+    assert {str(row["rung_name"]) for row in rows} <= {rung.name.lower() for rung in Rung}
+    for row in rows:
+        assert float(row["total_ms"]) >= 0.0
+        assert float(row["max_ms"]) <= float(row["total_ms"]) + 1e-9
+
+
+def test_failed_rung_evaluation_still_reports_the_work_it_burned():
+    """Work spent and thrown away is exactly what a rung audit must see."""
+
+    kernel, effects, pipeline = make_pipeline(tiles=1)
+
+    def explode(intent, step):
+        def run(_token=None):
+            raise RuntimeError("boom")
+
+        return run
+
+    effects.evaluate_rung = explode
+    pipeline.retarget(intent(), demand(1), scope(0, missing=1))
+    drain(kernel)
+
+    assert sum(int(row["calls"]) for row in pipeline.rung_timings.rows()) == 2

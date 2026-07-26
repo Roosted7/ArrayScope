@@ -12,6 +12,9 @@ montage with **expensive operations** the preview rung is worth an order of
 magnitude — and the system currently produces none at all (§6). §7 proposes the
 FLOOR/PREVIEW merge that follows from both, §8 answers the upload questions,
 §9 records that the levels/histogram merge into the pyramid already exists.
+§10 replaces this dossier's two inferences with counters (both held) and adds
+the per-rung evaluation cost, which shows a 16× input reduction buying only
+~2.5× on raw data.
 
 Field report that opened this: *"loading the NIfTI with a full montage over
 the third dimension takes many seconds. It often runs two quality levels, but
@@ -61,11 +64,19 @@ The trace agrees — every acknowledgement in the run is one of:
 and every planned pre-native step in `pipeline_plan` is `rung=0` (FLOOR) at
 level 4. `pipeline_plan` never emits a `rung=1` step.
 
-Corollary: `tile_lod_preview_reduced_scheduled` / `_blocked` / `_failures` are
-**dead diagnostics**. `diagnostics_snapshot.py:237-245` reads
-`window.renderer._montage_preview_reduced_*`, which is assigned nowhere in the
-tree, so all three report 0 forever — exactly the three counters one would
+Corollary: `tile_lod_preview_reduced_scheduled` / `_blocked` / `_failures` were
+**dead diagnostics**. `diagnostics_snapshot.py` read
+`window.renderer._montage_preview_reduced_*`, which was assigned nowhere in the
+tree, so all three reported 0 forever — exactly the three counters one would
 reach for to ask "did the reduced-input preview path run?".
+
+**Now wired** (see §10) to `submit_shared_transform_floor`, plus a
+`tile_lod_preview_reduced_last_gate` string so a 0 says *why*. On this raw
+montage they read `0/0/0` with gate `per-tile rungs own reduced input` — the
+per-tile ladder rungs are the owner, and §10's rung timings measure them. Two
+siblings in the same family are **still dead** and were left alone:
+`_montage_quality_ingest_reductions` and
+`_montage_quality_stage_hits_serving_derivations` are assigned nowhere either.
 
 ## 3. The preview rung is four times slower than the target it precedes
 
@@ -101,6 +112,10 @@ page grid of a 336² plane (`plan_source_grid_pages` yields 4 pages at
 reduction (0,0), and 1 page at reduction (2,2) or (4,4)). Session totals
 confirm the scale: `wgpu_uploads_total = 1088` (= 272 × 4) and
 `wgpu_active_resident_bytes = 285 212 672` — **285 MB resident to display 7.7 MB.**
+
+(§10a instruments this directly: the per-level upload counter reports **one
+row**, `(level 0, scalar_r32f)` = 1088 uploads / 285 212 672 bytes, and no
+level-2 or level-4 row at all.)
 
 This is deliberate and documented.
 `wgpu_imageview2d._wgpu_reusable_native_texture` says so:
@@ -531,9 +546,20 @@ Ack timeline: group `kind == "backend_ack"` by `(quality, level)` over
 `ts_ns`. Transaction and upload attribution: `kind == "commit_batch"`,
 `phase == "backend_complete"`, fields `delta_qualities` / `delta_upserts` /
 `uploads` / `upload_bytes` / `elapsed_ms`. Run-to-run spread on this stage is
-4.0–4.9 s (±10%), so nothing under ~0.5 s can be shown end-to-end here — the
-per-pass ack spans and the per-window batch counts are the direct work counters
-to move.
+4.0–4.9 s (±10%; measured 3879–4976 over five repeats in §10c), so nothing
+under ~0.5 s can be shown end-to-end here — the per-pass ack spans and the
+per-window batch counts are the direct work counters to move.
+
+Since §10 the same questions read straight off the JSONL, no trace parsing:
+`wgpu_uploads_by_level` (uploads and bytes per page key) and
+`montage_quality_rung_evaluations` (calls, total_ms, max_ms per rung and
+level). Add `--repeat N` for the spread. Per-task provenance rides the trace's
+`kernel_start` / `kernel_finish` as `rung` / `level` / `fn_ns`.
+
+**A/B discipline this dossier learned the hard way** (§10d): alternate which
+side runs first. The second run of any back-to-back pair is ~700 ms slower on
+this machine, so two same-order pairs manufactured a phantom 1 s regression
+that vanished under six order-balanced pairs.
 
 The §6 FFT numbers come from
 `--stages load_data,fft_full_tiled_montage`; split acknowledgements by whether
@@ -550,6 +576,101 @@ Both configurations are n=1; the 0.7% preview-span difference is inside noise
 (which is the point — it does not move), while the 2.9 s stage difference and
 the 2-vs-15 refinement batch count are far outside it.
 
+## 10. The two inferences are now counters (2026-07-26, later the same day)
+
+Everything above was derived from trace events. Two of its steps had to be
+inferred because the counter did not exist. Both now do, and both inferences
+held.
+
+### 10a. Upload attribution by page key — §4's inference confirmed
+
+`wgpu_executor` splits `uploads_total` / `texture_upload_bytes_total` by
+`(DataChunkKey.lod.level, representation)`; the rows reach
+`MontageRuntimeDiagnostics.wgpu_uploads_by_level` and JSONL
+`wgpu_uploads_by_level`. On this stage, on every one of five in-process
+repeats:
+
+| level | representation | uploads | bytes |
+|---:|---|---:|---:|
+| 0 | `scalar_r32f` | 1088 | 285 212 672 |
+
+**One row. Every upload is a native page.** No level-2 row and no level-4 row
+exist — the reduced and preview payloads are never uploaded at all, they are
+substituted by the native plane exactly as
+`_wgpu_reusable_native_texture` documents. §4 inferred this from `272 × 4`;
+it is now read off a counter, and §5.4's memory case (285 MB resident to
+display 7.7 MB) is now measured rather than deduced.
+
+### 10b. Per-(rung, level) evaluation cost — and the 16x claim does not hold on raw data
+
+`FramePipeline` wraps each rung's worker function and accumulates calls, total
+and max wall time per `(rung, level)` into `RungEvaluationTimings`, surfaced as
+`tile_lod_rung_evaluations` / JSONL `montage_quality_rung_evaluations`. The
+trace carries the same provenance per task: `kernel_start` and `kernel_finish`
+gained `rung` / `level` (−1 for non-ladder work) and `kernel_finish` gained
+`fn_ns`, the function-body duration — no new event kinds.
+
+Five in-process repeats of the raw stage (`--repeat 5`, §10c):
+
+| rung | level | calls | total ms | per call |
+|---|---:|---:|---:|---:|
+| FLOOR | 4 | 272–373 | 2329–3139 | 8.0–8.7 ms |
+| DESIRED | 2 | 272 | 5944–11298 | 21.9–41.5 ms |
+
+Two rungs, never a `PREVIEW` row — §2's FLOOR/PREVIEW collapse, confirmed from
+the evaluation side rather than from acknowledgements.
+
+**FLOOR/DESIRED total-time ratio: median 0.40, range 0.24–0.50.** A 16x input
+reduction buys a **~2.5x** cheaper evaluation, not 16x. That is the expected
+shape for a raw pipeline — §5 already ruled out the preview level on raw data
+for two other reasons, and this adds a third: the saving the preview rung is
+supposed to bank is not there to bank. It does **not** test §6's claim, which
+is about *operation* pipelines; `fft_full_tiled_montage` still hits the
+pre-existing 271/272 stall guard (unchanged, untriaged, owned elsewhere), so
+the counter is in place for that measurement but the measurement has not been
+made.
+
+Absolute times here are wall time per evaluation under whatever load the
+machine has, not CPU time — the five repeats span 2329–3139 ms for the same
+272-call FLOOR pass. Compare ratios across a batch, not absolutes across
+sessions.
+
+**New, unexplained:** FLOOR ran **272–373** times for 272 tiles. Up to 37% of
+the preview pass is re-evaluating a floor some tile already had. That is
+squarely inside §5.2's territory and is the cheapest lead on this list.
+
+### 10c. Variance is now visible instead of assumed
+
+`profile_montage_workflow --repeat N` runs the selected stages N times in one
+process and prints per-run values plus median/min/max. Each pass builds a fresh
+window and session, so montage stages stay genuinely cold (1088 uploads on
+every pass). **`load_data` does not** — its file read is OS-page-cache warm
+from pass 2 (190 ms, then 44–53 ms); read that row as warm.
+
+Five repeats, `raw_full_tiled_montage` elapsed: **3879 / 4167 / 4266 / 4625 /
+4976 ms**, median 4266, spread 1098 ms (26%). The 4.0–4.9 s band this dossier
+warns about is now a measurement, not folklore.
+
+### 10d. The counters do not perturb what they measure
+
+Six order-balanced A/B pairs (`--trace` on, alternating which side ran first —
+the second run of any pair is systematically ~700 ms slower, which made two
+unbalanced pairs look like a 1 s regression):
+
+| | counters off | counters on |
+|---|---:|---:|
+| stage elapsed, median | 4409 ms | 4517 ms |
+| **preview ack span, median** | **3348 ms** | **3272 ms** |
+| uploads / bytes | 1088 / 285 MB | 1088 / 285 MB |
+| commit batches | 21–23 | 22 |
+| exact-2 acks | 272 | 272 |
+
+The work counters are identical, and the preview ack span — the low-variance
+counter §4c nominated — is 76 ms *lower* with the instrumentation on, i.e.
+inside noise in the favourable direction. Cost per upload is two integer dict
+bumps; cost per rung evaluation is one lock and three dict bumps against a
+multi-millisecond evaluation.
+
 ## Open questions, left open deliberately
 
 - **Why 18 transactions for the preview and 2 for the refinement.** This is
@@ -557,16 +678,15 @@ the 2-vs-15 refinement batch count are far outside it.
   (`_idle_backlog_cohort` / `_persistent_tile_upsert_limits`), the item clamp's
   interactive arm, or simply worker arrival pacing forcing a commit per
   completion wave.
+- **Why FLOOR evaluates up to 373 times for 272 tiles** (§10b). New, cheap to
+  chase, and the same pass §5.2 is about.
 - ~~**The `fft_full_tiled_montage` stall at 271/272**~~ — **CLOSED
   2026-07-26.** A/B'd back to `51b826a` (2026-07-23) and root-caused to a
   page-pool layer leaked at construction, unrelated to LOD or preview policy:
   [wgpu-pool-layer-leak-2026-07-26.md](wgpu-pool-layer-leak-2026-07-26.md).
   What it leaves behind for this dossier is that **§6 was measured on a stage
   that never finished**, so its FFT numbers are a lower bound on work done and
-  need re-taking.
-- **Which page keys the 1088 uploads belong to** is inferred (4 per tile = the
-  native grid, plus the code path that says it substitutes native for reduced),
-  not directly instrumented. There is no per-`lod.level` upload counter, and the
-  three counters that look like they would answer it are the dead ones from §2.
-  Now that §4c has priced the byte term at ~45 ms/batch this matters for the
-  memory question (§5.3), not the latency one.
+  need re-taking. §10e re-takes them over the fix.
+- ~~**Which page keys the 1088 uploads belong to**~~ — answered by §10a.
+- ~~**Is reduced-input evaluation ~16× cheaper for op pipelines?**~~ — answered
+  by §10e, over the stall fix. It is not: **1.5×** for this FFT pipeline.

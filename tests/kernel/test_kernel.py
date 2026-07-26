@@ -940,3 +940,57 @@ def test_shutdown_timeout_is_one_global_deadline_and_lists_running_scopes():
 
     release.set()
     backend.shutdown(timeout=1.0)
+
+
+def test_kernel_events_carry_rung_provenance_and_the_function_body_duration(monkeypatch):
+    """`fn_ns` on kernel_finish prices the evaluation, not the queue.
+
+    kernel_start fires before the started bookkeeping and kernel_finish after
+    delivery, so their timestamp difference includes lock and dispatch work.
+    Per-(rung, level) evaluation cost has to come off the body alone.
+    """
+
+    traces = []
+    monkeypatch.setattr(
+        "arrayscope.kernel.scheduler.emit_trace",
+        lambda kind, **fields: traces.append((kind, fields)),
+    )
+    kernel = Kernel(InlineWorkerBackend())
+
+    kernel.submit(TaskSpec(key="rung", fn=lambda: time.sleep(0.01), rung=1, level=4, tile_number=7))
+    kernel.submit(TaskSpec(key="plain", fn=lambda: None))
+
+    events = {(kind, fields.get("key")): fields for kind, fields in traces}
+    for kind in ("kernel_start", "kernel_finish"):
+        assert events[(kind, "rung")]["rung"] == 1
+        assert events[(kind, "rung")]["level"] == 4
+        # Non-ladder work reports -1 rather than a plausible-looking 0.
+        assert events[(kind, "plain")]["rung"] == -1
+        assert events[(kind, "plain")]["level"] == -1
+
+    body_ns = events[("kernel_finish", "rung")]["fn_ns"]
+    assert body_ns >= 10_000_000  # the 10 ms sleep really is inside the body
+    assert events[("kernel_finish", "plain")]["fn_ns"] < body_ns
+
+
+def test_failed_task_still_reports_the_time_its_body_burned(monkeypatch):
+    traces = []
+    monkeypatch.setattr(
+        "arrayscope.kernel.scheduler.emit_trace",
+        lambda kind, **fields: traces.append((kind, fields)),
+    )
+    kernel = Kernel(InlineWorkerBackend(), handler_error_hook=lambda ctx, exc: None)
+
+    def explode():
+        time.sleep(0.01)
+        raise ValueError("no")
+
+    kernel.submit(TaskSpec(key="boom", fn=explode, rung=2, level=0), on_error=lambda exc: None)
+    drain(kernel)
+
+    finish = next(
+        fields for kind, fields in traces if kind == "kernel_finish" and fields.get("key") == "boom"
+    )
+    assert finish["outcome"] == "failed"
+    assert finish["rung"] == 2
+    assert finish["fn_ns"] >= 10_000_000

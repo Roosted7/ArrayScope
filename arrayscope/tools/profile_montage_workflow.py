@@ -19,6 +19,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from importlib import metadata
 from pathlib import Path
+from statistics import median
 from time import perf_counter
 from uuid import uuid4
 
@@ -788,6 +789,7 @@ def run_profile_montage_workflow(
     synthetic_scene: str | None = None,
     synthetic_shape: tuple[int, int, int] = (192, 256, 40),
     physical_sample_seed: int | None = None,
+    repeat_index: int = 0,
 ) -> tuple[dict[str, object], ...]:
     """Run raw full montage, then FFT/shift/iFFT-over-montage-axis montage.
 
@@ -933,6 +935,7 @@ def run_profile_montage_workflow(
             profiler_artifact_paths=profiler_artifact_paths,
             run_temperature=_workflow_run_temperature(),
             qt_platform=str(app.platformName()),
+            repeat_index=int(repeat_index),
             grid_kind="full",
             source_index_count=tile_count,
             screenshot_timing_perturbed=screenshot_timing_perturbed,
@@ -952,6 +955,7 @@ def run_profile_montage_workflow(
             profiler_artifact_paths=profiler_artifact_paths,
             run_temperature=_workflow_run_temperature(),
             qt_platform=str(app.platformName()),
+            repeat_index=int(repeat_index),
             grid_kind="scroll",
             source_index_count=len(scroll_source_indices),
             screenshot_timing_perturbed=screenshot_timing_perturbed,
@@ -975,6 +979,7 @@ def run_profile_montage_workflow(
             profiler_artifact_paths=profiler_artifact_paths,
             run_temperature=_workflow_run_temperature(),
             qt_platform=str(app.platformName()),
+            repeat_index=int(repeat_index),
             grid_kind="display_axis",
             source_index_count=tile_count,
             screenshot_timing_perturbed=screenshot_timing_perturbed,
@@ -6442,6 +6447,14 @@ def _phase_record(
         "montage_quality_preview_reduced_failures": int(
             getattr(montage, "tile_lod_preview_reduced_failures", 0) or 0
         ),
+        "montage_quality_preview_reduced_last_gate": str(
+            getattr(montage, "tile_lod_preview_reduced_last_gate", "") or ""
+        ),
+        # Per-(rung, level) evaluation cost: the direct work counter for
+        # "how much does each ladder rung cost at each level".
+        "montage_quality_rung_evaluations": [
+            dict(row) for row in tuple(getattr(montage, "tile_lod_rung_evaluations", ()) or ())
+        ],
         "montage_quality_preview_presentations": int(
             getattr(montage, "tile_lod_preview_presentations", 0) or 0
         ),
@@ -6618,6 +6631,13 @@ def _phase_record(
             vispy.get("wgpu_plane_lookup_candidates_total", 0) or 0
         ),
         "wgpu_uploads_total": int(vispy.get("wgpu_uploads_total", 0) or 0),
+        "wgpu_upload_bytes_total": int(vispy.get("wgpu_upload_bytes_total", 0) or 0),
+        # Which page keys the uploads above carried, one row per (lod level,
+        # representation).  A raw montage's coarse commit uploads native pages,
+        # so the displayed level does not name the uploaded one.
+        "wgpu_uploads_by_level": [
+            dict(row) for row in tuple(vispy.get("wgpu_uploads_by_level", ()) or ())
+        ],
         "wgpu_last_report_uploads": int(vispy.get("wgpu_last_report_uploads", 0) or 0),
         "wgpu_page_pools": list(vispy.get("wgpu_page_pools", ()) or ()),
         "wgpu_atomic_warm_pinned_pages": int(vispy.get("wgpu_atomic_warm_pinned_pages", 0) or 0),
@@ -7120,6 +7140,7 @@ def _base_record(
     profiler_artifact_paths: tuple[str | Path, ...],
     run_temperature: str = "mixed",
     qt_platform: str,
+    repeat_index: int = 0,
     grid_kind: str = "full",
     source_index_count: int | None = None,
     screenshot_timing_perturbed: bool = False,
@@ -7136,6 +7157,9 @@ def _base_record(
         "profiler_artifact_paths": [str(path) for path in tuple(profiler_artifact_paths or ())],
         "run_temperature": str(run_temperature),
         "qt_platform": str(qt_platform),
+        # 0-based position of this workflow pass within a --repeat batch, so a
+        # reader can see the spread instead of guessing at it.
+        "repeat_index": int(repeat_index),
         "xdg_session_type": os.environ.get("XDG_SESSION_TYPE", ""),
         "wayland_display": os.environ.get("WAYLAND_DISPLAY", ""),
         "display": os.environ.get("DISPLAY", ""),
@@ -8926,6 +8950,54 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _workflow_repeat_spread_summary(records: tuple[dict[str, object], ...]) -> str:
+    """Per-run values and median for a ``--repeat`` batch.
+
+    Empty for a single pass.  This is the honest reading of a stage whose
+    wall clock spreads (the reference machine's raw montage covers 4.0-4.9 s):
+    a caller sees the spread rather than treating one run as the number.
+    """
+
+    passes = {int(record.get("repeat_index", 0) or 0) for record in records}
+    if len(passes) < 2:
+        return ""
+    grouped: dict[tuple[str, str], list[tuple[int, float]]] = {}
+    for record in records:
+        elapsed = record.get("elapsed_ms")
+        if elapsed is None:
+            continue
+        key = (str(record.get("backend", "")), str(record.get("phase", "")))
+        grouped.setdefault(key, []).append(
+            (int(record.get("repeat_index", 0) or 0), float(elapsed))
+        )
+    if not grouped:
+        return ""
+    lines = [
+        "",
+        f"Repeat spread over {len(passes)} runs (elapsed ms)",
+        "| Backend | phase | runs | median | min | max | per run |",
+        "|---|---|---:|---:|---:|---:|---|",
+    ]
+    for (backend, phase), samples in sorted(grouped.items()):
+        values = [elapsed for _index, elapsed in sorted(samples)]
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    f"`{backend}`",
+                    f"`{phase}`",
+                    str(len(values)),
+                    f"{median(values):.1f}",
+                    f"{min(values):.1f}",
+                    f"{max(values):.1f}",
+                    ", ".join(f"{value:.1f}" for value in values),
+                )
+            )
+            + " |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _r8_gate_summary(record: dict[str, object]) -> str:
     if not bool(record.get("r8_gate_applicable", False)):
         return "n/a"
@@ -9498,6 +9570,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default="off",
         help="wgpu display texture codec experiment; ignored by other backends",
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help=(
+            "Run the selected stages this many times in one process and report "
+            "the per-run values plus the median; each pass builds a fresh "
+            "window and session, and records carry repeat_index. Montage "
+            "stages stay cold per pass (measured: 1088 uploads every pass); "
+            "load_data does NOT — its file read is OS-page-cache warm from "
+            "pass 2 on (305 ms then ~51 ms)"
+        ),
+    )
     parser.add_argument("--jsonl", default=None, help="Optional JSONL metrics output")
     parser.add_argument("--trace", default=None, help="Structured event trace JSONL output")
     parser.add_argument(
@@ -9761,10 +9846,16 @@ def main(argv: tuple[str, ...] | None = None) -> int:
 
         configure_trace(trace)
     all_records: list[dict[str, object]] = []
+    repeats = max(1, int(args.repeat))
     try:
-        for backend in PROFILE_DEFAULT_BACKENDS if args.backend == "all" else (args.backend,):
+        for repeat_index, backend in (
+            (index, backend)
+            for index in range(repeats)
+            for backend in (PROFILE_DEFAULT_BACKENDS if args.backend == "all" else (args.backend,))
+        ):
             all_records.extend(
                 run_profile_montage_workflow(
+                    repeat_index=repeat_index,
                     data_path=args.data,
                     backend=backend,
                     wgpu_present_method=str(args.wgpu_present_method),
@@ -9796,6 +9887,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
 
             close_trace()
     print(_workflow_timing_summary(tuple(all_records)), end="")
+    print(_workflow_repeat_spread_summary(tuple(all_records)), end="")
     failed = [
         record
         for record in all_records

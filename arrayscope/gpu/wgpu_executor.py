@@ -1573,6 +1573,14 @@ class WgpuPlaneExecutor:
         self._compressed_uploads_total = 0
         self._compressed_fallbacks_total = 0
         self._texture_upload_bytes_total = 0
+        # Upload attribution by (lod level, representation).  The aggregate
+        # totals cannot answer "which keys did those uploads carry" — the
+        # question the 2026-07-26 preview-LOD dossier had to infer (1088
+        # uploads = 272 tiles x 4 native pages while 7.7 MB of level-2 data was
+        # on screen).  Two integer dict bumps per upload, next to a whole-page
+        # `write_texture`; nothing per-texel or per-row.
+        self._uploads_by_level_rep: dict[tuple[int, str], int] = {}
+        self._upload_bytes_by_level_rep: dict[tuple[int, str], int] = {}
         self._lod_compressed_source_reductions_total = 0
         self._pool_grows_total = 0
         self._pool_growth_copy_bytes_total = 0
@@ -2415,9 +2423,8 @@ class WgpuPlaneExecutor:
                 self._flat_codec[flat] = 1
                 self._flat_norm[flat] = norm4
                 self._table_dirty = True
-            self._uploads_total += 1
             self._compressed_uploads_total += 1
-            self._texture_upload_bytes_total += len(data)
+            self._record_upload(cmd.key, len(data))
             return 1
 
         self._ensure_free_pool_layer(_POOL_IDS[rep])
@@ -2436,9 +2443,19 @@ class WgpuPlaneExecutor:
             self._flat_codec[flat] = 0
             self._flat_norm[flat] = (0.0, 0.0, 0.0, 0.0)
             self._table_dirty = True
-        self._uploads_total += 1
-        self._texture_upload_bytes_total += int(payload.nbytes)
+        self._record_upload(cmd.key, int(payload.nbytes))
         return 1
+
+    def _record_upload(self, key: DataChunkKey, nbytes: int) -> None:
+        """Account one page upload in the aggregate and per-(level, rep) totals."""
+
+        self._uploads_total += 1
+        self._texture_upload_bytes_total += int(nbytes)
+        bucket = (int(key.lod.level), str(key.representation))
+        self._uploads_by_level_rep[bucket] = self._uploads_by_level_rep.get(bucket, 0) + 1
+        self._upload_bytes_by_level_rep[bucket] = self._upload_bytes_by_level_rep.get(
+            bucket, 0
+        ) + int(nbytes)
 
     def _encode_compressed(
         self, key: DataChunkKey, payload: np.ndarray
@@ -3497,6 +3514,27 @@ class WgpuPlaneExecutor:
         """Actual raw or block-compressed bytes submitted by resident ensures."""
 
         return int(self._texture_upload_bytes_total)
+
+    def upload_rows_by_level(self) -> tuple[dict[str, object], ...]:
+        """``uploads_total``/``texture_upload_bytes_total`` split by page key.
+
+        One row per ``(lod level, representation)`` actually uploaded, coarsest
+        level last, so a run states *which* keys its uploads carried instead of
+        leaving it to be inferred from a tile count.  A displayed level with no
+        row means the draw sampled pages some other level had already made
+        resident (on a raw wgpu montage the native-plane warm does exactly
+        that: level-0 rows, a level-2 draw).
+        """
+
+        return tuple(
+            {
+                "level": int(level),
+                "representation": str(rep),
+                "uploads": int(count),
+                "bytes": int(self._upload_bytes_by_level_rep.get((level, rep), 0)),
+            }
+            for (level, rep), count in sorted(self._uploads_by_level_rep.items())
+        )
 
     @property
     def active_resident_bytes(self) -> int:

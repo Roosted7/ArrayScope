@@ -13,10 +13,12 @@ Data only: no Qt, no numpy payload manipulation, no scheduling decisions.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
 from arrayscope.kernel.task import Lane, Priority
+from arrayscope.render.ladder import Rung
 
 
 @dataclass(frozen=True)
@@ -164,11 +166,72 @@ class PipelineCounters:
         return {name: int(getattr(self, name)) for name in self.__dataclass_fields__}
 
 
+class RungEvaluationTimings:
+    """Evaluation call count and wall time per ``(rung, level)``.
+
+    The claim this exists to settle is "reduced-input evaluation is ~16x
+    cheaper for operation pipelines".  Wall-clock cannot show it — this
+    machine's raw montage stage spreads 4.0-4.9 s run to run — so the cost of
+    each rung at each level has to be counted directly.
+
+    Worker threads record; the GUI thread reads.  One short lock and three
+    integer dict bumps per *evaluation* (not per tile row, page, or texel), so
+    a 272-tile montage pays ~600 of them against multi-millisecond
+    evaluations.
+    """
+
+    __slots__ = ("_calls", "_lock", "_max_ns", "_total_ns")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._calls: dict[tuple[int, int], int] = {}
+        self._total_ns: dict[tuple[int, int], int] = {}
+        self._max_ns: dict[tuple[int, int], int] = {}
+
+    def record(self, rung: int, level: int, elapsed_ns: int) -> None:
+        """Account one finished evaluation, however it ended.
+
+        Cancelled and failed evaluations are recorded too: work spent and
+        thrown away is exactly what a preview-rung audit must see.
+        """
+
+        bucket = (int(rung), int(level))
+        elapsed_ns = max(0, int(elapsed_ns))
+        with self._lock:
+            self._calls[bucket] = self._calls.get(bucket, 0) + 1
+            self._total_ns[bucket] = self._total_ns.get(bucket, 0) + elapsed_ns
+            if elapsed_ns > self._max_ns.get(bucket, 0):
+                self._max_ns[bucket] = elapsed_ns
+
+    def rows(self) -> tuple[dict[str, object], ...]:
+        """One row per observed ``(rung, level)``, coarse rungs first."""
+
+        with self._lock:
+            buckets = sorted(self._calls.items())
+            totals = dict(self._total_ns)
+            maxima = dict(self._max_ns)
+        return tuple(
+            {
+                "rung": int(rung),
+                "rung_name": Rung(rung).name.lower() if rung in _RUNG_VALUES else str(rung),
+                "level": int(level),
+                "calls": int(calls),
+                "total_ms": totals.get((rung, level), 0) / 1e6,
+                "max_ms": maxima.get((rung, level), 0) / 1e6,
+            }
+            for (rung, level), calls in buckets
+        )
+
+
+_RUNG_VALUES = frozenset(int(rung) for rung in Rung)
+
+
 __all__ = [
     "AckExpectation",
     "CommitBatch",
     "LodAdmissionScope",
     "PipelineCounters",
     "RenderIntent",
+    "RungEvaluationTimings",
     "TileWork",
 ]

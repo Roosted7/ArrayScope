@@ -24,12 +24,19 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from time import perf_counter_ns
 from typing import Any, Protocol
 
 from arrayscope.kernel import Kernel, Lane, Priority, Supersession, TaskSpec
 from arrayscope.render.ladder import LodLadder, Rung, RungStep, TileLodState
 from arrayscope.render.progressive_scheduling import SchedulingVerdict
-from arrayscope.render.stages import CommitBatch, LodAdmissionScope, PipelineCounters, RenderIntent
+from arrayscope.render.stages import (
+    CommitBatch,
+    LodAdmissionScope,
+    PipelineCounters,
+    RenderIntent,
+    RungEvaluationTimings,
+)
 
 
 class PipelineEffects(Protocol):
@@ -144,6 +151,7 @@ class FramePipeline:
         self.effects = effects
         self.ladder = ladder or LodLadder()
         self.counters = PipelineCounters()
+        self.rung_timings = RungEvaluationTimings()
         self._commit_max_items = max(1, int(commit_max_items))
         self._current_intent: RenderIntent | None = None
         self._ready_upserts: list = []
@@ -300,7 +308,7 @@ class FramePipeline:
         )
         spec = TaskSpec(
             key=step_key,
-            fn=self.effects.evaluate_rung(intent, step),
+            fn=self._timed_rung_evaluation(step, self.effects.evaluate_rung(intent, step)),
             lane=step.lane,
             priority=step.priority,
             scheduling_rank=int(step.scheduling_rank),
@@ -308,6 +316,9 @@ class FramePipeline:
             coverage_pass_open=coverage_pass_open,
             session_id=int(getattr(session, "session_id", 0) or 0),
             tile_number=int(step.tile_number),
+            # Ladder provenance for the trace only; identity stays `step_key`.
+            rung=int(step.rung),
+            level=int(step.level),
             scope=self._scope(intent.semantic_key),
             deps=self.effects.rung_deps(intent, step),
             # Latest-only per tile+rung: a *demand/level* change replaces the
@@ -338,6 +349,28 @@ class FramePipeline:
             return True
         self.effects.rung_dropped(intent, step)
         return False
+
+    def _timed_rung_evaluation(self, step: RungStep, evaluate: Callable[..., Any]):
+        """Wrap a rung's worker function so its cost lands in ``rung_timings``.
+
+        The wrapper is the whole evaluation and nothing else: no per-tile
+        allocation, one clock read on each side, and the record happens in a
+        ``finally`` so a cancelled or failed rung still reports the work it
+        burned.
+        """
+
+        rung = int(step.rung)
+        level = int(step.level)
+        timings = self.rung_timings
+
+        def timed(*args, **kwargs):
+            started_ns = perf_counter_ns()
+            try:
+                return evaluate(*args, **kwargs)
+            finally:
+                timings.record(rung, level, perf_counter_ns() - started_ns)
+
+        return timed
 
     def _drain_pending_admissions(self, generation: int) -> int:
         """Submit one bounded chunk of already-planned visible rung work."""

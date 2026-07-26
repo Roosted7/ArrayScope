@@ -3073,3 +3073,58 @@ def test_physical_tile_timeline_reports_draw_rate_without_settlement_gates():
         "100": 500.0,
     }
     assert "semantic evidence" in result["physical_tile_timeline_scope"]
+
+
+def test_repeat_spread_summary_reports_every_run_and_the_median():
+    """A `--repeat` batch must show the spread, not one run as "the number".
+
+    The reference machine's raw montage stage covers 4.0-4.9 s, so a single
+    elapsed value cannot support or refute a sub-0.5 s change.
+    """
+
+    from arrayscope.tools.profile_montage_workflow import _workflow_repeat_spread_summary
+
+    records = tuple(
+        {
+            "backend": "wgpu",
+            "phase": "raw_full_tiled_montage",
+            "repeat_index": index,
+            "elapsed_ms": elapsed,
+        }
+        for index, elapsed in enumerate((4412.5, 4216.1, 4436.1))
+    )
+
+    summary = _workflow_repeat_spread_summary(records)
+
+    assert "Repeat spread over 3 runs" in summary
+    assert "4412.5, 4216.1, 4436.1" in summary  # per run, in run order
+    assert "| 3 | 4412.5 | 4216.1 | 4436.1 |" in summary  # runs, median, min, max
+
+
+def test_repeat_spread_summary_is_silent_for_a_single_pass():
+    from arrayscope.tools.profile_montage_workflow import _workflow_repeat_spread_summary
+
+    records = ({"backend": "wgpu", "phase": "raw", "repeat_index": 0, "elapsed_ms": 1.0},)
+    assert _workflow_repeat_spread_summary(records) == ""
+    assert _workflow_repeat_spread_summary(()) == ""
+
+
+def test_repeat_spread_summary_groups_backends_and_phases_separately():
+    from arrayscope.tools.profile_montage_workflow import _workflow_repeat_spread_summary
+
+    records = tuple(
+        {
+            "backend": backend,
+            "phase": phase,
+            "repeat_index": index,
+            "elapsed_ms": 100.0 * (index + 1),
+        }
+        for index in (0, 1)
+        for backend in ("wgpu", "pyqtgraph")
+        for phase in ("load_data", "raw_full_tiled_montage")
+    )
+
+    lines = [line for line in _workflow_repeat_spread_summary(records).splitlines() if "`" in line]
+
+    assert len(lines) == 4
+    assert all("| 2 | 150.0 | 100.0 | 200.0 |" in line for line in lines)

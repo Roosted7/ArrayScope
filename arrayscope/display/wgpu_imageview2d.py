@@ -2730,6 +2730,12 @@ class WgpuImageView2D(ImageViewShell):
             "presented_tiles": committed_tiles,
             "page_table_resident_count": resident,
             "wgpu_uploads_total": int(getattr(executor, "uploads_total", 0) or 0),
+            "wgpu_upload_bytes_total": int(getattr(executor, "texture_upload_bytes_total", 0) or 0),
+            "wgpu_uploads_by_level": (
+                ()
+                if executor is None
+                else tuple(dict(row) for row in executor.upload_rows_by_level())
+            ),
             "wgpu_compressed_uploads_total": int(
                 getattr(executor, "compressed_uploads_total", 0) or 0
             ),

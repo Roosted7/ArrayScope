@@ -643,28 +643,51 @@ class Kernel:
             key=spec.key,
             lane=str(spec.lane),
             priority=int(spec.priority),
+            rung=int(spec.rung),
+            level=int(spec.level),
         )
         with self._lock:
             self._lane(spec.lane).started += 1
         if record.token.cancelled:
             self._finish(record, TaskOutcome.CANCELLED)
             return
+        # `fn_ns` is the body alone: kernel_start fires before the started
+        # bookkeeping and kernel_finish after delivery, so their timestamp
+        # difference prices queue and lock work into the evaluation.  Two
+        # clock reads per task make per-(rung, level) evaluation cost
+        # readable straight off the trace.
+        started_ns = perf_counter_ns()
         try:
             value = spec.fn(record.token) if spec.pass_token else spec.fn()
         except EvaluationCancelled:
-            self._finish(record, TaskOutcome.CANCELLED)
+            self._finish(record, TaskOutcome.CANCELLED, fn_ns=perf_counter_ns() - started_ns)
             return
         except BaseException as exc:
             exc.arrayscope_traceback = "".join(
                 traceback.format_exception(type(exc), exc, exc.__traceback__)
             )
-            self._finish(record, TaskOutcome.FAILED, error=exc)
+            self._finish(
+                record, TaskOutcome.FAILED, error=exc, fn_ns=perf_counter_ns() - started_ns
+            )
             return
-        self._finish(record, TaskOutcome.COMPLETED, value=value)
+        self._finish(
+            record,
+            TaskOutcome.COMPLETED,
+            value=value,
+            fn_ns=perf_counter_ns() - started_ns,
+        )
 
     # ---------------------------------------------------------- internals
 
-    def _finish(self, record: _Record, outcome: TaskOutcome, *, value=None, error=None) -> None:
+    def _finish(
+        self,
+        record: _Record,
+        outcome: TaskOutcome,
+        *,
+        value=None,
+        error=None,
+        fn_ns: int = -1,
+    ) -> None:
         spec = record.spec
         wake = False
         with self._lock:
@@ -705,6 +728,9 @@ class Kernel:
             lane=str(spec.lane),
             outcome=str(outcome.value),
             error_type=None if error is None else type(error).__name__,
+            rung=int(spec.rung),
+            level=int(spec.level),
+            fn_ns=int(fn_ns),
         )
         if wake:
             self._backend.wake()

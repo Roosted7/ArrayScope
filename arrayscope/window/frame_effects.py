@@ -1265,7 +1265,7 @@ class FramePipelineEffects:
         session = self.session
         demand = session.ingest_lod_demand()
         if demand is None or not self._session_is_current():
-            return 0
+            return self._preview_reduced_blocked("no demand" if demand is None else "stale session")
         visible_scope = (
             None
             if scope is None
@@ -1279,12 +1279,16 @@ class FramePipelineEffects:
             if visible_scope is None or int(tile.montage_index) in visible_scope
         )
         if not plan_tiles:
-            return 0
+            return self._preview_reduced_blocked("no planned tiles")
         seed = plan_tiles[0]
         if render_effects.preview_pipeline_commutes_for_display_lod(session, seed):
-            return 0  # commuting pipelines get per-tile FLOOR/DESIRED rungs.
-        if not render_effects.shared_preview_is_useful(session, seed, demand):
+            # Commuting pipelines get per-tile FLOOR/DESIRED rungs. Not a
+            # refusal of reduced-input preview — a different owner for it,
+            # measured by the ladder's own per-(rung, level) timings.
+            self._preview_reduced_gate("per-tile rungs own reduced input")
             return 0
+        if not render_effects.shared_preview_is_useful(session, seed, demand):
+            return self._preview_reduced_blocked(self._shared_preview_refusal(seed, demand))
         desired = int(getattr(demand, "desired_level", 0) or 0)
         preview_level = int(render_effects.preview_evaluation_level(session, demand))
         submitted = 0
@@ -1351,10 +1355,50 @@ class FramePipelineEffects:
             lane=WorkLane.DISPLAY_PREPARATION,
         )
 
+    # -- reduced-input preview accounting ---------------------------------
+    #
+    # These three counters plus the gate string are the answer to "did the
+    # reduced-input preview path run, and if not, what stopped it".  They read
+    # 0/0/0 for a long time by design: the montage default mode refuses every
+    # call (see `_shared_preview_refusal`), which is a finding, not a silence.
+    # A zero with no gate string means the path was never even asked.
+
+    def _preview_reduced_gate(self, reason: str) -> None:
+        """Record the last gate verdict without counting a refusal."""
+
+        self.renderer._montage_preview_reduced_last_gate = str(reason)
+
+    def _preview_reduced_blocked(self, reason: str) -> int:
+        """Count one refused reduced-input preview call; return 0 submissions."""
+
+        renderer = self.renderer
+        renderer._montage_preview_reduced_blocked = (
+            int(getattr(renderer, "_montage_preview_reduced_blocked", 0) or 0) + 1
+        )
+        renderer._montage_preview_reduced_last_gate = str(reason)
+        return 0
+
+    def _shared_preview_refusal(self, seed, demand) -> str:
+        """Which `shared_preview_is_useful` clause refused, in its own order."""
+
+        session = self.session
+        if str(getattr(session, "lod_policy_mode", "")) == "resident":
+            return "resident lod policy mode"
+        if not render_effects.can_evaluate_reduced_preview(session, seed):
+            return "pipeline does not support reduced display lod"
+        preview_level = int(render_effects.preview_evaluation_level(session, demand))
+        if preview_level < int(getattr(demand, "desired_level", 0) or 0):
+            return "preview level finer than demand"
+        return "shared transform preview disabled"
+
     def _submit_shared_transform_target(self, *, demand, level: int, tiles, priority, lane) -> int:
         session = self.session
         renderer = self.renderer
         level = int(level)
+        # A shared evaluation coarser than the demand is the reduced-input
+        # *preview*; at the demanded level it is the target computed through
+        # the same path, and must not be counted as a preview.
+        reduced_preview = level > int(getattr(demand, "desired_level", 0) or 0)
         tiles = prioritize_tiles(
             tuple(tiles or ()),
             context=session.tile_priority_context(),
@@ -1486,12 +1530,29 @@ class FramePipelineEffects:
             ),
             on_done=done,
             on_stale=dropped,
-            on_error=lambda exc: (dropped(), handle_ui_exception("shared transform target", exc)),
+            on_error=lambda exc: (
+                self._preview_reduced_failed(reduced_preview),
+                dropped(),
+                handle_ui_exception("shared transform target", exc),
+            ),
         )
         if handle is None:
             dropped()
-            return 0
+            return self._preview_reduced_blocked("kernel declined submission")
+        if reduced_preview:
+            renderer._montage_preview_reduced_scheduled = (
+                int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) + 1
+            )
+            self._preview_reduced_gate("submitted")
         return 1
+
+    def _preview_reduced_failed(self, reduced_preview: bool) -> None:
+        if not reduced_preview:
+            return
+        renderer = self.renderer
+        renderer._montage_preview_reduced_failures = (
+            int(getattr(renderer, "_montage_preview_reduced_failures", 0) or 0) + 1
+        )
 
     def commit_pending_session(self) -> None:
         if not self._session_is_current():

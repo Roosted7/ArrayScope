@@ -177,6 +177,10 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             presentation.get("wgpu_atomic_warm_pinned_pages", 0) or 0
         ),
         wgpu_uploads_total=int(presentation.get("wgpu_uploads_total", 0) or 0),
+        wgpu_upload_bytes_total=int(presentation.get("wgpu_upload_bytes_total", 0) or 0),
+        wgpu_uploads_by_level=tuple(
+            dict(row) for row in tuple(presentation.get("wgpu_uploads_by_level", ()) or ())
+        ),
         wgpu_active_resident_bytes=int(presentation.get("wgpu_active_resident_bytes", 0) or 0),
         wgpu_allocated_pool_bytes=int(presentation.get("wgpu_allocated_pool_bytes", 0) or 0),
         wgpu_pool_grows_total=int(presentation.get("wgpu_pool_grows_total", 0) or 0),
@@ -243,6 +247,10 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_lod_preview_reduced_failures=int(
             getattr(window.renderer, "_montage_preview_reduced_failures", 0) or 0
         ),
+        tile_lod_preview_reduced_last_gate=str(
+            getattr(window.renderer, "_montage_preview_reduced_last_gate", "") or ""
+        ),
+        tile_lod_rung_evaluations=_rung_evaluation_rows(session),
         tile_lod_preview_presentations=0
         if session is None
         else int(getattr(session, "lod_preview_presentations", 0) or 0),
@@ -904,6 +912,19 @@ def _montage_payload_level_counts(session) -> tuple[tuple[int, int], ...]:
         level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
         counts[level] = counts.get(level, 0) + 1
     return tuple(sorted(counts.items()))
+
+
+def _rung_evaluation_rows(session) -> tuple[dict[str, object], ...]:
+    """Per-(rung, level) evaluation cost owned by the session's frame pipeline.
+
+    Absent before the first ladder plan, so a missing pipeline is an empty
+    reading rather than a row of zeros.
+    """
+
+    timings = getattr(getattr(session, "pipeline", None), "rung_timings", None)
+    if timings is None:
+        return ()
+    return tuple(dict(row) for row in timings.rows())
 
 
 def _montage_overlay_count(window) -> int:

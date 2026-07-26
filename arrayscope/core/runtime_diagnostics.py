@@ -142,10 +142,21 @@ class MontageRuntimeDiagnostics:
     tile_lod_pending_materializations: int = 0
     tile_lod_materializations_completed: int = 0
     tile_lod_ingest_reductions: int = 0
+    # Shared reduced-input preview path (`submit_shared_transform_floor`):
+    # evaluations submitted, calls the gate refused, and evaluations that
+    # errored, plus the last gate verdict.  On a montage the mode gate refuses
+    # every call, which is the point of counting: "never ran" and "ran and
+    # found nothing" must not look alike.
     tile_lod_preview_reduced_scheduled: int = 0
     tile_lod_preview_reduced_blocked: int = 0
     tile_lod_preview_reduced_failures: int = 0
+    tile_lod_preview_reduced_last_gate: str = ""
     tile_lod_preview_presentations: int = 0
+    # Ladder evaluation cost, one row per (rung, level) actually evaluated:
+    # {rung, rung_name, level, calls, total_ms, max_ms}.  A direct work
+    # counter — usable where the stage's own wall clock is too noisy to show a
+    # change (raw montage spread is 4.0-4.9 s on the reference machine).
+    tile_lod_rung_evaluations: tuple[dict[str, object], ...] = ()
     # ADR 0050 zero-redundant-work counters: histogram/level recomputes caused
     # by display-LOD level swaps must stay 0; the reuse counters make the
     # avoided work observable in JSONL A/B traces.
@@ -223,6 +234,12 @@ class MontageRuntimeDiagnostics:
     wgpu_page_table_resident_count: int = 0
     wgpu_atomic_warm_pinned_pages: int = 0
     wgpu_uploads_total: int = 0
+    wgpu_upload_bytes_total: int = 0
+    # Upload attribution by page key: ({level, representation, uploads, bytes},
+    # ...).  Answers which LOD levels the aggregate above actually carried —
+    # the question a displayed level alone cannot answer once a coarse commit
+    # substitutes native pages for a reduced payload.
+    wgpu_uploads_by_level: tuple[dict[str, object], ...] = ()
     wgpu_active_resident_bytes: int = 0
     wgpu_allocated_pool_bytes: int = 0
     wgpu_pool_grows_total: int = 0
@@ -929,6 +946,8 @@ _MONTAGE_COVERED = frozenset(
         "wgpu_page_table_resident_count",
         "wgpu_atomic_warm_pinned_pages",
         "wgpu_uploads_total",
+        "wgpu_upload_bytes_total",
+        "wgpu_uploads_by_level",
         "wgpu_active_resident_bytes",
         "wgpu_allocated_pool_bytes",
         "wgpu_pool_grows_total",
@@ -968,7 +987,9 @@ _MONTAGE_COVERED = frozenset(
         "tile_lod_preview_reduced_scheduled",
         "tile_lod_preview_reduced_blocked",
         "tile_lod_preview_reduced_failures",
+        "tile_lod_preview_reduced_last_gate",
         "tile_lod_preview_presentations",
+        "tile_lod_rung_evaluations",
         "tile_lod_stats_cross_level_reuses",
         "tile_lod_stats_recomputes",
         "tile_lod_cross_level_reductions",
@@ -1117,18 +1138,45 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         or int(row.get("raw_resident_layers", 0) or 0) > 0
         or int(row.get("codec_resident_layers", 0) or 0) > 0
     )
+    rung_evaluation_lines = (
+        (
+            "Rung evaluation: "
+            + " ".join(
+                (
+                    f"{row.get('rung_name', row.get('rung'))}@L{int(row.get('level', 0) or 0)}="
+                    f"{int(row.get('calls', 0) or 0)}x"
+                    f"{float(row.get('total_ms', 0.0) or 0.0):.0f}ms"
+                    f"/max {float(row.get('max_ms', 0.0) or 0.0):.0f}"
+                )
+                for row in montage.tile_lod_rung_evaluations
+            ),
+        )
+        if montage.tile_lod_rung_evaluations
+        else ()
+    )
+    wgpu_upload_level_text = " ".join(
+        (
+            f"L{int(row.get('level', 0) or 0)}"
+            f"{'' if str(row.get('representation', '')) == 'scalar_r32f' else '/' + str(row.get('representation', ''))}"
+            f"={int(row.get('uploads', 0) or 0)}"
+            f"/{format_bytes(int(row.get('bytes', 0) or 0))}"
+        )
+        for row in montage.wgpu_uploads_by_level
+    )
     wgpu_lines = (
         (
             (
                 "WGPU page pools: "
                 f"resident={montage.wgpu_page_table_resident_count} "
                 f"atomic_pins={montage.wgpu_atomic_warm_pinned_pages} "
-                f"uploads={montage.wgpu_uploads_total} "
+                f"uploads={montage.wgpu_uploads_total}/"
+                f"{format_bytes(montage.wgpu_upload_bytes_total)} "
                 f"resident_bytes={format_bytes(montage.wgpu_active_resident_bytes)} "
                 f"allocated={format_bytes(montage.wgpu_allocated_pool_bytes)} "
                 f"grows={montage.wgpu_pool_grows_total}/"
                 f"{format_bytes(montage.wgpu_pool_growth_copy_bytes_total)}"
             ),
+            *((f"  uploads by level: {wgpu_upload_level_text}",) if wgpu_upload_level_text else ()),
             *wgpu_pool_lines,
             *(
                 (f"WGPU POOL ERROR: {montage.wgpu_last_pool_exhaustion}",)
@@ -1251,12 +1299,14 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"level_from_level={montage.tile_lod_cross_level_reductions} "
             f"preview_sched/block/fail={montage.tile_lod_preview_reduced_scheduled}/"
             f"{montage.tile_lod_preview_reduced_blocked}/"
-            f"{montage.tile_lod_preview_reduced_failures} "
+            f"{montage.tile_lod_preview_reduced_failures}"
+            f"{'' if not montage.tile_lod_preview_reduced_last_gate else '(' + montage.tile_lod_preview_reduced_last_gate + ')'} "
             f"reruns_avoided={montage.tile_lod_pipeline_reruns_avoided} "
             f"stage_hits={montage.tile_lod_stage_hits_serving_derivations} "
             f"hist_recomputes={montage.tile_histogram_lod_swap_recomputes} "
             f"hist_reuses={montage.tile_histogram_cross_level_reuses}"
         ),
+        *rung_evaluation_lines,
         # -- timings, grouped; n/a entries hidden --
         _ms_group(
             "Plan",

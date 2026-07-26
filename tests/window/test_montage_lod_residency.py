@@ -8305,3 +8305,60 @@ def test_admitted_wrapper_keeps_ladder_residency_during_atomic_wait():
     assert not any(int(step.tile_number) == 1 and step.rung == Rung.FLOOR for step in steps), (
         "no duplicate FLOOR producer may be planned while the wrapper awaits the swap"
     )
+
+
+def test_resident_mode_records_why_the_reduced_input_preview_never_runs():
+    """`tile_lod_preview_reduced_*` must distinguish refused from never-asked.
+
+    These three counters read 0 for every montage because the mode gate
+    refuses every call.  That is a finding about the system, and it is only
+    legible if the refusal is counted and named — a bare 0 reads as "the path
+    ran and found nothing to do".
+    """
+
+    session = _session(count=2, mode=LOD_POLICY_RESIDENT, pyramid=LodPageCache(max_bytes=1 << 20))
+    session.document = ArrayDocument(
+        np.ones((TILE, TILE, 8), dtype=np.float32),
+        operations=(CenteredFFT(axis=2),),
+    )
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+
+    assert (
+        effects.submit_shared_transform_floor(
+            LodAdmissionScope(visible_tile_numbers=frozenset({0, 1}))
+        )
+        == 0
+    )
+
+    assert int(getattr(renderer, "_montage_preview_reduced_blocked", 0)) == 1
+    assert getattr(renderer, "_montage_preview_reduced_last_gate", "") == "resident lod policy mode"
+    assert int(getattr(renderer, "_montage_preview_reduced_scheduled", 0)) == 0
+    assert int(getattr(renderer, "_montage_preview_reduced_failures", 0)) == 0
+
+
+def test_commuting_pipeline_is_not_counted_as_a_refused_reduced_preview():
+    """A raw pipeline's reduced input is owned by the per-tile ladder rungs.
+
+    Different owner, not a refusal: counting it as blocked would make the
+    counter say the reduced-input path was denied when it was simply measured
+    somewhere else (the ladder's own per-(rung, level) timings).
+    """
+
+    session = _session(count=2, mode=LOD_POLICY_RESIDENT, pyramid=LodPageCache(max_bytes=1 << 20))
+    session.document = ArrayDocument(np.ones((TILE, TILE, 8), dtype=np.float32))
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+
+    assert (
+        effects.submit_shared_transform_floor(
+            LodAdmissionScope(visible_tile_numbers=frozenset({0, 1}))
+        )
+        == 0
+    )
+
+    assert int(getattr(renderer, "_montage_preview_reduced_blocked", 0)) == 0
+    assert (
+        getattr(renderer, "_montage_preview_reduced_last_gate", "")
+        == "per-tile rungs own reduced input"
+    )
