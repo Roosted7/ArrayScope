@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from pyqtgraph.Qt import QtGui
+from pyqtgraph.Qt import QtCore, QtGui
 
 from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -239,6 +239,57 @@ def test_large_preview_prefix_is_not_acknowledged_as_physical_coverage(qt_app):
     assert stats.committed_upserts == ()
     assert stats.presented_identities == {}
     assert layer.preview_atlas_decline_reason == "awaiting-complete-preview-transaction"
+
+
+def test_compact_preview_paints_through_the_real_pyqtgraph_scene(qtbot):
+    from arrayscope.display.imageview2d import ImageView2D
+
+    count = 256
+    geometry = _geometry(count)
+    payloads = {tile: _preview_payload(tile) for tile in range(count)}
+    view = ImageView2D()
+    qtbot.addWidget(view)
+    view.resize(640, 520)
+    view.show()
+    qtbot.waitExposed(view)
+
+    stats = view._montage_tile_layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 257.0),
+        rgb_already_windowed=False,
+        dirty_tiles=tuple(payloads),
+        tile_payloads=payloads,
+        tile_delta=_delta(payloads, active=range(count)),
+    )
+    view.getView().setRange(
+        xRange=(0.0, float(geometry.display_shape[1])),
+        yRange=(0.0, float(geometry.display_shape[0])),
+        padding=0.0,
+    )
+    view.graphicsView.viewport().repaint()
+
+    assert stats.committed_upserts == tuple(range(count))
+    item = view._montage_tile_layer._preview_atlas_item
+    assert item is not None
+    assert item.scene() is not None
+    tile_number = 128
+    row, column = divmod(tile_number, 17)
+    world = QtCore.QPointF(column * 9 + 4, row * 9 + 4)
+    scene = view.getView().mapViewToScene(world)
+    viewport_point = view.graphicsView.mapFromScene(scene)
+    raster = view.graphicsView.viewport().grab().toImage()
+    color = raster.pixelColor(viewport_point)
+    expected = round((tile_number + 1) * 255.0 / 257.0)
+    assert (
+        max(
+            abs(color.red() - expected),
+            abs(color.green() - expected),
+            abs(color.blue() - expected),
+        )
+        <= 2
+    )
 
 
 def test_failed_exact_upload_keeps_preview_member(qt_app, monkeypatch):
