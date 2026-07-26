@@ -89,10 +89,19 @@ montage they read `0/0/0` with gate `per-tile rungs own reduced input` — the
 per-tile ladder rungs are the owner, and §10's rung timings measure them; on the
 FFT montage they read `0/24/0` with gate
 `commutes but not tile-local: no preview owner` (§10f). §10g adds the ladder's
-own gate string, which is what names §2's collapse from the plan side. Two
-siblings in the same family are **still dead** and were left alone:
-`_montage_quality_ingest_reductions` and
-`_montage_quality_stage_hits_serving_derivations` are assigned nowhere either.
+own gate string, which is what names §2's collapse from the plan side.
+
+**Those remaining two dead siblings were deleted rather than wired.**
+`_montage_quality_ingest_reductions` named the old
+`admit_ingest_reduction` path, and
+`_montage_quality_stage_hits_serving_derivations` was incremented only when
+that same ingest admission consumed a stage-backed result. R3 deleted that
+owner when the ladder took over quality progression (`123cf98b`), but its
+diagnostic fields, text slots, and profile JSONL exporters survived. Wiring
+them to current rung evaluations or general stage-backed tile results would
+silently change their meaning. The live evidence is instead the ladder's
+per-rung evaluation/gate diagnostics and the existing
+`tile_compute_stage_backed` compute counter.
 
 ## 3. The preview rung is four times slower than the target it precedes
 
