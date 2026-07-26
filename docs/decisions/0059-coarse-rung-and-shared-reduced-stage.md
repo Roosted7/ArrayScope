@@ -1,11 +1,14 @@
 # ADR 0059: One coarse rung, fed by a shared reduced-input stage
 
-- **Status:** Accepted and implemented (2026-07-26), with the global
-  coarse-before-refine product ordering still open. Supersedes the scheduling
-  half of ADR 0050's "reduce-before-ops and preview-then-refine" section: the
-  two routes it designed still exist as *evaluation* capabilities, but this
-  ADR replaces the shared-transform *scheduling* path with the stage cache the
-  native path already uses, and collapses FLOOR/PREVIEW into one rung.
+- **Status:** Mechanism accepted and implemented (2026-07-26); unconditional
+  product admission retracted after follow-up measurement. The shared
+  real-document stage remains the canonical way to produce a reduced rung,
+  but whether to schedule that rung is now an empirical utility decision.
+  Supersedes the scheduling half of ADR 0050's "reduce-before-ops and
+  preview-then-refine" section: the two routes it designed still exist as
+  *evaluation* capabilities, but this ADR replaces the shared-transform
+  *scheduling* path with the stage cache the native path already uses, and
+  collapses FLOOR/PREVIEW into one rung.
 - **Number:** 0059 was free at `59592c26`. Parallel worktrees have collided on
   ADR numbers before; renumber on integration if 0059 is taken.
 
@@ -227,14 +230,59 @@ bounded coarse presentation, admit no `DESIRED` while a required tile is still
 blank, and stay within the whole-fill bar without restoring the retired shared
 scheduler.
 
+### Follow-up: schedule by measured delivery utility, not operation cost
+
+The stronger ordering failure exposed a more basic policy error: the coarse
+rung is not uniformly useful. On the WGPU raw montage, an order-balanced
+`feeea32a`/current-main A/B used three processes per arm and `--repeat 3` in
+each process (nine stage passes per arm, process order `baseline, main, main,
+baseline, baseline, main`). The raw-stage median moved from **5102.7 ms to
+6104.0 ms**: **+1001.3 ms / +19.6%**. This is the price of making the reduced
+rung actually run on a path whose exact result already arrives quickly.
+
+Nor does "the operation pipeline is expensive" select the useful arm. Three
+current-main WGPU FFT single runs had a **5820.5 ms** whole-fill median. Their
+exact ACKs began **2547–3159 ms before the last coarse ACK**, even though the
+rung counters priced `DESIRED` at 4.26–4.44 s of aggregate worker time and
+`FLOOR` at only 1.56–1.78 s. A same-tip diagnostic with coarse admission
+disabled had a **3419.3 ms** median over three single runs and completed all
+exact ACKs in 3.09–3.84 s. That diagnostic was not order-balanced and is
+therefore directional, not a release timing claim; it is nevertheless enough
+to reject worker-time ratio as the predicate. The supposedly cheap rung
+delivers isolated early pixels, then occupies the presentation path long
+enough to delay complete coverage.
+
+The policy answer is therefore **conditional, but not conditional on
+"expensive pipeline."** A pipeline/backend/display signature may admit the
+rung only after measured evidence for that signature shows both:
+
+1. the backend can represent the genuinely reduced payload, and
+2. the complete coarse ACK pass naturally precedes the first exact ACK, while
+   whole-fill cost remains inside the performance bar.
+
+`operations/cost.py` cannot answer either question: it estimates shapes,
+dtypes, and bytes, not elapsed evaluation or admission. The new
+`montage_quality_rung_evaluations` counter prices completed worker work, but it
+also cannot predict first-use delivery order. Any adaptive implementation
+therefore needs an empirical key that includes the operation pipeline, source
+shape/dtype and reduced region, backend, and display-mapping class. An unknown
+key must skip the rung in the product; profiling may explicitly sample both
+arms and record the result. No measured workload in this follow-up qualifies:
+raw WGPU regresses, FFT WGPU overlaps and delays coverage, and CPU-composited
+complex PyQtGraph cannot represent the reduced page at all. No speculative
+runtime cost predicate is landed by this change.
+
 ## Consequences
 
-Expected, and each one is a gate below rather than a claim:
+Mechanism consequences, each one gated below rather than a universal product
+claim:
 
 - The coarse rung's evaluation for the whole montage drops from 272 native
   evaluations to one ~36 ms reduced evaluation plus 272 parallel fan-outs.
-- Refinement stays on the per-tile parallel ladder, so the 1249 ms exact span
-  is preserved and ground rule 3's 5 s limit is not at risk from this change.
+- Refinement stays on the per-tile parallel ladder. The original expectation
+  that this preserved the exact span is retracted by the follow-up above:
+  shared evaluation does not prevent the extra presentation stream from
+  delaying complete coverage.
 - Three predicates lose their reason to exist
   (`preview_montage_planes_are_independent` and the two shared-transform
   ownership tests), and `shared_preview_is_useful`'s policy gate goes with the
@@ -265,19 +313,19 @@ Expected, and each one is a gate below rather than a claim:
 2. On the FFT montage: exactly one stage materialization for the coarse rung
    across all 272 tiles (counter-pinned via the stage manager's
    attach/hit diagnostics), not 272.
-3. Coarse-rung acks carry the operation key at `quality="preview"`, and across
-   the required scope `max(coarse ACK) < min(exact ACK)`. Per-tile order is
-   insufficient.
-4. Full refined stays at or under baseline (~5.2 s). Quote a **median over at
-   least three order-balanced passes** and say how many: the per-commit dossier
-   found the refinement is bistable — one unmodified baseline pass took 49
-   batches over 8.0 s with `fully_visible_ms` 16 015 against the usual 2
-   batches over 0.28 s — so a single pass can land on that tail and prove
-   nothing. The FFT stage must still come from single runs, never `--repeat`,
-   which inflates it 40% through worker contention.
-5. `montage_quality_rung_evaluations` shows the coarse rung's cost, and the
-   ladder gate counters no longer report `floor already covers this level` as
-   the dominant refusal on the raw stage.
+3. If the policy schedules a coarse rung, its ACKs carry the operation key at
+   `quality="preview"` and, across the required scope,
+   `max(coarse ACK) < min(exact ACK)`. Per-tile order is insufficient.
+4. For each admitted signature, full refined stays at or under baseline. Quote
+   a **median over at least three order-balanced passes** and say how many: the
+   per-commit dossier found the refinement is bistable — one unmodified
+   baseline pass took 49 batches over 8.0 s with `fully_visible_ms` 16 015
+   against the usual 2 batches over 0.28 s — so a single pass can land on that
+   tail and prove nothing. The FFT stage must still come from single runs,
+   never `--repeat`, which inflates it 40% through worker contention.
+5. `montage_quality_rung_evaluations` prices both alternatives. Raw WGPU is
+   expected to skip after the follow-up A/B above; merely removing `floor
+   already covers this level` is no longer a success criterion.
 
 ### Implementation evidence
 
@@ -316,13 +364,29 @@ Implemented on local `main` at `6ad55232`.
   were 5400.0/5329.4/5774.3 ms on main and
   6325.6/6651.4/7357.9 ms on the branch, giving medians of 5400.0 and
   6651.4 ms. The code was reverted.
-- The maintained-backend check was run this time. The full 272-tile
-  PyQtGraph FFT run had zero rung errors and zero raised tasks after
-  `1a050f5d`, but did not settle before the 120 s process watchdog. The bounded
-  32-tile run completed in 3826.1 ms with zero reduced-preview failures and
-  zero unsettled targets. That distinguishes the fixed exception/retry freeze
-  from the still-red full-grid throughput; it does not call the full backend
-  gate green.
+- The maintained-backend check was run this time, and a long watchdog is not
+  used as a substitute for diagnosis. On current main, a **102.8 s trace
+  prefix** reached only 251/272 operation tiles: 251 level-4 preview ACKs, 251
+  level-2 preview ACKs, and 246 exact ACKs. The 118 operation-session commits
+  spent **84.87 s** in backend presentation. The interrupted GUI-thread stack
+  was repeatedly mapping complex payloads through
+  `_apply_backend_tiled_presentation` → `_map_complex_cpu_payload` →
+  `_sample_lut_rgb`. This is converging, not wedged, but it is broken by the
+  product's few-second standard.
+- `feeea32a` is also broken rather than healthy: its **27.8 s trace prefix**
+  reached 163/272 exact tiles, with 39 operation-session commits spending
+  **21.88 s** in presentation. The difference is material: before ADR 0059 it
+  republishes one growing exact set; current main republishes reduced/native
+  preview and exact sets. Planner admission had used tile locality alone,
+  while `evaluate_preview_tile` later discovered that CPU-composited RGB could
+  not represent a reduced scalar/complex page and silently substituted native
+  output. The ladder now requires `can_evaluate_reduced_preview` at admission
+  too. A bounded 32-tile check then completed exact-only in **2673.0 ms** with
+  no FLOOR evaluation, preview payload, failure, or unsettled target. The WGPU
+  companion still completed in **1140.1 ms** with 32 level-4 FLOOR
+  evaluations and 32 non-zero-level complex uploads. The full PyQtGraph
+  growing-set presentation cost remains a separate red item; declining the
+  duplicate rung does not repair it.
 - A three-pass in-process raw run (`--repeat 3`) reported only
   `tile already has committable coverage` and `allow_preview false` as coarse
   refusal reasons; `floor already covers this level` is gone.

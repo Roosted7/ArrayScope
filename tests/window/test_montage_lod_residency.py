@@ -7453,6 +7453,7 @@ def test_montage_axis_fft_with_known_display_axes_reaches_the_coarse_ladder():
 
     from arrayscope.core.view_state import ViewState
     from arrayscope.render import effects as render_effects
+    from arrayscope.window.frame_runtime import _reduced_input_coarse_rung_available
 
     data = np.ones((TILE, TILE, 8), dtype=np.float32)
     view_state = ViewState.from_shape(data.shape).with_image_axes(0, 1)
@@ -7468,3 +7469,14 @@ def test_montage_axis_fft_with_known_display_axes_reaches_the_coarse_ladder():
 
     assert render_effects.preview_pipeline_commutes_for_display_lod(session, seed) is True
     assert render_effects.preview_pipeline_is_tile_local(session, seed) is True
+
+    session.rgb = True
+    session.shader_display = True
+    assert _reduced_input_coarse_rung_available(session, seed) is True
+
+    session.shader_display = False
+    assert render_effects.can_evaluate_reduced_preview(session, seed) is False
+    assert _reduced_input_coarse_rung_available(session, seed) is False
+
+    session.rgb = False
+    assert _reduced_input_coarse_rung_available(session, seed) is True

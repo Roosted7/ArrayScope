@@ -50,6 +50,24 @@ MONTAGE_AUTOFIT_VISIBLE_FRACTION = 0.80
 MONTAGE_AUTOFIT_RESCUE_VISIBLE_FRACTION = 0.35
 
 
+def _reduced_input_coarse_rung_available(session, seed_tile) -> bool:
+    """Whether the ordinary ladder can produce the promised reduced rung.
+
+    Tile locality says the shared stage is safe; it does not say the backend's
+    display payload can represent reduced scalar/complex pages.  In
+    particular, PyQtGraph CPU-composites a complex view to RGB, for which the
+    reduced-page renderer has no format.  Keep that pipeline on its native
+    output path instead of admitting FLOOR and silently substituting a second
+    native evaluation for every tile.
+    """
+
+    return bool(
+        seed_tile is not None
+        and render_effects.preview_pipeline_is_tile_local(session, seed_tile)
+        and render_effects.can_evaluate_reduced_preview(session, seed_tile)
+    )
+
+
 class FrameRuntimeMixin:
     def set_tile_truth_overlay_enabled(self, enabled: bool) -> None:
         self._tile_truth_overlay_enabled = bool(enabled)
@@ -255,10 +273,7 @@ class FrameRuntimeMixin:
             # "Independently tileable", as the comment below has always said
             # -- not "commuting".  Until the commuting predicate became
             # axis-aware the two happened to agree, and they no longer do.
-            reduced_input_available = bool(
-                seed_tile is not None
-                and render_effects.preview_pipeline_is_tile_local(session, seed_tile)
-            )
+            reduced_input_available = _reduced_input_coarse_rung_available(session, seed_tile)
             pipeline = FramePipeline(
                 self.win.kernel,
                 FramePipelineEffects(self, session),
