@@ -189,7 +189,11 @@ def test_create_empty_user_operation_is_selected_ready_template():
     assert entry.label == "New operation"
     assert entry.parameters == ()
     assert wrapper["template"]["kind"] == "empty"
-    with pytest.raises(NotImplementedError, match="new operation is empty"):
+    # The availability gate fires before the stub body does, so the user is told
+    # the operation is unfinished rather than seeing a NotImplementedError from
+    # inside generated code they have not read yet.
+    assert entry.unavailable_reason
+    with pytest.raises(RuntimeError, match="unavailable"):
         registry.create_operation(operation_id).apply(np.ones((2, 2)))
 
 
@@ -407,7 +411,7 @@ def test_create_operation_lazily_scans_user_ops(tmp_path):
     assert registry.get_operation_entry(op_id).id == op_id
 
 
-def test_reserved_runtime_is_skipped_with_problem(tmp_path):
+def test_incomplete_runtime_registers_unavailable_rather_than_vanishing(tmp_path):
     ops_dir = tmp_path / "operations"
     ops_dir.mkdir(parents=True, exist_ok=True)
     (ops_dir / "jl.json").write_text(
@@ -423,9 +427,14 @@ def test_reserved_runtime_is_skipped_with_problem(tmp_path):
     )
     library.refresh_user_operations()
 
-    assert "user:jl" not in {entry.id for entry in registry.all_operations()}
-    problems = library.user_operation_problems()
-    assert any("not yet supported" in message and "julia" in message for _path, message in problems)
+    # "julia" is a concrete command runtime now, so this wrapper is not an
+    # unknown-runtime error -- it is a julia operation missing its command
+    # template. It must still appear in the library, disabled with a reason,
+    # rather than silently vanishing: an operation the user wrote and cannot
+    # find is worse than one they can see and repair.
+    entries = {entry.id: entry for entry in registry.all_operations()}
+    assert "user:jl" in entries
+    assert entries["user:jl"].unavailable_reason
 
 
 def test_unsupported_parameter_kind_is_skipped_with_problem(tmp_path):
@@ -627,3 +636,19 @@ def test_user_op_passes_smoke_harness_checks(tmp_path):
     assert result.shape == predicted_shape
     if predicted_dtype is not None:
         assert result.dtype == np.dtype(predicted_dtype)
+
+
+def test_duplicated_crop_matches_the_original_on_an_empty_selection():
+    # A zero-length axis is a legal array, not a failed shape prediction: the
+    # built-in crop returns (0, 3, 4) for start == stop. The characterizer used
+    # to reject any predicted extent below 1, so a *duplicate* of crop raised
+    # where the operation it copied succeeded.
+    operation_id = library.duplicate_operation("crop")
+    data = np.arange(60, dtype=np.float32).reshape(5, 3, 4)
+    parameters = {"start": 1, "stop": 1}
+
+    duplicate = registry.create_operation(operation_id, axis=0, parameters=parameters)
+    original = registry.create_operation("crop", axis=0, parameters=parameters)
+
+    assert duplicate.output_shape(data.shape) == original.output_shape(data.shape)
+    assert duplicate.apply(data).shape == original.apply(data).shape == (0, 3, 4)

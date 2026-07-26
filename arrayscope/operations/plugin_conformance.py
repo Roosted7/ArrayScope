@@ -107,7 +107,11 @@ class ShapeRule:
 
     def predict(self, input_shape: Shape) -> Shape:
         result = tuple(int(axis.predict(tuple(input_shape))) for axis in self.axes)
-        if any(size < 1 for size in result):
+        # A zero-length axis is a legal array, not a failed prediction: the
+        # built-in crop returns (0, 3, 4) for start == stop, so rejecting 0 made
+        # a *duplicate* of crop raise where the original succeeded. Only a
+        # negative extent is impossible.
+        if any(size < 0 for size in result):
             raise ValueError(f"shape rule {self.detail} predicted invalid shape {result}")
         return result
 
