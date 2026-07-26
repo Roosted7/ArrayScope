@@ -1,4 +1,4 @@
-"""Tier-2 region-conformance harness for plugin operations.
+"""Joint output-contract and region-conformance characterization for plugin ops.
 
 A Tier-1 plugin op is OPAQUE: it always materializes the whole array (see
 :mod:`arrayscope.operations.plugins`).  A **Tier-2** op additionally *claims* it
@@ -12,12 +12,11 @@ reduction, roll, normalization, or FFT dressed up to look elementwise), running
 it per-region yields plausible-but-wrong pixels at interactive speed: exactly the
 silent-corruption class ArrayScope guards hardest against.
 
-So a region claim is never trusted on the author's word.  This module
-property-tests it: build a deterministic array, compute the whole-array result
-once, then for many sampled sub-regions compare the region-path result
-(``fn(whole[region])``) against the oracle (``fn(whole)[region]``).  The registry
-honors the claim only if every sampled region matches; a mismatch downgrades the
-op to the OPAQUE whole-array path (see the gate in ``plugins.py``).
+So neither a region claim nor a declared output adapter is trusted on the
+author's word. This module probes small deterministic slabs, fits only named
+conservative shape rules, observes dtype, and property-tests region behavior in
+one source-aware process-local cache. A false or unfit claim downgrades the op
+to the OPAQUE whole-array cache-stage path (see the gate in ``plugins.py``).
 
 The harness takes a duck-typed ``spec`` (anything with ``id`` and
 ``resolve_fn(axis, params)``) so it does not import the plugin registry -- no
@@ -54,6 +53,9 @@ _CHARACTERIZATION_STATS: dict[str, int] = {
     "probe_calls": 0,
     "probe_elements": 0,
     "probe_ns": 0,
+    "whole_array_calls": 0,
+    "whole_array_elements": 0,
+    "whole_array_ns": 0,
     "region_verified": 0,
     "region_honored": 0,
     "region_rejected": 0,
@@ -123,6 +125,9 @@ class OperationCharacterization:
     probe_calls: int
     probe_elements: int
     probe_ns: int
+    whole_array_calls: int
+    whole_array_elements: int
+    whole_array_ns: int
     cache_key: tuple
 
     @property
@@ -150,6 +155,7 @@ def characterize_operation(
     *,
     axis: int | None = None,
     params=None,
+    exact_input=None,
 ) -> OperationCharacterization:
     """Jointly adjudicate shape, dtype, and windowability with one cache."""
 
@@ -175,6 +181,9 @@ def characterize_operation(
     observations = []
     failure = None
     probe_elements = 0
+    whole_array_calls = 0
+    whole_array_elements = 0
+    whole_array_ns = 0
     for index, probe_shape in enumerate(probe_shapes):
         probe_input = _deterministic_array(
             np.random.default_rng(_SHAPE_PROBE_SEED + index), probe_shape, input_dtype
@@ -188,9 +197,10 @@ def characterize_operation(
         observations.append(
             (probe_shape, tuple(probe_output.shape), probe_output.dtype, probe_input, probe_output)
         )
+    bounded_probe_ns = perf_counter_ns() - started
 
     rule = None if failure is not None else _fit_shape_rule(probe_shapes, observations, param_map)
-    if failure is not None and not observations:
+    if failure is not None and not observations and exact_input is None:
         raise failure
     predictable = rule is not None
     reason = ""
@@ -203,6 +213,20 @@ def characterize_operation(
             ),
             None,
         )
+        if exact is None and exact_input is not None:
+            whole = np.asarray(exact_input)
+            if tuple(whole.shape) != input_shape or whole.dtype != input_dtype:
+                raise ValueError("exact characterization input does not match its signature")
+            exact_started = perf_counter_ns()
+            exact_output = np.asarray(fn(whole))
+            whole_array_calls = 1
+            whole_array_elements = int(whole.size)
+            whole_array_ns = perf_counter_ns() - exact_started
+            exact = (tuple(exact_output.shape), exact_output.dtype)
+            reason = (
+                "bounded observations did not fit; first real whole-array call "
+                f"took {whole_array_ns / 1_000_000:.3f} ms"
+            )
         if exact is None:
             if getattr(spec, "output_shape", None) is None:
                 detail = f": {failure}" if failure is not None else ""
@@ -255,7 +279,6 @@ def characterize_operation(
                 conformance.reason or reason,
             )
 
-    elapsed = perf_counter_ns() - started
     result = OperationCharacterization(
         op_id=str(getattr(spec, "id", "<anonymous>")),
         input_shape=input_shape,
@@ -267,7 +290,10 @@ def characterize_operation(
         reason=reason,
         probe_calls=len(observations),
         probe_elements=probe_elements,
-        probe_ns=elapsed,
+        probe_ns=bounded_probe_ns,
+        whole_array_calls=whole_array_calls,
+        whole_array_elements=whole_array_elements,
+        whole_array_ns=whole_array_ns,
         cache_key=key,
     )
     _CHARACTERIZATION_CACHE[key] = result
@@ -275,7 +301,10 @@ def characterize_operation(
     _CHARACTERIZATION_STATS["predictable" if predictable else "unpredictable"] += 1
     _CHARACTERIZATION_STATS["probe_calls"] += len(observations)
     _CHARACTERIZATION_STATS["probe_elements"] += probe_elements
-    _CHARACTERIZATION_STATS["probe_ns"] += elapsed
+    _CHARACTERIZATION_STATS["probe_ns"] += bounded_probe_ns
+    _CHARACTERIZATION_STATS["whole_array_calls"] += whole_array_calls
+    _CHARACTERIZATION_STATS["whole_array_elements"] += whole_array_elements
+    _CHARACTERIZATION_STATS["whole_array_ns"] += whole_array_ns
     return result
 
 
@@ -305,6 +334,9 @@ def record_runtime_mismatch(
         probe_calls=characterization.probe_calls,
         probe_elements=characterization.probe_elements,
         probe_ns=characterization.probe_ns,
+        whole_array_calls=characterization.whole_array_calls,
+        whole_array_elements=characterization.whole_array_elements,
+        whole_array_ns=characterization.whole_array_ns,
         cache_key=characterization.cache_key,
     )
     _CHARACTERIZATION_CACHE[characterization.cache_key] = exact

@@ -17,6 +17,7 @@ from arrayscope.operations.capabilities import (
     default_chunkable_axes,
 )
 from arrayscope.operations.cost import operation_output_signature
+from arrayscope.operations.plugin_conformance import CharacterizationUnavailable
 from arrayscope.operations.regions import (
     AxisRegion,
     AxisRegionKind,
@@ -1380,6 +1381,7 @@ class ArrayDocument:
             base_shape,
             tuple(step.operation for step in steps if step.enabled),
             base_dtype=getattr(self.base_data, "dtype", None),
+            base_data=self.base_data,
         )
         current_axes = output_axes_for_operations(
             base_axes, tuple(step.operation for step in steps if step.enabled)
@@ -1469,11 +1471,26 @@ def evaluate(base_data, operations):
     return data
 
 
-def evaluate_shape(base_shape, operations, *, base_dtype=None) -> Shape:
+def evaluate_shape(base_shape, operations, *, base_dtype=None, base_data=None) -> Shape:
     shape = tuple(int(size) for size in base_shape)
     dtype = None if base_dtype is None else np.dtype(base_dtype)
-    for operation in operations:
-        shape, dtype = operation_output_signature(shape, dtype, operation)
+    operations = tuple(operations)
+    materialized = None
+    materialized_through = 0
+    for index, operation in enumerate(operations):
+        try:
+            shape, dtype = operation_output_signature(shape, dtype, operation)
+        except CharacterizationUnavailable:
+            if base_data is None:
+                raise
+            if materialized is None:
+                materialized = base_data
+            for previous in operations[materialized_through:index]:
+                materialized = previous.apply(materialized)
+            shape, dtype = operation_output_signature(
+                shape, dtype, operation, exact_input=materialized
+            )
+            materialized_through = index
     return shape
 
 

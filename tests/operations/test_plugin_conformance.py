@@ -329,6 +329,34 @@ def test_unfit_shape_is_exact_and_whole_array_instead_of_extrapolated():
     assert capabilities.chunkable_axes == ()
 
 
+def test_large_unfit_shape_uses_first_real_whole_array_call_without_refusal():
+    def value_and_size_dependent(data):
+        extra = data.shape[0] % 2
+        if data[0, 0] == 42:
+            extra += 1
+        return np.pad(data, ((0, extra), (0, 0)))
+
+    spec = PluginOperationSpec(
+        id="demo:real-fallback",
+        label="Real fallback",
+        fn=value_and_size_dependent,
+        changes_shape=True,
+    )
+    plugins._SPEC_CACHE[spec.id] = spec
+    operation = plugins.create_plugin_operation(spec.id)
+    data = np.full((100, 100), 42, dtype=np.float32)
+
+    from arrayscope.operations.pipeline import ArrayDocument
+
+    document = ArrayDocument(data).with_operation(operation)
+
+    assert document.current_shape == (101, 100)
+    assert operation._characterization_hint.predictable is False
+    assert operation._characterization_hint.whole_array_calls == 1
+    assert operation._characterization_hint.whole_array_elements == data.size
+    assert operation.capabilities(data.shape, data.dtype).cache_stage is True
+
+
 def test_runtime_mismatch_withholds_result_invalidates_and_demotes():
     calls = 0
 

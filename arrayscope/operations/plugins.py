@@ -9,7 +9,8 @@ legitimate stage boundary).  A plugin contributes a pure
 ``fn(ndarray) -> ndarray`` plus a shape/dtype adapter; this module wraps that
 into a :class:`PluginOperation` that satisfies the same pipeline-step interface
 the built-in operations use, so it flows through the existing opaque
-materialization path rather than a parallel one.
+materialization path rather than a parallel one. Output shape, dtype, and any
+Tier-2 region claim are characterized together before planner use.
 
 Discovery is lazy by construction.  Entry-point *names* are enumerated at
 registry-build time (cheap metadata read, no import), but the plugin module is
@@ -90,8 +91,8 @@ class PluginOperationSpec:
     these.  ``fn`` covers the common stateless case; ``build`` covers the
     parametric case (it receives the resolved axis and parameter mapping and
     returns the bound ``fn``).  Exactly one of ``fn``/``build`` must be given.
-    ``output_shape``/``output_dtype`` are the shape/dtype adapter; both default
-    to identity (shape- and dtype-preserving).
+    ``output_shape``/``output_dtype`` are compatibility adapters; observed
+    characterization is authoritative and both adapters default to identity.
     """
 
     id: str
@@ -197,21 +198,24 @@ class PluginOperation:
     def _params(self) -> dict[str, object]:
         return dict(self.params)
 
-    def _characterize(self, shape: Shape, dtype) -> OperationCharacterization:
+    def _characterize(self, shape: Shape, dtype, *, exact_input=None) -> OperationCharacterization:
         characterization = characterize_operation(
             self._spec(),
             tuple(shape),
             np.dtype(dtype),
             axis=self.axis,
             params=self._params(),
+            exact_input=exact_input,
         )
         object.__setattr__(self, "_shape_hint", tuple(shape))
         object.__setattr__(self, "_dtype_hint", np.dtype(dtype))
         object.__setattr__(self, "_characterization_hint", characterization)
         return characterization
 
-    def characterize_output(self, shape: Shape, dtype) -> tuple[Shape, np.dtype]:
-        characterization = self._characterize(shape, dtype)
+    def characterize_output(
+        self, shape: Shape, dtype, *, exact_input=None
+    ) -> tuple[Shape, np.dtype]:
+        characterization = self._characterize(shape, dtype, exact_input=exact_input)
         return characterization.output_shape, characterization.output_dtype
 
     def _region_honored(self, shape: Shape | None = None, dtype=None) -> bool:
