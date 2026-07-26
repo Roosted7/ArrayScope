@@ -265,12 +265,13 @@ NUFFT, ESPIRiT, iterative apps, and wavelet pairs remain deferred until the
 definition/input-slot bundles can carry their extra arrays and structural
 metadata. Bundle A does not invent a unary approximation.
 
-### `bart_pack` — command-runtime seam, zero registered ops
+### `bart_pack` — shared command runtime plus readable BART-native examples
 
 Bundle A likewise removed every BART operation that merely performed built-in
-arithmetic. `bart_available`, `bart_executable`, cfl read/write, `bart_env`, and
-`run_bart` remain intact for Bundle C's command-template runtime. A runnable
-BART install still contributes zero registered operations today.
+arithmetic. Bundle C reimplemented `run_bart` over the shared cfl command
+runtime, preserving its argv API, fake-binary coverage, timeout, cancellation,
+concurrent draining, and cleanup. `bart_executable` now resolves from the
+effective environment `PATH`; it does not interpret `BART_TOOLBOX_PATH`.
 
 | removed id | native replacement | reason |
 |---|---|---|
@@ -284,11 +285,12 @@ BART install still contributes zero registered operations today.
 | `bart:std` | `std` | native sample std (`ddof=1`) returns the honest real dtype |
 | `bart:var` | `var` | native sample variance (`ddof=1`) returns the honest real dtype |
 
-The cfl handoff is intentionally still complex64 because that is BART's format.
-The retained fake-binary tests prove exact argv composition, concurrent pipe
-draining, timeout, cancellation, and cleanup without claiming access to a real
-BART installation. Multi-input reconstruction commands such as `pics` remain
-for Bundles C and E.
+The pack registers two genuinely BART-native, readable command definitions:
+`bart:ecalib` and `bart:walsh`. They are intentionally unavailable until Bundle
+D can characterize their output shapes; users can still inspect and duplicate
+their `bart … {in} {out}` templates. The cfl handoff remains complex64 because
+that is BART's format. Multi-input reconstruction commands such as `pics`
+remain for Bundle E rather than being misrepresented as unary operations.
 
 ## User-defined operations (no packaging required)
 
@@ -337,10 +339,85 @@ built-in (`crop`) or a third-party plugin op. Everything else is
 auto-filled on import from an `ast` introspection of the target function, so a
 user rarely writes this JSON by hand.
 
-`runtime` values `"shell"`, `"julia"` and `"matlab"` are **reserved**: they are
-parsed (schema future-proofing) but not executed today. A wrapper that declares
-one is skipped with a clear "runtime not yet supported" problem recorded (see
-the no-crash guarantee below); only `"python"` runs.
+### Runtime bodies
+
+`runtime` selects one of four concrete bodies:
+
+- `"python"` with no `environment` imports the source into ArrayScope's
+  interpreter, as above.
+- `"python"` with an `environment` id executes the same source/callable in that
+  environment's interpreter. The array crosses the process boundary using the
+  wrapper's `handoff` (`"npy"` or `"cfl"`) and `timeout_s`.
+- `"command"` executes `command_template` directly as an argument vector.
+- `"julia"` and `"matlab"` use the command machinery but prepend the selected
+  environment's interpreter, or `julia` / `matlab` from `PATH`.
+
+A command wrapper is:
+
+```json
+{
+  "format": "arrayscope-operation",
+  "version": 1,
+  "id": "user:external-recon",
+  "label": "External reconstruction",
+  "runtime": "command",
+  "command_template": "recon-tool --iterations {iterations} {in} {out}",
+  "handoff": "npy",
+  "timeout_s": 600,
+  "shell": false,
+  "environment": "recon",
+  "parameters": [
+    {"name": "iterations", "label": "Iterations", "kind": "int", "default": 30}
+  ]
+}
+```
+
+`{in}`, `{out}`, and every declared parameter must occur in the template.
+ArrayScope tokenizes the authored template first and substitutes values second:
+a path containing spaces remains one argument, and a value such as
+`"--looks-like-a-flag"` remains a literal value. The template is never sent to
+a shell unless `"shell": true` is explicitly set. Shell execution is an
+advanced, user-authored opt-in and is unavailable for the Julia/Matlab prefix
+runtimes.
+
+`handoff` currently accepts `"npy"` (dtype-preserving NumPy files) and `"cfl"`
+(BART's complex64, Fortran-ordered `.hdr`/`.cfl` pair). The runtime dispatches
+through a small handoff registry so NIfTI/raw can be added without another
+subprocess implementation. Both formats use the same concurrent stdout/stderr
+draining, overall timeout, and SIGTERM-to-SIGKILL cancellation path.
+
+### Named execution environments
+
+Reusable environments live beside wrappers in `operations/environments.json`:
+
+```json
+{
+  "format": "arrayscope-operation-environments",
+  "version": 1,
+  "environments": [
+    {
+      "id": "recon",
+      "name": "Recon tools",
+      "interpreter": "/opt/recon/bin/python",
+      "conda_env": "",
+      "venv_path": "",
+      "working_directory": "/data/reconstruction",
+      "variables": {
+        "BART_TOOLBOX_PATH": "/opt/bart",
+        "OMP_NUM_THREADS": "4"
+      }
+    }
+  ]
+}
+```
+
+At most one locator is set: an executable `interpreter`, a named `conda_env`,
+or a `venv_path`. A variables/working-directory-only record is valid for a
+general command. Resolution is lazy. Missing interpreters, vanished conda
+environments, invalid working directories, and commands absent from the
+effective `PATH` make referencing operations unavailable; they do not defer a
+crash until Apply. `BART_TOOLBOX_PATH` has no special resolver anymore—it is an
+ordinary variable on a named environment.
 
 `changes_shape` is **reserved and must be `false`**. A wrapper cannot supply an
 `output_shape` adapter, so a shape-changing op could not predict its output
@@ -405,6 +482,11 @@ manager UI drives:
 - `remove_user_operation(id, *, delete_files=True)`,
   `update_user_operation(id, **wrapper_fields)`,
   `user_operation_wrapper(id)`, and `user_operation_source_path(id)`.
+- `execution_environments()`, `update_execution_environment(**fields)`,
+  `remove_execution_environment(id)`, and
+  `resolve_execution_environment(id)` own the reusable environment records.
+- `quarantine_imported_command(id)` and `review_user_operation(id)` own the
+  imported-recipe trust transition.
 - `refresh_user_operations()` — re-scan the directory and re-register. The app
   calls this at startup (as it does for the colormap library) so recipes that
   reference a `user:` op resolve.
@@ -417,14 +499,30 @@ manager UI drives:
 ### The no-crash guarantee
 
 A broken user op **never** breaks startup or any registry enumeration. A wrapper
-with bad JSON, a missing/`syntax-error` code file, a missing callable, or a
-reserved runtime is caught, logged, and **skipped** — the rest of the library
-loads normally. The reason it was skipped is retrievable via
+with bad JSON, a missing/`syntax-error` code file, or a missing callable is
+caught, logged, and **skipped** — the rest of the library loads normally. The
+reason it was skipped is retrievable via
 `user_operation_problems() -> list[(file, message)]`, so the manager UI can show
 the failure instead of the op silently vanishing. Because registry code never
 scans the ops directory itself (the library owns the scan and drives
 `register_user_operation`), one user's broken file can never fail an unrelated
 machine's `all_operations()` or the non-crash smoke harness.
+
+A structurally valid but non-runnable wrapper is different: it remains
+registered with `unavailable_reason`. This covers New's empty template, a
+shape-changing duplicate pending Bundle D, an incomplete command template, a
+missing environment/executable, and an imported command awaiting review.
+Registered unavailable operations remain visible for diagnosis and editing but
+are never offered as runnable work.
+
+### Imported recipes and command trust
+
+A command operation referenced by an imported operation or view recipe is
+persistently marked `review.required` and loaded as a disabled pipeline step.
+It cannot execute during the recipe-triggered render. The manager shows the
+review reason and a **Mark imported command reviewed** action; reviewing clears
+that flag and immediately rechecks its template, environment, and executable.
+Locally authored command operations are not quarantined merely for existing.
 
 ## Managing operations (the manager UI)
 
@@ -461,6 +559,15 @@ label, description, group, icon (with a live preview), *requires axis*, source
 file, callable, copy-vs-link storage, and the full parameter metadata table
 (name, kind, default, min, max, step, description). Changes auto-save; there is
 no separate Save and no second parameter editor.
+
+The runtime selector keeps the ordinary Python case compact. Command, Julia,
+and Matlab definitions replace the source picker with the editable command
+template. The **Advanced** disclosure contains per-operation environment,
+handoff, timeout, and explicit shell settings plus the reusable environment
+editor (interpreter/conda/venv locator, working directory, and variables).
+Unavailable operations carry an `(unavailable)` marker and the same reason
+shown by the add popup, axis-chip menu, and command palette; those three
+surfaces render the entry disabled with the reason as tooltip.
 
 ### Connecting up a custom function (import vs. link)
 
