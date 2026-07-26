@@ -1,6 +1,6 @@
 # Operations as a platform — current state, vision, and the road there
 
-**Status:** Proposed (2026-07-26). Successor to the "custom operations
+**Status:** Implemented (2026-07-26). Successor to the "custom operations
 first-class" program that landed 2026-07-24 (`eaaea1cf`). That program built the
 *plumbing* — a library, a manager, anchored popups, a user-op wrapper format.
 This proposal is about the part it did not do: making the operation set itself
@@ -345,6 +345,16 @@ expressible; start simple.
 **Exit gate:** one real two-input recon runs end-to-end from the UI; ROI-driven
 invalidation is proven to be neither stale nor over-eager.
 
+Landed in Bundle E. Definitions and the single manager/form model now carry
+dimension-set, Compare-document, one-ROI mask/coordinates, and saved-array
+bindings. Multi-input characterization keys include binding plus resolved
+shape/dtype/source identity and are always OPAQUE. `bart:pics` binds sensitivity
+maps and runs from the UI through the shared cfl runtime; the fake BART oracle
+pins primary/sensitivity argv order, cancellation, timeout, and cleanup.
+Evaluation-counter tests prove a referenced ROI geometry edit recomputes once,
+while unrelated geometry and referenced label/color edits reuse the incumbent
+result. Missing sources restore as disabled/unavailable recipe steps.
+
 ### Phase 6 — Discoverability and polish
 
 - Search/filter in the add popup once the set is large; the "More…" partition
@@ -355,6 +365,11 @@ invalidation is proven to be neither stale nor over-eager.
   template editor, environments, slots), reviewed as screenshots — the import
   dialog's defects existing *through* a screenshot pass is the reason this is a
   standing requirement, not a closing chore.
+
+Bundle E supplied reviewed dark/light captures for the slot-bearing parameters
+popup, manager slot editor, and unresolved-slot state. The remaining phase-6
+work is the walkthrough and the already-noted add-popup search/fold redesign;
+the slot surfaces themselves no longer owe gallery coverage.
 
 ## How the work is bundled
 

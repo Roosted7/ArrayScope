@@ -1,7 +1,7 @@
 # ADR 0060: One operation definition, pluggable runtimes, discovered shapes
 
-- **Status:** Accepted (2026-07-26); Bundles A, B, and D are implemented, while
-  C and E remain queued. Refines the operation-extensibility model
+- **Status:** Accepted (2026-07-26); Bundles A–E are implemented. Refines the
+  operation-extensibility model
   established by the plugin-ops work (ADR-less, `docs/plugin-operations.md`) and
   the custom-operations program that landed 2026-07-24 (`eaaea1cf`). Supersedes
   that program's decision to *refuse* shape-changing user operations.
@@ -40,7 +40,7 @@ conclusion that the author must therefore supply it.
 Every operation — built-in, in-tree pack, entry-point plugin, user — is
 describable by a single declarative *definition*: identity (id, label,
 description, group, icon), an interface (requires-axis, parameters with kind,
-default, bounds, step, description, and later input slots), and a *body* that
+default, bounds, step, description, and input slots), and a *body* that
 names a runtime plus its runtime-specific fields.
 
 Built-ins keep their Python dataclass implementations — this is not a rewrite of
@@ -112,6 +112,47 @@ dtype-preserving. Accelerations (numba or otherwise) are landed only with a
 before/after measurement on a representative array, always behind a NumPy
 fallback.
 
+### 6. Auxiliary inputs are declarative sources, not a graph rewrite
+
+An operation definition may declare named `input_slots` with a label,
+description, and accepted source kinds. The primary operation chain remains
+linear. Each slot binding is recipe data and resolves at the window boundary to
+an immutable source snapshot:
+
+- `dimension-set` records one fixed-index selection from the current base
+  array;
+- `open-document` resolves through the existing Compare group;
+- `roi-mask` rasterizes one ROI to a 2-D boolean image-plane mask;
+- `roi-coordinates` supplies one ROI as an `N×2` float64 `(x, y)` array; and
+- `saved-array` memory-maps one `.npy` array.
+
+One slot binds exactly one source. A recipe may bind several slots, but a slot
+does not implicitly collect multiple ROIs. Bounding boxes are not a separate
+representation: a rectangle ROI is either its boolean mask or its four corner
+coordinates.
+
+Multi-input operations begin OPAQUE and demand the whole primary array and
+whole resolved slot arrays. A region capability is not inherited from the
+single-input path. It must be earned later by a workload-specific empirical
+mapping.
+
+The characterization cache key includes every slot's serialized binding,
+resolved shape, dtype, and source identity. This prevents different
+documents/ROIs/files from sharing a shape verdict. ROI source identity includes
+geometry but excludes label and color: moving or editing the referenced ROI
+invalidates its dependent operation, while renaming, recoloring, or editing an
+unrelated ROI does not. Deleting an ROI, closing a bound document, or removing
+a saved file rebuilds the step as disabled with an `unavailable_reason`.
+Recipe load follows the same disabled/quarantine path rather than failing the
+load or deferring a crash until apply.
+
+Resolved slots are process-local snapshots and are deliberately not serialized.
+The binding/resolution split is permanent ownership, not temporary scaffolding.
+The current `python-environment` runtime does not yet transport extra arrays and
+therefore advertises a definition-level unavailable reason when slots are
+declared; adding multi-file transport there would delete that explicit
+limitation.
+
 ## Consequences
 
 **Good**
@@ -148,6 +189,9 @@ fallback.
   through the problems channel, not as a crash.
 - More definition surface means more to keep coherent; mitigated by there being
   exactly one editor and one schema.
+- Open-document and dimension-set bindings use session-local identities. A
+  recipe restored in a different session loads safely but disabled until the
+  user chooses replacement sources.
 
 ## Alternatives considered
 

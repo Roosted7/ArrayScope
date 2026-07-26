@@ -267,9 +267,10 @@ enumerating operations never imports SigPy.
 | `sigpy:downsample` | `resample` | integer-only decimation was not an honest general resampler |
 | `sigpy:upsample` | `resample` | integer-only zero insertion was not an honest general resampler |
 
-NUFFT, ESPIRiT, iterative apps, and wavelet pairs remain deferred until the
-definition/input-slot bundles can carry their extra arrays and structural
-metadata. Bundle A does not invent a unary approximation.
+NUFFT, ESPIRiT, iterative apps, and wavelet pairs remain candidates for later
+operation definitions. Bundle E now provides the required array-input slots;
+operation-specific structural metadata and honest workload oracles are still
+required rather than inventing unary approximations.
 
 ### `bart_pack` — shared command runtime plus readable BART-native examples
 
@@ -291,12 +292,12 @@ effective environment `PATH`; it does not interpret `BART_TOOLBOX_PATH`.
 | `bart:std` | `std` | native sample std (`ddof=1`) returns the honest real dtype |
 | `bart:var` | `var` | native sample variance (`ddof=1`) returns the honest real dtype |
 
-The pack registers two genuinely BART-native, readable command definitions:
-`bart:ecalib` and `bart:walsh`. They are intentionally unavailable until Bundle
-D can characterize their output shapes; users can still inspect and duplicate
-their `bart … {in} {out}` templates. The cfl handoff remains complex64 because
-that is BART's format. Multi-input reconstruction commands such as `pics`
-remain for Bundle E rather than being misrepresented as unary operations.
+The pack registers three genuinely BART-native, readable command definitions:
+`bart:ecalib`, `bart:walsh`, and the multi-input `bart:pics`. All three use
+Bundle D's empirical characterization and are available when the configured
+`bart` executable resolves. PICS takes primary k-space plus a required
+`sensitivities` slot and hands both off as distinct cfl inputs. The cfl handoff
+remains complex64 because that is BART's format.
 
 ## User-defined operations (no packaging required)
 
@@ -334,6 +335,14 @@ wrapper JSON `<slug>.json`; an *imported* op also has its copied code file
   },
   "requires_axis": true,
   "changes_shape": false,
+  "input_slots": [
+    {
+      "name": "reference",
+      "label": "Reference array",
+      "description": "A second array used by the operation.",
+      "accepts": ["dimension-set", "open-document", "saved-array"]
+    }
+  ],
   "parameters": [
     {"name": "amount", "label": "Amount", "kind": "int", "default": 1}
   ]
@@ -367,18 +376,26 @@ A command wrapper is:
   "id": "user:external-recon",
   "label": "External reconstruction",
   "runtime": "command",
-  "command_template": "recon-tool --iterations {iterations} {in} {out}",
+  "command_template": "recon-tool --iterations {iterations} {in} {reference} {out}",
   "handoff": "npy",
   "timeout_s": 600,
   "shell": false,
   "environment": "recon",
+  "input_slots": [
+    {
+      "name": "reference",
+      "label": "Reference array",
+      "accepts": ["dimension-set", "open-document", "saved-array"]
+    }
+  ],
   "parameters": [
     {"name": "iterations", "label": "Iterations", "kind": "int", "default": 30}
   ]
 }
 ```
 
-`{in}`, `{out}`, and every declared parameter must occur in the template.
+`{in}`, `{out}`, every declared parameter, and every declared input slot must
+occur in the template.
 ArrayScope tokenizes the authored template first and substitutes values second:
 a path containing spaces remains one argument, and a value such as
 `"--looks-like-a-flag"` remains a literal value. The template is never sent to
