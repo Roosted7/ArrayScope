@@ -13,14 +13,20 @@ Use this order rather than scanning every historical note:
    rendering, or LOD code.
 3. `docs/graveyard.md` — rejected approaches. Read before any performance
    or scheduling experiment; do not re-derive a buried idea.
-4. `docs/mission.md` for scope and `docs/roadmap.md` for why the queue is
+4. `docs/agent-briefing.md` — if you are a delegated agent taking a bounded
+   bundle, read this before writing code: the review findings that keep
+   recurring (defaults your own change silently retires, tolerances that hide
+   the defect they test for, edge cases the incumbent handles, scaffolding
+   tests outliving their scaffold, unlocalized "pre-existing" failure claims,
+   surfaces with no gallery scenario).
+5. `docs/mission.md` for scope and `docs/roadmap.md` for why the queue is
    ordered as it is.
-5. `docs/architecture.md`, then the relevant deep dive in
+6. `docs/architecture.md`, then the relevant deep dive in
    `docs/architecture/`.
-6. `docs/testing/README.md` — the test rings and which ring a change must
+7. `docs/testing/README.md` — the test rings and which ring a change must
    pass before its "fixed" claim counts.
-7. `docs/areas.md` when working in parallel with other agents/branches.
-8. `docs/decisions/README.md` and the specific ADR when rationale matters;
+8. `docs/areas.md` when working in parallel with other agents/branches.
+9. `docs/decisions/README.md` and the specific ADR when rationale matters;
    `docs/ideas.md` only for exploratory work.
 
 `docs/archive/`, `docs/redesign/archive/`, and dated reviews are historical

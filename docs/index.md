@@ -16,6 +16,11 @@ Organized by the question you're asking. Stop at the first useful level.
 
 - [Ground rules](ground-rules.md) — standing law: pixels are the gate, one
   owner per decision, no silent fallbacks, repro-first.
+- [Agent briefing](agent-briefing.md) — failure modes that survive the ground
+  rules, recorded from delegated bundles: defaults silently retired by your own
+  change, tolerances that hide the defect they test for, edge cases the
+  incumbent handles, scaffolding tests outliving their scaffold, and
+  "pre-existing failure" claims without a first-bad-commit.
 - [Testing](testing/README.md) — the rings, what runs in CI vs by hand, the
   defect→ring law, environment facts and harness commands.
 - [README demo media](media/README.md) — the front-page animations are
