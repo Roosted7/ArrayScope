@@ -470,7 +470,10 @@ fn minify_taps(fw: vec2<f32>, enabled: u32) -> i32 {
 //   * Residency stays owned by the CENTRE tap, exactly as before the filter
 //     existed, so A3's missing-page hatch keeps one owner; a tap that
 //     resolves to no page is dropped from the average rather than counted as
-//     zero.
+//     zero.  During a partial fill that does re-colour the fragments whose
+//     tap crosses into the absent page -- bounded to half a screen pixel per
+//     page boundary, right beside a region already drawing the hatch.
+//     Counting the tap as zero would invent data instead.
 //   * A tap set containing ANY non-finite value stays non-finite.  Averaging
 //     a NaN into three good neighbours would launder it into a plausible
 //     number, which is the one thing finite_scalar and A2 exist to prevent.

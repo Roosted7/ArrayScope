@@ -300,7 +300,7 @@ invisible (off 4194/4611 ms vs on 3748/3855 ms across an order-balanced pair —
 the arms overlap, and the stage is scheduling-bound exactly as the dossier
 says), but it is a fifth of a 60 fps budget on the interactive pan path.
 
-Two implementation notes worth keeping:
+Implementation notes worth keeping:
 
 - **Resolve-per-tap, with a same-page shortcut.** Doing the taps manually and
   calling `resolve()` per tap sidesteps the gutter blocker as designed. Naively
@@ -322,6 +322,81 @@ Two implementation notes worth keeping:
   no shader oracle red — so the rule is locked at the mirror level in
   `tests/display/test_shader_mapping.py` instead. Kept because a wrong colour
   at a tile border would be worse than the aliasing this removes.
+- **Dropping a non-resident tap does re-colour a sliver during a partial
+  fill, and that is accepted.** A fragment whose tap crosses into a page that
+  is absent *at every level* averages fewer taps than it eventually will, so
+  its colour changes when the neighbour lands. The band is bounded: a tap sits
+  `fw/4` from the fragment centre, so only centres within `fw/4` of a page
+  boundary can cross it — **half a screen pixel per 256-texel page boundary,
+  independent of zoom**, and only while the neighbour is drawing the A3
+  missing-page hatch, i.e. immediately beside a region that is about to change
+  far more visibly anyway. Both alternatives are worse: counting a missing tap
+  as zero invents data and darkens the band, and promoting any missing tap to
+  "fragment missing" would grow the hatch over data we actually have.
+
+### Rejected: gating the filter on the coarse rung instead of a user flag
+
+Proposed 2026-07-26 — filter only where the payload is coarser than the
+demanded level, so the cost lands on the placeholder frame and the refined
+draw keeps its exact single `textureLoad`, making refinement read as
+blurry-then-sharp. **Refuted on three independent legs; the filter stays gated
+on minification alone.**
+
+**1. There is nothing to gate on: on wgpu the two rungs are the same draw.**
+Every tile the wgpu view commits is built with `lod_level=0`
+(`_wgpu_camera_tiles`), and `wgpu_uploads_by_level` on this stage reports
+exactly one row — `level 0, scalar_r32f, 1088 uploads, 285 MB`, no level-2 or
+level-4 row at all — because the native-plane warm (`e266260`) deliberately
+uploads the exact semantic plane. So `resolve()` lands on level 0 for every
+fragment of every frame, coarse rung and refined rung alike. The rungs differ
+in *when* tiles arrive, not in what is drawn. The harness's own FLOOR and FINAL
+screenshots of this stage are byte-identical.
+
+**2. The pixels agree: the coarse phase is not blurrier, it is if anything
+rougher.** Aliasing energy through the fill, 0.25 s timelapse:
+
+| t (s) | 2.8 | 3.5 | 4.0 | settled |
+|---|---:|---:|---:|---:|
+| filter off | 7.98 | 9.39 | 9.43 | 9.28 |
+| filter on | 6.46 | 7.51 | 7.54 | 7.39 |
+
+There is no blurry-then-sharp progression to preserve — the "preview" is
+already a native-texel point sample. Composing the two measured arms, a
+coarse-gated filter would run 7.4 during the fill and then **9.28 at rest**:
+the upgrade would visibly get *rougher*, which re-creates the field report's
+complaint rather than fixing it. (Composition, not a third run — with legs 1
+and 3 the gate has no other reachable output.)
+
+**3. Where a genuinely reduced coarse payload does exist, the filter is
+already inert — at today's floor.** On this dataset the coarse rung is level 4:
+21×21 texels drawn at ~57 px, **0.37 texels/px, magnifying 2.7×**, which the
+minification gate declines outright. Following
+[ADR 0059](../decisions/0059-coarse-rung-and-shared-reduced-stage.md), state
+what fixes that level: it is the `PREVIEW_FLOOR_MIN_LEVEL = 4` clamp, not
+`target_edge=48` — the unclamped formula would choose level 2 here (84 texels;
+42 undershoots 48). So this leg is conditional on the floor, and worth
+re-checking if the floor ever moves finer. It does not flip even then: at the
+unclamped level 2 the coarse draw is 84 texels over ~57 px = **1.47
+texels/px**, a 2-tap draw at the very bottom of the filter's range, while the
+native draw it precedes sits at **5.94**. Gating on "coarse" would still point
+the filter away from most of the aliasing, and at today's floor it disarms it
+completely.
+
+The cost argument for the gate inverts too. Because both rungs draw
+identically, a coarse-gated filter costs the same per frame as an always-on one
+*during* the fill and saves the pan-path cost only by giving up the resting
+view — and on a zoomed-out montage the resting view and the pan view are the
+same view at the same 5.9 texels/px.
+
+**What remains open is the plain default, not the gate.** Flipping only
+`AppSettingsState.wgpu_minification_filter` to `True` (leaving the protocol
+dataclass default `False`, which is what the executor oracles construct) keeps
+`tests/gpu tests/display tests/render tests/presentation` green — the display
+oracles magnify, where the filter is inert, so no rebaseline is forced. Read
+that as "not blocked", not as "covered": no oracle exercises a minified wgpu
+draw through app settings. The remaining reason to keep it off is the +1.7 ms
+per minified draw, which is a fifth of a 60 fps budget. That is a product call,
+deliberately left to the owner rather than taken here.
 
 ## Stage D — per-pixel value labels
 

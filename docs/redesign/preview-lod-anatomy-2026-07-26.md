@@ -294,6 +294,11 @@ never done, §5.2's is about work done too many times.
    ms), which is why it is opt-in. Invisible on this stage, which is
    scheduling-bound. Measurements and the trust rules:
    [wgpu-shader-legibility.md § C1 as built](../proposals/wgpu-shader-legibility.md#c1-as-built).
+   **Gating it on the coarse rung instead of a flag is refuted there**, and the
+   reason is §4's own finding turned around: with the native-plane warm both
+   rungs draw level-0 pages at 5.94 texels/px, so there is no coarse draw to
+   gate on — and where a genuinely reduced payload exists, `target_edge=48`
+   puts it near one texel per pixel, which the filter already declines.
    `textureLoad` point sampling is why the preview aliases *and* why the
    refinement is invisible. A preview-only multi-tap read is O(1) per fragment
    and, with the native plane already resident, costs no bandwidth — it
