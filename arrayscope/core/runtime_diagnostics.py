@@ -141,7 +141,6 @@ class MontageRuntimeDiagnostics:
     tile_lod_page_families: tuple[tuple[tuple[int, ...], str, int], ...] = ()
     tile_lod_pending_materializations: int = 0
     tile_lod_materializations_completed: int = 0
-    tile_lod_ingest_reductions: int = 0
     # Shared reduced-input preview path (`submit_shared_transform_floor`):
     # evaluations submitted, calls the gate refused, and evaluations that
     # errored, plus the last gate verdict.  On a montage the mode gate refuses
@@ -183,7 +182,6 @@ class MontageRuntimeDiagnostics:
     tile_lod_stats_recomputes: int = 0
     tile_lod_cross_level_reductions: int = 0
     tile_lod_pipeline_reruns_avoided: int = 0
-    tile_lod_stage_hits_serving_derivations: int = 0
     tile_histogram_lod_swap_recomputes: int = 0
     tile_histogram_cross_level_reuses: int = 0
     tile_compute_cache_hits: int = 0
@@ -1002,7 +1000,6 @@ _MONTAGE_COVERED = frozenset(
         "tile_lod_page_families",
         "tile_lod_pending_materializations",
         "tile_lod_materializations_completed",
-        "tile_lod_ingest_reductions",
         "tile_lod_preview_reduced_scheduled",
         "tile_lod_preview_reduced_blocked",
         "tile_lod_preview_reduced_failures",
@@ -1018,7 +1015,6 @@ _MONTAGE_COVERED = frozenset(
         "tile_lod_stats_recomputes",
         "tile_lod_cross_level_reductions",
         "tile_lod_pipeline_reruns_avoided",
-        "tile_lod_stage_hits_serving_derivations",
         "tile_histogram_lod_swap_recomputes",
         "tile_histogram_cross_level_reuses",
         "overlay_count",
@@ -1279,7 +1275,6 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"page_families={montage.tile_lod_page_families} "
             f"pending={montage.tile_lod_pending_materializations} "
             f"completed={montage.tile_lod_materializations_completed} "
-            f"ingest={montage.tile_lod_ingest_reductions} "
             f"preview={montage.tile_lod_preview_presentations}"
         ),
         *warning_lines,
@@ -1357,7 +1352,6 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"{montage.tile_lod_preview_reduced_failures}"
             f"{'' if not montage.tile_lod_preview_reduced_last_gate else '(' + montage.tile_lod_preview_reduced_last_gate + ')'} "
             f"reruns_avoided={montage.tile_lod_pipeline_reruns_avoided} "
-            f"stage_hits={montage.tile_lod_stage_hits_serving_derivations} "
             f"hist_recomputes={montage.tile_histogram_lod_swap_recomputes} "
             f"hist_reuses={montage.tile_histogram_cross_level_reuses}"
         ),

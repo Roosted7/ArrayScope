@@ -6465,9 +6465,6 @@ def _phase_record(
         "montage_quality_materializations_completed": int(
             getattr(montage, "tile_lod_materializations_completed", 0) or 0
         ),
-        "montage_quality_ingest_reductions": int(
-            getattr(montage, "tile_lod_ingest_reductions", 0) or 0
-        ),
         "montage_quality_preview_reduced_scheduled": int(
             getattr(montage, "tile_lod_preview_reduced_scheduled", 0) or 0
         ),
@@ -6516,9 +6513,6 @@ def _phase_record(
         ),
         "montage_quality_pipeline_reruns_avoided": int(
             getattr(montage, "tile_lod_pipeline_reruns_avoided", 0) or 0
-        ),
-        "montage_quality_stage_hits_serving_derivations": int(
-            getattr(montage, "tile_lod_stage_hits_serving_derivations", 0) or 0
         ),
         "montage_histogram_lod_swap_recomputes": int(
             getattr(montage, "tile_histogram_lod_swap_recomputes", 0) or 0

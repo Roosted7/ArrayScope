@@ -235,9 +235,6 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_lod_materializations_completed=0
         if session is None
         else int(getattr(session, "lod_materializations_completed", 0) or 0),
-        tile_lod_ingest_reductions=int(
-            getattr(window.renderer, "_montage_quality_ingest_reductions", 0) or 0
-        ),
         tile_lod_preview_reduced_scheduled=int(
             getattr(window.renderer, "_montage_preview_reduced_scheduled", 0) or 0
         ),
@@ -272,9 +269,6 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         else int(getattr(session, "lod_cross_level_reductions", 0) or 0),
         tile_lod_pipeline_reruns_avoided=int(
             getattr(window.renderer, "_montage_quality_pipeline_reruns_avoided", 0) or 0
-        ),
-        tile_lod_stage_hits_serving_derivations=int(
-            getattr(window.renderer, "_montage_quality_stage_hits_serving_derivations", 0) or 0
         ),
         tile_histogram_lod_swap_recomputes=int(
             getattr(window.img_view, "tile_histogram_lod_swap_recomputes", 0) or 0

@@ -11,6 +11,11 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from arrayscope.core.runtime_diagnostics import (
+    MontageRuntimeDiagnostics,
+    MontageTimingDiagnostics,
+    RenderTimingDiagnostics,
+)
 from arrayscope.tools.interaction_budget import bounded_interaction_settle_timeout_s
 
 
@@ -34,6 +39,52 @@ def test_tile_presentation_draw_wait_fails_loudly_when_request_is_not_drawn(monk
             object(),
             timeout_s=bounded_interaction_settle_timeout_s(0.01),
         )
+
+
+def test_phase_record_excludes_montage_counters_without_live_owners(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
+
+    snapshot = SimpleNamespace(
+        image_rendering_backend_actual="pyqtgraph",
+        montage=MontageRuntimeDiagnostics(active=False),
+        montage_timing=MontageTimingDiagnostics(),
+        render_timing=RenderTimingDiagnostics(),
+        resource_governor=None,
+    )
+    win = SimpleNamespace(
+        collect_runtime_diagnostics=lambda: snapshot,
+        renderer=SimpleNamespace(),
+    )
+    monkeypatch.setattr(workflow, "_window_geometry_state", lambda _win: {})
+    monkeypatch.setattr(workflow, "_vispy_presentation_diagnostics", lambda _win: {})
+    monkeypatch.setattr(workflow, "_wgpu_frame_cadence", lambda _win: {})
+    monkeypatch.setattr(workflow, "_montage_overlay_count", lambda _win: 0)
+    monkeypatch.setattr(
+        workflow,
+        "_montage_level_presentation_state",
+        lambda _win: {
+            "revision": 0,
+            "target_levels": None,
+            "stale_tiles": 0,
+            "pending_tiles": 0,
+            "settled": True,
+            "active_tile_count": 0,
+            "active_presented_tile_count": 0,
+        },
+    )
+
+    record = workflow._phase_record(
+        win,
+        phase="unit",
+        elapsed_ms=1.0,
+        event_loop_p95_gap_ms=None,
+        event_loop_p99_gap_ms=None,
+        event_loop_max_gap_ms=0.0,
+    )
+
+    assert "montage_quality_ingest_reductions" not in record
+    assert "montage_quality_stage_hits_serving_derivations" not in record
+    assert "montage_quality_preview_reduced_scheduled" in record
 
 
 def _journey_gesture_win(pending_fn, capture_log):

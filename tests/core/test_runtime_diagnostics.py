@@ -1,5 +1,5 @@
 import json
-from dataclasses import replace
+from dataclasses import fields, replace
 
 from arrayscope.core.cache_status import CacheDiagnosticsSnapshot, CacheStatus
 from arrayscope.core.diagnostics_jsonl import (
@@ -298,6 +298,19 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "stale_reused=1" in text
     assert "Inactive:" in text
     assert "Context:\n" in text
+
+
+def test_montage_diagnostics_exclude_counters_without_live_owners():
+    """Removed R3 paths must not survive as permanently-zero evidence."""
+
+    names = {field.name for field in fields(MontageRuntimeDiagnostics)}
+    assert "tile_lod_ingest_reductions" not in names
+    assert "tile_lod_stage_hits_serving_derivations" not in names
+
+    text = format_runtime_diagnostics(_snapshot())
+    assert "ingest=" not in text
+    assert "stage_hits=" not in text
+    assert "preview_sched/block/fail=" in text
 
 
 def _nondefault_probe_value(current):
