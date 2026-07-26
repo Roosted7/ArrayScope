@@ -2,8 +2,9 @@
 
 Both the dimension-chip "+" menu and the dock's add popup present the same
 catalogue of operations, grouped and ordered the same way: a pinned "Common"
-section first, then one section per taxonomy group, with the less-used backend
-groups (SigPy / BART / User / Other) tucked behind a trailing "More" partition.
+section first, then one section per taxonomy group. Groups in the trailing
+"more" partition become a submenu in the chip menu and individually expandable
+categories in the add popup.
 
 The catalogue itself -- which ops exist, in what groups, in what order, and
 which are hidden -- is owned by :mod:`arrayscope.operations.library`. This module
@@ -30,9 +31,9 @@ from arrayscope.operations.registry import OperationEntry
 class ListingSection:
     """One titled block of operations in the listing.
 
-    ``is_more`` flags a section that belongs to the collapsed "More" partition
-    (a UI surface may hide these behind a fold-out); everyday sections carry
-    ``is_more=False``.
+    ``is_more`` flags a section that belongs to the secondary browse partition
+    (a UI surface may hide it behind a submenu or category chooser); immediately
+    visible sections carry ``is_more=False``.
     """
 
     title: str

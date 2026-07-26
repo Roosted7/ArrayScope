@@ -412,7 +412,7 @@ def s_first_run_hints(ctx: Ctx):
     ctx.shot(win, "hints_overlay")
 
 
-@scenario("dialog_command_palette")
+@scenario("operation_command_palette")
 def s_palette(ctx: Ctx):
     from pyqtgraph.Qt import QtCore
 
@@ -426,9 +426,24 @@ def s_palette(ctx: Ctx):
             if isinstance(widget, CommandPaletteDialog):
                 ctx.pump(4)
                 captured.append(ctx.shot(widget, "command_palette"))
-                widget.search_edit.setText("fft") if hasattr(widget, "search_edit") else None
+                unfiltered_count = widget.list_widget.count()
+                widget.search.setText("fft")
                 ctx.pump(4)
+                filtered_labels = [
+                    widget.list_widget.item(row).text() for row in range(widget.list_widget.count())
+                ]
+                if not filtered_labels or len(filtered_labels) >= unfiltered_count:
+                    raise RuntimeError("command palette did not narrow the operation catalogue")
+                if not all("fft" in label.casefold() for label in filtered_labels):
+                    raise RuntimeError(
+                        f"command palette returned unrelated filtered rows: {filtered_labels}"
+                    )
                 captured.append(ctx.shot(widget, "command_palette_filtered"))
+                widget.search.setText("definitely-no-such-operation")
+                ctx.pump(4)
+                if widget.list_widget.item(0).text() != "No matching commands or operations.":
+                    raise RuntimeError("command palette no-match state is not visible")
+                captured.append(ctx.shot(widget, "command_palette_no_match"))
                 widget.reject()
                 return
         raise RuntimeError("command palette dialog not found")
@@ -470,22 +485,27 @@ def s_operation_add_popup(ctx: Ctx):
     anchor = button.mapToGlobal(button.rect().bottomLeft())
     win.open_operation_adder(anchor=anchor)
     popup = win._operation_add_popup
-    popup.adjustSize()
     ctx.pump(4)
     ctx.shot(popup, "add_popup_collapsed")
-    # Unfold the optional backend groups via the popup's public toggle. The list
-    # is a fixed-height scroll area, so bring a revealed backend op into view
-    # (selecting it auto-scrolls) to actually show the expanded state.
+    # Search stays owned by the command palette; the add popup's other path is
+    # taxonomy browsing. First capture the compact category chooser, then one
+    # expanded category so the accordion shape itself is reviewable.
     popup.set_expanded(True)
-    for op_id in ("sigpy:soft_thresh", "sigpy:hard_thresh"):
-        if popup.select_operation(op_id):
-            break
-    popup.adjustSize()
+    expected_categories = {"Reduce", "Transform", "Complex", "Pointwise", "Reshape"}
+    if not expected_categories <= set(popup.visible_category_titles()):
+        raise RuntimeError("native operation categories missing from add popup")
     ctx.pump(4)
-    ctx.shot(popup, "add_popup_more")
-    # BART examples are intentionally unavailable until the shape-discovery
-    # bundle can characterize them. Keep one disabled row in-frame so disabled
-    # styling and its tooltip-bearing presence are reviewable.
+    ctx.shot(popup, "add_popup_categories")
+    popup.set_expanded_category("Pointwise")
+    if not popup.select_operation("soft_threshold"):
+        raise RuntimeError("Pointwise category did not reveal soft threshold")
+    ctx.pump(4)
+    ctx.shot(popup, "add_popup_category_pointwise")
+    # Keep one unavailable BART example in-frame so disabled styling and its
+    # tooltip-bearing presence are reviewable.
+    # Unavailable rows cannot become selected, but select_operation still opens
+    # their owning category before returning False.
+    popup.select_operation("bart:ecalib")
     unavailable_item = next(
         (
             popup._list.item(row)
@@ -500,9 +520,9 @@ def s_operation_add_popup(ctx: Ctx):
     ctx.pump(4)
     ctx.shot(popup, "add_popup_unavailable")
     # Highlight an axis-requiring op so the inline axis combo row appears.
+    popup.set_expanded(False)
     if not popup.select_operation("crop"):
         raise RuntimeError("crop row not selectable in add popup")
-    popup.adjustSize()
     ctx.pump(4)
     ctx.shot(popup, "add_popup_axis_row")
 

@@ -18,7 +18,6 @@ from arrayscope.operations.evaluator import LARGE_MATERIALIZE_BYTES
 from arrayscope.operations.parameter_forms import build_parameter_form
 from arrayscope.operations.recipes import dumps_recipe, load_recipe_steps, save_recipe
 from arrayscope.operations.registry import (
-    all_operations,
     get_operation_entry,
     operation_id_for,
     operation_parameter_value,
@@ -262,6 +261,7 @@ class OperationActionsMixin:
             axis_choices=self._axis_choices(),
             default_axis=self._default_operation_axis(),
             is_enabled=self._operation_entry_enabled_anywhere,
+            on_search=self.open_command_palette,
             on_accept=lambda op_id, axis, anchor=anchor: self.request_operation(
                 op_id, axis, anchor=anchor
             ),
@@ -275,6 +275,12 @@ class OperationActionsMixin:
         return None
 
     def open_command_palette(self):
+        # The palette is the catalogue's single search surface. Flatten the same
+        # library-backed listing used by the popup and dimension menu so hidden
+        # operations stay hidden and manager ordering remains authoritative.
+        operation_entries = [
+            entry for section in build_operation_listing() for entry in section.entries
+        ]
         commands = [
             PaletteCommand(
                 entry.id,
@@ -282,10 +288,13 @@ class OperationActionsMixin:
                 kind="operation",
                 requires_axis=entry.requires_axis,
                 icon=_operation_icon_name(entry.id),
-                enabled=not bool(entry.unavailable_reason),
+                enabled=(
+                    not bool(entry.unavailable_reason)
+                    and self._operation_entry_enabled_anywhere(entry)
+                ),
                 unavailable_reason=entry.unavailable_reason,
             )
-            for entry in all_operations()
+            for entry in operation_entries
         ]
         commands.extend(
             [

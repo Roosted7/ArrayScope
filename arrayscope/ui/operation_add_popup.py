@@ -4,8 +4,10 @@ A compact, grouped operation picker rendered from the
 :class:`~arrayscope.ui.operation_listing.ListingSection` list the caller builds
 via :func:`~arrayscope.ui.operation_listing.build_operation_listing` (which reads
 the operation library). Section headers are non-selectable dividers; op rows
-carry an icon, label and description tooltip. The optional backend groups
-(SigPy / BART / ...) live behind a "More..." fold-out that expands in place.
+carry an icon, label and description tooltip. The pinned Common section opens
+immediately; the remaining groups are an accordion behind "Browse categories…"
+so revealing a category never turns the popup into one long catalogue scroll.
+Search stays owned by the command palette and is linked from the first row.
 
 When the selected op takes an axis, an axis dropdown appears below the list so
 op *and* dimension are chosen in the same popup. For the dimension-chip flow the
@@ -27,15 +29,17 @@ from arrayscope.operations.registry import OperationEntry
 from arrayscope.ui.bubbles import EditBubble
 from arrayscope.ui.icons import material_icon
 
-# Item-data roles: ROLE_KIND distinguishes op rows / headers / the more toggle;
-# ROLE_OP carries the operation id for op rows.
+# Item-data roles: ROLE_KIND distinguishes operations, headers, and browse
+# controls; ROLE_OP carries an operation id or category title.
 _ROLE_KIND = int(QtCore.Qt.ItemDataRole.UserRole)
 _ROLE_OP = int(QtCore.Qt.ItemDataRole.UserRole) + 1
 
 _KIND_OP = "op"
 _KIND_HEADER = "header"
-_KIND_MORE = "more"
-_KIND_LESS = "less"
+_KIND_SEARCH = "search"
+_KIND_BROWSE = "browse"
+_KIND_CATEGORY = "category"
+_KIND_COMMON_ONLY = "common_only"
 
 
 class OperationAddPopup(EditBubble):
@@ -49,6 +53,7 @@ class OperationAddPopup(EditBubble):
         default_axis: int | None = None,
         fixed_axis: int | None = None,
         is_enabled: Callable[[OperationEntry], bool] | None = None,
+        on_search: Callable[[], None] | None = None,
         on_accept: Callable[[str, int | None], None],
         on_needs_parameters: Callable[[str, int | None], None],
         parent=None,
@@ -65,12 +70,16 @@ class OperationAddPopup(EditBubble):
         self._by_id = {entry.id: entry for section in self._sections for entry in section.entries}
         self._fixed_axis = fixed_axis
         self._is_enabled = is_enabled or (lambda _entry: True)
+        self._on_search = on_search
         self._on_accept = on_accept
         self._on_needs_parameters = on_needs_parameters
         self._expanded = False
+        self._expanded_category: str | None = None
 
         container = QtWidgets.QWidget(self)
         column = QtWidgets.QVBoxLayout(container)
+        self._container = container
+        self._column = column
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(6)
 
@@ -111,24 +120,51 @@ class OperationAddPopup(EditBubble):
 
     def _rebuild(self) -> None:
         self._list.clear()
-        sections = self._sections
-        for section in sections:
-            if section.is_more and not self._expanded:
-                continue
+        if self._on_search is not None:
+            self._add_search_row()
+
+        main_sections = [section for section in self._sections if not section.is_more]
+        more_sections = [section for section in self._sections if section.is_more]
+        for section in main_sections:
             self._add_header(section.title)
             for entry in section.entries:
                 self._add_op_row(entry)
-        has_more = any(section.is_more for section in sections)
-        if has_more:
-            self._add_toggle_row(collapse=self._expanded)
+
+        if more_sections:
+            if not self._expanded:
+                self._add_browse_row()
+            else:
+                self._add_header("Browse by category")
+                for section in more_sections:
+                    is_open = section.title == self._expanded_category
+                    self._add_category_row(section.title, len(section.entries), expanded=is_open)
+                    if is_open:
+                        for entry in section.entries:
+                            self._add_op_row(entry)
+                self._add_common_only_row()
         self._select_first_op()
         self._apply_list_height()
         self._sync_axis_visibility()
+        self._resize_to_content()
+
+    def _resize_to_content(self) -> None:
+        """Make the popup follow a rebuilt list in both growth directions."""
+
+        # Qt eagerly grows a visible top-level popup but keeps its old geometry
+        # when a fixed-height child shrinks. Activate from the inner layout out
+        # before reading the hint, otherwise the hint still describes the
+        # category that just closed and leaves a large blank panel.
+        layouts = (self._column, self.content_layout, self.layout())
+        for layout in layouts:
+            layout.invalidate()
+        self._container.updateGeometry()
+        for layout in layouts:
+            layout.activate()
+        self.resize(self.sizeHint())
 
     #: Tallest the row list is allowed to grow before it starts scrolling.
-    #: Sized to clear the collapsed built-in listing (its full set of groups
-    #: plus the trailing "More…" toggle -- ~436 px) so the collapsed popup never
-    #: scrolls, while the taller expanded backend listing scrolls within it.
+    #: Sized to clear the compact Common listing plus its search and browse
+    #: affordances, while a category with many operations scrolls within it.
     _LIST_MAX_HEIGHT = 460
 
     def _apply_list_height(self) -> None:
@@ -190,11 +226,32 @@ class OperationAddPopup(EditBubble):
         item.setSizeHint(QtCore.QSize(0, 26))
         self._list.addItem(item)
 
-    def _add_toggle_row(self, *, collapse: bool) -> None:
-        text = "Less" if collapse else "More…"
-        icon = "expand_less" if collapse else "expand_more"
-        item = QtWidgets.QListWidgetItem(material_icon(icon), text)
-        item.setData(_ROLE_KIND, _KIND_LESS if collapse else _KIND_MORE)
+    def _add_search_row(self) -> None:
+        item = QtWidgets.QListWidgetItem(material_icon("search"), "Search all operations…  Ctrl+K")
+        item.setData(_ROLE_KIND, _KIND_SEARCH)
+        item.setSizeHint(QtCore.QSize(0, 26))
+        self._list.addItem(item)
+
+    def _add_browse_row(self) -> None:
+        item = QtWidgets.QListWidgetItem(material_icon("expand_more"), "Browse categories…")
+        item.setData(_ROLE_KIND, _KIND_BROWSE)
+        item.setSizeHint(QtCore.QSize(0, 26))
+        self._list.addItem(item)
+
+    def _add_category_row(self, title: str, count: int, *, expanded: bool) -> None:
+        icon = "expand_less" if expanded else "chevron_right"
+        item = QtWidgets.QListWidgetItem(material_icon(icon), f"{title}  ({count})")
+        item.setData(_ROLE_KIND, _KIND_CATEGORY)
+        item.setData(_ROLE_OP, title)
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        item.setSizeHint(QtCore.QSize(0, 26))
+        self._list.addItem(item)
+
+    def _add_common_only_row(self) -> None:
+        item = QtWidgets.QListWidgetItem(material_icon("expand_less"), "Show Common only")
+        item.setData(_ROLE_KIND, _KIND_COMMON_ONLY)
         item.setSizeHint(QtCore.QSize(0, 24))
         self._list.addItem(item)
 
@@ -211,19 +268,45 @@ class OperationAddPopup(EditBubble):
 
     def _on_item_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
         kind = item.data(_ROLE_KIND)
-        if kind in (_KIND_MORE, _KIND_LESS):
+        if kind == _KIND_SEARCH:
+            self._open_search()
+        elif kind == _KIND_BROWSE:
             self._toggle_expanded()
+        elif kind == _KIND_CATEGORY:
+            self._toggle_category(str(item.data(_ROLE_OP)))
+        elif kind == _KIND_COMMON_ONLY:
+            self.set_expanded(False)
 
     def _on_item_activated(self, item: QtWidgets.QListWidgetItem) -> None:
         kind = item.data(_ROLE_KIND)
-        if kind in (_KIND_MORE, _KIND_LESS):
+        if kind == _KIND_SEARCH:
+            self._open_search()
+        elif kind == _KIND_BROWSE:
             self._toggle_expanded()
+        elif kind == _KIND_CATEGORY:
+            self._toggle_category(str(item.data(_ROLE_OP)))
+        elif kind == _KIND_COMMON_ONLY:
+            self.set_expanded(False)
         elif kind == _KIND_OP:
             self._activate_operation(item.data(_ROLE_OP))
 
+    def _open_search(self) -> None:
+        if self._on_search is None:
+            return
+        self.close()
+        self._on_search()
+
     def _toggle_expanded(self) -> None:
         self._expanded = not self._expanded
+        if not self._expanded:
+            self._expanded_category = None
         self._rebuild()
+
+    def _toggle_category(self, title: str) -> None:
+        self._expanded_category = None if self._expanded_category == title else title
+        self._rebuild()
+        if self._expanded_category is not None:
+            self._select_category_row(self._expanded_category)
 
     def _current_entry(self) -> OperationEntry | None:
         item = self._list.currentItem()
@@ -241,10 +324,14 @@ class OperationAddPopup(EditBubble):
 
     def _sync_axis_visibility(self) -> None:
         if self._fixed_axis is not None:
-            self._axis_row.setVisible(False)
-            return
-        entry = self._current_entry()
-        self._axis_row.setVisible(bool(entry and entry.requires_axis))
+            visible = False
+        else:
+            entry = self._current_entry()
+            visible = bool(entry and entry.requires_axis)
+        changed = self._axis_row.isHidden() == visible
+        self._axis_row.setVisible(visible)
+        if changed:
+            self._resize_to_content()
 
     def _activate_operation(self, op_id: str) -> None:
         entry = self._by_id.get(op_id)
@@ -269,18 +356,19 @@ class OperationAddPopup(EditBubble):
     def select_operation(self, op_id: str) -> bool:
         """Move the selection to ``op_id``, revealing it; returns whether it was found.
 
-        Most operations live in the collapsed "More" partition, so selecting by
-        id expands the fold-out when the target is not currently listed rather
-        than reporting "not found" for an operation that plainly exists. Callers
-        (and a future search box) can then address any operation by id without
-        first knowing which side of the fold it landed on.
+        Most operations live behind a category row, so selecting by id opens the
+        owning category rather than reporting "not found" for an operation that
+        plainly exists.
         """
 
         if self._select_listed_operation(op_id):
             return True
-        if not self._expanded and self._has_more_sections():
-            self.set_expanded(True)
-            return self._select_listed_operation(op_id)
+        for section in self._sections:
+            if section.is_more and any(entry.id == op_id for entry in section.entries):
+                self._expanded = True
+                self._expanded_category = section.title
+                self._rebuild()
+                return self._select_listed_operation(op_id)
         return False
 
     def _select_listed_operation(self, op_id: str) -> bool:
@@ -294,8 +382,14 @@ class OperationAddPopup(EditBubble):
                 return True
         return False
 
-    def _has_more_sections(self) -> bool:
-        return any(section.is_more for section in self._sections)
+    def _select_category_row(self, title: str) -> bool:
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            if item.data(_ROLE_KIND) == _KIND_CATEGORY and item.data(_ROLE_OP) == title:
+                self._list.setCurrentRow(row)
+                self._list.scrollToItem(item)
+                return True
+        return False
 
     def visible_section_titles(self) -> list[str]:
         return [
@@ -311,6 +405,26 @@ class OperationAddPopup(EditBubble):
             if self._list.item(row).data(_ROLE_KIND) == _KIND_OP
         ]
 
+    def visible_category_titles(self) -> list[str]:
+        return [
+            str(self._list.item(row).data(_ROLE_OP))
+            for row in range(self._list.count())
+            if self._list.item(row).data(_ROLE_KIND) == _KIND_CATEGORY
+        ]
+
+    def set_expanded_category(self, title: str | None) -> None:
+        """Reveal the category chooser and optionally one category's entries."""
+
+        self._expanded = True
+        self._expanded_category = title
+        self._rebuild()
+        if title is not None:
+            self._select_category_row(title)
+
     def set_expanded(self, expanded: bool) -> None:
-        if bool(expanded) != self._expanded:
-            self._toggle_expanded()
+        expanded = bool(expanded)
+        if expanded != self._expanded or (not expanded and self._expanded_category is not None):
+            self._expanded = expanded
+            if not expanded:
+                self._expanded_category = None
+            self._rebuild()

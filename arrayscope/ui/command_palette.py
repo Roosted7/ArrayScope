@@ -38,7 +38,8 @@ class CommandPaletteDialog(QtWidgets.QDialog):
         layout.addWidget(self.list_widget, 1)
 
         axis_row = QtWidgets.QHBoxLayout()
-        axis_row.addWidget(QtWidgets.QLabel("Axis"))
+        self.axis_label = QtWidgets.QLabel("Axis")
+        axis_row.addWidget(self.axis_label)
         self.axis_combo = QtWidgets.QComboBox()
         for label, axis in axis_choices:
             self.axis_combo.addItem(label, axis)
@@ -60,10 +61,44 @@ class CommandPaletteDialog(QtWidgets.QDialog):
         self.setLayout(layout)
 
         self.search.textChanged.connect(self._refresh)
+        self.search.returnPressed.connect(self._accept_current)
+        self.search.installEventFilter(self)
         self.list_widget.currentRowChanged.connect(lambda _row: self._sync_axis_visibility())
         self.list_widget.itemDoubleClicked.connect(lambda _item: self.accept())
         self._refresh("")
         self.resize(520, 420)
+
+    def eventFilter(self, watched, event):
+        if watched is self.search and event.type() == QtCore.QEvent.Type.KeyPress:
+            key = event.key()
+            if key == QtCore.Qt.Key.Key_Down:
+                self._move_selection(1)
+                return True
+            if key == QtCore.Qt.Key.Key_Up:
+                self._move_selection(-1)
+                return True
+        return super().eventFilter(watched, event)
+
+    def _move_selection(self, step: int) -> None:
+        enabled_rows = [
+            index for index, command in enumerate(self._visible_commands) if command.enabled
+        ]
+        if not enabled_rows:
+            return
+        current = self.list_widget.currentRow()
+        if current not in enabled_rows:
+            target = enabled_rows[0] if step > 0 else enabled_rows[-1]
+        else:
+            position = enabled_rows.index(current)
+            position = max(0, min(position + step, len(enabled_rows) - 1))
+            target = enabled_rows[position]
+        self.list_widget.setCurrentRow(target)
+        self.list_widget.scrollToItem(self.list_widget.item(target))
+
+    def _accept_current(self) -> None:
+        command, _axis = self.selected()
+        if command is not None:
+            self.accept()
 
     def selected(self):
         row = self.list_widget.currentRow()
@@ -96,6 +131,10 @@ class CommandPaletteDialog(QtWidgets.QDialog):
             elif first_enabled < 0:
                 first_enabled = index
             self.list_widget.addItem(item)
+        if not self._visible_commands:
+            item = QtWidgets.QListWidgetItem("No matching commands or operations.")
+            item.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)
+            self.list_widget.addItem(item)
         if first_enabled >= 0:
             self.list_widget.setCurrentRow(first_enabled)
         self._sync_axis_visibility()
@@ -103,10 +142,8 @@ class CommandPaletteDialog(QtWidgets.QDialog):
     def _sync_axis_visibility(self):
         command, _axis = self.selected()
         visible = bool(command and command.requires_axis)
+        self.axis_label.setVisible(visible)
         self.axis_combo.setVisible(visible)
-        label = self.axis_combo.parentWidget()
-        if label is not None:
-            label.setVisible(True)
         ok = self.buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
         if ok is not None:
             ok.setEnabled(command is not None)

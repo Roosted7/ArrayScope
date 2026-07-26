@@ -8,7 +8,7 @@ import pytest
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from pyqtgraph.Qt import QtCore
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.operations import library
 from arrayscope.ui.command_palette import CommandPaletteDialog, PaletteCommand
@@ -85,3 +85,31 @@ def test_unavailable_reason_disables_add_popup_chip_menu_and_palette(qtbot):
     assert item.toolTip() == reason
     assert palette.selected() == (None, None)
     win.close()
+
+
+def test_window_palette_uses_library_listing_so_hidden_operations_stay_hidden(
+    qtbot,
+    monkeypatch,
+):
+    from arrayscope.window import ArrayScopeWindow, operation_actions
+
+    clear_arrayscope_settings()
+    captured = []
+
+    class CapturingPalette:
+        def __init__(self, commands, **_kwargs):
+            captured.extend(commands)
+
+        def exec(self):
+            return QtWidgets.QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(operation_actions, "CommandPaletteDialog", CapturingPalette)
+    win = ArrayScopeWindow(np.ones((3, 4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        library.set_operation_hidden("reverse", True)
+        win.open_command_palette()
+        assert "reverse" not in {command.id for command in captured}
+    finally:
+        library.set_operation_hidden("reverse", False)
+        win.close()
