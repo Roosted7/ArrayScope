@@ -283,12 +283,30 @@ transaction-count finding is not backend-specific — the per-commit cost is
 shared-path work. Nothing below argues for weakening the preview rung; §6
 finds the regime where it is worth far more than anyone was claiming.
 
-## 6. Ops change the answer completely — and there the preview is switched off
+## 6. Ops change the answer — but not for the reason claimed here first
+
+> **RETRACTION (2026-07-26, same day).** This section originally argued that the
+> preview's justification on an operation pipeline is compute: "an operation
+> evaluated on 16×-reduced input is ~16× cheaper", and that a 272-tile FFT
+> montage therefore runs 272 full-resolution FFTs before showing anything.
+> **That premise is false and §6c refutes it with a four-arm A/B.**
+> `CenteredFFT` declares `cache_stage=True`, so the per-tile route already
+> evaluates ONE native FFT stage (a single 921 ms task) and fans out 272
+> parallel ~2.6 ms slices — the duplication was removed by the stage cache
+> years before a preview route could remove it, and total worker time barely
+> moves (3.03 s → 3.74 s) when the shared route takes over. §10f independently
+> measured the same thing from the other side: a 16× input reduction buys ~2×,
+> not 16×, and cold-vs-warm stage cache is 63× at *identical* input size.
+>
+> What survives is a **responsiveness** argument, not an arithmetic one, and it
+> is worth having: opening the shared route delivers the first FFT pixel 2.5×
+> earlier and a 2.4× calmer event loop (§6c, arm B). What blocks it is
+> serialization, not a gate. The rest of this section is kept for the
+> measurement it records; read §6c before acting on any of it.
 
 Everything above is the **raw** montage, where the "operation" is a copy. The
-preview's second and much stronger justification is compute: an operation
-evaluated on 16×-reduced input is ~16× cheaper, and that saving lands *before*
-any commit or upload exists to be counted.
+claim below — that the preview's second justification is compute — is the
+retracted one.
 
 Measured on `fft_full_tiled_montage` (`CenteredFFT(axis=2)` → `FFTShift(axis=2)`
 → `CenteredIFFT(axis=2)`, display axes (0, 1)), splitting every acknowledgement
@@ -313,7 +331,11 @@ them:** "zero previews" survives unchanged, the first FFT pixel moves to
 2564 ms, and the rung counters find 8 s of FFT evaluation discarded per run
 that a truncated stage could not have shown.
 
-Two independent gates each suffice to cause it — **though §10e measures gate 1
+Two gates were identified as each sufficient — **§10e refutes that framing
+(gate 1 alone changes nothing) and §10g finds the actual cause: a seam between
+two predicates, where the shared route defers on *commuting* and the ladder
+declines on *tile-local*, and both owners are right.** Original text follows —
+**though §10e measures gate 1
 closed and finds the preview still absent, so "each suffice" holds for the
 cause and not for the cure**:
 
