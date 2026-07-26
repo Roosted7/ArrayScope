@@ -170,7 +170,7 @@ def test_every_listed_operation_can_be_duplicated():
     )
 
 
-def test_duplicate_label_and_slug_collisions_are_numbered():
+def test_duplicate_and_import_label_collisions_are_numbered(tmp_path):
     first = library.duplicate_operation("conjugate")
     second = library.duplicate_operation("conjugate")
 
@@ -178,6 +178,16 @@ def test_duplicate_label_and_slug_collisions_are_numbered():
     assert registry.get_operation_entry(second).label == "Conjugate copy 2"
     assert first == "user:conjugate_copy"
     assert second == "user:conjugate_copy_2"
+
+    # File imports and generated native copies enter through different creation
+    # paths, but both must use the same collision-safe label/slug policy.
+    src = _write_source(tmp_path, "d.py", _DOUBLE_SRC)
+    imported_first = library.import_custom_operation(src, "double", label="Boost")
+    imported_second = library.import_custom_operation(src, "double", label="Boost")
+    assert imported_first == "user:boost"
+    assert imported_second == "user:boost_2"
+    assert registry.get_operation_entry(imported_first).label == "Boost"
+    assert registry.get_operation_entry(imported_second).label == "Boost 2"
 
 
 def test_create_empty_user_operation_is_selected_ready_template():
@@ -549,16 +559,6 @@ def test_update_user_operation_rewrites_wrapper(tmp_path):
     entry = registry.get_operation_entry(op_id)
     assert entry.label == "Twice"
     assert entry.description == "x2"
-
-
-def test_slug_collision_suffixes(tmp_path):
-    src = _write_source(tmp_path, "d.py", _DOUBLE_SRC)
-    id1 = library.import_custom_operation(src, "double", label="Boost")
-    id2 = library.import_custom_operation(src, "double", label="Boost")
-    assert id1 != id2
-    entries = {entry.id: entry for entry in registry.all_operations()}
-    assert {id1, id2} <= set(entries)
-    assert (entries[id1].label, entries[id2].label) == ("Boost", "Boost 2")
 
 
 def test_manager_source_retarget_numbers_duplicate_inferred_labels(tmp_path):

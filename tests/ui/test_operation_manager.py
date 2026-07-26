@@ -164,7 +164,6 @@ def test_new_and_source_picker_stay_in_manager(qtbot, tmp_path, monkeypatch):
         assert dialog.requires_axis_check.isChecked() is True
         assert dialog.description_edit.text() == "Roll one axis by amount."
         assert dialog.params_table.rowCount() == 1
-        assert dialog.params_table.columnCount() == 7
         assert dialog.params_table.item(0, 0).text() == "amount"
         assert get_operation_entry(new_id).label == "Shift"
 
@@ -208,9 +207,7 @@ def test_link_mode_stores_absolute_path(qtbot, tmp_path, monkeypatch):
         win.close()
 
 
-def test_duplicate_system_selection_becomes_editable_user_copy(qtbot):
-    from arrayscope.operations import library, registry
-
+def test_duplicate_system_selection_transitions_to_editable_user_copy(qtbot):
     win = _window(qtbot)
     dialog = _manager(qtbot, win)
     try:
@@ -226,29 +223,26 @@ def test_duplicate_system_selection_becomes_editable_user_copy(qtbot):
         assert operation_id.startswith("user:")
         assert dialog.label_edit.isEnabled() is True
         assert dialog.params_table.isEnabled() is True
-        assert registry.get_operation_entry(operation_id).label == "Conjugate copy"
-        data = np.array([1 + 2j], dtype=np.complex64)
-        assert np.array_equal(
-            registry.create_operation(operation_id).apply(data),
-            np.conjugate(data),
-        )
-        assert library.user_operation_wrapper(operation_id)["template"]["kind"] == "native-copy"
+        assert dialog.label_edit.text() == "Conjugate copy"
+        # Generated-source contents and execution parity belong to the library
+        # contract; this UI test pins the read-only -> editable transition.
+        assert dialog.source_box.isEnabled() is True
     finally:
         dialog.close()
         win.close()
 
 
-def test_parameter_metadata_parity_and_default_layout(qtbot, tmp_path):
+def test_parameter_and_input_slot_tables_preserve_editable_schema(qtbot, tmp_path):
     from arrayscope.operations import library, registry
 
-    src = _write_source(
+    bounded_src = _write_source(
         tmp_path,
         "bounded.py",
         "def bounded(data, gain: float = 0.5):\n    return data * gain\n",
     )
-    operation_id = library.import_custom_operation(src, "bounded")
+    bounded_id = library.import_custom_operation(bounded_src, "bounded")
     library.update_user_operation(
-        operation_id,
+        bounded_id,
         parameters=[
             {
                 "name": "gain",
@@ -263,40 +257,14 @@ def test_parameter_metadata_parity_and_default_layout(qtbot, tmp_path):
         ],
     )
 
-    win = _window(qtbot)
-    dialog = _manager(qtbot, win)
-    try:
-        assert dialog.select_operation(operation_id)
-        process_events(qtbot)
-        assert dialog.params_table.columnCount() == 7
-        assert dialog.params_table.item(0, 3).text() == "0.0"
-        assert dialog.params_table.item(0, 4).text() == "1.0"
-        assert dialog.params_table.item(0, 5).text() == "0.05"
-        assert dialog.params_table.item(0, 6).text() == "Scale factor."
-        assert dialog.params_table.minimumHeight() >= 200
-        assert dialog.params_table.horizontalScrollBar().maximum() == 0
-
-        dialog.params_table.item(0, 6).setText("Editable help.")
-        process_events(qtbot)
-        assert (
-            registry.get_operation_entry(operation_id).parameters[0].description == "Editable help."
-        )
-    finally:
-        dialog.close()
-        win.close()
-
-
-def test_input_slot_schema_is_editable_in_the_manager(qtbot, tmp_path):
-    from arrayscope.operations import library, registry
-
-    src = _write_source(
+    blend_src = _write_source(
         tmp_path,
         "blend.py",
         "def blend(data, reference):\n    return data + reference\n",
     )
-    operation_id = library.import_custom_operation(src, "blend")
+    blend_id = library.import_custom_operation(blend_src, "blend")
     library.update_user_operation(
-        operation_id,
+        blend_id,
         parameters=[],
         input_slots=[
             {
@@ -311,14 +279,34 @@ def test_input_slot_schema_is_editable_in_the_manager(qtbot, tmp_path):
     win = _window(qtbot)
     dialog = _manager(qtbot, win)
     try:
-        assert dialog.select_operation(operation_id)
+        # Bounds/help and slot accepts/labels are definition metadata, not just
+        # display text. Reconstructing either editor must preserve and write
+        # back the full schema rather than only its happy-path name/default.
+        assert dialog.select_operation(bounded_id)
+        process_events(qtbot)
+        assert dialog.params_table.columnCount() == 7
+        assert dialog.params_table.item(0, 3).text() == "0.0"
+        assert dialog.params_table.item(0, 4).text() == "1.0"
+        assert dialog.params_table.item(0, 5).text() == "0.05"
+        assert dialog.params_table.item(0, 6).text() == "Scale factor."
+        assert dialog.params_table.minimumHeight() >= 200
+        assert dialog.params_table.horizontalScrollBar().maximum() == 0
+
+        dialog.params_table.item(0, 6).setText("Editable help.")
+        process_events(qtbot)
+        assert (
+            registry.get_operation_entry(bounded_id).parameters[0].description == "Editable help."
+        )
+
+        assert dialog.select_operation(blend_id)
+        process_events(qtbot)
         assert dialog.slots_table.rowCount() == 1
         assert dialog.slots_table.item(0, 0).text() == "reference"
         assert "open-document" in dialog.slots_table.item(0, 2).text()
 
         dialog.slots_table.item(0, 1).setText("Reference data")
         process_events(qtbot)
-        assert registry.get_operation_entry(operation_id).input_slots[0].label == "Reference data"
+        assert registry.get_operation_entry(blend_id).input_slots[0].label == "Reference data"
     finally:
         dialog.close()
         win.close()
