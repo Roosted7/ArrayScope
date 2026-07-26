@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from arrayscope.operations import library, recipes, registry
+from arrayscope.operations.operation_definitions import export_operation_definition
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +51,122 @@ def shift(data, axis, amount: int = 1):
     """Roll one axis by amount."""
     return np.roll(data, amount, axis=axis)
 '''
+
+
+# ---------------------------------------------------------------------------
+# declarative definitions
+# ---------------------------------------------------------------------------
+
+
+def test_every_operation_exports_and_round_trips_its_interface():
+    entries = registry.all_operations()
+    assert entries
+    for entry in entries:
+        definition = export_operation_definition(entry)
+        assert definition["id"] == entry.id
+        assert definition["label"] == entry.label
+        assert definition["description"] == entry.description
+        assert definition["group"] == entry.group
+        assert definition["icon"] == entry.icon
+        assert definition["requires_axis"] is entry.requires_axis
+        assert definition["changes_shape"] is entry.changes_shape
+        assert definition["runtime"]
+        assert definition["source"]
+        assert (
+            tuple(
+                registry.OperationParameter(**parameter) for parameter in definition["parameters"]
+            )
+            == entry.parameters
+        )
+
+
+def test_user_definition_preserves_existing_source_block(tmp_path):
+    src = _write_source(tmp_path, "linked.py", _DOUBLE_SRC)
+    operation_id = library.import_custom_operation(src, "double", link=True)
+
+    definition = export_operation_definition(operation_id)
+
+    assert definition["tier"] == "user"
+    assert definition["runtime"] == "python"
+    assert definition["source"] == {
+        "mode": "link",
+        "path": os.path.abspath(src),
+        "callable": "double",
+    }
+
+
+def test_duplicate_native_is_editable_and_working():
+    operation_id = library.duplicate_operation("conjugate")
+    entry = registry.get_operation_entry(operation_id)
+
+    assert operation_id.startswith("user:")
+    assert entry.label == "Conjugate copy"
+    data = np.array([1 + 2j, 3 - 4j], dtype=np.complex64)
+    assert np.array_equal(registry.create_operation(operation_id).apply(data), np.conjugate(data))
+    source = library.user_operation_source_path(operation_id)
+    assert source is not None
+    assert "def conjugate_copy(data):" in Path(source).read_text()
+
+
+def test_duplicate_parameter_form_matches_and_external_adapter_runs():
+    from arrayscope.operations.parameter_forms import build_parameter_form
+
+    source_entry = next(
+        (entry for entry in registry.all_operations() if entry.id == "sigpy:soft_thresh"),
+        None,
+    )
+    if source_entry is None:
+        pytest.skip("sigpy pack is unavailable")
+
+    operation_id = library.duplicate_operation(source_entry.id)
+    duplicate_entry = registry.get_operation_entry(operation_id)
+    source_form = build_parameter_form(source_entry, shape=(4, 5), axis=None)
+    duplicate_form = build_parameter_form(duplicate_entry, shape=(4, 5), axis=None)
+
+    assert source_form is not None
+    assert duplicate_form is not None
+    assert duplicate_form.fields == source_form.fields
+    data = np.array([0.1, 0.5, 2.0], dtype=np.float32)
+    values = source_form.values()
+    expected = registry.create_operation(source_entry.id, parameters=values).apply(data)
+    actual = registry.create_operation(operation_id, parameters=values).apply(data)
+    assert np.allclose(actual, expected)
+    wrapper = library.user_operation_wrapper(operation_id)
+    assert wrapper["template"]["kind"] == "external-adapter"
+
+
+def test_duplicate_shape_changer_is_loud_template_not_false_shape_claim():
+    operation_id = library.duplicate_operation("crop")
+    wrapper = library.user_operation_wrapper(operation_id)
+
+    assert wrapper["changes_shape"] is False
+    assert wrapper["template"]["kind"] == "shape-changing"
+    operation = registry.create_operation(operation_id, axis=0, parameters={"start": 0, "stop": 1})
+    with pytest.raises(RuntimeError, match="shape discovery lands in Bundle D"):
+        operation.apply(np.ones((2, 2), dtype=np.float32))
+
+
+def test_duplicate_label_and_slug_collisions_are_numbered():
+    first = library.duplicate_operation("conjugate")
+    second = library.duplicate_operation("conjugate")
+
+    assert registry.get_operation_entry(first).label == "Conjugate copy"
+    assert registry.get_operation_entry(second).label == "Conjugate copy 2"
+    assert first == "user:conjugate_copy"
+    assert second == "user:conjugate_copy_2"
+
+
+def test_create_empty_user_operation_is_selected_ready_template():
+    operation_id = library.create_empty_user_operation()
+    entry = registry.get_operation_entry(operation_id)
+    wrapper = library.user_operation_wrapper(operation_id)
+
+    assert operation_id == "user:new_operation"
+    assert entry.label == "New operation"
+    assert entry.parameters == ()
+    assert wrapper["template"]["kind"] == "empty"
+    with pytest.raises(NotImplementedError, match="new operation is empty"):
+        registry.create_operation(operation_id).apply(np.ones((2, 2)))
 
 
 # ---------------------------------------------------------------------------

@@ -778,6 +778,247 @@ def _wrapper_path_for_id(operation_id: str) -> str | None:
     return None
 
 
+def user_operation_wrapper(operation_id: str) -> dict | None:
+    """Return a detached copy of a user operation's wrapper payload."""
+
+    path = _wrapper_path_for_id(operation_id)
+    if path is None:
+        return None
+    with open(path) as handle:
+        payload = json.load(handle)
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def user_operation_source_path(operation_id: str) -> str | None:
+    """Absolute path to the Python source backing a user operation."""
+
+    wrapper = user_operation_wrapper(operation_id)
+    if wrapper is None:
+        return None
+    source = wrapper.get("source")
+    if not isinstance(source, dict):
+        return None
+    rel_or_abs = str(source.get("path") or "")
+    if not rel_or_abs:
+        return None
+    if os.path.isabs(rel_or_abs):
+        return rel_or_abs
+    return os.path.join(user_operations_directory(), rel_or_abs)
+
+
+def create_empty_user_operation() -> str:
+    """Create and register an unfinished user operation for in-manager editing."""
+
+    from arrayscope.operations.operation_definitions import empty_template_source
+
+    directory = user_operations_directory()
+    os.makedirs(directory, exist_ok=True)
+    label = _unique_copy_label("New operation", copy_suffix=False)
+    slug = _unique_slug(directory, _safe_slug(label))
+    operation_id = f"user:{slug}"
+    callable_name = _callable_name(slug)
+    source_name = f"{slug}.py"
+    source_path = os.path.join(directory, source_name)
+    with open(source_path, "w") as handle:
+        handle.write(empty_template_source(callable_name))
+    wrapper = {
+        "format": WRAPPER_FORMAT,
+        "version": 1,
+        "id": operation_id,
+        "label": label,
+        "description": "",
+        "group": "User",
+        "icon": "extension",
+        "runtime": SUPPORTED_RUNTIME,
+        "source": {"mode": "import", "path": source_name, "callable": callable_name},
+        "requires_axis": False,
+        "changes_shape": False,
+        "parameters": [],
+        "template": {
+            "kind": "empty",
+            "message": "Empty template — open the code file and implement it before running.",
+        },
+    }
+    _write_wrapper(os.path.join(directory, f"{slug}.json"), wrapper)
+    refresh_user_operations()
+    return operation_id
+
+
+def duplicate_operation(operation_id: str) -> str:
+    """Duplicate any operation into a selected, editable ``user:`` copy.
+
+    Native shape-preserving implementations are copied into a standalone
+    function. Pack and entry-point operations get a working adapter that names
+    their provider dependency. Shape-changing operations become an explicit
+    blocked template until Bundle D's discovered-shape contract exists; the
+    wrapper never lies by declaring them shape-preserving.
+    """
+
+    from arrayscope.operations.operation_definitions import (
+        adapter_template_source,
+        blocked_shape_template_source,
+        export_operation_definition,
+        native_editable_source,
+    )
+
+    entry = registry.get_operation_entry(operation_id)
+    definition = export_operation_definition(entry)
+    directory = user_operations_directory()
+    os.makedirs(directory, exist_ok=True)
+    label = _unique_copy_label(entry.label)
+    slug = _unique_slug(directory, _safe_slug(label))
+    duplicate_id = f"user:{slug}"
+    source_name = f"{slug}.py"
+    callable_name = _callable_name(slug)
+    tier = str(definition.get("tier") or "")
+
+    template: dict[str, str]
+    if entry.changes_shape:
+        source_text = blocked_shape_template_source(entry, callable_name)
+        template = {
+            "kind": "shape-changing",
+            "source_id": entry.id,
+            "message": (
+                "Template only — the original changes shape. Bundle D owns shape "
+                "discovery, so this copy is blocked instead of lying to the evaluator."
+            ),
+        }
+    elif tier == "builtin":
+        source_text = native_editable_source(entry, callable_name)
+        template = {
+            "kind": "native-copy",
+            "source_id": entry.id,
+            "message": "Editable copy of the native implementation.",
+        }
+    elif tier in ("pack", "plugin"):
+        source_text = adapter_template_source(entry, callable_name)
+        provider = definition.get("source", {}).get("provider") or definition.get("source", {}).get(
+            "distribution"
+        )
+        template = {
+            "kind": "external-adapter",
+            "source_id": entry.id,
+            "message": (
+                f"Working adapter template — it still depends on {provider or entry.id}. "
+                "Replace the function body to make it independent."
+            ),
+        }
+    elif tier == "user":
+        source_path = user_operation_source_path(operation_id)
+        if source_path is None:
+            raise ValueError(f"user operation has no source path: {operation_id}")
+        with open(source_path) as handle:
+            source_text = handle.read()
+        source = definition.get("source") or {}
+        callable_name = str(source.get("callable") or callable_name)
+        template = {
+            "kind": "user-copy",
+            "source_id": entry.id,
+            "message": "Independent copy of the user operation and its source file.",
+        }
+    else:
+        raise ValueError(f"cannot duplicate operation tier {tier!r}")
+
+    with open(os.path.join(directory, source_name), "w") as handle:
+        handle.write(source_text)
+    wrapper = {
+        "format": WRAPPER_FORMAT,
+        "version": 1,
+        "id": duplicate_id,
+        "label": label,
+        "description": definition.get("description", ""),
+        "group": effective_group(entry),
+        "icon": definition.get("icon", "extension"),
+        "runtime": SUPPORTED_RUNTIME,
+        "source": {"mode": "import", "path": source_name, "callable": callable_name},
+        "requires_axis": bool(definition.get("requires_axis", False)),
+        # Bundle D owns shape discovery. Never persist a false shape claim.
+        "changes_shape": False,
+        "parameters": list(definition.get("parameters") or ()),
+        "template": template,
+    }
+    _write_wrapper(os.path.join(directory, f"{slug}.json"), wrapper)
+    refresh_user_operations()
+    return duplicate_id
+
+
+def update_user_operation_source(
+    operation_id: str,
+    py_path: str,
+    callable_name: str,
+    *,
+    link: bool,
+    infer: bool = True,
+) -> bool:
+    """Retarget a user op's source safely, optionally applying AST inference.
+
+    Introspection remains AST-only.  When ``infer`` is true every inferred field
+    is written into the ordinary editable wrapper fields so the manager can show
+    it immediately; subsequent edits are never hidden behind inference.
+    """
+
+    infos = {info.name: info for info in introspect_python_source(py_path)}
+    info = infos.get(callable_name)
+    if info is None:
+        raise ValueError(f"{py_path!r} has no top-level function {callable_name!r}")
+    wrapper_path = _wrapper_path_for_id(operation_id)
+    if wrapper_path is None:
+        return False
+    with open(wrapper_path) as handle:
+        payload = json.load(handle)
+
+    directory = user_operations_directory()
+    slug = operation_id[len("user:") :]
+    if link:
+        stored_path = os.path.abspath(py_path)
+    else:
+        stored_path = f"{slug}.py"
+        destination = os.path.join(directory, stored_path)
+        if os.path.abspath(py_path) != os.path.abspath(destination):
+            shutil.copyfile(py_path, destination)
+
+    payload["source"] = {
+        "mode": "link" if link else "import",
+        "path": stored_path,
+        "callable": callable_name,
+    }
+    payload.pop("template", None)
+    if infer:
+        payload.update(
+            label=callable_name.replace("_", " ").title(),
+            description=info.doc,
+            requires_axis=info.has_axis,
+            parameters=[_parameter_payload(parameter) for parameter in info.params],
+        )
+    _write_wrapper(wrapper_path, payload)
+    refresh_user_operations()
+    return True
+
+
+def _unique_copy_label(base: str, *, copy_suffix: bool = True) -> str:
+    root = str(base).rstrip(".").strip()
+    candidate = f"{root} copy" if copy_suffix else root
+    labels = {entry.label.casefold() for entry in registry.all_operations()}
+    if candidate.casefold() not in labels:
+        return candidate
+    suffix = 2
+    while f"{candidate} {suffix}".casefold() in labels:
+        suffix += 1
+    return f"{candidate} {suffix}"
+
+
+def _callable_name(slug: str) -> str:
+    name = slug.replace("-", "_")
+    if name and name[0].isdigit():
+        name = f"operation_{name}"
+    return name or "operation"
+
+
+def _write_wrapper(path: str, payload: dict) -> None:
+    with open(path, "w") as handle:
+        json.dump(payload, handle, indent=2)
+
+
 def import_custom_operation(
     py_path: str,
     callable_name: str,
@@ -845,8 +1086,7 @@ def import_custom_operation(
         "changes_shape": bool(changes_shape),
         "parameters": [_parameter_payload(param) for param in info.params],
     }
-    with open(os.path.join(directory, f"{slug}.json"), "w") as handle:
-        json.dump(wrapper, handle, indent=2)
+    _write_wrapper(os.path.join(directory, f"{slug}.json"), wrapper)
 
     refresh_user_operations()
     return operation_id
@@ -905,7 +1145,6 @@ def update_user_operation(operation_id: str, **wrapper_fields) -> bool:
         merged_source.update(source_update)
         payload["source"] = merged_source
     payload.update(wrapper_fields)
-    with open(path, "w") as handle:
-        json.dump(payload, handle, indent=2)
+    _write_wrapper(path, payload)
     refresh_user_operations()
     return True
