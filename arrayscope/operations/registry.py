@@ -113,6 +113,7 @@ class OperationEntry:
     group: str = "Other"
     description: str = ""
     icon: str = "data_array"
+    unavailable_reason: str = ""
 
 
 OPERATION_REGISTRY = {
@@ -791,6 +792,7 @@ def _pack_operation_entry(spec) -> OperationEntry:
         group=getattr(spec, "group", "Other"),
         description=getattr(spec, "description", ""),
         icon=getattr(spec, "icon", "data_array"),
+        unavailable_reason=spec.current_unavailable_reason(),
     )
 
 

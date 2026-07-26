@@ -51,12 +51,15 @@ def test_cfl_round_trips_as_complex64(tmp_path, dtype):
     np.testing.assert_allclose(result, source.astype(np.complex64))
 
 
-def test_available_bart_pack_registers_no_operations(monkeypatch):
-    monkeypatch.setattr(bart_pack, "bart_available", lambda: True)
+def test_bart_pack_registers_only_genuinely_bart_shaped_examples():
+    specs = bart_pack.pack_specs()
 
-    assert bart_pack.pack_specs() == ()
-    assert bart_pack.register() is False
-    assert not any(entry.id.startswith("bart:") for entry in registry.all_operations())
+    assert {spec.id for spec in specs} == {"bart:ecalib", "bart:walsh"}
+    assert all(spec.runtime == "command" for spec in specs)
+    assert all(spec.runtime_config["handoff"] == "cfl" for spec in specs)
+    registered = []
+    assert bart_pack.register(registered.append) is True
+    assert [spec.id for spec in registered] == [spec.id for spec in specs]
 
 
 def test_enumeration_never_spawns_bart(monkeypatch):
@@ -67,16 +70,17 @@ def test_enumeration_never_spawns_bart(monkeypatch):
     registry.all_operations()
 
 
-def test_bart_executable_prefers_toolbox_and_availability_requires_env(tmp_path, monkeypatch):
+def test_bart_executable_uses_effective_environment_path(tmp_path, monkeypatch):
     executable = tmp_path / "bart"
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv(bart_pack.BART_TOOLBOX_ENV, str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("BART_TOOLBOX_PATH", "/deliberately/not/interpreted")
 
     assert bart_pack.bart_executable() == str(executable)
     assert bart_pack.bart_available() is True
 
-    monkeypatch.delenv(bart_pack.BART_TOOLBOX_ENV)
+    monkeypatch.setenv("PATH", "")
     assert bart_pack.bart_available() is False
 
 

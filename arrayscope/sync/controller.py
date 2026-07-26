@@ -281,7 +281,7 @@ class WindowSyncController(Qt.QtCore.QObject):
     def _apply_operations(self, payload) -> None:
         win = self.win
         recipe = payload.get("recipe")
-        steps = steps_from_recipe(recipe, win.base_data.shape)
+        steps = steps_from_recipe(recipe, win.base_data.shape, imported=True)
         if tuple(steps) == tuple(win.document.steps):
             return
         win.operation_coordinator.load_steps(steps)

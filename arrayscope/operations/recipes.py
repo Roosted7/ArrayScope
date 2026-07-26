@@ -62,11 +62,15 @@ def operation_to_recipe_item(operation_or_step):
     return item
 
 
-def operations_from_recipe(recipe, base_shape):
-    return tuple(step.operation for step in steps_from_recipe(recipe, base_shape) if step.enabled)
+def operations_from_recipe(recipe, base_shape, *, imported: bool = False):
+    return tuple(
+        step.operation
+        for step in steps_from_recipe(recipe, base_shape, imported=imported)
+        if step.enabled
+    )
 
 
-def steps_from_recipe(recipe, base_shape):
+def steps_from_recipe(recipe, base_shape, *, imported: bool = False):
     if not isinstance(recipe, dict):
         raise ValueError("recipe must be a JSON object")
     version = recipe.get("version")
@@ -86,12 +90,19 @@ def steps_from_recipe(recipe, base_shape):
         if not isinstance(operation_id, str):
             raise ValueError(f"operation {index} is missing an id")
         try:
+            quarantined = False
+            if imported:
+                from arrayscope.operations import library
+
+                quarantined = library.quarantine_imported_command(operation_id)
             operation = create_operation(
                 operation_id,
                 axis=item.get("axis"),
                 parameters=item.get("parameters", {}),
             )
             enabled = bool(item.get("enabled", True)) if version == RECIPE_VERSION else True
+            if quarantined:
+                enabled = False
             if enabled:
                 shape = operation.output_shape(shape)
         except Exception as exc:
@@ -112,16 +123,20 @@ def dumps_recipe(operations, **kwargs) -> str:
     return json.dumps(recipe, **options)
 
 
-def loads_recipe(text: str, base_shape):
-    return tuple(step.operation for step in loads_recipe_steps(text, base_shape) if step.enabled)
+def loads_recipe(text: str, base_shape, *, imported: bool = False):
+    return tuple(
+        step.operation
+        for step in loads_recipe_steps(text, base_shape, imported=imported)
+        if step.enabled
+    )
 
 
-def loads_recipe_steps(text: str, base_shape):
+def loads_recipe_steps(text: str, base_shape, *, imported: bool = False):
     try:
         recipe = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON recipe: {exc}") from exc
-    return steps_from_recipe(recipe, base_shape)
+    return steps_from_recipe(recipe, base_shape, imported=imported)
 
 
 def save_recipe(path, operations):
@@ -138,9 +153,9 @@ def save_recipe(path, operations):
 
 def load_recipe(path, base_shape):
     with open(path, encoding="utf-8") as recipe_file:
-        return loads_recipe(recipe_file.read(), base_shape)
+        return loads_recipe(recipe_file.read(), base_shape, imported=True)
 
 
 def load_recipe_steps(path, base_shape):
     with open(path, encoding="utf-8") as recipe_file:
-        return loads_recipe_steps(recipe_file.read(), base_shape)
+        return loads_recipe_steps(recipe_file.read(), base_shape, imported=True)

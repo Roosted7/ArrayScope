@@ -122,13 +122,13 @@ def recipe_to_mapping(recipe: ViewRecipe):
     }
 
 
-def recipe_from_mapping(mapping, base_shape):
+def recipe_from_mapping(mapping, base_shape, *, imported: bool = False):
     if not isinstance(mapping, dict):
         raise ValueError("view recipe must be a JSON object")
     if mapping.get("version") != VIEW_RECIPE_VERSION:
         raise ValueError(f"unsupported view recipe version: {mapping.get('version')!r}")
     operations_recipe = {"version": 2, "operations": mapping.get("operations", [])}
-    steps = steps_from_recipe(operations_recipe, base_shape)
+    steps = steps_from_recipe(operations_recipe, base_shape, imported=imported)
     shape = tuple(base_shape)
     for step in steps:
         if step.enabled:
@@ -146,12 +146,12 @@ def dumps_view_recipe(recipe: ViewRecipe, **kwargs):
     return json.dumps(recipe_to_mapping(recipe), **options)
 
 
-def loads_view_recipe(text: str, base_shape):
+def loads_view_recipe(text: str, base_shape, *, imported: bool = False):
     try:
         mapping = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON view recipe: {exc}") from exc
-    return recipe_from_mapping(mapping, base_shape)
+    return recipe_from_mapping(mapping, base_shape, imported=imported)
 
 
 def save_view_recipe(path, recipe: ViewRecipe):
@@ -168,4 +168,4 @@ def save_view_recipe(path, recipe: ViewRecipe):
 
 def load_view_recipe(path, base_shape):
     with open(path, encoding="utf-8") as recipe_file:
-        return loads_view_recipe(recipe_file.read(), base_shape)
+        return loads_view_recipe(recipe_file.read(), base_shape, imported=True)

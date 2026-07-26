@@ -40,16 +40,17 @@ def export_operation_definition(operation: str | OperationEntry) -> dict[str, An
         definition.setdefault("version", 1)
         definition["tier"] = "user"
         definition["parameters"] = _parameter_payloads(entry.parameters)
+        definition["unavailable_reason"] = entry.unavailable_reason
         return definition
 
     registry.load_operation_packs()
     pack_spec = registry._PACK_SPECS.get(operation_id)
     if pack_spec is not None:
         provider = _callable_module(pack_spec.build or pack_spec.fn)
-        return _definition_from_entry(
+        definition = _definition_from_entry(
             entry,
             tier="pack",
-            runtime="python",
+            runtime=str(getattr(pack_spec, "runtime", "python") or "python"),
             source={
                 "mode": "pack",
                 "id": operation_id,
@@ -57,6 +58,12 @@ def export_operation_definition(operation: str | OperationEntry) -> dict[str, An
                 "module": provider,
             },
         )
+        runtime_config = dict(getattr(pack_spec, "runtime_config", None) or {})
+        definition.update(runtime_config)
+        environment_id = str(getattr(pack_spec, "environment_id", "") or "")
+        if environment_id:
+            definition["environment"] = environment_id
+        return definition
 
     if operation_id in registry.OPERATION_REGISTRY:
         operation_type = entry.operation_type
@@ -221,6 +228,7 @@ def _definition_from_entry(
         "requires_axis": bool(entry.requires_axis),
         "changes_shape": bool(entry.changes_shape),
         "parameters": _parameter_payloads(entry.parameters),
+        "unavailable_reason": entry.unavailable_reason,
         "tier": tier,
     }
 

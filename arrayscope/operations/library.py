@@ -49,14 +49,14 @@ Each user op is a wrapper JSON ``<slug>.json`` in
         ],
     }
 
-``runtime`` values ``"shell" | "julia" | "matlab"`` are **reserved**: they parse
-but do not register (a clear "runtime not yet supported" problem is recorded and
-the op is skipped) -- schema future-proofing only.  ``changes_shape`` is likewise
-**reserved and must be ``false``**: a wrapper cannot supply an ``output_shape``
-adapter, so a shape-changing op could not predict its output shape and would lie
-to the evaluator; a ``true`` value is skipped with a recorded problem.  A broken
-wrapper or code
-file **never** breaks startup: it is caught, logged, recorded in
+``runtime`` values ``"python"``, ``"command"``, ``"julia"``, and ``"matlab"``
+are concrete.  Command-backed operations use explicit tokenization plus an
+``npy`` or ``cfl`` array handoff; Python can name an out-of-process execution
+environment.  ``changes_shape`` is still **reserved and must be ``false``**:
+a wrapper cannot yet supply a trustworthy ``output_shape`` adapter, so a
+shape-changing op could not predict its output shape and would lie to the
+evaluator; a ``true`` value is registered unavailable pending shape discovery.
+A broken wrapper or code file **never** breaks startup: it is caught, logged, recorded in
 :func:`user_operation_problems`, and skipped, so the rest of the library loads.
 
 The operation manager UI (a separate chunk) builds on this module: it renders
@@ -78,9 +78,10 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from arrayscope.app import user_dirs
-from arrayscope.operations import registry
+from arrayscope.operations import command_runtime, environments, registry
 from arrayscope.operations.plugins import PluginOperationSpec
 from arrayscope.operations.registry import (
     COMMON_OPERATION_IDS,
@@ -94,9 +95,10 @@ _LOGGER = logging.getLogger(__name__)
 WRAPPER_FORMAT = "arrayscope-operation"
 LAYOUT_FORMAT = "arrayscope-operation-layout"
 
-# The one runtime we execute today; the rest are reserved (parsed, not run).
 SUPPORTED_RUNTIME = "python"
-RESERVED_RUNTIMES: frozenset[str] = frozenset({"shell", "julia", "matlab"})
+SUPPORTED_RUNTIMES: frozenset[str] = frozenset({"python", "command", "julia", "matlab"})
+# Compatibility name retained for callers that used the old schema constant.
+RESERVED_RUNTIMES: frozenset[str] = frozenset()
 
 # Default "More" fold-out groups a UI surface tucks below the common ops. This is
 # presentation policy the layout can override via ``more_groups``.
@@ -156,6 +158,29 @@ def user_operations_directory() -> str:
     """Directory holding user-op wrapper JSON + code files (tests monkeypatch this)."""
 
     return str(user_dirs.user_operations_directory())
+
+
+def execution_environments() -> tuple[environments.ExecutionEnvironment, ...]:
+    """Named environments persisted beside user operation wrappers."""
+
+    return environments.load_environments(user_operations_directory())
+
+
+def update_execution_environment(**fields) -> environments.ExecutionEnvironment:
+    record = environments.upsert_environment(user_operations_directory(), fields)
+    refresh_user_operations()
+    return record
+
+
+def remove_execution_environment(environment_id: str) -> bool:
+    removed = environments.remove_environment(user_operations_directory(), environment_id)
+    if removed:
+        refresh_user_operations()
+    return removed
+
+
+def resolve_execution_environment(environment_id: str):
+    return environments.resolve_environment(user_operations_directory(), environment_id)
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +435,11 @@ def _load_user_operations() -> None:
         for file_name in sorted(os.listdir(directory)):
             if not file_name.endswith(".json"):
                 continue
-            if file_name in ("layout.json", "hidden-operations.json"):
+            if file_name in (
+                "layout.json",
+                "hidden-operations.json",
+                environments.ENVIRONMENTS_FILE,
+            ):
                 continue
             path = os.path.join(directory, file_name)
             try:
@@ -457,41 +486,8 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
         raise ValueError(f"user operation id must start with 'user:', got {operation_id!r}")
 
     runtime = str(payload.get("runtime") or SUPPORTED_RUNTIME)
-    if runtime in RESERVED_RUNTIMES:
-        raise ValueError(f"runtime not yet supported: {runtime}")
-    if runtime != SUPPORTED_RUNTIME:
+    if runtime not in SUPPORTED_RUNTIMES:
         raise ValueError(f"unknown runtime: {runtime}")
-
-    source = payload.get("source")
-    if not isinstance(source, dict):
-        raise ValueError("wrapper is missing a 'source' object")
-    mode = str(source.get("mode") or "import")
-    if mode not in ("import", "link"):
-        raise ValueError(f"unknown source mode: {mode}")
-    rel_or_abs = str(source.get("path") or "")
-    if not rel_or_abs:
-        raise ValueError("source is missing a 'path'")
-    callable_name = str(source.get("callable") or "")
-    if not callable_name:
-        raise ValueError("source is missing a 'callable'")
-
-    # import: path is relative to the ops dir; link: path is absolute.
-    directory = user_operations_directory()
-    code_path = rel_or_abs if os.path.isabs(rel_or_abs) else os.path.join(directory, rel_or_abs)
-
-    # Validate the code file at load time WITHOUT executing it: AST-parse it
-    # (catches a missing file / syntax error) and confirm the callable exists.
-    # Actual execution stays lazy (first use).  A "broken" code file is therefore
-    # skipped here with a recorded problem, never registered as a landmine that
-    # explodes at apply time.
-    try:
-        available = {info.name for info in introspect_python_source(code_path)}
-    except FileNotFoundError as exc:
-        raise ValueError(f"source file not found: {code_path}") from exc
-    except SyntaxError as exc:
-        raise ValueError(f"source file has a syntax error: {exc}") from exc
-    if callable_name not in available:
-        raise ValueError(f"source file {code_path!r} has no top-level function {callable_name!r}")
 
     slug = operation_id[len("user:") :]
     parameters = _parameters_from_payload(payload.get("parameters", ()))
@@ -507,10 +503,70 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
             "(the wrapper cannot predict the output shape)"
         )
 
+    template = payload.get("template")
+    unavailable_reason = ""
+    if isinstance(template, dict):
+        unavailable_reason = str(template.get("reason") or "")
+    review = payload.get("review")
+    if isinstance(review, dict) and bool(review.get("required")):
+        unavailable_reason = str(
+            review.get("reason")
+            or "Imported command operation is unavailable until reviewed in the operation manager."
+        )
+
+    environment_id = str(payload.get("environment") or "")
+    source = payload.get("source")
+    runtime_config: dict[str, object] = {}
+    if runtime == "python":
+        if not isinstance(source, dict):
+            raise ValueError("wrapper is missing a 'source' object")
+        mode = str(source.get("mode") or "import")
+        if mode not in ("import", "link"):
+            raise ValueError(f"unknown source mode: {mode}")
+        rel_or_abs = str(source.get("path") or "")
+        if not rel_or_abs:
+            raise ValueError("source is missing a 'path'")
+        callable_name = str(source.get("callable") or "")
+        if not callable_name:
+            raise ValueError("source is missing a 'callable'")
+        directory = user_operations_directory()
+        code_path = rel_or_abs if os.path.isabs(rel_or_abs) else os.path.join(directory, rel_or_abs)
+        try:
+            available = {info.name for info in introspect_python_source(code_path)}
+        except FileNotFoundError as exc:
+            raise ValueError(f"source file not found: {code_path}") from exc
+        except SyntaxError as exc:
+            raise ValueError(f"source file has a syntax error: {exc}") from exc
+        if callable_name not in available:
+            raise ValueError(
+                f"source file {code_path!r} has no top-level function {callable_name!r}"
+            )
+        if environment_id:
+            runtime_config = _runtime_config(payload)
+            build = _make_python_environment_build(
+                code_path,
+                callable_name,
+                environment_id=environment_id,
+                handoff=str(runtime_config["handoff"]),
+                timeout=runtime_config["timeout_s"],
+            )
+        else:
+            build = _make_user_build(code_path, slug, callable_name)
+    else:
+        runtime_config = _runtime_config(payload)
+        command_problem = _command_definition_problem(runtime, runtime_config, parameters)
+        if command_problem and not unavailable_reason:
+            unavailable_reason = command_problem
+        build = _make_command_build(
+            runtime,
+            runtime_config,
+            environment_id=environment_id,
+        )
+
     return PluginOperationSpec(
         id=operation_id,
         label=str(payload.get("label") or slug),
-        build=_make_user_build(code_path, slug, callable_name),
+        build=build,
         parameters=parameters,
         requires_axis=requires_axis,
         changes_shape=changes_shape,
@@ -519,7 +575,189 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
         icon=str(payload.get("icon") or "extension"),
         # User ops are Tier-1 OPAQUE: no region claim, so no conformance gate.
         region_capable=False,
+        unavailable_reason=unavailable_reason,
+        availability=_availability_check(
+            runtime,
+            runtime_config,
+            environment_id=environment_id,
+        ),
+        runtime=runtime,
+        runtime_config=runtime_config,
+        environment_id=environment_id,
     )
+
+
+def _runtime_config(payload: dict) -> dict[str, object]:
+    timeout = payload.get("timeout_s", command_runtime.DEFAULT_TIMEOUT_S)
+    if timeout is not None:
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("timeout_s must be a number or null") from exc
+        if timeout <= 0:
+            timeout = None
+    handoff = str(payload.get("handoff") or "npy")
+    command_runtime.array_handoff(handoff)
+    return {
+        "command_template": str(payload.get("command_template") or ""),
+        "handoff": handoff,
+        "timeout_s": timeout,
+        "shell": bool(payload.get("shell", False)),
+    }
+
+
+def _command_definition_problem(
+    runtime: str,
+    config: dict[str, object],
+    parameters: tuple[OperationParameter, ...],
+) -> str:
+    command_template = str(config.get("command_template") or "")
+    if not command_template.strip():
+        return "Command template is empty."
+    fields = command_runtime.template_fields(command_template)
+    required = {"in", "out", *(parameter.name for parameter in parameters)}
+    missing = sorted(required - fields)
+    if missing:
+        return f"Command template is missing placeholders for: {', '.join(missing)}"
+    if runtime in {"julia", "matlab"} and bool(config.get("shell")):
+        return f"{runtime} runtime does not support shell execution."
+    return ""
+
+
+def _resolve_runtime_environment(environment_id: str):
+    if not environment_id:
+        return None, None
+    return resolve_execution_environment(environment_id)
+
+
+def _runtime_prefix(runtime: str, resolved) -> tuple[str, ...]:
+    conda_prefix = tuple(getattr(resolved, "command_prefix", ()) or ())
+    if runtime == "command":
+        return conda_prefix
+    default = "julia" if runtime == "julia" else "matlab"
+    interpreter = getattr(resolved, "interpreter", None) if resolved is not None else None
+    if interpreter == "python":
+        interpreter = default
+    return (*conda_prefix, str(interpreter or default))
+
+
+def _availability_check(runtime: str, config: dict[str, object], *, environment_id: str):
+    def check() -> str | None:
+        resolved, reason = _resolve_runtime_environment(environment_id)
+        if reason:
+            return reason
+        if runtime == "python":
+            if not environment_id:
+                return None
+            if resolved is None or not resolved.interpreter:
+                return f"Execution environment {environment_id!r} has no Python interpreter."
+            return None
+        prefix = _runtime_prefix(runtime, resolved)
+        values = {"in": "input", "out": "output"}
+        command = command_runtime.build_command(
+            str(config["command_template"]),
+            values
+            | {
+                field: "0"
+                for field in command_runtime.template_fields(str(config["command_template"]))
+                if field not in values
+            },
+            shell=bool(config["shell"]),
+            prefix=prefix,
+        )
+        executable = command_runtime.command_executable(command, shell=bool(config["shell"]))
+        effective_env = None if resolved is None else resolved.env
+        if executable is None or not command_runtime.is_executable(executable, env=effective_env):
+            return f"Command executable is not available: {executable or '(empty command)'}"
+        return None
+
+    return check
+
+
+def _make_command_build(
+    runtime: str,
+    config: dict[str, object],
+    *,
+    environment_id: str,
+):
+    def build(axis, params):
+        values = dict(params)
+        if axis is not None:
+            values["axis"] = axis
+
+        def bound(data):
+            resolved, reason = _resolve_runtime_environment(environment_id)
+            if reason:
+                raise RuntimeError(reason)
+            return command_runtime.run_command_template(
+                str(config["command_template"]),
+                data,
+                parameters=values,
+                handoff=str(config["handoff"]),
+                shell=bool(config["shell"]),
+                prefix=_runtime_prefix(runtime, resolved),
+                env=None if resolved is None else resolved.env,
+                cwd=None if resolved is None else resolved.cwd,
+                timeout=config["timeout_s"],
+            )
+
+        return bound
+
+    return build
+
+
+def _make_python_environment_build(
+    code_path: str,
+    callable_name: str,
+    *,
+    environment_id: str,
+    handoff: str,
+    timeout,
+):
+    worker = str(Path(__file__).with_name("python_environment_worker.py"))
+
+    def build(axis, params):
+        parameters_json = json.dumps(dict(params), separators=(",", ":"))
+        axis_json = json.dumps(axis)
+
+        def bound(data):
+            resolved, reason = resolve_execution_environment(environment_id)
+            if reason:
+                raise RuntimeError(reason)
+            if resolved is None or not resolved.interpreter:
+                raise RuntimeError(
+                    f"Execution environment {environment_id!r} has no Python interpreter."
+                )
+            prefix = tuple(resolved.command_prefix)
+            command = [
+                *prefix,
+                resolved.interpreter,
+                worker,
+                "--source",
+                code_path,
+                "--callable",
+                callable_name,
+                "--handoff",
+                handoff,
+                "--parameters",
+                parameters_json,
+                "--axis",
+                axis_json,
+                "{in}",
+                "{out}",
+            ]
+            return command_runtime.run_array_command(
+                command,
+                data,
+                handoff=handoff,
+                env=resolved.env,
+                cwd=resolved.cwd,
+                timeout=timeout,
+            )
+
+        return bound
+
+    return build
 
 
 def _parameters_from_payload(raw) -> tuple[OperationParameter, ...]:
@@ -860,6 +1098,7 @@ def create_empty_user_operation() -> str:
         "template": {
             "kind": "empty",
             "message": "Empty template — open the code file and implement it before running.",
+            "reason": "Empty template — open the code file and implement it before running.",
         },
     }
     _write_wrapper(os.path.join(directory, f"{slug}.json"), wrapper)
@@ -894,17 +1133,58 @@ def duplicate_operation(operation_id: str) -> str:
     source_name = f"{slug}.py"
     callable_name = _callable_name(slug)
     tier = str(definition.get("tier") or "")
+    runtime = str(definition.get("runtime") or SUPPORTED_RUNTIME)
+
+    if runtime in {"command", "julia", "matlab"}:
+        wrapper = {
+            key: value
+            for key, value in definition.items()
+            if key
+            in {
+                "description",
+                "group",
+                "icon",
+                "runtime",
+                "command_template",
+                "handoff",
+                "timeout_s",
+                "shell",
+                "environment",
+                "requires_axis",
+                "parameters",
+            }
+        }
+        wrapper.update(
+            {
+                "format": WRAPPER_FORMAT,
+                "version": 1,
+                "id": duplicate_id,
+                "label": label,
+                "group": effective_group(entry),
+                "changes_shape": False,
+                "template": {
+                    "kind": "command-copy",
+                    "source_id": entry.id,
+                    "message": "Editable copy of the command-template definition.",
+                },
+            }
+        )
+        _write_wrapper(os.path.join(directory, f"{slug}.json"), wrapper)
+        refresh_user_operations()
+        return duplicate_id
 
     template: dict[str, str]
     if entry.changes_shape:
         source_text = blocked_shape_template_source(entry, callable_name)
+        reason = (
+            "Template only — the original changes shape. Bundle D owns shape "
+            "discovery, so this copy is blocked instead of lying to the evaluator."
+        )
         template = {
             "kind": "shape-changing",
             "source_id": entry.id,
-            "message": (
-                "Template only — the original changes shape. Bundle D owns shape "
-                "discovery, so this copy is blocked instead of lying to the evaluator."
-            ),
+            "message": reason,
+            "reason": reason,
         }
     elif tier == "builtin":
         source_text = native_editable_source(entry, callable_name)
@@ -1066,9 +1346,6 @@ def import_custom_operation(
     """
 
     if changes_shape:
-        # See _spec_from_wrapper_file: a user wrapper cannot predict the output
-        # shape, so a shape-changing op would lie to the evaluator. Refuse to
-        # write a wrapper we would only skip on the next load.
         raise ValueError(
             "shape-changing user operations are not yet supported "
             "(the wrapper cannot predict the output shape)"
@@ -1168,6 +1445,61 @@ def update_user_operation(operation_id: str, **wrapper_fields) -> bool:
         merged_source.update(source_update)
         payload["source"] = merged_source
     payload.update(wrapper_fields)
+    _write_wrapper(path, payload)
+    refresh_user_operations()
+    return True
+
+
+def operation_runtime(operation_id: str) -> str:
+    """Declarative runtime for one operation without executing its body."""
+
+    wrapper = user_operation_wrapper(operation_id)
+    if wrapper is not None:
+        return str(wrapper.get("runtime") or SUPPORTED_RUNTIME)
+    try:
+        from arrayscope.operations.operation_definitions import export_operation_definition
+
+        return str(export_operation_definition(operation_id).get("runtime") or "python")
+    except Exception:
+        return "python"
+
+
+def quarantine_imported_command(operation_id: str) -> bool:
+    """Persist the ADR 0060 imported-recipe review boundary for a command op."""
+
+    if operation_runtime(operation_id) not in {"command", "julia", "matlab"}:
+        return False
+    path = _wrapper_path_for_id(operation_id)
+    if path is None:
+        return False
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    review = payload.get("review")
+    if isinstance(review, dict) and review.get("required"):
+        return True
+    payload["review"] = {
+        "required": True,
+        "reason": (
+            "Imported recipe command — review this definition in the operation "
+            "manager before allowing it to run."
+        ),
+    }
+    _write_wrapper(path, payload)
+    refresh_user_operations()
+    return True
+
+
+def review_user_operation(operation_id: str) -> bool:
+    """Mark an imported command definition reviewed and recompute availability."""
+
+    path = _wrapper_path_for_id(operation_id)
+    if path is None:
+        return False
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if "review" not in payload:
+        return False
+    payload.pop("review", None)
     _write_wrapper(path, payload)
     refresh_user_operations()
     return True

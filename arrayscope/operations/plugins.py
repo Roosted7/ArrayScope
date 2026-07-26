@@ -122,18 +122,40 @@ class PluginOperationSpec:
     # plausible-but-wrong pixels at interactive speed, so an unverified/failing
     # claim is downgraded to the OPAQUE whole-array path, never trusted.
     region_capable: bool = False
+    # A registered operation may be visible but deliberately non-runnable (an
+    # unfinished template, unresolved environment, or imported command awaiting
+    # review). ``availability`` is evaluated lazily so a repaired environment
+    # is picked up without importing or executing the operation body.
+    unavailable_reason: str = ""
+    availability: Callable[[], str | None] | None = None
+    # Shared declarative runtime metadata. It is exported by the operation
+    # manager and copied verbatim when a command-backed system example is
+    # duplicated into a user operation.
+    runtime: str = "python"
+    runtime_config: Mapping[str, object] | None = None
+    environment_id: str = ""
 
     def __post_init__(self) -> None:
         if (self.fn is None) == (self.build is None):
             raise ValueError(f"plugin operation {self.id!r} must declare exactly one of fn / build")
 
     def resolve_fn(self, axis: int | None, params: Mapping[str, object]) -> Callable[..., object]:
+        reason = self.current_unavailable_reason()
+        if reason:
+            raise RuntimeError(f"operation {self.id!r} is unavailable: {reason}")
         if self.build is not None:
             built = self.build(axis, dict(params))
             if not callable(built):
                 raise TypeError(f"plugin operation {self.id!r} build() did not return a callable")
             return built
         return self.fn  # type: ignore[return-value]
+
+    def current_unavailable_reason(self) -> str:
+        if self.unavailable_reason:
+            return str(self.unavailable_reason)
+        if self.availability is not None:
+            return str(self.availability() or "")
+        return ""
 
     def resolve_output_shape(
         self, shape: Shape, axis: int | None, params: Mapping[str, object]
@@ -355,6 +377,7 @@ def plugin_operation_entry(operation_id: str) -> OperationEntry:
         group=spec.group,
         description=spec.description,
         icon=spec.icon,
+        unavailable_reason=spec.current_unavailable_reason(),
     )
 
 

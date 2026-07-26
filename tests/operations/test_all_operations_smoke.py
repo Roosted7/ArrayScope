@@ -78,11 +78,14 @@ def _sample_array(shape, dtype) -> np.ndarray:
     return real.astype(dtype)
 
 
-def test_demoted_numpy_wrapper_packs_contribute_no_operations():
-    """SigPy/BART runtime seams remain, but their NumPy-equivalent ops do not."""
+def test_demoted_numpy_wrapper_packs_only_expose_real_bart_examples():
+    """NumPy-equivalent pack ops stay demoted; real BART examples are explicit."""
 
-    ids = {entry.id for entry in registry.all_operations()}
-    assert not any(op_id.startswith(("sigpy:", "bart:")) for op_id in ids)
+    entries = registry.all_operations()
+    assert not any(entry.id.startswith("sigpy:") for entry in entries)
+    bart_entries = {entry.id: entry for entry in entries if entry.id.startswith("bart:")}
+    assert set(bart_entries) == {"bart:ecalib", "bart:walsh"}
+    assert all(entry.unavailable_reason for entry in bart_entries.values())
 
 
 def test_every_operation_builds_and_applies_without_crashing():
@@ -90,6 +93,8 @@ def test_every_operation_builds_and_applies_without_crashing():
     assert entries, "no operations registered"
 
     for entry in entries:
+        if entry.unavailable_reason:
+            continue
         shape, axis, dtypes = _context_for(entry.id)
         op_axis = axis if entry.requires_axis else None
 
