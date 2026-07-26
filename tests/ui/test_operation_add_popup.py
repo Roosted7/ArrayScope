@@ -27,15 +27,38 @@ def _make_popup(qtbot, *, fixed_axis=None, is_enabled=None, accepted=None, needs
     return popup, accepted, needs
 
 
-def test_popup_builds_with_common_and_group_sections(qtbot):
+def test_collapsed_popup_shows_only_common_and_reveals_the_rest_on_expand(qtbot):
+    # The whole point of the fold-out is that the popup opens small: the native
+    # toolbox is ~37 operations, so everything except the pinned Common section
+    # defaults into "More". A previous default named only the optional backend
+    # groups, which stopped partitioning anything once those packs were demoted
+    # and left one flat 37-row scroll behind an empty fold-out.
     popup, _accepted, _needs = _make_popup(qtbot)
-    titles = popup.visible_section_titles()
-    assert titles[0] == "COMMON"
-    assert "TRANSFORM" in titles
-    # Common ops (e.g. crop, mean) are listed exactly once, in Common.
+
+    collapsed_titles = popup.visible_section_titles()
+    assert collapsed_titles == ["COMMON"]
+    # Common ops are listed exactly once, in Common -- never repeated in their
+    # home group when it is revealed.
+    popup.set_expanded(True)
+    expanded_titles = popup.visible_section_titles()
+    assert expanded_titles[0] == "COMMON"
+    assert "TRANSFORM" in expanded_titles
     op_ids = popup.visible_operation_ids()
     assert op_ids.count("crop") == 1
     assert op_ids.count("mean") == 1
+
+
+def test_select_operation_reveals_a_folded_away_operation(qtbot):
+    # Selecting by id must not depend on which side of the fold an operation
+    # landed on -- "not found" for an operation that plainly exists would be a
+    # trap for callers and for a future search box.
+    popup, _accepted, _needs = _make_popup(qtbot)
+    assert "conjugate" not in popup.visible_operation_ids()
+
+    assert popup.select_operation("conjugate")
+
+    assert popup._expanded
+    assert "conjugate" in popup.visible_operation_ids()
 
 
 def test_axis_row_shown_for_axis_op_hidden_for_non_axis_op(qtbot):
@@ -89,12 +112,17 @@ def test_disabled_op_is_unselectable(qtbot):
     assert not popup.select_operation("mean")
 
 
-def test_native_pointwise_section_is_in_everyday_collapsed_listing(qtbot):
+def test_more_toggle_round_trips(qtbot):
+    # Expanding and collapsing again must return the popup to its small opening
+    # state rather than leaving the revealed groups behind.
     popup, _accepted, _needs = _make_popup(qtbot)
-    assert "POINTWISE" in popup.visible_section_titles()
-    assert "soft_threshold" in popup.visible_operation_ids()
+    collapsed_height = popup._list.height()
+
     popup.set_expanded(True)
     assert "POINTWISE" in popup.visible_section_titles()
     assert "soft_threshold" in popup.visible_operation_ids()
+    assert popup._list.height() > collapsed_height
+
     popup.set_expanded(False)
-    assert "POINTWISE" in popup.visible_section_titles()
+    assert popup.visible_section_titles() == ["COMMON"]
+    assert popup._list.height() == collapsed_height

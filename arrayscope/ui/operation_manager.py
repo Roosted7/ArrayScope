@@ -137,7 +137,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.remove_button = QtWidgets.QToolButton(self)
         set_button_icon(self.remove_button, "delete", tooltip="Hide")
         self.unhide_button = QtWidgets.QToolButton(self)
-        set_button_icon(self.unhide_button, "reset_wrench", tooltip="Restore / unhide")
+        set_button_icon(self.unhide_button, "visibility", tooltip="Restore / unhide")
         self.open_file_button = QtWidgets.QToolButton(self)
         set_button_icon(self.open_file_button, "edit", tooltip="Open the code file")
         self.open_folder_button = QtWidgets.QToolButton(self)
@@ -824,10 +824,13 @@ class OperationManagerDialog(QtWidgets.QDialog):
         hidden = operation_id in library.hidden_operations()
         self.duplicate_button.setEnabled(True)
         self.remove_button.setEnabled(True)
+        # The icon follows the action, not just the tooltip: hiding a system op
+        # is reversible (the Restore button brings it back), so a trash can
+        # overstates it. Deleting a user op really does remove its files.
         set_button_icon(
             self.remove_button,
-            "delete",
-            tooltip="Remove this user operation" if is_user else "Hide",
+            "delete" if is_user else "visibility_off",
+            tooltip="Remove this user operation" if is_user else "Hide this operation",
         )
         self.unhide_button.setEnabled(hidden)
         self.open_file_button.setEnabled(is_user)

@@ -28,11 +28,19 @@ def _build_kernels():
         rows = data.reshape((-1, data.shape[-1]))
         output = np.empty_like(rows)
         for row in prange(rows.shape[0]):
-            norm_squared = np.float32(0.0)
+            # Accumulate in float64 even though the data is float32/complex64:
+            # NumPy's reference path sums pairwise, this loop sums sequentially,
+            # and a float32 accumulator drifts with the axis length (2.6e-4
+            # relative at 1e6 samples). Since the kernel only engages once the
+            # JIT is warm, that drift would make the same operation on the same
+            # data return different values depending on compilation timing.
+            # The accumulator is not the bottleneck here -- this loop is
+            # memory-bound -- so the wider add is effectively free.
+            norm_squared = np.float64(0.0)
             for column in range(rows.shape[1]):
-                magnitude = abs(rows[row, column])
+                magnitude = np.float64(abs(rows[row, column]))
                 norm_squared += magnitude * magnitude
-            norm = np.sqrt(norm_squared)
+            norm = np.float32(np.sqrt(norm_squared))
             if norm == 0:
                 for column in range(rows.shape[1]):
                     output[row, column] = 0

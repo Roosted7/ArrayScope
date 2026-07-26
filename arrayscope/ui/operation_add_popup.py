@@ -255,16 +255,35 @@ class OperationAddPopup(EditBubble):
     # -- test / introspection helpers ----------------------------------------
 
     def select_operation(self, op_id: str) -> bool:
-        """Move the selection to ``op_id``; returns whether it was found."""
+        """Move the selection to ``op_id``, revealing it; returns whether it was found.
 
+        Most operations live in the collapsed "More" partition, so selecting by
+        id expands the fold-out when the target is not currently listed rather
+        than reporting "not found" for an operation that plainly exists. Callers
+        (and a future search box) can then address any operation by id without
+        first knowing which side of the fold it landed on.
+        """
+
+        if self._select_listed_operation(op_id):
+            return True
+        if not self._expanded and self._has_more_sections():
+            self.set_expanded(True)
+            return self._select_listed_operation(op_id)
+        return False
+
+    def _select_listed_operation(self, op_id: str) -> bool:
         for row in range(self._list.count()):
             item = self._list.item(row)
             if item.data(_ROLE_KIND) == _KIND_OP and item.data(_ROLE_OP) == op_id:
                 if not (item.flags() & QtCore.Qt.ItemFlag.ItemIsSelectable):
                     return False
                 self._list.setCurrentRow(row)
+                self._list.scrollToItem(item)
                 return True
         return False
+
+    def _has_more_sections(self) -> bool:
+        return any(section.is_more for section in self._sections)
 
     def visible_section_titles(self) -> list[str]:
         return [

@@ -100,7 +100,29 @@ RESERVED_RUNTIMES: frozenset[str] = frozenset({"shell", "julia", "matlab"})
 
 # Default "More" fold-out groups a UI surface tucks below the common ops. This is
 # presentation policy the layout can override via ``more_groups``.
-DEFAULT_MORE_GROUPS: tuple[str, ...] = ("SigPy", "BART", "User", "Other")
+#
+# Everything except the pinned "Common" section folds away by default. That
+# looks aggressive but it is what keeps the add popup short: the native toolbox
+# is 37 operations, and "Common" already holds the head of each group, so what
+# remains in the groups *is* the less-used tail. The earlier default named the
+# optional backend groups instead, which stopped partitioning anything the
+# moment those packs were demoted -- the popup became one flat 37-row scroll
+# with an empty fold-out, which is exactly what the fold-out exists to prevent.
+#
+# Anything a user reaches for often is one checkbox away from the pinned
+# section in the operation manager, and the layout can override this list
+# wholesale, so this default trades one click for a popup that opens small.
+DEFAULT_MORE_GROUPS: tuple[str, ...] = (
+    "Reduce",
+    "Transform",
+    "Complex",
+    "Pointwise",
+    "Reshape",
+    "SigPy",
+    "BART",
+    "User",
+    "Other",
+)
 
 # Python module namespace user code is imported under (keeps user modules from
 # colliding with real packages and with each other).
