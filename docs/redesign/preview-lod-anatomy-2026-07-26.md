@@ -286,6 +286,14 @@ never done, §5.2's is about work done too many times.
    to carry `copyBufferToTexture`'s 256-byte `bytes_per_row` alignment, but
    wgpu-native may stage through a buffer; if it does, pad rows to 64 texels.
 5. **Preview blur / proper minification (independent, cheap, do it anyway).**
+   **Built 2026-07-26, default off** — a 2x2 footprint box filter on minified
+   draws, under View ▸ Display Aids ▸ "Smooth When Zoomed Out". It removes 20%
+   of this montage's aliasing energy and changes 22.5% of the frame's pixels.
+   "Cheap" was half right: residency and uploads really are unchanged, but four
+   texel reads per fragment cost **+1.7 ms on a full-window draw** (1.63 → 3.28
+   ms), which is why it is opt-in. Invisible on this stage, which is
+   scheduling-bound. Measurements and the trust rules:
+   [wgpu-shader-legibility.md § C1 as built](../proposals/wgpu-shader-legibility.md#c1-as-built).
    `textureLoad` point sampling is why the preview aliases *and* why the
    refinement is invisible. A preview-only multi-tap read is O(1) per fragment
    and, with the native plane already resident, costs no bandwidth — it

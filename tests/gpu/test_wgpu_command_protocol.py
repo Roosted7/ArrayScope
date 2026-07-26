@@ -7,6 +7,7 @@ guarantees.  Mirrors ``experiments/wgpu_gate_b/virtual_tensor.py``.
 """
 
 import contextlib
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -480,20 +481,46 @@ class Scene:
             sx = t.src_origin[0] + (np.arange(tw) + 0.5) / tw * t.src_size[0]
             sy = t.src_origin[1] + (np.arange(th) + 0.5) / th * t.src_size[1]
             sxg, syg = np.meshgrid(sx, sy)
-            if t.lod_level == 1:
-                cx = np.clip(sxg / 2, 0, PLANE // 2 - 1).astype(np.int64)
-                cy = np.clip(syg / 2, 0, PLANE // 2 - 1).astype(np.int64)
-                v = self.plane_l1[cy, cx]
-            else:
-                cx = np.clip(sxg, 0, PLANE - 1).astype(np.int64)
-                cy = np.clip(syg, 0, PLANE - 1).astype(np.int64)
-                v = self.plane[cy, cx].copy()
+
+            def gather(gx, gy, lod_level=t.lod_level):
+                """One tap: the texel ``resolve()`` lands on, at this tile's
+                level, falling back to the pinned L1 ancestor where an L0 page
+                has been evicted."""
+
+                if lod_level == 1:
+                    cx = np.clip(gx / 2, 0, PLANE // 2 - 1).astype(np.int64)
+                    cy = np.clip(gy / 2, 0, PLANE // 2 - 1).astype(np.int64)
+                    return self.plane_l1[cy, cx]
+                cx = np.clip(gx, 0, PLANE - 1).astype(np.int64)
+                cy = np.clip(gy, 0, PLANE - 1).astype(np.int64)
+                out = self.plane[cy, cx].copy()
                 if absent_l0:
-                    cx1 = np.clip(sxg / 2, 0, PLANE // 2 - 1).astype(np.int64)
-                    cy1 = np.clip(syg / 2, 0, PLANE // 2 - 1).astype(np.int64)
+                    cx1 = np.clip(gx / 2, 0, PLANE // 2 - 1).astype(np.int64)
+                    cy1 = np.clip(gy / 2, 0, PLANE // 2 - 1).astype(np.int64)
                     for acx, acy in absent_l0:
                         m = (cx // PAGE == acx) & (cy // PAGE == acy)
-                        v[m] = self.plane_l1[cy1[m], cx1[m]]
+                        out[m] = self.plane_l1[cy1[m], cx1[m]]
+                return out
+
+            # C1: the fragment's source footprint, box-averaged, whenever the
+            # draw is minified and the aid is on; one tap (== the plain
+            # point sample) otherwise.  Derivatives are the tile's constant
+            # src-per-dst ratios, which is exactly what fwidth yields for an
+            # axis-aligned tile.
+            fw_x = t.src_size[0] / tw
+            fw_y = t.src_size[1] / th
+            taps = shader_mapping.wgpu_minification_tap_count(
+                fw_x, fw_y, enabled=getattr(mapping, "minification_filter", False)
+            )
+            tap_coords = shader_mapping.wgpu_minification_taps(
+                sxg,
+                syg,
+                fw_x,
+                fw_y,
+                taps,
+                src_rect=(*t.src_origin, *t.src_size),
+            )
+            v = np.mean([gather(gx, gy) for gx, gy in tap_coords], axis=0)
             re = v[..., 0].astype(np.float32)
             im = v[..., 1].astype(np.float32)
             x = {
@@ -781,7 +808,151 @@ def test_clip_indicator_marks_out_of_window_values(scene):
     assert changed > 5000, changed
 
 
-def _single_page_scalar_executor(doc, data):
+# ---- C1 minification filter oracles -----------------------------------------
+#
+# Same discipline as Stage A: each pairs a CPU-mirror match with an assertion
+# that the visual demonstrably fires, so dropping the shader branch turns the
+# test red.  Default-off byte-identity is already proven by every oracle above,
+# which renders minified tiles (``montage``, the L1 windows) with MAG.
+
+# Two zoomed-out draws of the same window: 1000 source texels over 768 dst
+# pixels (1.30 texels/px, just past the gate) and over 192 (5.21 texels/px,
+# the regime the 272-tile montage field report is about).  Both take the
+# 2-tap cap; what differs is how wide the footprint they average is.
+#
+# 1000 rather than the round 1024 on purpose.  1024/768 = 4/3 puts a tap
+# coordinate exactly on a texel boundary for two dst columns in every three,
+# and which side of that boundary a tap falls on is an f32 tie the GPU's
+# interpolated varying and a NumPy f64 mirror cannot be made to agree on --
+# neither answer is wrong.  1000/768 never lands on an integer, so the oracle
+# tests the filter instead of the tie-break.
+MINIFY_NEAR_GATE = (TileInstance((0, 0, 1, 1), (0, 0), (1000.0, 1000.0)),)
+MINIFY_MONTAGE = (TileInstance((0, 0, 0.25, 0.25), (0, 0), (1000.0, 1000.0)),)
+
+
+def _neighbour_energy(img):
+    """Mean absolute horizontal neighbour difference — an aliasing proxy: a
+    point-sampled minification keeps the source's full high-frequency content,
+    a footprint average does not."""
+
+    luma = img[..., :3].astype(np.float64).mean(axis=-1)
+    return float(np.abs(np.diff(luma, axis=1)).mean())
+
+
+@pytest.mark.parametrize(
+    ("tiles", "case"), [(MINIFY_NEAR_GATE, 0), (MINIFY_MONTAGE, 1)], ids=("near-gate", "montage")
+)
+def test_minification_filter_averages_the_footprint(scene, tiles, case):
+    """C1: a minified draw averages its source footprint instead of showing one
+    texel out of it.  Fails if the tap loop is dropped: the render stops
+    matching the mirror and its aliasing energy jumps back up."""
+
+    on_map = DisplayMapping("magnitude", 0.0, 6.0, minification_filter=True)
+    assert (
+        shader_mapping.wgpu_minification_tap_count(
+            tiles[0].src_size[0] / round(tiles[0].dst_rect[2] * CANVAS[0]),
+            tiles[0].src_size[1] / round(tiles[0].dst_rect[3] * CANVAS[1]),
+        )
+        == shader_mapping.MINIFY_FILTER_MAX_TAPS
+    )
+
+    scene.render(tiles, on_map, generation=60 + case)
+    on = scene.executor.read_target()
+    scene.assert_matches(on, scene.reference(tiles, on_map))
+
+    # MAG defaults the filter off — the same zoomed-out view, point-sampled.
+    scene.render(tiles, MAG, generation=70 + case)
+    off = scene.executor.read_target()
+    scene.assert_matches(off, scene.reference(tiles, MAG))
+
+    changed = int(np.any(on.astype(np.int32) != off.astype(np.int32), axis=-1).sum())
+    assert changed > 10_000, changed
+    assert _neighbour_energy(on) < 0.75 * _neighbour_energy(off)
+
+
+def test_minification_filter_leaves_magnified_draws_exactly_nearest(scene):
+    """C1's gate: at or below one source texel per screen pixel the filter is
+    inert, byte for byte.  Bilinear magnification would invent values that are
+    not in the array, and would blur Stage A's pixel grid away."""
+
+    # 700 source texels over 768 dst pixels: magnifying, but only just, so a
+    # filter that ignored the gate would move a large share of the pixels.
+    zoom = (TileInstance((0, 0, 1, 1), (0, 0), (700.0, 700.0)),)
+    scene.render(zoom, DisplayMapping("magnitude", 0.0, 6.0, minification_filter=True), 80)
+    on = scene.executor.read_target()
+    scene.render(zoom, MAG, generation=81)
+    assert np.array_equal(on, scene.executor.read_target())
+
+
+def test_minification_filter_does_not_bleed_across_montage_tiles(scene):
+    """C1's edge rule: taps are clamped to the tile's own source window, so a
+    montage cell never averages in its neighbour's data (or the zero padding
+    past a page's stored_rect).  A wrong colour at a tile border would be worse
+    than the aliasing the filter fixes, so the mirror clamps too and any
+    disagreement is a failure."""
+
+    # Four cells drawn side by side out of far-apart source windows, each
+    # minified 2x (256 texels over 128 dst px).
+    origins = ((0.0, 0.0), (768.0, 0.0), (0.0, 768.0), (768.0, 768.0))
+    tiles = tuple(
+        TileInstance(
+            (0.25 * i, 0.0, 1 / 6, 1 / 6),
+            origin,
+            (256.0, 256.0),
+        )
+        for i, origin in enumerate(origins)
+    )
+    on_map = DisplayMapping("magnitude", 0.0, 6.0, minification_filter=True)
+    scene.render(tiles, on_map, generation=90)
+    scene.assert_matches(scene.executor.read_target(), scene.reference(tiles, on_map))
+
+
+def test_minification_filter_keeps_a_nonfinite_footprint_nonfinite(scene):
+    """C1's trust rule: a tap set containing a non-finite value stays
+    non-finite.  Averaging one NaN into eight good neighbours would launder it
+    into a plausible number, which is exactly what A2 exists to prevent —
+    and the filter must make such a texel MORE visible, not less.
+
+    Fails if the tap loop drops non-finite taps the way it drops non-resident
+    ones: the hatch would shrink to nothing instead of covering the footprint.
+    """
+
+    rng = np.random.default_rng(11)
+    # Narrow spread inside a wide window, so no honest pixel can land on LUT 0
+    # or 255 and be mistaken for the black/white hatch.
+    data = (rng.standard_normal((PAGE, PAGE)) * 0.2).astype(np.float32)
+    # Texel 129: at 4 texels per pixel the point sample lands on texels 2 mod
+    # 4 and the two taps on 1 and 3 mod 4, so this one is invisible today and
+    # reachable only through the filter.
+    data[129, 129] = np.nan
+    mapping = DisplayMapping("magnitude", -3.0, 3.0)
+    dst = (0.0, 0.0, 0.25, 0.25)  # 256 texels over 64 px -> 4 texels/px
+
+    off = _single_page_scalar_executor("nan-minify-off", data, mapping=mapping, dst_rect=dst)
+    on = _single_page_scalar_executor(
+        "nan-minify-on",
+        data,
+        mapping=replace(mapping, minification_filter=True),
+        dst_rect=dst,
+    )
+
+    ys, xs = np.mgrid[0:64, 0:64]
+    hatch = shader_mapping.wgpu_nan_hatch_rgba(xs + 0.5, ys + 0.5)
+
+    def marked(img):  # only inside the tile; the cleared target is black too
+        return np.all(img[:64, :64, :3] == hatch[..., :3], axis=-1)
+
+    marked_on, marked_off = marked(on), marked(off)
+
+    # Point sampling never lands on texel 129 at this rate, so the bad texel is
+    # invisible today; the filter reaches it and marks it as the A2 hatch.
+    assert marked_off.sum() == 0
+    assert marked_on.sum() > 0
+    # ...confined to the footprint that contains it, not smeared over the tile.
+    assert marked_on.sum() < 16
+
+
+def _single_page_scalar_executor(doc, data, *, mapping=None, dst_rect=(0, 0, 1, 1)):
     executor = WgpuPlaneExecutor(
         target_size=(PAGE, PAGE), pool_layers={SCALAR_R32F: 1}, device=_shared_device()
     )
@@ -798,9 +969,9 @@ def _single_page_scalar_executor(doc, data):
         FrameSubmission(
             1,
             (
-                SetDisplayMapping(DisplayMapping("magnitude", -3.0, 3.0)),
+                SetDisplayMapping(mapping or DisplayMapping("magnitude", -3.0, 3.0)),
                 UpdateTileInstances(
-                    (TileInstance((0, 0, 1, 1), (0, 0), (float(PAGE), float(PAGE)), 0),)
+                    (TileInstance(dst_rect, (0, 0), (float(PAGE), float(PAGE)), 0),)
                 ),
                 PresentGeneration(1),
             ),

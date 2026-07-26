@@ -61,6 +61,7 @@ class WindowMenuMixin:
                 ),
                 "wgpu_pixel_grid": self._settings.value("wgpu_pixel_grid", False),
                 "wgpu_clip_indicator": self._settings.value("wgpu_clip_indicator", False),
+                "wgpu_minification_filter": self._settings.value("wgpu_minification_filter", False),
                 "resident_crop_rebind": self._settings.value("resident_crop_rebind", True),
                 "chunk_transport_codec": self._settings.value(
                     "chunk_transport_codec", ChunkTransportCodecChoice.RAW.value
@@ -238,6 +239,19 @@ class WindowMenuMixin:
         clip_indicator_action.toggled.connect(self._set_wgpu_clip_indicator_enabled)
         display_aids_menu.addAction(clip_indicator_action)
         self._wgpu_clip_indicator_action = clip_indicator_action
+        minification_filter_action = QtGui.QAction("Smooth When Zoomed Out", self, checkable=True)
+        minification_filter_action.setToolTip(
+            "Average every source texel a screen pixel covers instead of showing "
+            "just one of them, so a zoomed-out view stops shimmering. Only "
+            "affects draws that are zoomed out; magnification stays exact. "
+            "wgpu backend."
+        )
+        minification_filter_action.setChecked(
+            bool(getattr(self.app_settings, "wgpu_minification_filter", False))
+        )
+        minification_filter_action.toggled.connect(self._set_wgpu_minification_filter_enabled)
+        display_aids_menu.addAction(minification_filter_action)
+        self._wgpu_minification_filter_action = minification_filter_action
 
         performance_menu = QtWidgets.QMenu("Performance", self)
         self.menuBar().addMenu(performance_menu)
@@ -586,6 +600,13 @@ class WindowMenuMixin:
             "setWgpuClipIndicatorEnabled", bool(enabled), "Clipping indicator"
         )
 
+    def _set_wgpu_minification_filter_enabled(self, enabled: bool) -> None:
+        self.app_settings = self._updated_app_settings(wgpu_minification_filter=bool(enabled))
+        self._save_app_settings()
+        self._apply_wgpu_display_aid(
+            "setWgpuMinificationFilterEnabled", bool(enabled), "Zoomed-out smoothing"
+        )
+
     def _apply_wgpu_display_aid(self, setter_name: str, enabled: bool, label: str) -> None:
         """Apply a display-aid toggle to the live view, loudly (no silent no-op).
 
@@ -651,6 +672,7 @@ class WindowMenuMixin:
         for action_attr, setting_attr in (
             ("_wgpu_pixel_grid_action", "wgpu_pixel_grid"),
             ("_wgpu_clip_indicator_action", "wgpu_clip_indicator"),
+            ("_wgpu_minification_filter_action", "wgpu_minification_filter"),
         ):
             action = getattr(self, action_attr, None)
             if action is not None:

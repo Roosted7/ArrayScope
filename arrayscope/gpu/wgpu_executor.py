@@ -82,6 +82,13 @@ MAX_HISTOGRAM_BINS = 512
 
 _MODE_INDEX = {"magnitude": 0, "phase": 1, "real": 2, "imag": 3}
 _SCALE_INDEX = {"linear": 0, "log": 1, "symlog": 2}
+#: Display-aid bits packed into the single ``Mapping.aids`` uniform word (must
+#: mirror the ``AID_*`` constants in both WGSL render shaders).  One word
+#: rather than one word each: the mapping uniform is pinned at 32 bytes and
+#: Stage A already spent the two spare padding words.
+_AID_PIXEL_GRID = 1
+_AID_CLIP_INDICATOR = 2
+_AID_MINIFY_FILTER = 4
 _OVERLAY_KIND_INDEX = {
     "line": 0,
     "world_rect": 1,
@@ -278,9 +285,16 @@ struct Mapping {
     level_hi: f32,
     symlog_constant: f32,
     phase_color: u32,
-    pixel_grid: u32,
-    clip_indicator: u32,
+    // Display-aid flags packed into ONE word.  Stage A spent both spare
+    // padding words, and the uniform must not grow: the bind group pins
+    // `size: 32` and 9 words would round up to 48.  Bits mirror the _AID_*
+    // constants in the Python writer.
+    aids: u32,
+    _pad3: u32,
 };
+const AID_PIXEL_GRID: u32 = 1u;
+const AID_CLIP_INDICATOR: u32 = 2u;
+const AID_MINIFY_FILTER: u32 = 4u;
 struct LodInfo { base: u32, grid_w: u32, grid_h: u32, _pad: u32 };
 struct PlaneInfo { rep: u32, max_lod: u32, lod_base: u32, _pad: u32 };
 struct Tile {
@@ -313,6 +327,8 @@ struct VOut {
     @location(0) src: vec2<f32>,
     @location(1) @interpolate(flat) lod: u32,
     @location(2) @interpolate(flat) plane: u32,
+    // C1: the tile's own source window, so a filter tap can be clamped to it.
+    @location(3) @interpolate(flat) src_rect: vec4<f32>,
 };
 
 @vertex
@@ -332,12 +348,15 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     // canonically, so walk its UV axes swapped (q.yx) while the display quad
     // (t.dst) stays in screen orientation.
     out.src = t.src.xy + select(q, q.yx, t.transposed != 0u) * t.src.zw;
+    // A transpose swaps which axis the quad walks, never the window itself,
+    // so the source rect the fragment clamps taps to is t.src either way.
+    out.src_rect = t.src;
     out.lod = t.lod;
     out.plane = t.plane;
     return out;
 }
 
-struct Resolved { layer: i32, texel: vec2<i32> };
+struct Resolved { layer: i32, texel: vec2<i32>, lod: u32 };
 
 fn resolve(plane_index: u32, src_l0: vec2<f32>, lod_req: u32) -> Resolved {
     let p = planes[plane_index];
@@ -349,10 +368,10 @@ fn resolve(plane_index: u32, src_l0: vec2<f32>, lod_req: u32) -> Resolved {
         let chunk = coord / 256u;
         let entry = page_table[info.base + chunk.y * info.grid_w + chunk.x];
         if (entry >= 0) {
-            return Resolved(entry, vec2<i32>(coord % 256u));
+            return Resolved(entry, vec2<i32>(coord % 256u), lod);
         }
     }
-    return Resolved(-1, vec2<i32>(0, 0));
+    return Resolved(-1, vec2<i32>(0, 0), 0u);
 }
 
 fn apply_scale(value: f32) -> f32 {
@@ -406,14 +425,119 @@ fn pixel_grid(color: vec4<f32>, src: vec2<f32>, fw: vec2<f32>, enabled: u32) -> 
     return vec4<f32>(color.rgb * (1.0 - darken), color.a);
 }
 
+struct Sampled { v: vec2<f32>, nonfinite: u32 };
+
+// One resident scalar/complex texel as the (re, im) pair map_value consumes.
+fn read_sample(p: PlaneInfo, r: Resolved) -> vec2<f32> {
+    if (p.rep == 0u) {
+        return vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
+    }
+    return textureLoad(complex_pool, r.texel, r.layer, 0).rg;
+}
+
+// C1: taps per axis across the fragment's source footprint.  `fw` is
+// fwidth(in.src) -- source texels per screen pixel -- so max(fw) is the
+// minification factor.  1 tap while magnifying keeps that path EXACTLY
+// nearest (inventing values between samples would be a lie, and Stage A's
+// pixel grid depends on crisp texels); 2 while minifying.
+//
+// The cap is 2 on measured evidence, not for symmetry.  On the 272-tile
+// montage at 5.9 texels/px, 3x3 removes 23% of the frame's aliasing energy
+// and 2x2 removes 21% -- but 3x3 costs twice as much (+3.3 ms vs +1.7 ms per
+// full-window draw).  The extra ring of taps is too correlated with the ones
+// already taken to pay for itself; heavier minification is the LOD ladder's
+// job, not this filter's.
+fn minify_taps(fw: vec2<f32>, enabled: u32) -> i32 {
+    if (enabled == 0u) { return 1; }
+    let m = max(fw.x, fw.y);
+    // Negated so a non-finite derivative falls to the nearest-sample path
+    // rather than into ceil() of a NaN.
+    if (!(m > 1.0)) { return 1; }
+    return min(i32(ceil(m)), 2);
+}
+
+// C1: average the fragment's source footprint instead of point-sampling its
+// centre.  Every tap walks the page table itself (`resolve`), so a footprint
+// spanning four pages filters correctly with no gutters, no sampler and no
+// mipmaps -- and complex planes average the COMPONENTS, before the mode
+// reduction, which is what the pyramid's own phase-vector reducer means.
+//
+// Three rules, all deliberate:
+//   * Taps are clamped to THIS tile's source rect, so a tap never leaves the
+//     tile to read a neighbouring montage cell or the zero padding past a
+//     page's stored_rect.  A wrong colour at a tile border would be worse
+//     than the aliasing this fixes.
+//   * Residency stays owned by the CENTRE tap, exactly as before the filter
+//     existed, so A3's missing-page hatch keeps one owner; a tap that
+//     resolves to no page is dropped from the average rather than counted as
+//     zero.
+//   * A tap set containing ANY non-finite value stays non-finite.  Averaging
+//     a NaN into three good neighbours would launder it into a plausible
+//     number, which is the one thing finite_scalar and A2 exist to prevent.
+fn sample_footprint(
+    p: PlaneInfo,
+    plane: u32,
+    src: vec2<f32>,
+    lod: u32,
+    rect: vec4<f32>,
+    fw: vec2<f32>,
+    taps: i32,
+    centre: Resolved,
+) -> Sampled {
+    if (taps <= 1) {
+        let v = read_sample(p, centre);
+        return Sampled(v, select(0u, 1u, !finite_scalar(v.x) || !finite_scalar(v.y)));
+    }
+    let lo = rect.xy;
+    let hi = rect.xy + rect.zw - vec2<f32>(1e-4, 1e-4);
+    let n = f32(taps);
+    // Same-page shortcut.  When the centre resolved at the requested level, a
+    // tap landing in the SAME 256^2 page is that page's texel by
+    // construction -- bit for bit what resolve() would return, without
+    // re-walking the page table.  At these minification rates the footprint is
+    // a few texels wide, so nearly every tap takes it; it is what keeps the
+    // filter's cost near one page-table walk per fragment instead of taps^2.
+    let level = min(lod, p.max_lod);
+    let info = lod_info[p.lod_base + level];
+    let scale = f32(1u << level);
+    let limit = vec2<f32>(f32(info.grid_w * 256u) - 1.0, f32(info.grid_h * 256u) - 1.0);
+    let centre_page = vec2<u32>(clamp(src / scale, vec2<f32>(0.0), limit)) / 256u;
+    let shortcut = centre.lod == level;
+    var acc = vec2<f32>(0.0, 0.0);
+    var hits = 0.0;
+    var bad = false;
+    for (var j = 0; j < taps; j = j + 1) {
+        for (var i = 0; i < taps; i = i + 1) {
+            // Box quadrature over [src - fw/2, src + fw/2].
+            let unit = (vec2<f32>(f32(i), f32(j)) + vec2<f32>(0.5)) / n - vec2<f32>(0.5);
+            let at = clamp(src + unit * fw, lo, hi);
+            let coord = vec2<u32>(clamp(at / scale, vec2<f32>(0.0), limit));
+            var r = Resolved(centre.layer, vec2<i32>(coord % 256u), level);
+            if (!(shortcut && all(coord / 256u == centre_page))) {
+                r = resolve(plane, at, lod);
+            }
+            if (r.layer < 0) { continue; }
+            let v = read_sample(p, r);
+            bad = bad || !finite_scalar(v.x) || !finite_scalar(v.y);
+            acc = acc + v;
+            hits = hits + 1.0;
+        }
+    }
+    if (bad) { return Sampled(vec2<f32>(0.0, 0.0), 1u); }
+    if (hits == 0.0) {
+        // Every tap landed on a non-resident page; the centre is resident by
+        // construction, so fall back to it rather than inventing a value.
+        let v = read_sample(p, centre);
+        return Sampled(v, select(0u, 1u, !finite_scalar(v.x) || !finite_scalar(v.y)));
+    }
+    return Sampled(acc / hits, 0u);
+}
+
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    // A1: derivatives require uniform control flow, so take fwidth BEFORE
-    // resolve()'s data-dependent early returns.  Only consumed by the
-    // zoom-gated pixel grid at the single exit below.
-    // A1: derivatives require uniform control flow, so take fwidth BEFORE
-    // resolve()'s data-dependent early returns.  Only consumed by the
-    // zoom-gated pixel grid at the single exit below.
+    // A1/C1: derivatives require uniform control flow, so take fwidth BEFORE
+    // resolve()'s data-dependent early returns.  Consumed by the zoom-gated
+    // pixel grid at the single exit below and by C1's minification filter.
     let fw = fwidth(in.src);
     let p = planes[in.plane];
     let r = resolve(in.plane, in.src, in.lod);
@@ -438,21 +562,20 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         );
         color = vec4<f32>(c.rgb * intensity, 1.0);
     } else {
-        var v = vec2<f32>(0.0, 0.0);
-        if (p.rep == 0u) {
-            v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
-        } else {
-            v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
-        }
-        if (!finite_scalar(v.x) || !finite_scalar(v.y)) {
+        // C1: filtered footprint read while minified.  With the flag off (and
+        // whenever magnifying) taps == 1, which is the single textureLoad
+        // this branch has always done, byte for byte.
+        let taps = minify_taps(fw, mapping.aids & AID_MINIFY_FILTER);
+        let s = sample_footprint(p, in.plane, in.src, in.lod, in.src_rect, fw, taps, r);
+        if (s.nonfinite != 0u) {
             // A2: a non-finite source texel is a bad-data signal, not a value.
             color = nan_marker(in.pos.xy);
         } else {
-            color = map_value(p, v);
+            color = map_value(p, s.v);
         }
     }
     // A1: applied once to the final colour; identity at normal zoom.
-    return pixel_grid(color, in.src, fw, mapping.pixel_grid);
+    return pixel_grid(color, in.src, fw, mapping.aids & AID_PIXEL_GRID);
 }
 
 // Scalar/complex value -> displayed colour: the mode/scale/levels/LUT path,
@@ -475,7 +598,7 @@ fn map_value(p: PlaneInfo, v: vec2<f32>) -> vec4<f32> {
     let phase_path = mapping.phase_color != 0u && p.rep == 1u && mapping.mode != 1u;
     // A4 (default off): mark values outside the levels window distinctly so
     // clipping is visible while windowing.  Skipped for the phase-colour path.
-    if (mapping.clip_indicator != 0u && !phase_path) {
+    if ((mapping.aids & AID_CLIP_INDICATOR) != 0u && !phase_path) {
         if (x < mapping.level_lo) { return vec4<f32>(0.0, 0.2, 0.8, 1.0); }
         if (x > mapping.level_hi) { return vec4<f32>(0.9, 0.1, 0.0, 1.0); }
     }
@@ -515,9 +638,16 @@ struct Mapping {
     level_hi: f32,
     symlog_constant: f32,
     phase_color: u32,
-    pixel_grid: u32,
-    clip_indicator: u32,
+    // Display-aid flags packed into ONE word.  Stage A spent both spare
+    // padding words, and the uniform must not grow: the bind group pins
+    // `size: 32` and 9 words would round up to 48.  Bits mirror the _AID_*
+    // constants in the Python writer.
+    aids: u32,
+    _pad3: u32,
 };
+const AID_PIXEL_GRID: u32 = 1u;
+const AID_CLIP_INDICATOR: u32 = 2u;
+const AID_MINIFY_FILTER: u32 = 4u;
 struct LodInfo { base: u32, grid_w: u32, grid_h: u32, _pad: u32 };
 struct PlaneInfo { rep: u32, max_lod: u32, lod_base: u32, _pad: u32 };
 struct Tile {
@@ -555,6 +685,8 @@ struct VOut {
     @location(0) src: vec2<f32>,
     @location(1) @interpolate(flat) lod: u32,
     @location(2) @interpolate(flat) plane: u32,
+    // C1: the tile's own source window, so a filter tap can be clamped to it.
+    @location(3) @interpolate(flat) src_rect: vec4<f32>,
 };
 
 @vertex
@@ -572,12 +704,15 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     // canonically, so walk its UV axes swapped (q.yx) while the display quad
     // (t.dst) stays in screen orientation.
     out.src = t.src.xy + select(q, q.yx, t.transposed != 0u) * t.src.zw;
+    // A transpose swaps which axis the quad walks, never the window itself,
+    // so the source rect the fragment clamps taps to is t.src either way.
+    out.src_rect = t.src;
     out.lod = t.lod;
     out.plane = t.plane;
     return out;
 }
 
-struct Resolved { layer: i32, texel: vec2<i32>, fidx: i32 };
+struct Resolved { layer: i32, texel: vec2<i32>, fidx: i32, lod: u32 };
 
 fn resolve(plane_index: u32, src_l0: vec2<f32>, lod_req: u32) -> Resolved {
     let p = planes[plane_index];
@@ -590,10 +725,10 @@ fn resolve(plane_index: u32, src_l0: vec2<f32>, lod_req: u32) -> Resolved {
         let fi = info.base + chunk.y * info.grid_w + chunk.x;
         let entry = page_table[fi];
         if (entry >= 0) {
-            return Resolved(entry, vec2<i32>(coord % 256u), i32(fi));
+            return Resolved(entry, vec2<i32>(coord % 256u), i32(fi), lod);
         }
     }
-    return Resolved(-1, vec2<i32>(0, 0), -1);
+    return Resolved(-1, vec2<i32>(0, 0), -1, 0u);
 }
 
 fn apply_scale(value: f32) -> f32 {
@@ -647,9 +782,101 @@ fn pixel_grid(color: vec4<f32>, src: vec2<f32>, fw: vec2<f32>, enabled: u32) -> 
     return vec4<f32>(color.rgb * (1.0 - darken), color.a);
 }
 
+struct Sampled { v: vec2<f32>, nonfinite: u32 };
+
+// One resident scalar/complex texel.  A page the executor stored compressed
+// is decoded by the hardware sampler and unscaled by its own (lo, span); a
+// raw page keeps the exact integer textureLoad.  Identical to the base
+// shader's read_sample apart from that branch, so C1 filters both alike.
+fn read_sample(p: PlaneInfo, r: Resolved) -> vec2<f32> {
+    let compressed = page_codec[r.fidx] == 1u;
+    let uv = (vec2<f32>(r.texel) + vec2<f32>(0.5)) / 256.0;
+    let nrm = page_norm[r.fidx];
+    if (p.rep == 0u) {
+        if (compressed) {
+            let s = textureSampleLevel(scalar_bc_pool, codec_samp, uv, r.layer, 0.0).r;
+            return vec2<f32>(s * nrm.y + nrm.x, 0.0);
+        }
+        return vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
+    }
+    if (compressed) {
+        let s = textureSampleLevel(complex_bc_pool, codec_samp, uv, r.layer, 0.0).rg;
+        return vec2<f32>(s.r * nrm.y + nrm.x, s.g * nrm.w + nrm.z);
+    }
+    return textureLoad(complex_pool, r.texel, r.layer, 0).rg;
+}
+
+// C1: taps per axis across the fragment's source footprint -- see the base
+// shader for the full rationale, including why the cap is 2.
+fn minify_taps(fw: vec2<f32>, enabled: u32) -> i32 {
+    if (enabled == 0u) { return 1; }
+    let m = max(fw.x, fw.y);
+    // Negated so a non-finite derivative falls to the nearest-sample path
+    // rather than into ceil() of a NaN.
+    if (!(m > 1.0)) { return 1; }
+    return min(i32(ceil(m)), 2);
+}
+
+// C1: footprint box filter.  Taps clamped to this tile's own source rect;
+// residency owned by the centre tap (A3); any non-finite tap keeps the whole
+// fragment non-finite (A2).  See the base shader for why each rule holds.
+fn sample_footprint(
+    p: PlaneInfo,
+    plane: u32,
+    src: vec2<f32>,
+    lod: u32,
+    rect: vec4<f32>,
+    fw: vec2<f32>,
+    taps: i32,
+    centre: Resolved,
+) -> Sampled {
+    if (taps <= 1) {
+        let v = read_sample(p, centre);
+        return Sampled(v, select(0u, 1u, !finite_scalar(v.x) || !finite_scalar(v.y)));
+    }
+    let lo = rect.xy;
+    let hi = rect.xy + rect.zw - vec2<f32>(1e-4, 1e-4);
+    let n = f32(taps);
+    // Same-page shortcut -- see the base shader for why it is exact.
+    let level = min(lod, p.max_lod);
+    let info = lod_info[p.lod_base + level];
+    let scale = f32(1u << level);
+    let limit = vec2<f32>(f32(info.grid_w * 256u) - 1.0, f32(info.grid_h * 256u) - 1.0);
+    let centre_page = vec2<u32>(clamp(src / scale, vec2<f32>(0.0), limit)) / 256u;
+    let shortcut = centre.lod == level;
+    var acc = vec2<f32>(0.0, 0.0);
+    var hits = 0.0;
+    var bad = false;
+    for (var j = 0; j < taps; j = j + 1) {
+        for (var i = 0; i < taps; i = i + 1) {
+            // Box quadrature over [src - fw/2, src + fw/2].
+            let unit = (vec2<f32>(f32(i), f32(j)) + vec2<f32>(0.5)) / n - vec2<f32>(0.5);
+            let at = clamp(src + unit * fw, lo, hi);
+            let coord = vec2<u32>(clamp(at / scale, vec2<f32>(0.0), limit));
+            // Same page -> same flat index, so the codec/norm lookup is the
+            // centre's too.
+            var r = Resolved(centre.layer, vec2<i32>(coord % 256u), centre.fidx, level);
+            if (!(shortcut && all(coord / 256u == centre_page))) {
+                r = resolve(plane, at, lod);
+            }
+            if (r.layer < 0) { continue; }
+            let v = read_sample(p, r);
+            bad = bad || !finite_scalar(v.x) || !finite_scalar(v.y);
+            acc = acc + v;
+            hits = hits + 1.0;
+        }
+    }
+    if (bad) { return Sampled(vec2<f32>(0.0, 0.0), 1u); }
+    if (hits == 0.0) {
+        let v = read_sample(p, centre);
+        return Sampled(v, select(0u, 1u, !finite_scalar(v.x) || !finite_scalar(v.y)));
+    }
+    return Sampled(acc / hits, 0u);
+}
+
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    // A1: fwidth before resolve()'s data-dependent early returns.
+    // A1/C1: fwidth before resolve()'s data-dependent early returns.
     let fw = fwidth(in.src);
     let p = planes[in.plane];
     let r = resolve(in.plane, in.src, in.lod);
@@ -669,32 +896,15 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         );
         color = vec4<f32>(c.rgb * intensity, 1.0);
     } else {
-        var v = vec2<f32>(0.0, 0.0);
-        let compressed = page_codec[r.fidx] == 1u;
-        let uv = (vec2<f32>(r.texel) + vec2<f32>(0.5)) / 256.0;
-        let nrm = page_norm[r.fidx];
-        if (p.rep == 0u) {
-            if (compressed) {
-                let s = textureSampleLevel(scalar_bc_pool, codec_samp, uv, r.layer, 0.0).r;
-                v = vec2<f32>(s * nrm.y + nrm.x, 0.0);
-            } else {
-                v = vec2<f32>(textureLoad(scalar_pool, r.texel, r.layer, 0).r, 0.0);
-            }
-        } else {
-            if (compressed) {
-                let s = textureSampleLevel(complex_bc_pool, codec_samp, uv, r.layer, 0.0).rg;
-                v = vec2<f32>(s.r * nrm.y + nrm.x, s.g * nrm.w + nrm.z);
-            } else {
-                v = textureLoad(complex_pool, r.texel, r.layer, 0).rg;
-            }
-        }
-        if (!finite_scalar(v.x) || !finite_scalar(v.y)) {
+        let taps = minify_taps(fw, mapping.aids & AID_MINIFY_FILTER);  // C1
+        let s = sample_footprint(p, in.plane, in.src, in.lod, in.src_rect, fw, taps, r);
+        if (s.nonfinite != 0u) {
             color = nan_marker(in.pos.xy);  // A2
         } else {
-            color = map_value(p, v);
+            color = map_value(p, s.v);
         }
     }
-    return pixel_grid(color, in.src, fw, mapping.pixel_grid);  // A1
+    return pixel_grid(color, in.src, fw, mapping.aids & AID_PIXEL_GRID);  // A1
 }
 
 // Scalar/complex value -> displayed colour (mode/scale/levels/LUT + A4 clip).
@@ -713,7 +923,7 @@ fn map_value(p: PlaneInfo, v: vec2<f32>) -> vec4<f32> {
     x = apply_scale(x);
     let g = clamp((x - mapping.level_lo) / (mapping.level_hi - mapping.level_lo), 0.0, 1.0);
     let phase_path = mapping.phase_color != 0u && p.rep == 1u && mapping.mode != 1u;
-    if (mapping.clip_indicator != 0u && !phase_path) {
+    if ((mapping.aids & AID_CLIP_INDICATOR) != 0u && !phase_path) {
         if (x < mapping.level_lo) { return vec4<f32>(0.0, 0.2, 0.8, 1.0); }
         if (x > mapping.level_hi) { return vec4<f32>(0.9, 0.1, 0.0, 1.0); }
     }
@@ -2202,6 +2412,15 @@ class WgpuPlaneExecutor:
         self._current_lut = lut
 
     def _write_mapping(self) -> None:
+        # Display-aid bits, packed into the single ``aids`` Mapping word (the
+        # uniform is pinned at 32 bytes; Stage A already spent both spare
+        # padding words).  Every aid defaults off, so a default mapping writes
+        # aids == 0 and the shader takes exactly its pre-aid path.
+        aids = (
+            (_AID_PIXEL_GRID if self._mapping.pixel_grid else 0)
+            | (_AID_CLIP_INDICATOR if self._mapping.clip_indicator else 0)
+            | (_AID_MINIFY_FILTER if self._mapping.minification_filter else 0)
+        )
         self.device.queue.write_buffer(
             self._mapping_buf,
             0,
@@ -2213,11 +2432,8 @@ class WgpuPlaneExecutor:
                 self._mapping.level_hi,
                 self._mapping.symlog_constant,
                 int(self._mapping.phase_color),
-                # Stage-A legibility flags in the two spare Mapping words:
-                # pixel_grid (zoom-gated grid) and clip_indicator (windowing
-                # aid).  Both default off, so the default render is unchanged.
-                int(self._mapping.pixel_grid),
-                int(self._mapping.clip_indicator),
+                aids,
+                0,
             ),
         )
 

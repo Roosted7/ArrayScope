@@ -773,6 +773,7 @@ def run_profile_montage_workflow(
     wgpu_present_method: str = "bitmap",
     wgpu_power_preference: str = "low-power",
     texture_codec: str = "off",
+    wgpu_minification_filter: bool = False,
     jsonl: str | Path | None = None,
     timeout_s: float = INTERACTION_SETTLE_HARD_LIMIT_S,
     max_tiles: int | None = None,
@@ -848,6 +849,7 @@ def run_profile_montage_workflow(
     wgpu_present_method = str(wgpu_present_method or "bitmap")
     settings.setValue("wgpu_present_method", wgpu_present_method)
     settings.setValue("texture_codec", str(texture_codec or "off"))
+    settings.setValue("wgpu_minification_filter", bool(wgpu_minification_filter))
     settings.setValue("montage_quality_policy", "resident")
     settings.sync()
 
@@ -9612,6 +9614,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="wgpu display texture codec experiment; ignored by other backends",
     )
     parser.add_argument(
+        "--wgpu-minification-filter",
+        action="store_true",
+        help=(
+            "average each fragment's source footprint on minified draws "
+            "(shader C1, default off); ignored by other backends"
+        ),
+    )
+    parser.add_argument(
         "--repeat",
         type=int,
         default=1,
@@ -9902,6 +9912,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
                     wgpu_present_method=str(args.wgpu_present_method),
                     wgpu_power_preference=str(args.wgpu_power_preference),
                     texture_codec=str(args.texture_codec),
+                    wgpu_minification_filter=bool(args.wgpu_minification_filter),
                     jsonl=jsonl,
                     timeout_s=bounded_interaction_settle_timeout_s(args.timeout_s),
                     max_tiles=None if args.max_tiles <= 0 else args.max_tiles,

@@ -409,9 +409,9 @@ def _coerce_enum(enum_type, value):
 
 
 # --------------------------------------------------------------------------
-# wgpu Stage-A shader-legibility mirrors
+# wgpu shader-legibility mirrors (Stage A trust signals + C1 minification)
 #
-# Pure NumPy mirrors of the four fragment-shader trust signals implemented in
+# Pure NumPy mirrors of the fragment-shader visuals implemented in
 # ``arrayscope.gpu.wgpu_executor._RENDER_WGSL.fs_main`` (and its BC-pool
 # variant).  They are the single owner of the CPU-side formulas, so the wgpu
 # executor's per-pixel oracle (``tests/gpu/test_wgpu_command_protocol.py``
@@ -441,6 +441,20 @@ MISSING_HATCH_SHADES = (0.12, 0.20)
 #: the window, warm above it.
 CLIP_UNDER_RGB = (0.0, 0.2, 0.8)
 CLIP_OVER_RGB = (0.9, 0.1, 0.0)
+#: Source texels per screen pixel above which the C1 minification filter
+#: engages.  At or below it the draw is magnifying (or 1:1) and stays exactly
+#: nearest — a filtered magnification would show values that are not in the
+#: array, and would defeat the pixel grid.
+MINIFY_FILTER_MIN_TEXELS_PER_PX = 1.0
+#: Cap on taps per axis, so the filter costs a small constant.  2 on measured
+#: evidence: a third ring of taps doubles the cost for two more percentage
+#: points of aliasing reduction (see the WGSL ``minify_taps``).  Minification
+#: heavier than 2x2 covers is the LOD ladder's problem, not this filter's.
+MINIFY_FILTER_MAX_TAPS = 2
+#: Shrink applied to the tile source rect's far edge before clamping taps, so
+#: a tap on the boundary stays inside the last texel instead of rolling into
+#: the next page.
+MINIFY_FILTER_RECT_EPS = 1e-4
 
 
 def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
@@ -514,7 +528,73 @@ def wgpu_pixel_grid_darken(rgb8, src_x, src_y, fw_x, fw_y, *, enabled: bool = Tr
     return np.clip(out, 0.0, 255.0).astype(np.uint8)
 
 
+def wgpu_minification_tap_count(fw_x, fw_y, *, enabled: bool = True) -> int:
+    """Taps per axis for the C1 minification box filter.
+
+    ``fw_x``/``fw_y`` are the source-texels-per-screen-pixel derivatives, as
+    for :func:`wgpu_pixel_grid_darken`.  One tap means "unchanged": the shader
+    does the single ``textureLoad`` it always did.  Magnification always gets
+    one tap — inventing values between samples is the one thing an inspection
+    tool must not do — so only a minified draw filters, and only up to
+    ``MINIFY_FILTER_MAX_TAPS`` per axis.
+
+    The GPU evaluates this per fragment; the mirror takes the per-tile
+    constant derivative, which is exact for an axis-aligned affine tile.
+    """
+
+    if not enabled:
+        return 1
+    factor = max(float(fw_x), float(fw_y))
+    # Negated so a non-finite derivative falls to the nearest-sample path.
+    if not factor > MINIFY_FILTER_MIN_TEXELS_PER_PX:
+        return 1
+    return min(int(np.ceil(factor)), MINIFY_FILTER_MAX_TAPS)
+
+
+def wgpu_minification_taps(src_x, src_y, fw_x, fw_y, taps: int, *, src_rect=None) -> list:
+    """Source coordinates of the C1 box-filter taps, uniformly weighted.
+
+    Box quadrature over the fragment's footprint ``[src - fw/2, src + fw/2]``,
+    clamped to ``src_rect`` (``(x0, y0, w, h)``, the tile's own source window)
+    so no tap escapes the tile into a neighbouring montage cell or the zero
+    padding past a page's ``stored_rect``.  Returns ``taps * taps`` coordinate
+    pairs; the caller gathers and averages them, and is responsible for the
+    residency and non-finite rules the shader applies (see ``sample_footprint``
+    in ``wgpu_executor``).
+    """
+
+    src_x = np.asarray(src_x, dtype=np.float64)
+    src_y = np.asarray(src_y, dtype=np.float64)
+    taps = int(taps)
+    if taps <= 1:
+        return [(src_x, src_y)]
+    fw_x = float(fw_x)
+    fw_y = float(fw_y)
+    if src_rect is None:
+        lo_x = lo_y = -np.inf
+        hi_x = hi_y = np.inf
+    else:
+        x0, y0, width, height = (float(v) for v in src_rect)
+        lo_x, lo_y = x0, y0
+        hi_x = x0 + width - MINIFY_FILTER_RECT_EPS
+        hi_y = y0 + height - MINIFY_FILTER_RECT_EPS
+    out = []
+    for j in range(taps):
+        for i in range(taps):
+            unit_x = (i + 0.5) / taps - 0.5
+            unit_y = (j + 0.5) / taps - 0.5
+            out.append(
+                (
+                    np.clip(src_x + unit_x * fw_x, lo_x, hi_x),
+                    np.clip(src_y + unit_y * fw_y, lo_y, hi_y),
+                )
+            )
+    return out
+
+
 __all__ = [
+    "MINIFY_FILTER_MAX_TAPS",
+    "MINIFY_FILTER_MIN_TEXELS_PER_PX",
     "ShaderComponent",
     "ShaderDisplayMode",
     "ShaderMapping",
@@ -535,6 +615,8 @@ __all__ = [
     "shader_component_uniform",
     "shader_mapping_with_lut",
     "wgpu_clip_rgb",
+    "wgpu_minification_tap_count",
+    "wgpu_minification_taps",
     "wgpu_missing_hatch_rgba",
     "wgpu_nan_hatch_rgba",
     "wgpu_pixel_grid_darken",

@@ -150,6 +150,7 @@ def test_settings_round_trip_defaults_and_values():
             "texture_codec": "bc",
             "wgpu_pixel_grid": "true",
             "wgpu_clip_indicator": "true",
+            "wgpu_minification_filter": "true",
             "resident_crop_rebind": "true",
             "memory_profile": "aggressive",
             "render_memory_budget_mb": "1024",
@@ -172,6 +173,7 @@ def test_settings_round_trip_defaults_and_values():
         "texture_codec": "bc",
         "wgpu_pixel_grid": True,
         "wgpu_clip_indicator": True,
+        "wgpu_minification_filter": True,
         "resident_crop_rebind": True,
         "memory_profile": "aggressive",
         "render_memory_budget_mb": 1024,
@@ -181,6 +183,7 @@ def test_settings_round_trip_defaults_and_values():
     defaults = settings_state.settings_from_mapping({})
     assert defaults.wgpu_pixel_grid is False
     assert defaults.wgpu_clip_indicator is False
+    assert defaults.wgpu_minification_filter is False
     assert defaults.resident_crop_rebind is True
     assert defaults.theme == theme.ThemeChoice.SYSTEM
     assert defaults.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT

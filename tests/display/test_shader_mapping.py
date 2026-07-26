@@ -1,6 +1,7 @@
 import numpy as np
 
 from arrayscope.display.shader_mapping import (
+    MINIFY_FILTER_MAX_TAPS,
     ShaderComponent,
     ShaderMapping,
     ShaderScale,
@@ -16,6 +17,8 @@ from arrayscope.display.shader_mapping import (
     phase_lut_indices,
     shader_component_uniform,
     shader_mapping_with_lut,
+    wgpu_minification_tap_count,
+    wgpu_minification_taps,
     window_intensity,
 )
 
@@ -197,3 +200,57 @@ def test_scalar_cpu_oracle_uses_the_frame_lut_instead_of_implicit_grayscale():
         np.array([[0, 0, 255], [128, 0, 128], [255, 0, 0]], dtype=np.uint8),
     )
     np.testing.assert_array_equal(rgba[0, :, 3], np.array([255, 255, 255], dtype=np.uint8))
+
+
+def test_minification_tap_count_gates_on_the_minification_factor():
+    """C1's gate, in the CPU mirror: one tap (== unchanged, exactly nearest)
+    while magnifying or at 1:1, more only once a screen pixel really covers
+    more than one source texel, capped so the cost stays constant."""
+
+    assert wgpu_minification_tap_count(0.5, 0.5) == 1
+    assert wgpu_minification_tap_count(1.0, 1.0) == 1
+    assert wgpu_minification_tap_count(1.3, 1.3) == 2
+    assert wgpu_minification_tap_count(2.0, 0.1) == 2  # the wider axis decides
+    assert wgpu_minification_tap_count(40.0, 40.0) == MINIFY_FILTER_MAX_TAPS
+    assert wgpu_minification_tap_count(8.0, 8.0, enabled=False) == 1
+    # A non-finite derivative must fall to the nearest-sample path, never into
+    # ceil() of a NaN.
+    assert wgpu_minification_tap_count(float("nan"), 1.0) == 1
+
+
+def test_minification_taps_box_quadrature_covers_the_footprint_symmetrically():
+    """Taps partition the fragment's footprint [src - fw/2, src + fw/2] into
+    equal cells and sit at their centres, so the uniform average the shader
+    takes really is a box filter over the footprint."""
+
+    src = np.array([10.0])
+    taps = wgpu_minification_taps(src, src, 3.0, 3.0, 3)
+
+    assert len(taps) == 9
+    xs = sorted({float(tx[0]) for tx, _ in taps})
+    assert xs == [9.0, 10.0, 11.0]
+    # Symmetric about the fragment centre, and inside the footprint.
+    assert min(xs) >= 10.0 - 3.0 / 2
+    assert max(xs) <= 10.0 + 3.0 / 2
+    assert wgpu_minification_taps(src, src, 3.0, 3.0, 1) == [(src, src)]
+
+
+def test_minification_taps_never_leave_the_tile_source_rect():
+    """A tap that escaped its tile would average in a neighbouring montage
+    cell, or the zero padding past a page's stored_rect -- a wrong colour at a
+    tile border, which is worse than the aliasing the filter removes.
+
+    Under the protocol's affine tile contract the clamp is inert (the extreme
+    tap sits fw/(2n) inside the edge by construction), so this locks the rule
+    against a tile whose footprint is wider than that contract implies.
+    """
+
+    rect = (100.0, 200.0, 8.0, 8.0)
+    # A deliberately over-wide footprint at the rect's two corners.
+    corners_x = np.array([100.0, 107.9])
+    corners_y = np.array([200.0, 207.9])
+    for tx, ty in wgpu_minification_taps(corners_x, corners_y, 20.0, 20.0, 3, src_rect=rect):
+        assert np.all(tx >= 100.0)
+        assert np.all(tx < 108.0)
+        assert np.all(ty >= 200.0)
+        assert np.all(ty < 208.0)

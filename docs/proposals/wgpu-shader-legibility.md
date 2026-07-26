@@ -227,6 +227,10 @@ the trajectory gate; overlay instance count reported in `FrameReport`.
 
 ## Stage C — honest minification filtering
 
+**C1 is implemented** (2026-07-26), default off, under View ▸ Display Aids ▸
+"Smooth When Zoomed Out". C2 and C3 remain unbuilt. Measurements and the two
+deviations from the text below are in [C1 as built](#c1-as-built).
+
 The substantive image-quality work, and the only stage with a real
 performance risk. Land it last among A–C and gate it on the perf bars.
 
@@ -261,6 +265,63 @@ gone on a fixture that exhibits it, **and** benchmark deltas within ±10% of
 the frozen baseline (`docs/queue.md` performance bars). A measured regression
 means C1 ships behind a setting or not at all. Plus `Scene.reference` mirror
 and fault-injection tests.
+
+### C1 as built
+
+`DisplayMapping.minification_filter` (backend-neutral, ADR 0057) → the
+`AID_MINIFY_FILTER` bit of `Mapping.aids` in both render shaders. **Default
+off, so the default render is byte-identical and no display-oracle rebaseline
+is needed** — the pre-existing `Scene.reference` oracles all render minified
+tiles and still pass unchanged.
+
+Two deviations from the text above, both measured rather than argued:
+
+**The cap is 2x2, not adaptive up to 3x3.** On the zoomed-out 272-tile montage
+(1400x948 window, 5.9 source texels per screen pixel — the case the
+[preview-LOD dossier](../redesign/preview-lod-anatomy-2026-07-26.md) §4 opens
+with), against a point-sampled baseline:
+
+| taps/axis | frame-time delta | aliasing energy | of the 2x2 gain |
+|---|---:|---:|---:|
+| 2 (shipped) | **+1.7 ms** | 9.36 → 7.47 (−20.2%) | 100% |
+| 3 | +3.3 ms | 9.36 → 7.21 (−23.0%) | 114% |
+
+The third ring of taps doubles the cost for one seventh more benefit; its
+samples are too correlated with the ones already taken. Aliasing energy is the
+mean absolute neighbour difference over the screenshot, which is what
+shimmer is; 22.5% of the frame's pixels change, run-to-run noise is 0.0%.
+
+**The cost is not free, and the "no extra bandwidth" argument was only half
+right.** Residency and upload traffic really are unchanged — but nine (now
+four) texel reads per fragment are not nine-for-the-price-of-one. A full-window
+draw at the shipped cap goes **1.63 → 3.28 ms** (+1.7 ms, +105%) in a tight
+executor loop. That is why it ships default off. On the montage *stage* it is
+invisible (off 4194/4611 ms vs on 3748/3855 ms across an order-balanced pair —
+the arms overlap, and the stage is scheduling-bound exactly as the dossier
+says), but it is a fifth of a 60 fps budget on the interactive pan path.
+
+Two implementation notes worth keeping:
+
+- **Resolve-per-tap, with a same-page shortcut.** Doing the taps manually and
+  calling `resolve()` per tap sidesteps the gutter blocker as designed. Naively
+  that is `taps²` page-table walks; since the footprint is a few texels wide,
+  a tap landing in the centre tap's own 256² page is that page's texel *by
+  construction*. Taking that shortcut (only when the centre resolved at the
+  requested level, so it is bit-exact) is worth 29% of the filter's cost.
+- **The trust rules had to be decided explicitly.** Residency stays owned by
+  the centre tap, so A3's missing-page hatch keeps one owner and a tap on a
+  non-resident page is dropped rather than counted as zero. A tap set
+  containing *any* non-finite value stays non-finite — averaging a NaN into
+  three good neighbours would launder it into a plausible number, which is what
+  A2 exists to prevent. The filter therefore makes a lone bad texel *more*
+  visible: at 4 texels/px a point sample can miss it entirely.
+- **The tile-source-rect clamp is a guard, not a hot path.** Taps are clamped
+  to the tile's own source window so one can never average in a neighbouring
+  montage cell. Under the protocol's affine tile contract the clamp is provably
+  inert (the extreme tap sits `fw/(2n)` inside the edge), and removing it turns
+  no shader oracle red — so the rule is locked at the mirror level in
+  `tests/display/test_shader_mapping.py` instead. Kept because a wrong colour
+  at a tile border would be worse than the aliasing this removes.
 
 ## Stage D — per-pixel value labels
 

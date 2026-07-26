@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from time import perf_counter, perf_counter_ns
+from typing import ClassVar
 
 import numpy as np
 
@@ -432,6 +433,7 @@ class WgpuImageView2D(ImageViewShell):
             mode="real",
             pixel_grid=self._pixel_grid_enabled,
             clip_indicator=self._clip_indicator_enabled,
+            minification_filter=self._minification_filter_enabled,
         )
         self._wgpu_committed: dict[str, object] | None = None
         self._wgpu_tile_instances_cache: tuple[object, tuple[TileInstance, ...]] | None = None
@@ -487,6 +489,7 @@ class WgpuImageView2D(ImageViewShell):
         texture_codec="off",
         pixel_grid=False,
         clip_indicator=False,
+        minification_filter=False,
     ):
         from arrayscope.app.settings_state import (
             normalize_texture_codec_choice,
@@ -502,13 +505,14 @@ class WgpuImageView2D(ImageViewShell):
         # ``compressed_textures`` mode string against the device's real BC/ASTC
         # support at executor-build time (``_ensure_wgpu_executor``).
         self._wgpu_texture_codec_choice = normalize_texture_codec_choice(texture_codec)
-        # Shader Stage-A legibility aids (zoom-gated pixel grid + clip markers).
-        # Pure shader-uniform flags carried on every DisplayMapping this view
-        # builds; toggling them live only re-submits SetDisplayMapping (no
-        # residency change).  Stored before super().__init__ because setupUI
-        # builds the initial mapping.
+        # Shader display aids: Stage A's zoom-gated pixel grid and clip
+        # markers, plus C1's minification filter.  Pure shader-uniform flags
+        # carried on every DisplayMapping this view builds; toggling them live
+        # only re-submits SetDisplayMapping (no residency change).  Stored
+        # before super().__init__ because setupUI builds the initial mapping.
         self._pixel_grid_enabled = bool(pixel_grid)
         self._clip_indicator_enabled = bool(clip_indicator)
+        self._minification_filter_enabled = bool(minification_filter)
         super().__init__(parent=parent, view=view, imageItem=imageItem)
         self._view_navigation = QtViewNavigationDriver(self)
         self.imageItem.setVisible(False)
@@ -1700,6 +1704,7 @@ class WgpuImageView2D(ImageViewShell):
                 phase_color=phase_color,
                 pixel_grid=self._pixel_grid_enabled,
                 clip_indicator=self._clip_indicator_enabled,
+                minification_filter=self._minification_filter_enabled,
             )
             display_shape = tile_layout_shape(geometry, frame_plan=frame_plan)
             self._wgpu_committed = {
@@ -2527,6 +2532,7 @@ class WgpuImageView2D(ImageViewShell):
             phase_color=self._wgpu_mapping_state.phase_color,
             pixel_grid=self._pixel_grid_enabled,
             clip_indicator=self._clip_indicator_enabled,
+            minification_filter=self._minification_filter_enabled,
         )
         start = perf_counter()
         report = self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
@@ -2561,18 +2567,30 @@ class WgpuImageView2D(ImageViewShell):
             phase_color=self._wgpu_mapping_state.phase_color,
             pixel_grid=self._pixel_grid_enabled,
             clip_indicator=self._clip_indicator_enabled,
+            minification_filter=self._minification_filter_enabled,
         )
         if self._montage_display_mode == "wgpu_tile_layer":
             self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
             self._request_wgpu_canvas_draw(count_presentation=True)
 
-    # ---- shader legibility aids (Stage A) -------------------------------------
+    # ---- shader display aids (Stage A + C1) -----------------------------------
+
+    #: Mapping-field name -> the view attribute that mirrors it.  One table so
+    #: a new aid is one row here plus its accessor pair, not another branch.
+    _LEGIBILITY_FLAG_ATTRS: ClassVar[dict[str, str]] = {
+        "pixel_grid": "_pixel_grid_enabled",
+        "clip_indicator": "_clip_indicator_enabled",
+        "minification_filter": "_minification_filter_enabled",
+    }
 
     def wgpuPixelGridEnabled(self) -> bool:
         return bool(self._pixel_grid_enabled)
 
     def wgpuClipIndicatorEnabled(self) -> bool:
         return bool(self._clip_indicator_enabled)
+
+    def wgpuMinificationFilterEnabled(self) -> bool:
+        return bool(self._minification_filter_enabled)
 
     def setWgpuPixelGridEnabled(self, enabled: bool) -> None:
         """Toggle the zoom-gated per-texel pixel grid on the live view."""
@@ -2584,22 +2602,23 @@ class WgpuImageView2D(ImageViewShell):
 
         self._set_legibility_flag("clip_indicator", bool(enabled))
 
+    def setWgpuMinificationFilterEnabled(self, enabled: bool) -> None:
+        """Toggle footprint averaging on minified draws on the live view."""
+
+        self._set_legibility_flag("minification_filter", bool(enabled))
+
     def _set_legibility_flag(self, name: str, enabled: bool) -> None:
-        """Update one legibility flag and, if live, re-submit the mapping.
+        """Update one display-aid flag and, if live, re-submit the mapping.
 
         These are pure shader-uniform flags: no residency, no upload — a
         ``SetDisplayMapping`` re-submit plus a redraw is the whole cost, so the
         toggle is felt immediately without rebuilding the view.
         """
 
-        if name == "pixel_grid":
-            if self._pixel_grid_enabled == enabled:
-                return
-            self._pixel_grid_enabled = enabled
-        else:
-            if self._clip_indicator_enabled == enabled:
-                return
-            self._clip_indicator_enabled = enabled
+        attr = self._LEGIBILITY_FLAG_ATTRS[name]
+        if getattr(self, attr) == enabled:
+            return
+        setattr(self, attr, enabled)
         self._wgpu_mapping_state = replace(self._wgpu_mapping_state, **{name: enabled})
         if self._wgpu_executor is not None and self._montage_display_mode == "wgpu_tile_layer":
             self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
