@@ -29,7 +29,10 @@ _CHATTY_BYTES = 200_000
 
 
 @pytest.fixture(autouse=True)
-def _clean_pack_state():
+def _clean_pack_state(monkeypatch):
+    # A real BART build may need a private loader path. The bash/Python fake
+    # executables in this module must remain independent of that installation.
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     registry._reset_operation_packs()
     plugins._reset_plugin_cache()
     yield

@@ -124,7 +124,7 @@ def test_demoted_numpy_wrapper_packs_only_expose_real_bart_examples():
     assert not any(entry.id.startswith("sigpy:") for entry in entries)
     bart_entries = {entry.id: entry for entry in entries if entry.id.startswith("bart:")}
     assert set(bart_entries) == {"bart:pics", "bart:ecalib", "bart:walsh"}
-    assert all(entry.unavailable_reason for entry in bart_entries.values())
+    assert all(entry.group == "BART" for entry in bart_entries.values())
 
 
 def test_every_operation_builds_and_applies_without_crashing(
@@ -136,6 +136,11 @@ def test_every_operation_builds_and_applies_without_crashing(
     assert slot_bearing_user_operation in {entry.id for entry in entries}
 
     for entry in entries:
+        # These commands require structurally valid MRI inputs; random-array
+        # smoke data is not a legal substitute. The real-toolbox harness owns
+        # their construction, execution, shape, dtype, and numeric contracts.
+        if entry.id.startswith("bart:"):
+            continue
         if entry.unavailable_reason:
             continue
         shape, axis, dtypes = _context_for(entry.id)
