@@ -245,169 +245,50 @@ is enumerated through `registry.all_operations()` (which the operation dock,
 command palette, and export menu use). `operation_entries()` stays built-ins-only
 for callers that assume concrete dataclass operation types.
 
-### `sigpy_pack` — threshold, resize + strided resampling (no FFT)
+### `sigpy_pack` — availability seam, zero registered ops
 
-`arrayscope/operations/packs/sigpy_pack.py` ships the sigpy operations that are
-**additive** over the built-ins. It deliberately ships **no FFT**: an earlier
-design shipped `sigpy:fft` / `sigpy:ifft`, and they were removed as redundant
-(see docs/graveyard.md). ArrayScope already covers a centered FFT two ways a
-`sigpy:fft` op only duplicated — the built-in `centered_fft` / `centered_ifft`
-**operations** (`arrayscope/operations/pipeline.py`, in `OPERATION_REGISTRY`),
-and the **FFT backend** setting (`FFTBackendChoice {AUTO, NUMPY, PYFFTW, SCIPY}`
-in `arrayscope/app/settings_state.py`, resolved in
-`arrayscope/operations/fft_backend.py`) which selects the FFT *implementation*
-underneath those built-in ops. `sigpy.fft` is `numpy.fft` under the hood, so a
-sigpy FFT adds nothing as an op or as a backend, and is **not** added as a fourth
-`FFTBackendChoice`.
+Bundle A demoted every unary SigPy wrapper to a native built-in. The module
+keeps its lazy `find_spec("sigpy")` availability probe for later genuinely
+SigPy-shaped operations, but `pack_specs()` is empty and importing or
+enumerating operations never imports SigPy.
 
-What the pack does ship:
+| removed id | native replacement | reason |
+|---|---|---|
+| `sigpy:soft_thresh` | `soft_threshold` | the wrapper promoted float32 to complex128 before narrowing |
+| `sigpy:hard_thresh` | `hard_threshold` | the wrapper promoted float32 to complex128 before narrowing |
+| `sigpy:resize` | `pad`, `crop`, `resample` | native structure ops cover centred growth/crop and fractional interpolation |
+| `sigpy:circshift` | `roll` | the wrapper was `np.roll` plus an optional-package import |
+| `sigpy:downsample` | `resample` | integer-only decimation was not an honest general resampler |
+| `sigpy:upsample` | `resample` | integer-only zero insertion was not an honest general resampler |
 
-- `sigpy:soft_thresh` — pointwise complex **soft** thresholding (magnitude
-  shrinkage, `sign(x)·max(|x|−λ, 0)`; the L1 proximal operator). The workhorse MRI
-  sparsity/denoising primitive, offered as a view stage.
-- `sigpy:hard_thresh` — pointwise complex **hard** thresholding (keep samples with
-  `|x| > λ`, zero the rest). A sparsifying / support-view companion.
-- `sigpy:resize` — **centered** zero-pad / center-crop of one axis to a target
-  length (`sigpy.resize`): the canonical k-space *zero-fill* interpolation and its
-  inverse center-crop. Additive over the built-in `crop` (which only *shrinks* by
-  an explicit `[start:stop]` window and does not center).
-- `sigpy:circshift` — **circular shift** (roll) of one axis by an integer number
-  of samples (`sigpy.circshift`, negative shifts allowed). Shape- and
-  dtype-preserving. Additive over the built-ins: `reverse` mirrors and `fftshift`
-  rolls by exactly half; there is no general roll-by-k.
-- `sigpy:downsample` — **strided decimation** of one axis by an integer factor
-  (`sigpy.downsample`, `input[..., ::factor, ...]`, *no* anti-alias filter; shape
-  `ceil(n / factor)`, dtype-preserving).
-- `sigpy:upsample` — **zero-insertion upsample** of one axis by an integer factor
-  (`sigpy.upsample`, the exact adjoint of `downsample`; shape `n · factor`,
-  dtype-preserving). `downsample` + `upsample` form a natural strided pair, both
-  with a context-aware form that derives the output length.
+NUFFT, ESPIRiT, iterative apps, and wavelet pairs remain deferred until the
+definition/input-slot bundles can carry their extra arrays and structural
+metadata. Bundle A does not invent a unary approximation.
 
-Both threshold ops are strictly pointwise, so `fn(whole)[region] ==
-fn(whole[region])` on every axis. They therefore declare **Tier-2
-`region_capable=True`** — and are the first pack ops whose windowable claim the
-conformance harness actually *honors* (the BART ops are all OPAQUE). `sigpy:resize`,
-`sigpy:downsample` and `sigpy:upsample` are shape-changing and re-index the whole
-axis; `sigpy:circshift` wraps samples across the axis boundary — all four are
-therefore **Tier-1 OPAQUE**.
+### `bart_pack` — command-runtime seam, zero registered ops
 
-Numeric precision: sigpy's `soft_thresh` / `hard_thresh` always return
-`complex128`. The ops **narrow the result back** to the input dtype (complex stays
-complex by width, real floats keep their width, other real inputs → `float32`), so
-they respect the repo's float32 discipline; the narrowing cast is pointwise and
-does not disturb the windowable property. The `λ` threshold is a `float`
-parameter, which is why a `"float"` parameter kind sits beside `"int"` in the
-`create_operation` / `create_plugin_operation` paths.
+Bundle A likewise removed every BART operation that merely performed built-in
+arithmetic. `bart_available`, `bart_executable`, cfl read/write, `bart_env`, and
+`run_bart` remain intact for Bundle C's command-template runtime. A runnable
+BART install still contributes zero registered operations today.
 
-**Still deferred** (they do not fit the `fn(ndarray) -> ndarray` +
-scalar-parameter unary contract without engine changes):
+| removed id | native replacement | reason |
+|---|---|---|
+| `bart:fft` | `centered_fft` | avoided a subprocess and two cfl temp files |
+| `bart:ifft` | `centered_ifft` | avoided a subprocess and two cfl temp files |
+| `bart:scale` | `scale` | avoided a subprocess, temp files, and forced complex64 |
+| `bart:spow` | `power` | avoided a subprocess, temp files, and forced complex64 |
+| `bart:cabs` | `magnitude` | avoided a subprocess, temp files, and forced complex64 |
+| `bart:carg` | `phase` | avoided a subprocess, temp files, and forced complex64 |
+| `bart:normalize` | `normalize` | native per-axis L2 normalization preserves input precision |
+| `bart:std` | `std` | native sample std (`ddof=1`) returns the honest real dtype |
+| `bart:var` | `var` | native sample variance (`ddof=1`) returns the honest real dtype |
 
-- `sigpy.nufft` / `sigpy.nufft_adjoint(input, coord, ...)` — needs a k-space
-  *coordinate array* as a second argument; the plugin parameter model carries
-  scalars, not a companion ndarray.
-- `sigpy.mri.app.EspiritCalib(ksp, ...)` — needs coil-axis + calibration
-  semantics and a compute device, and it *changes dimensionality* (produces
-  sensitivity maps) in a way the scalar-param shape adapter cannot predict; it is
-  an iterative app object, not a pure `fn(ndarray) -> ndarray`.
-- `sigpy.fwt` / `sigpy.iwt` (wavelet transform pair) — a natural reversible view
-  stage, but `iwt` needs the *original* `oshape` **and** the `coeff_slices`
-  structure `fwt` produced to invert. The scalar-parameter model cannot carry that
-  structural metadata between two independent unary steps, so the forward/inverse
-  pair cannot be expressed honestly. Deferred for the same reason as nufft/espirit.
-
-### `bart_pack` — out-of-process BART ops (subprocess + cfl handoff)
-
-`arrayscope/operations/packs/bart_pack.py` ships operations that run the external
-[BART](https://mrirecon.github.io/bart/) `bart` binary **as a subprocess**, handing
-data across in BART's native **cfl** temp-file format. Unlike the sigpy pack (an
-in-process library call), the compute happens in a child process, so the pack owns
-the cfl handoff, a working child environment, and cancellation of the child.
-
-| id | label | axis | shape | capability |
-|----|-------|------|-------|------------|
-| `bart:fft`  | Centered FFT (BART)             | required | same | **OPAQUE / Tier-1** |
-| `bart:ifft` | Centered iFFT (BART, unnormalized) | required | same | **OPAQUE / Tier-1** |
-| `bart:cabs` | Complex magnitude (BART)        | none     | same | **OPAQUE / Tier-1** |
-| `bart:carg` | Complex phase (BART)            | none     | same | **OPAQUE / Tier-1** |
-| `bart:scale`| Scale (BART)                    | none     | same | **OPAQUE / Tier-1** |
-| `bart:spow` | Power (BART)                    | none     | same | **OPAQUE / Tier-1** |
-| `bart:normalize` | Normalize along axis (BART) | required | same | **OPAQUE / Tier-1** |
-| `bart:std`  | Std along axis (BART)           | required | collapses axis | **OPAQUE / Tier-1** |
-| `bart:var`  | Variance along axis (BART)      | required | collapses axis | **OPAQUE / Tier-1** |
-
-The additions are genuinely BART-native — none has a built-in or sigpy-pack
-equivalent: `bart:carg` is the phase companion to `bart:cabs`; `bart:scale`
-(`× factor`) and `bart:spow` (`x**p`, complex principal branch) are pointwise
-scalar maps; `bart:normalize` scales by the reciprocal L2 norm along one axis; and
-`bart:std` / `bart:var` are the second-moment **reductions** the built-ins
-(`mean` / `rss` / `sum` / `max` / `min`) do not cover. `bart std` / `bart var` are
-the *sample* statistics (ddof = 1); BART reduces the axis to a singleton and the
-pack reshapes it **out**, so the output ndim drops by one exactly as the built-in
-reductions do.
-
-**BART's FFT convention.** `bart fft <bitmask>` is **centered but unnormalized**:
-it equals `fftshift(fft(ifftshift(x, ax), ax), ax)` (verified against NumPy in the
-tests). An axis maps to a dimension bitmask (`1 << axis`); the cfl handoff preserves
-axis order, so numpy axis *a* is BART dim *a*. `bart:ifft` (`bart fft -i`) is likewise
-unnormalized, so `ifft(fft(x)) == N·x` along the axis — BART's convention, **not**
-NumPy's 1/N. `bart:cabs` is pointwise `|z|`.
-
-**Everything is complex64.** cfl is a complex64 container, so every op takes and
-returns complex64 (real/integer inputs are promoted on write). The ops declare
-`output_dtype = complex64` unconditionally.
-
-**cfl handoff.** The pack rolls its own minimal cfl reader/writer (`write_cfl` /
-`read_cfl`) rather than importing `$BART_TOOLBOX_PATH/python/cfl.py` — this keeps the
-pack self-contained (no `sys.path` mutation into the BART source tree) and cfl is
-trivially simple: a `.hdr` text file listing dimensions plus a `.cfl` blob of raw
-complex64 in column-major (Fortran) order. The format is byte-for-byte what BART
-reads/writes (proven end-to-end by the fft-correctness test). Each op writes its input
-to `in.cfl` in a `tempfile.TemporaryDirectory`, runs `bart <cmd> in out`, reads
-`out.cfl`, and the temp dir is **always** cleaned up — on success, error, or cancel.
-
-**Cancellation (SIGTERM → SIGKILL, `<1 s`).** `run_bart` starts the child in its own
-session (`start_new_session=True`) and polls the operation's `cancellation_token`
-while it runs. On cancel it `SIGTERM`s the child's process group, waits a short grace
-(0.25 s), then `SIGKILL`s, and raises `EvaluationCancelled` (the same signal the rest
-of the operations engine uses). A mid-op cancel therefore kills `bart` in well under a
-second with **no orphaned process** and the temp dir cleaned; the test proves this
-deterministically with a fake-`bart` shim and a startup barrier (the `<1 s` is the
-assertion, not a fixed sleep). This subprocess cancellation is **independent of** the
-kernel cooperative-cancellation item (queue item 10 notes item 10 "requires the
-shutdown/cancellation item closed first"): the SIGTERM machinery does not depend on the
-kernel work that threads a token into the plugin `fn` call path. Until that lands, the
-engine plugin path applies the op with no token (the sync whole-array path); the runner
-is ready to forward a token the moment the engine supplies one.
-
-**Admission cost (honest).** Every BART op is **OPAQUE** — a per-region execution would
-mean one out-of-process cfl round-trip *per tile*, which is never the right plan for an
-expensive subprocess op, so even the pointwise ops (`bart:cabs` / `bart:carg` /
-`bart:scale` / `bart:spow`) stay OPAQUE (here the *cost model*, not correctness, forbids
-windowing). The plugin path classifies each pack op as
-a whole-array `TRANSFORM` (blocks and expands every axis, not chunkable, not fusable, a
-cache-stage boundary) — the heaviest class the admission cost model has — and the forced
-complex64 output raises the estimated bytes for real inputs. That OPAQUE/TRANSFORM
-classification is the admission cost hint. (A dedicated per-op *out-of-process* cost
-multiplier would need a new field on the frozen `PluginOperationSpec`, i.e. a plugin
-contract change, which is out of scope here.)
-
-**Optionality.** Availability is decided by `bart_available()` — a cheap, lazy
-filesystem check that an executable `bart` exists on `PATH` or in the
-`BART_TOOLBOX_PATH` toolbox, with that env var set. It never runs `bart version`.
-When `bart` is not runnable the pack registers nothing; importing ArrayScope, building
-the registry, and enumerating operations never spawn `bart`, so import-health stays
-green.
-
-**Deferred BART op.**
-
-- `bart pics` (parallel-imaging compressed sensing) is **multi-input**: it needs a
-  k-space array *and* a coil-sensitivity map array (`bart pics kspace sens out`), which
-  does not fit the unary `fn(ndarray) -> ndarray` + scalar-parameter contract — there is
-  no honest way to bind the second ndarray through the recipe/dock parameter model. A
-  self-contained `ecalib`→`pics` variant would have to hard-code a coil axis and
-  calibration semantics and would *change dimensionality*. It is deferred (mirroring the
-  sigpy ESPIRiT deferral) rather than forced through the unary pipeline — correctness over
-  coverage. The cfl-handoff + subprocess + cancellation mechanism is proven via `bart:fft`.
+The cfl handoff is intentionally still complex64 because that is BART's format.
+The retained fake-binary tests prove exact argv composition, concurrent pipe
+draining, timeout, cancellation, and cleanup without claiming access to a real
+BART installation. Multi-input reconstruction commands such as `pics` remain
+for Bundles C and E.
 
 ## User-defined operations (no packaging required)
 
@@ -452,7 +333,7 @@ wrapper JSON `<slug>.json`; an *imported* op also has its copied code file
 ```
 
 The id **must** be namespaced `user:<slug>`, so a user op can never shadow a
-built-in (`crop`) or a pack op (`sigpy:soft_thresh`). Everything else is
+built-in (`crop`) or a third-party plugin op. Everything else is
 auto-filled on import from an `ast` introspection of the target function, so a
 user rarely writes this JSON by hand.
 

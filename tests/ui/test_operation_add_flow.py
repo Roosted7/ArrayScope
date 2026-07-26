@@ -104,23 +104,17 @@ def test_edit_operation_seeds_and_replaces_generic_op(qtbot):
     assert (int(crop.start), int(crop.stop)) == (1, 4)
 
 
-def test_sigpy_soft_thresh_regression(qtbot):
-    """The original bug: a sigpy op raised 'requires parameter lamda'.
+def test_native_soft_threshold_parameter_flow(qtbot):
+    """Driving the float form must land the native threshold parameter."""
 
-    Driving the params popup's accept with lamda=0.5 must land the op.
-    """
-    from arrayscope.operations.packs.sigpy_pack import sigpy_available
-
-    if not sigpy_available():
-        pytest.skip("sigpy not installed")
     win = _window(qtbot)
-    win.request_operation("sigpy:soft_thresh")  # requires_axis=False
+    win.request_operation("soft_threshold")  # requires_axis=False
     popup = win._operation_params_popup
     assert popup is not None
-    popup._spins["lamda"].setValue(0.5)
+    popup._spins["threshold"].setValue(0.5)
     process_events(qtbot, count=2)
     popup._accept()
     process_events(qtbot)
-    assert _op_ids(win) == ["sigpy:soft_thresh"]
+    assert _op_ids(win) == ["soft_threshold"]
     op = win.document.steps[0].operation
-    assert dict(op.params)["lamda"] == pytest.approx(0.5)
+    assert op.threshold == pytest.approx(0.5)

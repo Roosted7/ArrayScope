@@ -73,8 +73,6 @@ DEFAULT_GROUP_ORDER: tuple[str, ...] = (
     "Reshape",
     "Complex",
     "Pointwise",
-    "SigPy",
-    "BART",
     "User",
     "Other",
 )

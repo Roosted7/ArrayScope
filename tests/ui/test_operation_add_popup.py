@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import os
 
-import pytest
-
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -91,16 +89,12 @@ def test_disabled_op_is_unselectable(qtbot):
     assert not popup.select_operation("mean")
 
 
-def test_more_foldout_reveals_sigpy_section(qtbot):
-    from arrayscope.operations.packs.sigpy_pack import sigpy_available
-
-    if not sigpy_available():
-        pytest.skip("sigpy not installed")
+def test_native_pointwise_section_is_in_everyday_collapsed_listing(qtbot):
     popup, _accepted, _needs = _make_popup(qtbot)
-    assert "SIGPY" not in popup.visible_section_titles()
-    assert "sigpy:soft_thresh" not in popup.visible_operation_ids()
+    assert "POINTWISE" in popup.visible_section_titles()
+    assert "soft_threshold" in popup.visible_operation_ids()
     popup.set_expanded(True)
-    assert "SIGPY" in popup.visible_section_titles()
-    assert "sigpy:soft_thresh" in popup.visible_operation_ids()
+    assert "POINTWISE" in popup.visible_section_titles()
+    assert "soft_threshold" in popup.visible_operation_ids()
     popup.set_expanded(False)
-    assert "SIGPY" not in popup.visible_section_titles()
+    assert "POINTWISE" in popup.visible_section_titles()

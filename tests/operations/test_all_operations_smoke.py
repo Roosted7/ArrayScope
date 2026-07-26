@@ -20,7 +20,6 @@ import numpy as np
 import pytest
 
 from arrayscope.operations import plugins, registry
-from arrayscope.operations.packs.sigpy_pack import sigpy_available
 from arrayscope.operations.parameter_forms import build_parameter_form
 
 # Generic context used unless an op overrides it below.
@@ -79,15 +78,11 @@ def _sample_array(shape, dtype) -> np.ndarray:
     return real.astype(dtype)
 
 
-def test_sigpy_ops_are_actually_exercised():
-    """Guard: in an env with sigpy, the pack ops must reach this harness."""
+def test_demoted_numpy_wrapper_packs_contribute_no_operations():
+    """SigPy/BART runtime seams remain, but their NumPy-equivalent ops do not."""
 
-    if not sigpy_available():
-        pytest.skip("sigpy not installed")
     ids = {entry.id for entry in registry.all_operations()}
-    assert "sigpy:soft_thresh" in ids
-    assert "sigpy:hard_thresh" in ids
-    assert "sigpy:resize" in ids
+    assert not any(op_id.startswith(("sigpy:", "bart:")) for op_id in ids)
 
 
 def test_every_operation_builds_and_applies_without_crashing():

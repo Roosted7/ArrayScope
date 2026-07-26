@@ -77,15 +77,11 @@ def test_accept_delivers_values_dict(qtbot):
     reason="mean is expected to be parameterless",
 )
 def test_float_op_uses_double_spinbox(qtbot):
-    from arrayscope.operations.packs.sigpy_pack import sigpy_available
-
-    if not sigpy_available():
-        pytest.skip("sigpy not installed")
-    entry = get_operation_entry("sigpy:soft_thresh")
+    entry = get_operation_entry("soft_threshold")
     form = build_parameter_form(entry, shape=(4, 5), axis=0)
     popup = OperationParamsPopup(entry, form, lambda values: None)
     qtbot.addWidget(popup)
     assert popup.findChildren(QtWidgets.QDoubleSpinBox)
-    popup._spins["lamda"].setValue(0.5)
+    popup._spins["threshold"].setValue(0.5)
     process_events(qtbot, count=2)
-    assert form.field("lamda").value == pytest.approx(0.5)
+    assert form.field("threshold").value == pytest.approx(0.5)

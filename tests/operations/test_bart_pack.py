@@ -1,15 +1,8 @@
-"""Tests for the optional in-process BART operation pack.
+"""BART runtime-seam tests after the unary operation pack was demoted.
 
-Covers: ``bart:fft`` correctness against a NumPy centered-FFT reference (BART's
-own centered/unnormalized convention, verified end-to-end through the real
-subprocess + cfl handoff); a cfl write/read round-trip; the load-bearing
-**cancellation <1 s** gate (SIGTERM kills the child promptly, no orphan, temp dir
-cleaned) driven deterministically by a fake ``bart`` shim + a startup barrier;
-optionality (bart-absent -> the pack registers nothing) and laziness
-(enumeration never spawns ``bart``).
-
-The real-BART assertions ``pytest.skip`` cleanly when ``bart`` is not runnable so
-CI without BART stays green; on a machine where BART is installed they execute.
+The arithmetic wrappers are gone.  These tests keep the future command runtime's
+load-bearing behavior pinned: cfl I/O, cheap availability, exact argv ordering,
+concurrent pipe draining, cancellation, timeout, and scratch cleanup.
 """
 
 from __future__ import annotations
@@ -18,7 +11,6 @@ import glob
 import os
 import stat
 import sys
-import textwrap
 import threading
 import time
 
@@ -31,18 +23,8 @@ from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.packs import bart_pack
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
 
-PROBE_SHAPE = (6, 5, 4)
-
-# Fallback locations for the real-BART tests.  Prefer explicit env overrides
-# (``ARRAYSCOPE_BART_TOOLBOX`` / ``ARRAYSCOPE_BART_MKL_LIB``) so the recipe is not
-# tied to one contributor's machine; the hardcoded paths remain only as a
-# documented local convenience for this workstation.  Used only to populate the
-# env when the caller has not already; if they are absent the real-BART tests
-# skip.
-_DEFAULT_TOOLBOX = os.environ.get("ARRAYSCOPE_BART_TOOLBOX", "/home/thomas/projects/bart")
-_DEFAULT_MKL_LIB = os.environ.get(
-    "ARRAYSCOPE_BART_MKL_LIB", "/home/thomas/miniconda3/pkgs/mkl-2025.3.0-h0e700b2_462/lib"
-)
+PROBE_SHAPE = (4, 5, 6)
+_CHATTY_BYTES = 200_000
 
 
 @pytest.fixture(autouse=True)
@@ -54,169 +36,87 @@ def _clean_pack_state():
     plugins._reset_plugin_cache()
 
 
-@pytest.fixture
-def bart_env(monkeypatch):
-    """Ensure BART_TOOLBOX_PATH (+ MKL lib path) are set, else skip cleanly."""
-
-    if not os.environ.get(bart_pack.BART_TOOLBOX_ENV):
-        if os.path.isfile(os.path.join(_DEFAULT_TOOLBOX, "bart")):
-            monkeypatch.setenv(bart_pack.BART_TOOLBOX_ENV, _DEFAULT_TOOLBOX)
-        else:
-            pytest.skip("BART_TOOLBOX_PATH not set and no default toolbox present")
-    if "mkl" not in os.environ.get("LD_LIBRARY_PATH", "") and os.path.isdir(_DEFAULT_MKL_LIB):
-        existing = os.environ.get("LD_LIBRARY_PATH", "")
-        monkeypatch.setenv(
-            "LD_LIBRARY_PATH", f"{_DEFAULT_MKL_LIB}:{existing}" if existing else _DEFAULT_MKL_LIB
-        )
-    if not bart_pack.bart_available():
-        pytest.skip("bart is not runnable in this environment")
-
-
-def _reference_fft(x, axis):
-    ax = axis % x.ndim
-    return np.fft.fftshift(np.fft.fft(np.fft.ifftshift(x, axes=ax), axis=ax), axes=ax)
-
-
-# --- cfl round-trip (self-contained I/O) -------------------------------------
-
-
 @pytest.mark.parametrize("dtype", ["complex64", "float32", "float64", "int16"])
-def test_cfl_round_trips(tmp_path, dtype):
-    rng = np.random.default_rng(0)
-    real = rng.standard_normal(PROBE_SHAPE)
-    x = real.astype(dtype)
-    stem = str(tmp_path / "probe")
-    bart_pack.write_cfl(stem, x)
-    got = bart_pack.read_cfl(stem)
-    assert got.dtype == np.complex64
-    assert got.shape == PROBE_SHAPE
-    # complex64 promotion is exact for the real part we wrote.
-    np.testing.assert_allclose(got, x.astype(np.complex64))
+def test_cfl_round_trips_as_complex64(tmp_path, dtype):
+    stem = str(tmp_path / "array")
+    source = np.arange(120).reshape(PROBE_SHAPE).astype(dtype)
+    if np.dtype(dtype).kind == "c":
+        source += 1j * np.flip(source, axis=1)
+
+    bart_pack.write_cfl(stem, source)
+    result = bart_pack.read_cfl(stem)
+
+    assert result.shape == source.shape
+    assert result.dtype == np.dtype(np.complex64)
+    np.testing.assert_allclose(result, source.astype(np.complex64))
 
 
-# --- discovery / enumeration -------------------------------------------------
+def test_available_bart_pack_registers_no_operations(monkeypatch):
+    monkeypatch.setattr(bart_pack, "bart_available", lambda: True)
 
-
-def test_bart_ops_appear_when_available(bart_env):
-    ids = {entry.id for entry in registry.all_operations()}
-    assert {"bart:fft", "bart:ifft", "bart:cabs"} <= ids
-    fft_entry = registry.get_operation_entry("bart:fft")
-    assert fft_entry.label == "Centered FFT (BART)"
-    assert fft_entry.requires_axis is True
-    assert fft_entry.changes_shape is False
+    assert bart_pack.pack_specs() == ()
+    assert bart_pack.register() is False
+    assert not any(entry.id.startswith("bart:") for entry in registry.all_operations())
 
 
 def test_enumeration_never_spawns_bart(monkeypatch):
-    """Laziness / import-health: listing ops must not execute bart."""
+    def forbidden_popen(*args, **kwargs):
+        raise AssertionError(f"enumeration spawned a process: {args!r} {kwargs!r}")
 
-    import subprocess
-
-    def _boom(*args, **kwargs):
-        raise AssertionError("enumerating operations must not spawn bart")
-
-    monkeypatch.setattr(subprocess, "Popen", _boom)
-    registry.all_operations()  # must not raise
+    monkeypatch.setattr("subprocess.Popen", forbidden_popen)
+    registry.all_operations()
 
 
-# --- optionality: bart-absent contributes nothing ----------------------------
+def test_bart_executable_prefers_toolbox_and_availability_requires_env(tmp_path, monkeypatch):
+    executable = tmp_path / "bart"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv(bart_pack.BART_TOOLBOX_ENV, str(tmp_path))
+
+    assert bart_pack.bart_executable() == str(executable)
+    assert bart_pack.bart_available() is True
+
+    monkeypatch.delenv(bart_pack.BART_TOOLBOX_ENV)
+    assert bart_pack.bart_available() is False
 
 
-def test_pack_contributes_nothing_when_bart_absent(monkeypatch):
-    monkeypatch.setattr(bart_pack, "bart_available", lambda: False)
-    registry._reset_operation_packs()
-    assert bart_pack.register() is False
-    ids = {entry.id for entry in registry.all_operations()}
-    assert not any(op_id.startswith("bart:") for op_id in ids)
-    assert "centered_fft" in ids  # built-ins untouched
-
-
-def test_pack_specs_exist_independently_of_installation():
-    ids = {spec.id for spec in bart_pack.pack_specs()}
-    assert ids == {
-        "bart:fft",
-        "bart:ifft",
-        "bart:cabs",
-        "bart:carg",
-        "bart:scale",
-        "bart:spow",
-        "bart:normalize",
-        "bart:std",
-        "bart:var",
-    }
-
-
-# --- correctness against a NumPy reference (real bart subprocess) -------------
-
-
-@pytest.mark.parametrize("axis", [0, 1, 2])
-def test_bart_fft_matches_numpy_centered_reference(bart_env, axis):
-    rng = np.random.default_rng(axis)
-    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
-        np.complex64
-    )
-    op = registry.create_operation("bart:fft", axis=axis)
-    got = np.asarray(op.apply(x))
-    assert got.dtype == np.complex64
-    ref = _reference_fft(x, axis).astype(np.complex64)
-    # BART is single precision; compare relative to the transform magnitude.
-    assert np.max(np.abs(got - ref)) <= 1e-3 * np.max(np.abs(ref))
-    assert np.dtype(op.output_dtype(np.dtype("float32"))) == np.complex64
-
-
-def test_bart_fft_ifft_round_trips_up_to_bart_normalization(bart_env):
-    # BART's fft/ifft are both unnormalized -> ifft(fft(x)) == N * x along the axis.
-    x = (np.arange(120).reshape(PROBE_SHAPE)).astype(np.complex64)
-    fwd = registry.create_operation("bart:fft", axis=1)
-    inv = registry.create_operation("bart:ifft", axis=1)
-    y = np.asarray(inv.apply(np.asarray(fwd.apply(x))))
-    n = PROBE_SHAPE[1]
-    np.testing.assert_allclose(y, x * n, rtol=0, atol=1e-2 * np.max(np.abs(x * n)))
-
-
-def test_bart_cabs_matches_numpy_abs(bart_env):
-    rng = np.random.default_rng(7)
-    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
-        np.complex64
-    )
-    op = registry.create_operation("bart:cabs")
-    got = np.asarray(op.apply(x))
-    np.testing.assert_allclose(got.real, np.abs(x), atol=1e-4)
-    np.testing.assert_allclose(got.imag, 0.0, atol=1e-5)
-
-
-# --- admission: the op is classified OPAQUE / heavy TRANSFORM -----------------
-
-
-def test_bart_fft_is_opaque_and_costed_heavy(bart_env):
-    from arrayscope.operations.capabilities import OperationClass
-    from arrayscope.operations.cost import estimate_operation_cost
-
-    op = registry.create_operation("bart:fft", axis=0)
-    assert op.execution_class is OperationClass.OPAQUE
-    # Real (float32) input -> forced complex64 output = 2x the bytes: an honest,
-    # heavier admission signal, on a non-chunkable whole-array TRANSFORM stage.
-    cost = estimate_operation_cost(PROBE_SHAPE, np.dtype("float32"), op)
-    assert cost.kind == "transform"
-    assert cost.can_chunk is False
-    assert cost.chunkable_axes == ()
-    assert cost.estimated_output_bytes == int(np.prod(PROBE_SHAPE)) * 8  # complex64
-
-
-# --- cancellation <1 s (the load-bearing gate) -------------------------------
-
-
-def _write_fake_bart(tmp_path, marker):
-    """A ``bart`` shim that records its pid to ``marker`` then blocks forever.
-
-    ``exec sleep`` keeps the same pid/process-group so a SIGTERM to the group we
-    started kills exactly the process whose pid we observe -- the barrier
-    (waiting for the marker) makes the cancel deterministic, not time-based.
-    """
-
-    script = tmp_path / "fake_bart"
-    script.write_text(f'#!/bin/bash\necho $$ > "{marker}"\nexec sleep 300\n')
+def _make_executable(script) -> str:
     script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return str(script)
+
+
+def _write_recording_bart(tmp_path, marker) -> str:
+    script = tmp_path / "recording_bart"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import shutil\n"
+        "import sys\n"
+        f"open({str(marker)!r}, 'w').write('\\n'.join(sys.argv[1:-2]))\n"
+        "shutil.copyfile(sys.argv[-2] + '.hdr', sys.argv[-1] + '.hdr')\n"
+        "shutil.copyfile(sys.argv[-2] + '.cfl', sys.argv[-1] + '.cfl')\n"
+    )
+    return _make_executable(script)
+
+
+def test_run_bart_preserves_exact_argv_composition(tmp_path):
+    marker = tmp_path / "argv"
+    executable = _write_recording_bart(tmp_path, marker)
+    source = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+
+    result = bart_pack.run_bart(
+        ["pics", "-R", "W:7:0:0.01", "-i", "50"],
+        source,
+        executable=executable,
+    )
+
+    assert marker.read_text().splitlines() == ["pics", "-R", "W:7:0:0.01", "-i", "50"]
+    np.testing.assert_allclose(result, source.astype(np.complex64))
+
+
+def _write_blocking_bart(tmp_path, marker) -> str:
+    script = tmp_path / "blocking_bart"
+    script.write_text(f'#!/bin/bash\necho $$ > "{marker}"\nexec sleep 300\n')
+    return _make_executable(script)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -229,470 +129,142 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def test_cancel_mid_op_kills_child_under_one_second(tmp_path):
+def test_cancel_mid_command_kills_child_under_one_second(tmp_path):
     marker = tmp_path / "child_pid"
-    fake_bart = _write_fake_bart(tmp_path, marker)
+    executable = _write_blocking_bart(tmp_path, marker)
     token = CancellationToken()
+    before = set(glob.glob(str(tmp_path / "arrayscope-bart-*")))
+    outcome: dict[str, object] = {}
 
-    # Isolate this run's scratch dir under tmp_path so the leak check cannot race a
-    # concurrent (xdist) run's dir in the shared system temp.
-    temp_root = str(tmp_path)
-    before = set(glob.glob(os.path.join(temp_root, "arrayscope-bart-*")))
-
-    result: dict[str, object] = {}
-
-    def _runner():
+    def runner():
         try:
             bart_pack.run_bart(
-                ["fft", "0"],
+                ["pics"],
                 np.ones((4, 4), dtype=np.complex64),
                 cancellation_token=token,
-                executable=fake_bart,
-                temp_dir=temp_root,
+                executable=executable,
+                temp_dir=str(tmp_path),
             )
         except BaseException as exc:
-            result["exc"] = exc
+            outcome["exc"] = exc
 
-    thread = threading.Thread(target=_runner)
+    thread = threading.Thread(target=runner)
     thread.start()
-
-    # Barrier: wait until the child has actually started (marker written).
-    # The barrier deadline is owned by the one interaction-budget owner, not a
-    # local literal (architecture guard: one bounded timeout owner).
     deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S
     while not marker.exists() and time.monotonic() < deadline:
         time.sleep(0.005)
     assert marker.exists(), "fake bart never started"
-    child_pid = int(marker.read_text().strip())
-    assert _pid_alive(child_pid)
+    child_pid = int(marker.read_text())
 
-    cancel_at = time.monotonic()
+    started = time.monotonic()
     token.cancel()
     thread.join(timeout=3.0)
-    elapsed = time.monotonic() - cancel_at
+    elapsed = time.monotonic() - started
 
-    assert not thread.is_alive(), "run_bart did not return after cancel"
-    assert elapsed < 1.0, f"cancel took {elapsed:.3f}s (>1s)"
-    assert isinstance(result.get("exc"), EvaluationCancelled)
-
-    # The child (and its process group) is dead -- no orphan.
+    assert not thread.is_alive()
+    assert elapsed < 1.0
+    assert isinstance(outcome.get("exc"), EvaluationCancelled)
     for _ in range(50):
         if not _pid_alive(child_pid):
             break
         time.sleep(0.01)
-    assert not _pid_alive(child_pid), "bart child survived the cancel"
-
-    # The temp dir was always cleaned up, even on cancel.
-    after = set(glob.glob(os.path.join(temp_root, "arrayscope-bart-*")))
-    assert after <= before, f"leaked temp dirs: {after - before}"
+    assert not _pid_alive(child_pid)
+    assert set(glob.glob(str(tmp_path / "arrayscope-bart-*"))) <= before
 
 
-def test_already_cancelled_never_spawns(tmp_path):
+def test_already_cancelled_command_never_spawns(tmp_path):
     marker = tmp_path / "child_pid"
-    fake_bart = _write_fake_bart(tmp_path, marker)
+    executable = _write_blocking_bart(tmp_path, marker)
     token = CancellationToken()
     token.cancel()
+
     with pytest.raises(EvaluationCancelled):
         bart_pack.run_bart(
-            ["fft", "0"],
+            ["pics"],
             np.ones((2, 2), dtype=np.complex64),
             cancellation_token=token,
-            executable=fake_bart,
+            executable=executable,
         )
-    assert not marker.exists(), "run_bart spawned bart despite pre-cancel"
+    assert not marker.exists()
 
 
-# --- pipe draining + overall timeout (no real BART toolbox needed) ------------
-
-
-# Comfortably past the ~64 KB OS pipe buffer, on BOTH stdout and stderr: an
-# undrained ``Popen(PIPE)`` child that writes this much blocks on write forever.
-_CHATTY_BYTES = 200_000
-
-
-def _make_executable(script) -> str:
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return str(script)
-
-
-def _write_chatty_then_exit_bart(tmp_path) -> str:
-    """A ``bart`` shim that floods both pipes, echoes its input to ``out``, exits 0.
-
-    ``run_bart`` appends ``in`` and ``out`` stems as the last two argv, so with an
-    empty command they land as ``$1``/``$2``.  Copying the cfl pair lets the real
-    ``read_cfl`` round-trip succeed, so a green result *proves* the flood was
-    drained rather than deadlocking.
-    """
-
-    script = tmp_path / "chatty_bart"
+def _write_chatty_copy_bart(tmp_path) -> str:
+    script = tmp_path / "chatty_copy_bart"
     script.write_text(
         "#!/bin/bash\n"
-        'in="$1"\n'
-        'out="$2"\n'
-        f"yes 'stdout-noise' | head -c {_CHATTY_BYTES}\n"
-        f"yes 'stderr-noise' | head -c {_CHATTY_BYTES} 1>&2\n"
-        'cp "$in.cfl" "$out.cfl"\n'
+        'in="${@: -2:1}"\n'
+        'out="${@: -1}"\n'
+        f"yes stdout-noise | head -c {_CHATTY_BYTES}\n"
+        f"yes stderr-noise | head -c {_CHATTY_BYTES} 1>&2\n"
         'cp "$in.hdr" "$out.hdr"\n'
+        'cp "$in.cfl" "$out.cfl"\n'
     )
     return _make_executable(script)
 
 
-def _write_chatty_then_hang_bart(tmp_path, marker) -> str:
-    """A ``bart`` shim that floods both pipes, records its pid, then blocks forever."""
-
+def _write_chatty_hang_bart(tmp_path, marker) -> str:
     script = tmp_path / "chatty_hang_bart"
     script.write_text(
         "#!/bin/bash\n"
         f'echo $$ > "{marker}"\n'
-        f"yes 'stdout-noise' | head -c {_CHATTY_BYTES}\n"
-        f"yes 'stderr-noise' | head -c {_CHATTY_BYTES} 1>&2\n"
+        f"yes stdout-noise | head -c {_CHATTY_BYTES}\n"
+        f"yes stderr-noise | head -c {_CHATTY_BYTES} 1>&2\n"
         "exec sleep 300\n"
     )
     return _make_executable(script)
 
 
-def test_bart_timeout_env_config(monkeypatch):
-    """The overall-timeout ceiling is env-driven with a documented fallback."""
+def test_chatty_child_is_drained_without_deadlock(tmp_path):
+    executable = _write_chatty_copy_bart(tmp_path)
+    source = np.arange(120, dtype=np.complex64).reshape(PROBE_SHAPE)
+    outcome: dict[str, object] = {}
 
-    monkeypatch.delenv(bart_pack.BART_TIMEOUT_ENV, raising=False)
-    assert bart_pack.bart_timeout() == bart_pack._DEFAULT_TIMEOUT_S
-    monkeypatch.setenv(bart_pack.BART_TIMEOUT_ENV, "12.5")
-    assert bart_pack.bart_timeout() == 12.5
-    monkeypatch.setenv(bart_pack.BART_TIMEOUT_ENV, "0")  # non-positive disables
-    assert bart_pack.bart_timeout() is None
-    monkeypatch.setenv(bart_pack.BART_TIMEOUT_ENV, "nonsense")  # malformed -> default
-    assert bart_pack.bart_timeout() == bart_pack._DEFAULT_TIMEOUT_S
-
-
-def test_chatty_child_is_drained_and_does_not_deadlock(tmp_path):
-    """A child flooding both pipes past the buffer must not hang the runner."""
-
-    fake_bart = _write_chatty_then_exit_bart(tmp_path)
-    x = (np.arange(120).reshape(PROBE_SHAPE)).astype(np.complex64)
-
-    result: dict[str, object] = {}
-
-    def _runner():
+    def runner():
         try:
-            # A bounded ceiling so a *regression* (undrained -> blocked child)
-            # fails as a timeout rather than wedging the whole suite forever.
-            result["out"] = bart_pack.run_bart([], x, executable=fake_bart, timeout=30.0)
+            outcome["result"] = bart_pack.run_bart(
+                ["pics"], source, executable=executable, timeout=30.0
+            )
         except BaseException as exc:
-            result["exc"] = exc
+            outcome["exc"] = exc
 
-    thread = threading.Thread(target=_runner)
+    thread = threading.Thread(target=runner)
     thread.start()
     thread.join(timeout=INTERACTION_SETTLE_HARD_LIMIT_S)
 
-    assert not thread.is_alive(), "run_bart deadlocked on an undrained chatty child"
-    assert "exc" not in result, f"unexpected error: {result.get('exc')!r}"
-    np.testing.assert_allclose(np.asarray(result["out"]), x)
+    assert not thread.is_alive()
+    assert "exc" not in outcome
+    np.testing.assert_array_equal(outcome["result"], source)
 
 
-def test_overall_timeout_kills_stuck_child(tmp_path):
-    """A child that floods then hangs is killed by the overall timeout, no orphan."""
-
+def test_overall_timeout_kills_stuck_child_and_cleans_scratch(tmp_path):
     marker = tmp_path / "child_pid"
-    fake_bart = _write_chatty_then_hang_bart(tmp_path, marker)
+    executable = _write_chatty_hang_bart(tmp_path, marker)
+    before = set(glob.glob(str(tmp_path / "arrayscope-bart-*")))
 
-    # Isolate this run's scratch dir under tmp_path so the leak check cannot race a
-    # concurrent (xdist) run's dir in the shared system temp.
-    temp_root = str(tmp_path)
-    before = set(glob.glob(os.path.join(temp_root, "arrayscope-bart-*")))
-
-    started = time.monotonic()
     with pytest.raises(RuntimeError, match="timed out"):
         bart_pack.run_bart(
-            [],
+            ["pics"],
             np.ones((4, 4), dtype=np.complex64),
-            executable=fake_bart,
+            executable=executable,
             timeout=0.5,
-            temp_dir=temp_root,
+            temp_dir=str(tmp_path),
         )
-    elapsed = time.monotonic() - started
-    assert elapsed < INTERACTION_SETTLE_HARD_LIMIT_S, f"timeout was not prompt ({elapsed:.2f}s)"
 
-    # The flooding child recorded its pid; it (and its group) must be dead.
-    assert marker.exists(), "chatty child never started"
-    child_pid = int(marker.read_text().strip())
+    child_pid = int(marker.read_text())
     for _ in range(50):
         if not _pid_alive(child_pid):
             break
         time.sleep(0.01)
-    assert not _pid_alive(child_pid), "stuck bart child survived the timeout"
-
-    # The temp dir was cleaned up even though we bailed on a timeout.
-    after = set(glob.glob(os.path.join(temp_root, "arrayscope-bart-*")))
-    assert after <= before, f"leaked temp dirs: {after - before}"
+    assert not _pid_alive(child_pid)
+    assert set(glob.glob(str(tmp_path / "arrayscope-bart-*"))) <= before
 
 
-# --- new ops: exact CLI argv composition (no real BART needed) ----------------
-#
-# A recording ``bart`` shim proves the *exact* command each new op composes --
-# tool name, parameter/bitmask encoding, ordering -- through the real cfl handoff.
-# The shim records the composed command (argv minus the trailing in/out stems) and
-# round-trips the cfl: shape-preserving tools echo their input; ``std`` / ``var``
-# emit a singleton along the bitmask axis so the op's reshape is exercised too.
-# It reuses the pack's own cfl format (a self-contained Python replica), so a green
-# result also proves ``write_cfl`` / ``read_cfl`` interop end to end.
-
-_RECORDING_BART_BODY = textwrap.dedent(
-    """\
-    import sys
-
-    import numpy as np
-
-
-    def read_cfl(stem):
-        with open(stem + ".hdr") as handle:
-            next(handle)
-            dims = [int(token) for token in next(handle).split()]
-        while len(dims) > 1 and dims[-1] == 1:
-            dims.pop()
-        with open(stem + ".cfl", "rb") as handle:
-            data = np.frombuffer(handle.read(), dtype=np.complex64)
-        return np.reshape(data[: int(np.prod(dims))], dims, order="F")
-
-
-    def write_cfl(stem, arr):
-        arr = np.asarray(arr).astype(np.complex64)
-        with open(stem + ".hdr", "w") as handle:
-            handle.write("# Dimensions\\n")
-            handle.write(" ".join(str(int(s)) for s in arr.shape))
-            handle.write("\\n")
-        with open(stem + ".cfl", "wb") as handle:
-            handle.write(np.ascontiguousarray(arr.T))
-
-
-    argv = sys.argv[1:]
-    in_stem, out_stem = argv[-2], argv[-1]
-    cmd = argv[:-2]
-    with open(MARKER_PATH, "w") as handle:
-        handle.write("\\n".join(cmd))
-    data = read_cfl(in_stem)
-    tool = cmd[0]
-    if tool in ("std", "var"):
-        axis = int(cmd[1]).bit_length() - 1
-        write_cfl(out_stem, np.take(data, [0], axis=axis))
-    else:
-        write_cfl(out_stem, data)
-    """
-)
-
-
-def _write_recording_bart(tmp_path, marker) -> str:
-    """A Python ``bart`` shim that records the composed command + round-trips cfl."""
-
-    script = tmp_path / "recording_bart"
-    body = _RECORDING_BART_BODY.replace("MARKER_PATH", repr(str(marker)))
-    script.write_text(f"#!{sys.executable}\n{body}")
-    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return str(script)
-
-
-@pytest.fixture
-def recording_bart(tmp_path, monkeypatch):
-    """Register the BART pack against a recording shim; yield the argv marker.
-
-    Forces ``bart_available`` True and points ``bart_executable`` at the shim, so
-    the pack registers and every op's ``run_bart`` resolves to the recorder -- no
-    real BART toolbox required.
-    """
-
-    marker = tmp_path / "argv"
-    shim = _write_recording_bart(tmp_path, marker)
-    monkeypatch.setattr(bart_pack, "bart_available", lambda: True)
-    monkeypatch.setattr(bart_pack, "bart_executable", lambda: shim)
-    registry._reset_operation_packs()
-    return marker
-
-
-def _recorded_cmd(marker) -> list[str]:
-    return marker.read_text().split("\n")
-
-
-def test_scale_composes_scale_factor_argv(recording_bart):
-    x = np.arange(24, dtype=np.complex64).reshape(2, 3, 4)
-    op = registry.create_operation("bart:scale", parameters={"factor": 2.0})
-    got = np.asarray(op.apply(x))
-    assert _recorded_cmd(recording_bart) == ["scale", "2.0"]
-    assert got.dtype == np.complex64
-    np.testing.assert_array_equal(got, x)  # the shim echoes the input
-
-
-def test_spow_composes_exponent_argv(recording_bart):
-    x = np.ones((2, 3), dtype=np.complex64)
-    op = registry.create_operation("bart:spow", parameters={"exponent": 0.5})
-    op.apply(x)
-    assert _recorded_cmd(recording_bart) == ["spow", "0.5"]
-
-
-def test_carg_composes_bare_argv(recording_bart):
-    x = np.ones((2, 3), dtype=np.complex64)
-    op = registry.create_operation("bart:carg")
-    op.apply(x)
-    assert _recorded_cmd(recording_bart) == ["carg"]
-
-
-@pytest.mark.parametrize(("axis", "bitmask"), [(0, "1"), (1, "2"), (2, "4")])
-def test_normalize_composes_axis_bitmask(recording_bart, axis, bitmask):
-    x = np.ones((2, 3, 4), dtype=np.complex64)
-    op = registry.create_operation("bart:normalize", axis=axis)
-    got = np.asarray(op.apply(x))
-    assert _recorded_cmd(recording_bart) == ["normalize", bitmask]
-    assert got.shape == (2, 3, 4)  # shape-preserving
-
-
-@pytest.mark.parametrize("tool", ["std", "var"])
-@pytest.mark.parametrize(("axis", "bitmask"), [(0, "1"), (1, "2"), (2, "4")])
-def test_reduction_composes_bitmask_and_collapses_axis(recording_bart, tool, axis, bitmask):
-    x = np.arange(24, dtype=np.complex64).reshape(2, 3, 4)
-    op = registry.create_operation(f"bart:{tool}", axis=axis)
-    got = np.asarray(op.apply(x))
-    assert _recorded_cmd(recording_bart) == [tool, bitmask]
-    # The reduced axis is collapsed *out* (ndim - 1), matching the adapter.
-    expected_shape = x.shape[:axis] + x.shape[axis + 1 :]
-    assert got.shape == expected_shape
-    assert got.shape == op.output_shape(x.shape)
-    assert got.dtype == np.complex64
-
-
-# --- new ops: output-shape / dtype adapters (correct WITHOUT bart installed) --
-
-
-def test_reduction_output_shape_adapter_drops_axis():
-    from arrayscope.operations.packs.bart_pack import _reduce_output_shape
-
-    # Adapter is a pure function -> unit-testable with no bart, no registration.
-    assert _reduce_output_shape((6, 5, 4), 0, {}) == (5, 4)
-    assert _reduce_output_shape((6, 5, 4), 1, {}) == (6, 4)
-    assert _reduce_output_shape((6, 5, 4), 2, {}) == (6, 5)
-    assert _reduce_output_shape((6, 5, 4), -1, {}) == (6, 5)
-
-
-def test_shape_preserving_ops_declare_identity_shape_and_complex64_dtype():
-    # These adapters must be correct without bart, so read them off the specs.
-    for spec in bart_pack.pack_specs():
-        assert np.dtype(spec.resolve_output_dtype(np.dtype("float32"))) == np.complex64
-    for spec in (bart_pack.scale_spec(), bart_pack.spow_spec(), bart_pack.normalize_spec()):
-        assert spec.changes_shape is False
-        assert spec.resolve_output_shape((6, 5, 4), 1, {"factor": 2.0, "exponent": 2.0}) == (
-            6,
-            5,
-            4,
-        )
-    for spec in (bart_pack.std_spec(), bart_pack.var_spec()):
-        assert spec.changes_shape is True
-        assert spec.resolve_output_shape((6, 5, 4), 1, {}) == (6, 4)
-
-
-def test_new_pointwise_and_reduction_ops_are_all_opaque(recording_bart):
-    from arrayscope.operations.capabilities import OperationClass
-
-    # Every BART op stays OPAQUE (cost model, not correctness) -- including the
-    # pointwise carg/scale/spow: a per-tile subprocess is never the right plan.
-    for op_id, kwargs in [
-        ("bart:carg", {}),
-        ("bart:scale", {"parameters": {"factor": 2.0}}),
-        ("bart:spow", {"parameters": {"exponent": 2.0}}),
-        ("bart:normalize", {"axis": 1}),
-        ("bart:std", {"axis": 1}),
-        ("bart:var", {"axis": 1}),
-    ]:
-        op = registry.create_operation(op_id, **kwargs)
-        assert op.execution_class is OperationClass.OPAQUE, op_id
-        assert plugins.is_region_honored(op_id, op.axis, op.params) is False, op_id
-
-
-# --- new ops: discovery + presentation metadata ------------------------------
-
-
-def test_new_bart_ops_appear_with_metadata(recording_bart):
-    ids = {entry.id for entry in registry.all_operations()}
-    assert {"bart:carg", "bart:scale", "bart:spow", "bart:normalize", "bart:std", "bart:var"} <= ids
-    scale = registry.get_operation_entry("bart:scale")
-    assert scale.group == "BART"
-    assert scale.requires_axis is False
-    std = registry.get_operation_entry("bart:std")
-    assert std.requires_axis is True
-    assert std.changes_shape is True
-
-
-def test_new_bart_ops_recipe_round_trip(recording_bart):
-    scale = registry.create_operation("bart:scale", parameters={"factor": 0.25})
-    item = plugins.recipe_item_for_plugin_operation(scale, enabled=True)
-    assert item == {"id": "bart:scale", "parameters": {"factor": 0.25}, "enabled": True}
-    assert registry.create_operation(item["id"], parameters=item["parameters"]) == scale
-
-    std = registry.create_operation("bart:std", axis=2)
-    std_item = plugins.recipe_item_for_plugin_operation(std, enabled=True)
-    assert std_item == {"id": "bart:std", "axis": 2, "enabled": True}
-    assert registry.create_operation(std_item["id"], axis=std_item["axis"]) == std
-
-
-# --- new ops: real-BART numeric anchor (skips when bart is not runnable) ------
-
-
-def test_bart_scale_matches_reference(bart_env):
-    """``bart scale <factor>`` multiplies every sample by the real scalar."""
-
-    rng = np.random.default_rng(11)
-    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
-        np.complex64
-    )
-    op = registry.create_operation("bart:scale", parameters={"factor": 2.5})
-    got = np.asarray(op.apply(x))
-    ref = (x * 2.5).astype(np.complex64)
-    assert got.dtype == np.complex64
-    np.testing.assert_allclose(got, ref, rtol=0, atol=1e-4 * np.max(np.abs(ref)))
-
-
-def test_bart_carg_matches_numpy_angle(bart_env):
-    """``bart carg`` returns the phase in the real part (imag 0), like ``cabs``."""
-
-    rng = np.random.default_rng(13)
-    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
-        np.complex64
-    )
-    op = registry.create_operation("bart:carg")
-    got = np.asarray(op.apply(x))
-    np.testing.assert_allclose(got.real, np.angle(x), atol=1e-4)
-    np.testing.assert_allclose(got.imag, 0.0, atol=1e-5)
-
-
-def test_bart_spow_matches_numpy_power(bart_env):
-    rng = np.random.default_rng(17)
-    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
-        np.complex64
-    )
-    op = registry.create_operation("bart:spow", parameters={"exponent": 2.0})
-    got = np.asarray(op.apply(x))
-    np.testing.assert_allclose(got, (x**2).astype(np.complex64), rtol=0, atol=1e-3)
-
-
-@pytest.mark.parametrize("axis", [0, 1, 2])
-def test_bart_std_matches_sample_std_and_collapses_axis(bart_env, axis):
-    """``bart std`` is the *sample* std (ddof=1); the op collapses the axis out."""
-
-    rng = np.random.default_rng(19 + axis)
-    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
-        np.complex64
-    )
-    op = registry.create_operation("bart:std", axis=axis)
-    got = np.asarray(op.apply(x))
-    assert got.shape == x.shape[:axis] + x.shape[axis + 1 :]
-    ref = np.std(x, axis=axis, ddof=1)
-    np.testing.assert_allclose(got.real, ref, rtol=0, atol=1e-3 * float(np.max(ref)))
-
-
-@pytest.mark.parametrize("axis", [0, 1, 2])
-def test_bart_normalize_divides_by_axis_norm(bart_env, axis):
-    rng = np.random.default_rng(23 + axis)
-    x = (rng.standard_normal(PROBE_SHAPE) + 1j * rng.standard_normal(PROBE_SHAPE)).astype(
-        np.complex64
-    )
-    op = registry.create_operation("bart:normalize", axis=axis)
-    got = np.asarray(op.apply(x))
-    assert got.shape == x.shape  # shape-preserving
-    norm = np.sqrt(np.sum(np.abs(x) ** 2, axis=axis, keepdims=True))
-    np.testing.assert_allclose(got, (x / norm).astype(np.complex64), rtol=0, atol=1e-3)
+def test_bart_timeout_env_config(monkeypatch):
+    monkeypatch.delenv(bart_pack.BART_TIMEOUT_ENV, raising=False)
+    assert bart_pack.bart_timeout() == bart_pack._DEFAULT_TIMEOUT_S
+    monkeypatch.setenv(bart_pack.BART_TIMEOUT_ENV, "12.5")
+    assert bart_pack.bart_timeout() == 12.5
+    monkeypatch.setenv(bart_pack.BART_TIMEOUT_ENV, "0")
+    assert bart_pack.bart_timeout() is None
+    monkeypatch.setenv(bart_pack.BART_TIMEOUT_ENV, "malformed")
+    assert bart_pack.bart_timeout() == bart_pack._DEFAULT_TIMEOUT_S

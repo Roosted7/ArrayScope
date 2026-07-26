@@ -33,10 +33,10 @@ this file says *what, in what order, and when it counts as done*.
 plugin ops v1/v2/v3 (8, Tier-2 conformance harness for 9, BART pack for 10),
 and the G7 codec groundwork landed — see the [Done ledger](queue-done.md). The
 sigpy FFT pack that first accompanied step 9 was removed as redundant with the
-built-in FFT (see [graveyard.md](graveyard.md)); the genuinely-additive sigpy
-*threshold + resize* pack landed 2026-07-24 (`sigpy:soft_thresh`/`hard_thresh`
-are the first verified-Tier-2 pack ops, `sigpy:resize` is OPAQUE k-space
-zero-fill). G7's live product-benefit gate closed with a measured NO. Row 4
+built-in FFT (see [graveyard.md](graveyard.md)); the later threshold/resize pack
+landed 2026-07-24 as useful plumbing evidence and was demoted by row 11 Bundle A
+once native dtype-honest replacements existed. G7's live product-benefit gate
+closed with a measured NO. Row 4
 audits what should be retained before any codec revival; codec implementation
 remains in the review/ideas list unless that audit identifies a real owner-level
 bottleneck. `sigpy`, `blosc2`/`zfpy`, and `bart` were installed into the env this

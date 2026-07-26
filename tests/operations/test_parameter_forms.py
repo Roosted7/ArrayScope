@@ -37,30 +37,24 @@ def test_parameterless_op_has_no_form():
 
 
 def test_default_form_seeds_from_metadata():
-    # sigpy:soft_thresh declares lamda default=0.0, minimum=0.0, step=0.01.
-    pytest.importorskip("sigpy")
-    registry.load_operation_packs()
-    entry = get_operation_entry("sigpy:soft_thresh")
+    entry = get_operation_entry("soft_threshold")
     form = build_parameter_form(entry, shape=(4, 5, 6), axis=None)
     assert form is not None
-    field = form.field("lamda")
+    field = form.field("threshold")
     assert isinstance(field, ParameterField)
     assert field.kind == "float"
-    assert field.value == 0.0
+    assert field.value == 0.1
     assert field.minimum == 0.0
     assert field.step == 0.01
     assert field.description
-    # Values are ready to hand to create_operation.
-    assert form.values() == {"lamda": 0.0}
+    assert form.values() == {"threshold": 0.1}
 
 
 def test_default_form_validate_bounds():
-    pytest.importorskip("sigpy")
-    registry.load_operation_packs()
-    entry = get_operation_entry("sigpy:soft_thresh")
+    entry = get_operation_entry("soft_threshold")
     form = build_parameter_form(entry, shape=(4, 5, 6), axis=None)
     assert form.validate() is None
-    form.set_value("lamda", -1.0)
+    form.set_value("threshold", -1.0)
     message = form.validate()
     assert message is not None
     assert "at least" in message
@@ -152,32 +146,6 @@ def test_crop_without_context_still_builds():
     assert form.field("start").value == 0
     assert form.field("stop").value == 1
     assert form.field("start").maximum is None
-
-
-# --- resize provider: context default ----------------------------------------
-
-
-def test_resize_form_defaults_to_axis_length():
-    pytest.importorskip("sigpy")
-    registry.load_operation_packs()
-    entry = get_operation_entry("sigpy:resize")
-    form = build_parameter_form(entry, shape=(4, 8, 6), axis=1)
-    assert form.field("size").value == 8
-    assert form.field("size").minimum == 1
-    assert DerivedValue("Current length", "8") in form.derived()
-    # Editing the target updates the derived output line.
-    form.set_value("size", 16)
-    assert DerivedValue("Output length", "16") in form.derived()
-
-
-def test_resize_form_without_context_falls_back():
-    pytest.importorskip("sigpy")
-    registry.load_operation_packs()
-    entry = get_operation_entry("sigpy:resize")
-    form = build_parameter_form(entry, shape=None, axis=None)
-    assert form.field("size").value == 1
-    # No current-length line without context, but the output line is present.
-    assert form.derived() == [DerivedValue("Output length", "1")]
 
 
 def test_form_values_feed_create_operation():
