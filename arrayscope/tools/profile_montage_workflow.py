@@ -6678,6 +6678,10 @@ def _phase_record(
         "wgpu_uploads_by_level": [
             dict(row) for row in tuple(vispy.get("wgpu_uploads_by_level", ()) or ())
         ],
+        "wgpu_binding_fast_path_commits": int(vispy.get("wgpu_binding_fast_path_commits", 0) or 0),
+        "wgpu_binding_full_republications": int(
+            vispy.get("wgpu_binding_full_republications", 0) or 0
+        ),
         "wgpu_last_report_uploads": int(vispy.get("wgpu_last_report_uploads", 0) or 0),
         "wgpu_page_pools": list(vispy.get("wgpu_page_pools", ()) or ()),
         "wgpu_atomic_warm_pinned_pages": int(vispy.get("wgpu_atomic_warm_pinned_pages", 0) or 0),

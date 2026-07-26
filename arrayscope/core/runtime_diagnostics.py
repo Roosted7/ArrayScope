@@ -255,6 +255,11 @@ class MontageRuntimeDiagnostics:
     # the question a displayed level alone cannot answer once a coarse commit
     # substitutes native pages for a reduced payload.
     wgpu_uploads_by_level: tuple[dict[str, object], ...] = ()
+    # How often a commit reused the submitted tile binding instead of
+    # republishing all of it. A mapping-only commit that silently stops
+    # taking the fast path costs ~62 ms each and is otherwise invisible.
+    wgpu_binding_fast_path_commits: int = 0
+    wgpu_binding_full_republications: int = 0
     wgpu_active_resident_bytes: int = 0
     wgpu_allocated_pool_bytes: int = 0
     wgpu_pool_grows_total: int = 0
@@ -963,6 +968,8 @@ _MONTAGE_COVERED = frozenset(
         "wgpu_uploads_total",
         "wgpu_upload_bytes_total",
         "wgpu_uploads_by_level",
+        "wgpu_binding_fast_path_commits",
+        "wgpu_binding_full_republications",
         "wgpu_active_resident_bytes",
         "wgpu_allocated_pool_bytes",
         "wgpu_pool_grows_total",

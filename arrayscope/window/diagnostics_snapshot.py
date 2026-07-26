@@ -181,6 +181,12 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         wgpu_uploads_by_level=tuple(
             dict(row) for row in tuple(presentation.get("wgpu_uploads_by_level", ()) or ())
         ),
+        wgpu_binding_fast_path_commits=int(
+            presentation.get("wgpu_binding_fast_path_commits", 0) or 0
+        ),
+        wgpu_binding_full_republications=int(
+            presentation.get("wgpu_binding_full_republications", 0) or 0
+        ),
         wgpu_active_resident_bytes=int(presentation.get("wgpu_active_resident_bytes", 0) or 0),
         wgpu_allocated_pool_bytes=int(presentation.get("wgpu_allocated_pool_bytes", 0) or 0),
         wgpu_pool_grows_total=int(presentation.get("wgpu_pool_grows_total", 0) or 0),
