@@ -1616,7 +1616,14 @@ class WgpuPlaneExecutor:
                 representation=rep,
                 texture=texture,
                 view=texture.create_view(dimension="2d-array"),
-                free_layers=list(range(min(allocated, budget))),
+                # Every allocated layer is free until something binds it.
+                # ``min(allocated, budget)`` silently orphaned layer 0 of a
+                # zero-budget pool: such a pool still allocates one layer so
+                # bind groups stay valid, and `_grow_pool` only ever appends
+                # indices at or above the previous extent, so the layer never
+                # returned. A later `ensure_pool_budgets` therefore raised the
+                # ceiling over a pool that was permanently one layer short.
+                free_layers=list(range(allocated)),
                 layer_count=budget,
                 allocated_layers=allocated,
             )
@@ -2838,11 +2845,21 @@ class WgpuPlaneExecutor:
             if slot.pool_id == pool_id or (pool_id is None and key.representation == representation)
         )
         pinned = sum(self.page_table.is_pinned(key) for key in resident)
+        # Layers that are neither bound nor free are a pool-accounting leak,
+        # not pressure. Naming them here keeps the two failures apart: a
+        # genuinely full pool reports ``unaccounted=0``.
+        bound_layers = {
+            int(slot.page_index)
+            for key, slot in self.page_table.slot_items()
+            if slot.pool_id == pool_id or (pool_id is None and key.representation == representation)
+        }
+        unaccounted = set(range(int(pool.allocated_layers))) - bound_layers - set(pool.free_layers)
         self._last_pool_exhaustion = (
             f"page pool {representation!r} exhausted and every resident page is pinned: "
             f"pool={pool_id or 'all'} budget={pool.layer_count} "
             f"allocated={pool.allocated_layers} resident={len(resident)} "
-            f"pinned={pinned} free={len(pool.free_layers)}"
+            f"pinned={pinned} free={len(pool.free_layers)} "
+            f"unaccounted={len(unaccounted)}"
         )
         raise RuntimeError(self._last_pool_exhaustion)
 

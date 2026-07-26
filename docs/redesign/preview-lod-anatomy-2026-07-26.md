@@ -269,9 +269,12 @@ by whether its identity carries the operation key:
 **Zero previews on the FFT pipeline.** Every preview in the run belongs to a
 raw tile from an earlier phase. Planned steps for the FFT fill are 5944 ×
 `(rung=2, level=2)` — DESIRED only. First FFT pixel lands at **6664 ms**, and
-the stage does not finish: it hits the 4 s stall guard at 271/272 tiles, twice,
-identically (observed on this tip only; not A/B'd against a baseline, so not
-attributed to anything here).
+the stage did not finish: it hit the 4 s stall guard at 271/272 tiles, twice,
+identically. **Triaged and fixed 2026-07-26** — a leaked page-pool layer, not
+an LOD or preview defect; see
+[wgpu-pool-layer-leak-2026-07-26.md](wgpu-pool-layer-leak-2026-07-26.md). The
+stage now completes 272/272, so the §6 numbers below (which were taken from
+the truncated runs) should be re-measured on the fixed tip.
 
 Two independent gates each suffice to cause it:
 
@@ -468,7 +471,9 @@ The §6 FFT numbers come from
 `identity` contains the operation name to separate op-pipeline tiles from raw
 ones, and read planned rungs from `kind == "pipeline_plan"`, field `steps`
 (`[tile, rung, level]`). That stage hit the 4 s stall guard at 271/272 on both
-runs; it is recorded here as observed, not attributed.
+runs; that stall is now fixed
+([dossier](wgpu-pool-layer-leak-2026-07-26.md)), so the §6 measurement can be
+redone against a stage that actually completes.
 
 The §4c probe was a temporary `return None` at the top of
 `_wgpu_reusable_native_texture` behind an env flag, reverted after the run.
@@ -483,9 +488,13 @@ the 2-vs-15 refinement batch count are far outside it.
   (`_idle_backlog_cohort` / `_persistent_tile_upsert_limits`), the item clamp's
   interactive arm, or simply worker arrival pacing forcing a commit per
   completion wave.
-- **The `fft_full_tiled_montage` stall at 271/272**, reproduced twice on this
-  tip, is untriaged and not A/B'd against a baseline. It is not evidence about
-  any diff until someone runs that comparison.
+- ~~**The `fft_full_tiled_montage` stall at 271/272**~~ — **CLOSED
+  2026-07-26.** A/B'd back to `51b826a` (2026-07-23) and root-caused to a
+  page-pool layer leaked at construction, unrelated to LOD or preview policy:
+  [wgpu-pool-layer-leak-2026-07-26.md](wgpu-pool-layer-leak-2026-07-26.md).
+  What it leaves behind for this dossier is that **§6 was measured on a stage
+  that never finished**, so its FFT numbers are a lower bound on work done and
+  need re-taking.
 - **Which page keys the 1088 uploads belong to** is inferred (4 per tile = the
   native grid, plus the code path that says it substitutes native for reduced),
   not directly instrumented. There is no per-`lod.level` upload counter, and the

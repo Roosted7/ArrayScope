@@ -58,6 +58,29 @@ with reasons recorded in the ledger: sigpy `nufft`/`espirit`/`fwt`/`iwt` and
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
+- **An exception on the presentation-commit path is laundered into an
+  anonymous stall** (found 2026-07-26 while root-causing the 272-tile FFT
+  montage stall — [dossier](redesign/wgpu-pool-layer-leak-2026-07-26.md) §5).
+  `_on_presentation_gate` disarms the gate *before* calling
+  `commit_pending_session`, which re-arms only by reaching
+  `_rearm_if_backlog()` on its way out; the handler is the outermost Python
+  frame of a `QEvent`, so Qt prints the traceback and continues. Any exception
+  between those two points therefore destroys every wakeup with a live
+  backlog, and the run dies four seconds later on the profiler's STALL GUARD
+  with a dump that describes a lost wakeup and says nothing about the throw.
+  Demonstrated twice with unrelated causes (a `RuntimeError` from page-pool
+  exhaustion and an `AttributeError` from a typo'd probe) producing
+  **byte-identical** stall signatures — same tile, same 271/272, same
+  `gate_no_progress=1`. This inverts ADR 0051: the pool error is *designed* to
+  be loud and the gate makes it the least informative failure the system has.
+  Do **not** fix by catching and re-arming — that hides genuine exhaustion.
+  The decision to make is what a commit exception should do instead
+  (terminate the process loudly? fail the frame with the original traceback
+  attached to the stall dump?), which is an ADR 0051 failure-semantics call,
+  not a bug fix. **Exit gate:** an injected exception on the commit path
+  surfaces its own traceback as the run's cause of death, in the profiler and
+  in the app; the STALL GUARD never again reports a lost wakeup for a frame
+  that actually threw.
 - **wgpu shader legibility — Stage A (grid / trust signals) — offscreen green,
   ring-4 OWED** (branch `claude/wgpu-shader-stage-a`). Four fragment-shader
   visuals in `_RENDER_WGSL` + its BC-pool twin (and the CPU mirror in

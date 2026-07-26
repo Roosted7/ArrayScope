@@ -1395,6 +1395,47 @@ def test_per_pool_eviction_respects_budget_and_pins():
         )
 
 
+def test_zero_budget_pool_keeps_every_allocated_layer_usable():
+    """A pool built at budget zero must not orphan its bootstrap layer.
+
+    Zero-budget pools still allocate one layer so bind groups stay valid.
+    That layer used to be left off ``free_layers``, and ``_grow_pool`` only
+    appends indices at or above the previous extent, so it never came back.
+    A later ``ensure_pool_budgets`` then governed a pool that was one layer
+    short of its own ceiling for the rest of the process — which is fatal
+    exactly when the working set is sized to the budget (the 272-tile FFT
+    montage: budget 1088, 1087 usable, one tile permanently unpresentable).
+    """
+
+    executor = WgpuPlaneExecutor(
+        target_size=(PAGE, PAGE),
+        # Complex is absent, so it is constructed at budget zero — the shape
+        # the profile workflow hits when its scalar load_data stage builds
+        # the executor before the FFT stage needs complex pages.
+        pool_layers={SCALAR_R32F: 4},
+        device=_shared_device(),
+    )
+    assert executor.pool_budget(COMPLEX_RG32F) == 0
+    assert executor.pool_free_layers(COMPLEX_RG32F) == 1
+
+    budget = 6
+    executor.ensure_pool_budgets({COMPLEX_RG32F: budget})
+    keys = [plane_chunk_key("doc-c", "op-live", 0, cx, 0) for cx in range(budget)]
+    executor.submit(
+        FrameSubmission(
+            1,
+            tuple(
+                EnsureChunkResident(key, np.zeros((PAGE, PAGE, 2), np.float32), pinned=True)
+                for key in keys
+            ),
+        )
+    )
+    # Every layer the raised ceiling promised is reachable: all `budget`
+    # pages are resident even though each one is pinned against eviction.
+    assert set(executor.page_table.resident_keys()) >= set(keys)
+    assert executor.pool_free_layers(COMPLEX_RG32F) == 0
+
+
 def test_histogram_frontier_survives_same_submission_eviction_pressure():
     """A key a later DispatchHistogram samples must not be LRU-evicted by the
     same submission's ensures: the executor pre-scans the batch and shields
