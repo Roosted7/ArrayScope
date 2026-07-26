@@ -11,11 +11,13 @@ from __future__ import annotations
 import os
 import shutil
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
 from arrayscope.operations import command_runtime
 
+BART_ENVIRONMENT_ID = "bart"
 BART_TIMEOUT_ENV = "ARRAYSCOPE_BART_TIMEOUT_S"
 _DEFAULT_TIMEOUT_S = command_runtime.DEFAULT_TIMEOUT_S
 _POLL_INTERVAL = command_runtime.POLL_INTERVAL_S
@@ -41,6 +43,45 @@ def bart_executable(env: Mapping[str, object] | None = None) -> str | None:
 
 def bart_available(env: Mapping[str, object] | None = None) -> bool:
     return bart_executable(env) is not None
+
+
+@dataclass(frozen=True)
+class _BartRuntime:
+    executable: str
+    env: Mapping[str, str] | None = None
+    cwd: str | None = None
+    prefix: tuple[str, ...] = ()
+
+
+def _pack_runtime() -> tuple[_BartRuntime | None, str | None]:
+    """Resolve the named ``bart`` record, falling back to the process PATH."""
+
+    # Import lazily because library imports the pack registry.
+    from arrayscope.operations.library import resolve_execution_environment
+
+    resolved, reason = resolve_execution_environment(BART_ENVIRONMENT_ID)
+    if reason:
+        if "is not configured" not in reason:
+            return None, reason
+    elif resolved is not None:
+        prefix = tuple(resolved.command_prefix)
+        if prefix:
+            # The environment resolver has already proved that the conda
+            # environment exists. ``conda run`` owns lookup inside it.
+            return _BartRuntime("bart", resolved.env, resolved.cwd, prefix), None
+        executable = bart_executable(resolved.env)
+        if executable is None:
+            return (
+                None,
+                "BART is unavailable because the bart executable was not found "
+                f"in execution environment {BART_ENVIRONMENT_ID!r}.",
+            )
+        return _BartRuntime(executable, resolved.env, resolved.cwd), None
+
+    executable = bart_executable()
+    if executable is not None:
+        return _BartRuntime(executable), None
+    return None, "BART is unavailable because the bart executable was not found."
 
 
 def bart_timeout(default: float = _DEFAULT_TIMEOUT_S) -> float | None:
@@ -80,6 +121,8 @@ def run_bart(
     grace: float = _TERM_GRACE,
     timeout: float | None = _USE_CONFIGURED_TIMEOUT,  # type: ignore[assignment]
     temp_dir: str | None = None,
+    cwd: str | None = None,
+    prefix: Sequence[str] = (),
 ) -> np.ndarray:
     """Run ``bart <argv> in out`` through the shared cfl command runtime."""
 
@@ -92,6 +135,7 @@ def run_bart(
     slot_inputs = dict(inputs or {})
     return command_runtime.run_array_command(
         [
+            *[str(token) for token in prefix],
             binary,
             *[str(token) for token in argv],
             "{in}",
@@ -107,6 +151,7 @@ def run_bart(
         poll_interval=poll_interval,
         grace=grace,
         temp_dir=temp_dir,
+        cwd=cwd,
     )
 
 
@@ -123,22 +168,33 @@ def pack_specs() -> tuple:
     from arrayscope.operations.registry import OperationParameter
 
     def availability():
-        return (
-            None
-            if bart_available()
-            else "BART is unavailable because the bart executable was not found."
+        _runtime, reason = _pack_runtime()
+        return reason
+
+    def invoke(argv, data, *, inputs=None):
+        runtime, reason = _pack_runtime()
+        if reason or runtime is None:
+            raise RuntimeError(reason or "BART execution environment is unavailable.")
+        return run_bart(
+            argv,
+            data,
+            inputs=inputs,
+            env=runtime.env,
+            executable=runtime.executable,
+            cwd=runtime.cwd,
+            prefix=runtime.prefix,
         )
 
     def build(argv):
         def factory(_axis, params, _slots):
             tokens = [str(token).format_map(dict(params)) for token in argv]
-            return lambda data: run_bart(tokens, data)
+            return lambda data: invoke(tokens, data)
 
         return factory
 
     def build_pics(_axis, params, slots):
-        tokens = ["pics", "-i", str(int(params["iterations"]))]
-        return lambda data: run_bart(tokens, data, inputs=slots)
+        tokens = ["pics", "-S", "-i", str(int(params["iterations"]))]
+        return lambda data: invoke(tokens, data, inputs=slots)
 
     return (
         PluginOperationSpec(
@@ -174,12 +230,12 @@ def pack_specs() -> tuple:
             availability=availability,
             runtime="command",
             runtime_config={
-                "command_template": ("bart pics -i {iterations} {in} {sensitivities} {out}"),
+                "command_template": ("bart pics -S -i {iterations} {in} {sensitivities} {out}"),
                 "handoff": "cfl",
                 "timeout_s": _DEFAULT_TIMEOUT_S,
                 "shell": False,
             },
-            environment_id="bart",
+            environment_id=BART_ENVIRONMENT_ID,
         ),
         PluginOperationSpec(
             id="bart:ecalib",
@@ -206,34 +262,34 @@ def pack_specs() -> tuple:
                 "timeout_s": _DEFAULT_TIMEOUT_S,
                 "shell": False,
             },
-            environment_id="bart",
+            environment_id=BART_ENVIRONMENT_ID,
         ),
         PluginOperationSpec(
             id="bart:walsh",
-            label="BART Walsh sensitivity maps",
-            build=build(("walsh", "-r", "{radius}")),
+            label="BART Walsh calibration covariance",
+            build=build(("walsh", "-r", "{calibration_size}")),
             parameters=(
                 OperationParameter(
-                    "radius",
-                    "Radius",
+                    "calibration_size",
+                    "Calibration size",
                     kind="int",
                     default=5,
                     minimum=1,
-                    description="Local covariance smoothing radius.",
+                    description="Centered k-space calibration-region size.",
                 ),
             ),
             group="BART",
-            description="Estimate coil sensitivities with BART's Walsh method.",
+            description=("Estimate packed Hermitian coil-covariance matrices for BART ecaltwo."),
             icon="blur_on",
             availability=availability,
             runtime="command",
             runtime_config={
-                "command_template": "bart walsh -r {radius} {in} {out}",
+                "command_template": ("bart walsh -r {calibration_size} {in} {out}"),
                 "handoff": "cfl",
                 "timeout_s": _DEFAULT_TIMEOUT_S,
                 "shell": False,
             },
-            environment_id="bart",
+            environment_id=BART_ENVIRONMENT_ID,
         ),
     )
 

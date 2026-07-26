@@ -13,12 +13,13 @@ import stat
 import sys
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from arrayscope.kernel.task import CancellationToken
-from arrayscope.operations import plugins, registry
+from arrayscope.operations import environments, library, plugins, registry
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.packs import bart_pack
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
@@ -56,7 +57,11 @@ def test_bart_pack_registers_only_genuinely_bart_shaped_examples():
 
     assert {spec.id for spec in specs} == {"bart:pics", "bart:ecalib", "bart:walsh"}
     pics = next(spec for spec in specs if spec.id == "bart:pics")
+    walsh = next(spec for spec in specs if spec.id == "bart:walsh")
     assert [slot.name for slot in pics.input_slots] == ["sensitivities"]
+    assert pics.runtime_config["command_template"].startswith("bart pics -S ")
+    assert [parameter.name for parameter in walsh.parameters] == ["calibration_size"]
+    assert "covariance" in walsh.label.lower()
     assert all(spec.runtime == "command" for spec in specs)
     assert all(spec.runtime_config["handoff"] == "cfl" for spec in specs)
     registered = []
@@ -134,24 +139,50 @@ def test_run_bart_preserves_exact_argv_composition(tmp_path):
     np.testing.assert_allclose(result, source.astype(np.complex64))
 
 
-def test_pics_hands_off_primary_and_sensitivity_arrays_in_exact_order(tmp_path):
+def test_pics_definition_preserves_scale_and_hands_inputs_in_exact_order(tmp_path, monkeypatch):
     marker = tmp_path / "argv"
-    executable = _write_recording_pics_bart(tmp_path, marker)
+    Path(_write_recording_pics_bart(tmp_path, marker)).rename(tmp_path / "bart")
+    monkeypatch.setenv("PATH", str(tmp_path))
     source = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     sensitivities = np.full((2, 3, 4), 7 + 2j, dtype=np.complex64)
+    pics = next(spec for spec in bart_pack.pack_specs() if spec.id == "bart:pics")
 
-    result = bart_pack.run_bart(
-        ["pics", "-i", "17"],
-        source,
-        inputs={"sensitivities": sensitivities},
-        executable=executable,
-    )
+    result = pics.resolve_fn(
+        None,
+        {"iterations": 17},
+        {"sensitivities": sensitivities},
+    )(source)
 
     argv = marker.read_text().splitlines()
-    assert argv[:3] == ["pics", "-i", "17"]
-    assert len(argv) == 6
+    assert argv[:4] == ["pics", "-S", "-i", "17"]
+    assert len(argv) == 7
     assert argv[-3] != argv[-2]
     assert os.path.exists(argv[-3] + ".cfl") is False  # scratch was cleaned
+    np.testing.assert_allclose(result, source.astype(np.complex64))
+
+
+def test_pack_uses_named_bart_execution_environment(tmp_path, monkeypatch):
+    marker = tmp_path / "argv"
+    Path(_write_recording_bart(tmp_path, marker)).rename(tmp_path / "bart")
+    monkeypatch.setenv("PATH", "")
+    operations_dir = tmp_path / "operations"
+    environments.save_environments(
+        operations_dir,
+        [
+            environments.ExecutionEnvironment(
+                id="bart",
+                name="BART toolbox",
+                variables=(("PATH", str(tmp_path)),),
+            )
+        ],
+    )
+    monkeypatch.setattr(library, "user_operations_directory", lambda: str(operations_dir))
+    source = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    ecalib = next(spec for spec in bart_pack.pack_specs() if spec.id == "bart:ecalib")
+
+    result = ecalib.resolve_fn(None, {"maps": 2})(source)
+
+    assert marker.read_text().splitlines() == ["ecalib", "-m", "2"]
     np.testing.assert_allclose(result, source.astype(np.complex64))
 
 
