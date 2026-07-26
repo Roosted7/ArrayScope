@@ -67,6 +67,19 @@ class StubEffects:
 
         return run
 
+    def evaluate_preview_batch(self, intent, steps):
+        self.last_intent = intent
+        steps = tuple(steps)
+
+        def run(_token=None):
+            self.evaluated.append(("preview-batch", len(steps), steps[0].level))
+            return tuple(
+                (int(step.tile_number), "payload", int(step.tile_number), int(step.level))
+                for step in steps
+            )
+
+        return run
+
     def apply_commit(self, batch):
         self.batches.append(batch)
 
@@ -592,6 +605,48 @@ def test_large_visible_plan_admission_is_chunked_and_completion_driven():
     assert len(effects.evaluated) == 40
     assert not pipeline._pending_admissions
     assert not pipeline._admission_continuation_armed
+
+
+def test_full_preview_scope_uses_one_worker_and_one_completion_batch():
+    tile_count = 272
+    _kernel, _backend, effects, pipeline = make_manual_pipeline(tiles=tile_count)
+    visible = tuple(range(tile_count))
+
+    submitted = pipeline.retarget(
+        intent(),
+        demand(2),
+        scope(*visible, missing=tile_count),
+    )
+
+    assert submitted == 1
+    assert pipeline.counters.tasks_submitted == 1
+    assert not pipeline._pending_admissions
+    assert not pipeline._admission_continuation_armed
+    assert {rung for _semantic, _tile, rung, _level, _key in effects.admitted} == {int(Rung.FLOOR)}
+
+    assert _backend.run_next()
+    drain(_kernel)
+
+    assert effects.evaluated == [("preview-batch", tile_count, 4)]
+    assert len(effects.batches) == 1
+    assert len(effects.batches[0].upserts) == tile_count
+
+
+def test_preview_batch_requires_exact_scheduling_verdict_tile_set():
+    effects = StubEffects(tiles=273)
+    kernel = CaptureKernel()
+    pipeline = FramePipeline(kernel, effects, LodLadder())
+    visible = tuple(range(272))
+
+    submitted = pipeline.retarget(
+        intent(),
+        demand(2),
+        scope(*visible, missing=len(visible)),
+    )
+
+    assert submitted == pipeline.ADMISSION_CHUNK
+    assert not any(spec.rung == int(Rung.FLOOR) and spec.tile_number < 0 for spec in kernel.specs)
+    assert len(pipeline._pending_admissions) == len(visible) - pipeline.ADMISSION_CHUNK
 
 
 def test_rung_provenance_rides_the_task_spec_without_changing_identity():

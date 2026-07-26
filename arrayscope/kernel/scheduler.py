@@ -645,6 +645,8 @@ class Kernel:
             priority=int(spec.priority),
             rung=int(spec.rung),
             level=int(spec.level),
+            session_id=int(spec.session_id),
+            tile_number=int(spec.tile_number),
             scheduling_generation=int(spec.scheduling_generation),
         )
         with self._lock:
@@ -731,6 +733,8 @@ class Kernel:
             error_type=None if error is None else type(error).__name__,
             rung=int(spec.rung),
             level=int(spec.level),
+            session_id=int(spec.session_id),
+            tile_number=int(spec.tile_number),
             scheduling_generation=int(spec.scheduling_generation),
             fn_ns=int(fn_ns),
         )

@@ -63,6 +63,7 @@ from arrayscope.gpu.keys import (
     SCALAR_R32F,
 )
 from arrayscope.presentation import ClaimOwner, LevelPhase
+from arrayscope.render.ladder import coarse_rung_level
 
 PREVIEW_FLOOR_MIN_LEVEL = 4
 
@@ -550,7 +551,13 @@ def selected_lod_factor(session) -> int:
             desired_level = int(
                 getattr(session.lod_policy_decision.demand, "desired_level", 0) or 0
             )
-            session.lod_preview_level = max(base_preview, desired_level)
+            session.lod_preview_level = coarse_rung_level(
+                desired_level=desired_level,
+                retention_level=base_preview,
+                montage_tile_count=len(
+                    tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+                ),
+            )
     else:
         session.lod_policy_decision = native_lod_policy(
             session.view_range,

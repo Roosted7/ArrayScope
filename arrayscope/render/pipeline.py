@@ -121,6 +121,15 @@ class _RungKey:
     level: int
 
 
+@dataclass(frozen=True)
+class _PreviewBatchKey:
+    """One worker task covering a complete, immutable coarse montage scope."""
+
+    semantic_key: object
+    source_ids: tuple[object, ...]
+    level: int
+
+
 class FramePipeline:
     """Schedules quality progression for regions of any image frame.
 
@@ -138,6 +147,8 @@ class FramePipeline:
 
     SCOPE = "frame"
     ADMISSION_CHUNK = 24
+    PREVIEW_FANOUT_MIN_ITEMS = 256
+    PREVIEW_FANOUT_MAX_ITEMS = 512
 
     def __init__(
         self,
@@ -248,7 +259,10 @@ class FramePipeline:
                 self.counters.interactive_native_deferred += 1
                 continue
             self._pending_admissions.append((intent, step))
-        submitted += self._drain_pending_admissions(admission_generation)
+        if self._submit_preview_batch(admission_generation, verdict):
+            submitted += 1
+        else:
+            submitted += self._drain_pending_admissions(admission_generation)
         if self._pending_admissions:
             self._arm_admission_continuation(admission_generation)
         self._flush_ready()
@@ -416,14 +430,133 @@ class FramePipeline:
 
         return timed
 
-    def _drain_pending_admissions(self, generation: int) -> int:
+    def _submit_preview_batch(
+        self,
+        generation: int,
+        verdict: SchedulingVerdict,
+    ) -> bool:
+        """Submit one complete coarse montage through the ordinary kernel.
+
+        The batch is still one rung task in ``DISPLAY_PREVIEW`` and therefore
+        obeys the same phase/lane quotas as every per-tile FLOOR. It only
+        removes per-tile scheduler/completion overhead: lifecycle claims and
+        physical acknowledgements remain one per required tile.
+        """
+
+        if int(generation) != int(self._admission_generation):
+            return False
+        pending = tuple(self._pending_admissions)
+        count = len(pending)
+        evaluate_batch = getattr(self.effects, "evaluate_preview_batch", None)
+        if (
+            not callable(evaluate_batch)
+            or not bool(verdict.coverage_open)
+            or not (self.PREVIEW_FANOUT_MIN_ITEMS <= count <= self.PREVIEW_FANOUT_MAX_ITEMS)
+            or not pending
+            or any(intent is not self._current_intent for intent, _step in pending)
+            or any(step.rung != Rung.FLOOR for _intent, step in pending)
+        ):
+            return False
+        intent = pending[0][0]
+        steps = tuple(step for _intent, step in pending)
+        tile_numbers = tuple(int(step.tile_number) for step in steps)
+        if (
+            len(tile_numbers) != len(set(tile_numbers))
+            or set(tile_numbers) != set(verdict.required_tiles)
+        ):
+            return False
+        if len({int(step.level) for step in steps}) != 1:
+            return False
+
+        prepared = []
+        for step in steps:
+            if not self.effects.prepare_rung(intent, step):
+                for claimed in prepared:
+                    self.effects.rung_dropped(intent, claimed)
+                return False
+            prepared.append(step)
+
+        source_ids = tuple(intent.source_id_for_tile(int(step.tile_number)) for step in steps)
+        batch_key = _PreviewBatchKey(
+            semantic_key=intent.semantic_key,
+            source_ids=source_ids,
+            level=int(steps[0].level),
+        )
+        session = getattr(self.effects, "session", None)
+        evaluated = [False]
+        deps = tuple(
+            dict.fromkeys(
+                dependency for step in steps for dependency in self.effects.rung_deps(intent, step)
+            )
+        )
+        spec = TaskSpec(
+            key=batch_key,
+            fn=self._timed_rung_evaluation(
+                steps[0],
+                evaluate_batch(intent, steps),
+                evaluated,
+            ),
+            lane=Lane.DISPLAY_PREVIEW,
+            priority=min((step.priority for step in steps), default=Priority.INTERACTIVE),
+            scheduling_rank=min((int(step.scheduling_rank) for step in steps), default=0),
+            presentation_phase=1,
+            coverage_pass_open=True,
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            tile_number=-1,
+            scheduling_generation=int(verdict.generation),
+            rung=int(Rung.FLOOR),
+            level=int(steps[0].level),
+            scope=self._scope(intent.semantic_key),
+            deps=deps,
+            supersession=Supersession(
+                family=("preview-batch", intent.semantic_key),
+                value=(source_ids, int(steps[0].level)),
+            ),
+            reusable=True,
+            pass_token=True,
+        )
+        handle = self.kernel.submit(
+            spec,
+            on_done=lambda payload, intent=intent, steps=steps, ran=evaluated: (
+                self._on_preview_batch_done(intent, steps, payload, ran)
+            ),
+            on_error=lambda exc, intent=intent, steps=steps, ran=evaluated: (
+                self._on_preview_batch_error(intent, steps, exc, ran)
+            ),
+            on_stale=lambda intent=intent, steps=steps, ran=evaluated: self._drop_preview_batch(
+                intent, steps, ran
+            ),
+            on_reuse=lambda _payload, intent=intent, steps=steps, ran=evaluated: (
+                self._drop_preview_batch(intent, steps, ran)
+            ),
+        )
+        if handle is None:
+            for step in steps:
+                self.effects.rung_dropped(intent, step)
+            return False
+        self._pending_admissions.clear()
+        for step in steps:
+            self.effects.rung_admitted(intent, step, batch_key)
+        self.counters.tasks_submitted += 1
+        return True
+
+    def _drain_pending_admissions(
+        self,
+        generation: int,
+        *,
+        max_inspected: int | None = None,
+    ) -> int:
         """Submit one bounded chunk of already-planned visible rung work."""
 
         if int(generation) != int(self._admission_generation):
             return 0
+        inspection_limit = max(
+            1,
+            int(self.ADMISSION_CHUNK if max_inspected is None else max_inspected),
+        )
         submitted = 0
         inspected = 0
-        while self._pending_admissions and inspected < int(self.ADMISSION_CHUNK):
+        while self._pending_admissions and inspected < inspection_limit:
             queued_intent, step = self._pending_admissions.popleft()
             inspected += 1
             current = self._current_intent
@@ -494,6 +627,52 @@ class FramePipeline:
             return
         self._ready_upserts.append((intent, step, payload))
         self._flush_ready()
+
+    def _on_preview_batch_done(
+        self,
+        intent: RenderIntent,
+        steps: tuple[RungStep, ...],
+        payload,
+        evaluated: list[bool] | None = None,
+    ) -> None:
+        current = self._current_intent
+        if any(not self._intent_step_matches_current(intent, step, current) for step in steps):
+            self._drop_preview_batch(intent, steps, evaluated)
+            return
+        rows = tuple(payload or ())
+        by_tile = {
+            int(row[0]): tuple(row[1:]) for row in rows if isinstance(row, tuple) and len(row) >= 2
+        }
+        expected = {int(step.tile_number) for step in steps}
+        if set(by_tile) != expected:
+            self._drop_preview_batch(intent, steps, evaluated)
+            return
+        self._ready_upserts.extend((intent, step, by_tile[int(step.tile_number)]) for step in steps)
+        self._flush_ready()
+
+    def _drop_preview_batch(
+        self,
+        intent: RenderIntent,
+        steps: tuple[RungStep, ...],
+        evaluated: list[bool] | None = None,
+    ) -> None:
+        discarded_recorded = False
+        for step in steps:
+            if evaluated is not None and evaluated[0] and not discarded_recorded:
+                self.rung_timings.record_discarded(int(step.rung), int(step.level))
+                evaluated[0] = False
+                discarded_recorded = True
+            self.effects.rung_dropped(intent, step)
+
+    def _on_preview_batch_error(
+        self,
+        intent: RenderIntent,
+        steps: tuple[RungStep, ...],
+        exc: BaseException,
+        evaluated: list[bool] | None = None,
+    ) -> None:
+        self._drop_preview_batch(intent, steps, evaluated)
+        raise exc
 
     def _on_rung_reusable(
         self, intent: RenderIntent, step: RungStep, payload, evaluated: list[bool] | None = None

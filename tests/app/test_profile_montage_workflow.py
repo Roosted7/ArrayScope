@@ -1379,6 +1379,9 @@ def _passing_r8_phase_record(*, backend="wgpu"):
         "waited_for_pyqtgraph_draw_after_complete": backend == "pyqtgraph",
         "pyqtgraph_draw_pending_after_complete": False,
         "coarse_target_trace_window_complete": True,
+        "coarse_rung_enabled": True,
+        "coarse_target_preview_required": True,
+        "coarse_target_preview_exemption": None,
         "coarse_target_order_applicable": True,
         "coarse_target_order_status": "ordered",
         "coarse_target_ack_ordered": True,
@@ -1419,23 +1422,46 @@ def test_coarse_target_trace_metrics_rejects_ack_and_worker_overlap():
             "sequence": 10,
             "ts_ns": 1_000_000_000,
         },
-        {"kind": "kernel_start", "rung": 0, "sequence": 11, "ts_ns": 1_010_000_000},
-        {"kind": "kernel_start", "rung": 2, "sequence": 12, "ts_ns": 1_020_000_000},
+        {
+            "kind": "scheduling_phase",
+            "event": "scope_started",
+            "generation": 1,
+            "required_tiles": 1,
+            "required_tile_numbers": (0,),
+            "sequence": 11,
+            "ts_ns": 1_005_000_000,
+        },
+        {
+            "kind": "kernel_start",
+            "rung": 0,
+            "task_seq": 41,
+            "scheduling_generation": 1,
+            "sequence": 12,
+            "ts_ns": 1_010_000_000,
+        },
+        {"kind": "kernel_start", "rung": 2, "sequence": 13, "ts_ns": 1_020_000_000},
         {
             "kind": "backend_ack",
             "accepted": True,
             "quality": "exact",
             "tile": 0,
-            "sequence": 13,
+            "sequence": 14,
             "ts_ns": 1_030_000_000,
         },
-        {"kind": "kernel_finish", "rung": 0, "sequence": 14, "ts_ns": 1_040_000_000},
+        {
+            "kind": "kernel_finish",
+            "rung": 0,
+            "task_seq": 41,
+            "scheduling_generation": 1,
+            "sequence": 15,
+            "ts_ns": 1_040_000_000,
+        },
         {
             "kind": "backend_ack",
             "accepted": True,
             "quality": "preview",
             "tile": 0,
-            "sequence": 15,
+            "sequence": 16,
             "ts_ns": 1_050_000_000,
         },
         {
@@ -1443,7 +1469,7 @@ def test_coarse_target_trace_metrics_rejects_ack_and_worker_overlap():
             "action": "phase_complete",
             "phase": "raw_full_tiled_montage",
             "backend": "wgpu",
-            "sequence": 16,
+            "sequence": 17,
             "ts_ns": 1_060_000_000,
         },
     )
@@ -1476,11 +1502,20 @@ def test_coarse_target_trace_metrics_withholds_t1_t2_for_partial_coverage():
             "ts_ns": 2_000_000_000,
         },
         {
+            "kind": "scheduling_phase",
+            "event": "scope_started",
+            "generation": 1,
+            "required_tiles": 2,
+            "required_tile_numbers": (0, 1),
+            "sequence": 21,
+            "ts_ns": 2_005_000_000,
+        },
+        {
             "kind": "backend_ack",
             "accepted": True,
             "quality": "preview",
             "tile": 0,
-            "sequence": 21,
+            "sequence": 22,
             "ts_ns": 2_010_000_000,
         },
         {
@@ -1488,7 +1523,7 @@ def test_coarse_target_trace_metrics_withholds_t1_t2_for_partial_coverage():
             "accepted": True,
             "quality": "exact",
             "tile": 0,
-            "sequence": 22,
+            "sequence": 23,
             "ts_ns": 2_020_000_000,
         },
         {
@@ -1496,7 +1531,7 @@ def test_coarse_target_trace_metrics_withholds_t1_t2_for_partial_coverage():
             "action": "phase_complete",
             "phase": "raw_full_tiled_montage",
             "backend": "pyqtgraph",
-            "sequence": 23,
+            "sequence": 24,
             "ts_ns": 2_030_000_000,
         },
     )
@@ -1515,7 +1550,7 @@ def test_coarse_target_trace_metrics_withholds_t1_t2_for_partial_coverage():
     assert result["coarse_target_target_ack_last_ms"] == 20.0
 
 
-def test_coarse_target_trace_metrics_uses_final_required_scope_generation():
+def test_coarse_target_trace_metrics_rejects_target_work_from_predecessor_scope():
     from arrayscope.tools.profile_montage_workflow import _coarse_target_trace_metrics
 
     events = (
@@ -1532,6 +1567,7 @@ def test_coarse_target_trace_metrics_uses_final_required_scope_generation():
             "event": "scope_started",
             "generation": 4,
             "required_tiles": 1,
+            "required_tile_numbers": (0,),
             "sequence": 31,
             "ts_ns": 3_010_000_000,
         },
@@ -1541,16 +1577,32 @@ def test_coarse_target_trace_metrics_uses_final_required_scope_generation():
             "event": "scope_started",
             "generation": 5,
             "required_tiles": 2,
+            "required_tile_numbers": (0, 1),
             "sequence": 33,
             "ts_ns": 3_030_000_000,
         },
-        {"kind": "kernel_finish", "rung": 0, "sequence": 34, "ts_ns": 3_040_000_000},
+        {
+            "kind": "kernel_start",
+            "rung": 0,
+            "task_seq": 99,
+            "scheduling_generation": 5,
+            "sequence": 34,
+            "ts_ns": 3_035_000_000,
+        },
+        {
+            "kind": "kernel_finish",
+            "rung": 0,
+            "task_seq": 99,
+            "scheduling_generation": 5,
+            "sequence": 35,
+            "ts_ns": 3_040_000_000,
+        },
         {
             "kind": "backend_ack",
             "accepted": True,
             "quality": "preview",
             "tile": 0,
-            "sequence": 35,
+            "sequence": 36,
             "ts_ns": 3_050_000_000,
         },
         {
@@ -1558,16 +1610,16 @@ def test_coarse_target_trace_metrics_uses_final_required_scope_generation():
             "accepted": True,
             "quality": "preview",
             "tile": 1,
-            "sequence": 36,
+            "sequence": 37,
             "ts_ns": 3_060_000_000,
         },
-        {"kind": "kernel_start", "rung": 2, "sequence": 37, "ts_ns": 3_070_000_000},
+        {"kind": "kernel_start", "rung": 2, "sequence": 38, "ts_ns": 3_070_000_000},
         {
             "kind": "backend_ack",
             "accepted": True,
             "quality": "exact",
             "tile": 0,
-            "sequence": 38,
+            "sequence": 39,
             "ts_ns": 3_080_000_000,
         },
         {
@@ -1575,7 +1627,7 @@ def test_coarse_target_trace_metrics_uses_final_required_scope_generation():
             "accepted": True,
             "quality": "exact",
             "tile": 1,
-            "sequence": 39,
+            "sequence": 40,
             "ts_ns": 3_090_000_000,
         },
         {
@@ -1583,7 +1635,7 @@ def test_coarse_target_trace_metrics_uses_final_required_scope_generation():
             "action": "phase_complete",
             "phase": "raw_full_tiled_montage",
             "backend": "pyqtgraph",
-            "sequence": 40,
+            "sequence": 41,
             "ts_ns": 3_100_000_000,
         },
     )
@@ -1596,9 +1648,428 @@ def test_coarse_target_trace_metrics_uses_final_required_scope_generation():
         requested_tiles=2,
     )
 
-    assert result["coarse_target_order_status"] == "ordered"
+    assert result["coarse_target_order_status"] == "overlap"
     assert result["coarse_target_scheduling_generation"] == 5
-    assert result["coarse_target_first_target_task_start_ms"] == 70.0
+    assert result["coarse_target_first_target_task_start_ms"] == 20.0
+
+
+def test_coarse_target_trace_metrics_does_not_borrow_preview_from_old_scope():
+    from arrayscope.tools.profile_montage_workflow import _coarse_target_trace_metrics
+
+    events = (
+        {
+            "kind": "input",
+            "action": "phase_start",
+            "phase": "raw_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 10,
+            "ts_ns": 1_000_000_000,
+        },
+        {
+            "kind": "scheduling_phase",
+            "event": "scope_started",
+            "generation": 1,
+            "required_tiles": 2,
+            "required_tile_numbers": (0, 1),
+            "sequence": 11,
+            "ts_ns": 1_010_000_000,
+        },
+        {"kind": "kernel_finish", "rung": 0, "sequence": 12, "ts_ns": 1_020_000_000},
+        {
+            "kind": "backend_ack",
+            "accepted": True,
+            "quality": "preview",
+            "tile": 0,
+            "sequence": 13,
+            "ts_ns": 1_030_000_000,
+        },
+        {
+            "kind": "backend_ack",
+            "accepted": True,
+            "quality": "preview",
+            "tile": 1,
+            "sequence": 14,
+            "ts_ns": 1_040_000_000,
+        },
+        {
+            "kind": "scheduling_phase",
+            "event": "scope_started",
+            "generation": 2,
+            "required_tiles": 2,
+            "required_tile_numbers": (0, 1),
+            "sequence": 15,
+            "ts_ns": 1_050_000_000,
+        },
+        {
+            "kind": "scheduling_phase",
+            "event": "coverage_closed",
+            "generation": 2,
+            "sequence": 16,
+            "ts_ns": 1_060_000_000,
+        },
+        {
+            "kind": "kernel_start",
+            "rung": 2,
+            "scheduling_generation": 2,
+            "sequence": 17,
+            "ts_ns": 1_070_000_000,
+        },
+        {
+            "kind": "backend_ack",
+            "accepted": True,
+            "quality": "exact",
+            "tile": 0,
+            "sequence": 18,
+            "ts_ns": 1_080_000_000,
+        },
+        {
+            "kind": "backend_ack",
+            "accepted": True,
+            "quality": "exact",
+            "tile": 1,
+            "sequence": 19,
+            "ts_ns": 1_090_000_000,
+        },
+        {
+            "kind": "input",
+            "action": "phase_complete",
+            "phase": "raw_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 20,
+            "ts_ns": 1_100_000_000,
+        },
+    )
+
+    result = _coarse_target_trace_metrics(
+        events,
+        phase="raw_full_tiled_montage",
+        backend="wgpu",
+        phase_start_sequence=10,
+        requested_tiles=2,
+    )
+
+    assert result["coarse_target_scheduling_generation"] == 2
+    assert result["coarse_target_order_status"] == "no-preview-pass"
+    assert result["coarse_target_order_applicable"] is False
+    assert result["coarse_target_preview_ack_tiles"] == 0
+    assert result["coarse_target_preview_task_finishes"] == 0
+
+
+def test_coarse_target_trace_metrics_hard_fails_when_exact_scope_is_missing():
+    from arrayscope.tools.profile_montage_workflow import _coarse_target_trace_metrics
+
+    events = (
+        {
+            "kind": "input",
+            "action": "phase_start",
+            "phase": "raw_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 1,
+            "ts_ns": 1_000_000_000,
+        },
+        {
+            "kind": "backend_ack",
+            "accepted": True,
+            "quality": "preview",
+            "tile": 0,
+            "sequence": 2,
+            "ts_ns": 1_010_000_000,
+        },
+        {
+            "kind": "input",
+            "action": "phase_complete",
+            "phase": "raw_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 3,
+            "ts_ns": 1_020_000_000,
+        },
+    )
+
+    result = _coarse_target_trace_metrics(
+        events,
+        phase="raw_full_tiled_montage",
+        backend="wgpu",
+        phase_start_sequence=1,
+        requested_tiles=1,
+    )
+
+    assert result["coarse_target_trace_window_complete"] is False
+    assert result["coarse_target_order_status"] == "required-scope-missing"
+
+
+def test_coarse_target_trace_metrics_rejects_equal_count_wrong_preview_tiles():
+    from arrayscope.tools.profile_montage_workflow import _coarse_target_trace_metrics
+
+    events = (
+        {
+            "kind": "input",
+            "action": "phase_start",
+            "phase": "raw_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 1,
+            "ts_ns": 1_000_000_000,
+        },
+        {
+            "kind": "scheduling_phase",
+            "event": "scope_started",
+            "generation": 4,
+            "required_tiles": 2,
+            "required_tile_numbers": (0, 1),
+            "session_id": 7,
+            "sequence": 2,
+            "ts_ns": 1_010_000_000,
+        },
+        {
+            "kind": "kernel_start",
+            "rung": 0,
+            "task_seq": 77,
+            "scheduling_generation": 4,
+            "session_id": 7,
+            "sequence": 3,
+            "ts_ns": 1_015_000_000,
+        },
+        {
+            "kind": "kernel_finish",
+            "rung": 0,
+            "task_seq": 77,
+            "scheduling_generation": 4,
+            "session_id": 7,
+            "sequence": 3,
+            "ts_ns": 1_020_000_000,
+        },
+        *(
+            {
+                "kind": "backend_ack",
+                "accepted": True,
+                "quality": "preview",
+                "tile": tile,
+                "session_id": 7,
+                "sequence": 4 + offset,
+                "ts_ns": 1_030_000_000 + offset * 1_000_000,
+            }
+            for offset, tile in enumerate((0, 2))
+        ),
+        {
+            "kind": "kernel_start",
+            "rung": 2,
+            "sequence": 6,
+            "ts_ns": 1_040_000_000,
+        },
+        *(
+            {
+                "kind": "backend_ack",
+                "accepted": True,
+                "quality": "exact",
+                "tile": tile,
+                "session_id": 7,
+                "sequence": 7 + offset,
+                "ts_ns": 1_050_000_000 + offset * 1_000_000,
+            }
+            for offset, tile in enumerate((0, 1))
+        ),
+        {
+            "kind": "input",
+            "action": "phase_complete",
+            "phase": "raw_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 9,
+            "ts_ns": 1_060_000_000,
+        },
+    )
+
+    result = _coarse_target_trace_metrics(
+        events,
+        phase="raw_full_tiled_montage",
+        backend="wgpu",
+        phase_start_sequence=1,
+        requested_tiles=2,
+    )
+
+    assert result["coarse_target_preview_ack_tiles"] == 2
+    assert result["coarse_target_t1_ms"] is None
+    assert result["coarse_target_ack_ordered"] is False
+
+
+def test_coarse_target_trace_metrics_requires_every_preview_task_to_finish():
+    from arrayscope.tools.profile_montage_workflow import _coarse_target_trace_metrics
+
+    events = (
+        {
+            "kind": "input",
+            "action": "phase_start",
+            "phase": "raw_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 1,
+            "ts_ns": 1_000_000_000,
+        },
+        {
+            "kind": "scheduling_phase",
+            "event": "scope_started",
+            "generation": 2,
+            "required_tiles": 1,
+            "required_tile_numbers": (0,),
+            "session_id": 5,
+            "sequence": 2,
+            "ts_ns": 1_010_000_000,
+        },
+        {
+            "kind": "kernel_start",
+            "rung": 0,
+            "task_seq": 10,
+            "scheduling_generation": 2,
+            "session_id": 5,
+            "sequence": 3,
+            "ts_ns": 1_020_000_000,
+        },
+        {
+            "kind": "kernel_start",
+            "rung": 0,
+            "task_seq": 11,
+            "scheduling_generation": 2,
+            "session_id": 5,
+            "sequence": 4,
+            "ts_ns": 1_021_000_000,
+        },
+        {
+            "kind": "kernel_finish",
+            "rung": 0,
+            "task_seq": 10,
+            "scheduling_generation": 2,
+            "session_id": 5,
+            "sequence": 5,
+            "ts_ns": 1_030_000_000,
+        },
+        {
+            "kind": "backend_ack",
+            "accepted": True,
+            "quality": "preview",
+            "tile": 0,
+            "session_id": 5,
+            "sequence": 6,
+            "ts_ns": 1_040_000_000,
+        },
+        {
+            "kind": "kernel_start",
+            "rung": 2,
+            "sequence": 7,
+            "ts_ns": 1_050_000_000,
+        },
+        {
+            "kind": "backend_ack",
+            "accepted": True,
+            "quality": "exact",
+            "tile": 0,
+            "session_id": 5,
+            "sequence": 8,
+            "ts_ns": 1_060_000_000,
+        },
+        {
+            "kind": "input",
+            "action": "phase_complete",
+            "phase": "raw_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 9,
+            "ts_ns": 1_070_000_000,
+        },
+    )
+
+    result = _coarse_target_trace_metrics(
+        events,
+        phase="raw_full_tiled_montage",
+        backend="wgpu",
+        phase_start_sequence=1,
+        requested_tiles=1,
+    )
+
+    assert result["coarse_target_preview_tasks_complete"] is False
+    assert result["coarse_target_execution_ordered"] is False
+
+
+def test_coarse_target_trace_metrics_does_not_build_t2_from_predecessor_session():
+    from arrayscope.tools.profile_montage_workflow import _coarse_target_trace_metrics
+
+    events = (
+        {
+            "kind": "input",
+            "action": "phase_start",
+            "phase": "raw_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 1,
+            "ts_ns": 1_000_000_000,
+        },
+        {
+            "kind": "scheduling_phase",
+            "event": "scope_started",
+            "generation": 2,
+            "required_tiles": 2,
+            "required_tile_numbers": (0, 1),
+            "session_id": 5,
+            "sequence": 2,
+            "ts_ns": 1_010_000_000,
+        },
+        {
+            "kind": "kernel_start",
+            "rung": 0,
+            "task_seq": 10,
+            "scheduling_generation": 2,
+            "session_id": 5,
+            "sequence": 3,
+            "ts_ns": 1_020_000_000,
+        },
+        {
+            "kind": "kernel_finish",
+            "rung": 0,
+            "task_seq": 10,
+            "scheduling_generation": 2,
+            "session_id": 5,
+            "sequence": 4,
+            "ts_ns": 1_030_000_000,
+        },
+        *(
+            {
+                "kind": "backend_ack",
+                "accepted": True,
+                "quality": "preview",
+                "tile": tile,
+                "session_id": 5,
+                "sequence": 5 + offset,
+                "ts_ns": 1_040_000_000 + offset * 1_000_000,
+            }
+            for offset, tile in enumerate((0, 1))
+        ),
+        *(
+            {
+                "kind": "backend_ack",
+                "accepted": True,
+                "quality": "exact",
+                "tile": tile,
+                "session_id": 4,
+                "sequence": 7 + offset,
+                "ts_ns": 1_050_000_000 + offset * 1_000_000,
+            }
+            for offset, tile in enumerate((0, 1))
+        ),
+        {
+            "kind": "input",
+            "action": "phase_complete",
+            "phase": "raw_full_tiled_montage",
+            "backend": "wgpu",
+            "sequence": 9,
+            "ts_ns": 1_070_000_000,
+        },
+    )
+
+    result = _coarse_target_trace_metrics(
+        events,
+        phase="raw_full_tiled_montage",
+        backend="wgpu",
+        phase_start_sequence=1,
+        requested_tiles=2,
+    )
+
+    assert result["coarse_target_target_ack_tiles"] == 0
+    assert result["coarse_target_t2_ms"] is None
+    assert result["coarse_target_ack_ordered"] is False
 
 
 def test_r8_certification_hard_fails_both_coarse_target_order_clauses():
@@ -1616,6 +2087,63 @@ def test_r8_certification_hard_fails_both_coarse_target_order_clauses():
     failures = {failure["gate"] for failure in result["r8_gate_failures"]}
     assert "coarse_ack_pass_precedes_target_ack" in failures
     assert "coarse_tasks_finish_before_target_starts" in failures
+
+
+def test_r8_certification_requires_supported_enabled_preview_to_exist():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record(backend="wgpu")
+    record.update(
+        coarse_target_order_applicable=False,
+        coarse_target_order_status="no-preview-pass",
+        coarse_target_ack_ordered=None,
+        coarse_target_execution_ordered=None,
+        coarse_target_t1_ms=None,
+        coarse_target_preview_ack_tiles=0,
+        coarse_target_preview_task_finishes=0,
+    )
+
+    result = _r8_certification(record)
+
+    failures = {failure["gate"] for failure in result["r8_gate_failures"]}
+    assert "coarse_preview_pass_present" in failures
+
+
+def test_r8_certification_exempts_deferred_pyqtgraph_complex_preview():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record(backend="pyqtgraph")
+    record.update(
+        phase="fft_full_tiled_montage",
+        coarse_target_preview_required=False,
+        coarse_target_preview_exemption="pyqtgraph-composited-rgb-format-deferred",
+        coarse_target_order_applicable=False,
+        coarse_target_order_status="no-preview-pass",
+        coarse_target_ack_ordered=None,
+        coarse_target_execution_ordered=None,
+        coarse_target_t1_ms=None,
+        coarse_target_preview_ack_tiles=0,
+        coarse_target_preview_task_finishes=0,
+    )
+
+    result = _r8_certification(record)
+
+    failures = {failure["gate"] for failure in result["r8_gate_failures"]}
+    assert "coarse_preview_pass_present" not in failures
+    assert "coarse_ack_pass_precedes_target_ack" not in failures
+    assert "coarse_tasks_finish_before_target_starts" not in failures
+
+
+def test_r8_certification_enforces_two_second_preview_target():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record(backend="wgpu")
+    record["coarse_target_t1_ms"] = 1_001.0
+
+    result = _r8_certification(record)
+
+    failures = {failure["gate"] for failure in result["r8_gate_failures"]}
+    assert "preview_first_t1_target" in failures
 
 
 def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():

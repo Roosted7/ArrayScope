@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 
@@ -27,7 +28,11 @@ from arrayscope.kernel import complete_inline_work as _complete_inline_work
 from arrayscope.operations.evaluator import _document_key
 from arrayscope.render import effects as render_effects
 from arrayscope.render import lod as render_lod
-from arrayscope.render.ladder import LadderPolicy, LodLadder
+from arrayscope.render.ladder import (
+    COARSE_RUNG_ENABLED_DEFAULT,
+    LadderPolicy,
+    LodLadder,
+)
 from arrayscope.render.pipeline import FramePipeline
 from arrayscope.render.stages import LodAdmissionScope, RenderIntent
 from arrayscope.ui.toasts import show_revert_action, show_status_message
@@ -288,13 +293,16 @@ class FrameRuntimeMixin:
                         # passes only when its identical real-document region
                         # is backed by one cacheable shared stage.
                         reduced_input_available=reduced_input_available,
-                        # ADR 0059's ordered A/B found no qualifying current
-                        # workload: WGPU T2 more than doubled and PyQtGraph raw
-                        # never reached T2 inside the interaction budget.
-                        # Keep the mechanism directly measurable, but make the
-                        # measured target-only arm the product default.
+                        # Preview-first is the explicit product default. The
+                        # profiler may force either A/B arm, but absence of a
+                        # profiler-only attribute never defines production
+                        # behavior.
                         coarse_rung_enabled=bool(
-                            getattr(self, "_profile_enable_coarse_rung", False)
+                            getattr(
+                                self,
+                                "_profile_enable_coarse_rung",
+                                COARSE_RUNG_ENABLED_DEFAULT,
+                            )
                         )
                         and not bool(getattr(self, "_profile_disable_coarse_rung", False)),
                     )
@@ -376,11 +384,24 @@ class FrameRuntimeMixin:
         intent = self._montage_render_intent(session)
         scope = self._lod_admission_scope(session, intent)
         pipeline = self._frame_pipeline_for_session(session)
+        # The pipeline object survives camera retargets, while the effective
+        # preview level is recomputed from each new target demand. Refresh the
+        # ladder's retention input before every plan so scheduling, evaluation,
+        # residency and prefetch all consume the same session-owned level.
+        ladder_policy = getattr(getattr(pipeline, "ladder", None), "policy", None)
+        if ladder_policy is not None:
+            pipeline.ladder.policy = replace(
+                ladder_policy,
+                floor_level=max(
+                    1,
+                    int(getattr(session, "lod_preview_level", 0) or 0),
+                ),
+            )
+            ladder_policy = pipeline.ladder.policy
         if montage_commit.complete_deferred_stage_fan_in(self, session):
             return 0
         montage_commit.rearm_ready_stage_dependents(session)
         submitted = pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
-        ladder_policy = getattr(getattr(pipeline, "ladder", None), "policy", None)
         emit_trace(
             "pipeline_plan",
             session_id=int(getattr(session, "session_id", 0) or 0),

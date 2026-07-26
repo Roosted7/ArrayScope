@@ -7,6 +7,7 @@ import pytest
 from arrayscope.core.memory_policy import MemoryProfileChoice
 from arrayscope.core.resource_governor import ResourcePressure, ResourcePressureState
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
+from arrayscope.render.ladder import LadderPolicy
 from arrayscope.render.progressive_scheduling import SchedulingPhase, SchedulingVerdict
 from arrayscope.window.montage_payload_cache import (
     RetainedTiledPayloadStore,
@@ -153,6 +154,7 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
         required_tile_numbers=lambda: (7,),
         first_pass_quality=None,
         first_pass_pixels_presented=lambda: False,
+        lod_preview_level=4,
         is_complete=lambda: False,
         stage_fan_in=SimpleNamespace(
             active_requests=(),
@@ -163,6 +165,7 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     effects = SimpleNamespace()
     pipeline = SimpleNamespace(
         effects=effects,
+        ladder=SimpleNamespace(policy=LadderPolicy(floor_level=4)),
         retarget=lambda _intent, _demand, _scope: 0,
         last_plan_states=(),
         last_plan_steps=(),
@@ -177,9 +180,14 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     runtime._ensure_montage_watchdog = lambda: None
     runtime._schedule_montage_cached_level_stats = lambda _session: None
 
-    monkeypatch.setattr(
-        render_lod, "selected_lod_factor", lambda _session: calls.append("select") or 8
-    )
+    preview_levels = iter((9, 6))
+
+    def select_lod(current):
+        calls.append("select")
+        current.lod_preview_level = next(preview_levels)
+        return 1 << int(current.lod_preview_level)
+
+    monkeypatch.setattr(render_lod, "selected_lod_factor", select_lod)
     monkeypatch.setattr(
         render_lod,
         "mark_ladder_swaps_for_current_demand",
@@ -193,6 +201,14 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     assert submitted == 0
     assert calls[:2] == ["select", "mark"]
     assert calls.count("commit") == 1
+    assert pipeline.ladder.policy.floor_level == 9
+
+    calls.clear()
+    submitted = FrameRuntimeMixin.retarget_frame_pipeline(runtime, session)
+
+    assert submitted == 0
+    assert calls[:2] == ["select", "mark"]
+    assert pipeline.ladder.policy.floor_level == 6
 
     calls.clear()
     submitted = FrameRuntimeMixin.retarget_frame_pipeline(
@@ -3392,6 +3408,43 @@ def test_pyqtgraph_idle_commits_keep_governed_cohort_under_deep_backlog():
 
     window._viewport_interaction_active = True
     assert montage_commit.tile_layer_upsert_limits(window, build_session(60))["max_upserts"] <= 8
+
+
+def test_pyqtgraph_idle_refinement_uses_bounded_fixed_cost_cohort():
+    from arrayscope.window import frame_effects as montage_commit
+
+    session = SimpleNamespace(
+        scheduling_policy=SimpleNamespace(
+            verdict=SchedulingVerdict(1, SchedulingPhase.REFINE, tuple(range(60)))
+        ),
+        display_committed=True,
+        dirty_payloads=dict.fromkeys(range(60)),
+        pending_payload_upserts={},
+        pending_removals=set(),
+        has_pending_level_update=lambda: False,
+        has_stale_level_presentations=lambda: False,
+    )
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="pyqtgraph",
+                persistent_tile_residency=False,
+                shader_windowing=False,
+            )
+        ),
+        _viewport_interaction_active=False,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=2, byte_cap=4096, budget_ms=2.0
+            )
+        ),
+    )
+    window.win = window
+
+    limits = montage_commit.tile_layer_upsert_limits(window, session)
+
+    assert limits["max_upserts"] == 32
+    assert limits["cold_deadline_ms"] is None
 
 
 def test_pyqtgraph_floor_progress_commits_stay_governed():

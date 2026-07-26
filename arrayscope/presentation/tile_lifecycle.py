@@ -446,7 +446,8 @@ class TileRecord:
 class TileLifecycle:
     """Single owner of per-tile lifecycle state for one render session."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, trace_session_id: int = 0) -> None:
+        self._trace_session_id = int(trace_session_id)
         self._records: dict[int, TileRecord] = {}
         self._parked: set[int] = set()
         self._evaluating: set[int] = set()
@@ -477,6 +478,11 @@ class TileLifecycle:
     #: unbounded upload loop is worse than a diagnosed stale tile
     #: (backend_stale_identities stays nonzero — the wedge stays visible).
     IDENTITY_RESIGN_AFTER = 3
+
+    def set_trace_session_id(self, session_id: int) -> None:
+        """Attach this ledger's immutable owning-session trace identity."""
+
+        self._trace_session_id = int(session_id)
 
     @property
     def identity_rejections(self) -> int:
@@ -724,6 +730,7 @@ class TileLifecycle:
                 quality=str(ref.quality),
                 level=int(ref.lod_level),
                 accepted=bool(tile in confirmed),
+                session_id=int(self._trace_session_id),
             )
             _trace_lifecycle(
                 self.record(tile),
@@ -1021,6 +1028,7 @@ class TileLifecycle:
             quality=str(rec.presented_quality),
             level=rec.presented_level,
             accepted=True,
+            session_id=int(self._trace_session_id),
         )
         _trace_lifecycle(rec, "presented", identity=payload_identity)
         if rec.target_settled:

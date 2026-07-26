@@ -313,6 +313,7 @@ def test_evaluate_preview_tile_returns_display_only_payload():
         tile,
         demand=demand,
         semantic_source_id=source_id,
+        level=1,
         cancellation_token=None,
         shader_display=False,
         evaluation_context=None,
@@ -389,6 +390,7 @@ def test_reusable_preview_keeps_captured_route_and_source_anchor():
         tile,
         demand=demand,
         semantic_source_id=captured_source_id,
+        level=1,
         cancellation_token=None,
         shader_display=False,
         evaluation_context=None,
@@ -410,6 +412,7 @@ def test_evaluate_shared_preview_fans_out_display_only_payloads():
         tiles[0],
         tiles,
         demand=demand,
+        level=1,
         cancellation_token=None,
         shader_display=False,
         evaluation_context=None,
@@ -441,7 +444,44 @@ def test_evaluate_shared_preview_fans_out_display_only_payloads():
         )
 
 
-def test_shared_preview_runs_at_demanded_display_lod():
+def test_shared_preview_uses_the_same_source_alignment_owner_as_per_tile(monkeypatch):
+    session = _session()
+    tiles = session.plan.tiles[:2]
+    original = effects.read_reduced_preview_base_and_state
+    observed = []
+
+    def capture(*args, source_aligned=False, **kwargs):
+        observed.append(bool(source_aligned))
+        return original(*args, source_aligned=source_aligned, **kwargs)
+
+    monkeypatch.setattr(effects, "read_reduced_preview_base_and_state", capture)
+    session.source_anchoring = object()
+    assert effects.evaluate_shared_preview(
+        session,
+        tiles[0],
+        tiles,
+        demand=_demand(0),
+        level=1,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+    session.source_anchoring = None
+    assert effects.evaluate_shared_preview(
+        session,
+        tiles[0],
+        tiles,
+        demand=_demand(0),
+        level=1,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert observed == [True, False]
+
+
+def test_shared_preview_stays_two_levels_coarser_than_demanded_lod():
     session = _session()
     session.lod_preview_level = 1
     demand = _demand(1)
@@ -458,7 +498,7 @@ def test_shared_preview_runs_at_demanded_display_lod():
     )
 
     assert len(previews) == 2
-    assert {row[1].level_xy for row in previews} == {(1, 1)}
+    assert {row[1].level_xy for row in previews} == {(3, 3)}
 
 
 def test_reduced_preview_base_samples_display_axes_before_operation_input():
@@ -755,6 +795,32 @@ def test_reduce_nd_axis_mean_handles_integer_edges():
     np.testing.assert_array_equal(reduced, np.asarray([2, 6, 8], dtype=np.uint8))
 
 
+def test_reduce_nd_axis_mean_keeps_partial_bins_aligned_to_source_grid():
+    values = np.arange(94, 194, dtype=np.float32)
+    reduced = effects.reduce_nd_axis_mean(
+        values,
+        axis=0,
+        factor=16,
+        source_start=94,
+    )
+
+    np.testing.assert_array_equal(
+        reduced,
+        np.asarray([94.5, 103.5, 119.5, 135.5, 151.5, 167.5, 183.5, 192.5]),
+    )
+
+
+def test_reduce_nd_axis_mean_keeps_unanchored_crop_bins_local():
+    values = np.arange(94, 194, dtype=np.float32)
+
+    reduced = effects.reduce_nd_axis_mean(values, axis=0, factor=16)
+
+    np.testing.assert_array_equal(
+        reduced,
+        np.asarray([101.5, 117.5, 133.5, 149.5, 165.5, 181.5, 191.5]),
+    )
+
+
 def test_tile_lod_states_reads_lifecycle_and_presented_payload_level():
     session = _session()
     level_key = _page_set(tile=0, level=2)
@@ -882,11 +948,13 @@ def test_tile_lod_states_reads_page_cache_and_preview_floor_residency():
         ),
     )
     session.rendered_tiles[int(tile.montage_index)] = rendered
+    preview_level = effects.preview_evaluation_level(session, demand)
+    assert preview_level == 3
     level_key = effects.render_lod.page_set_key_for(
         session,
         rendered,
         demand=demand,
-        level=1,
+        level=preview_level,
     )
     _admit_page_set(session.lod_page_cache, level_key, rendered.image)
     session.lifecycle.level_claimed(int(tile.montage_index), level_key, ClaimOwner.PREVIEW)
@@ -912,7 +980,7 @@ def test_tile_lod_states_reads_page_cache_and_preview_floor_residency():
 
     # Lifecycle acknowledgement plus complete exact page residency is the
     # ladder's resident truth; the rendered native tile is only its source.
-    assert state.resident_levels == (1,)
+    assert state.resident_levels == (3,)
     assert state.floor_available is True
 
 

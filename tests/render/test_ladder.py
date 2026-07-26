@@ -69,8 +69,28 @@ def test_explicit_target_only_arm_omits_floor_without_changing_target_evaluation
 def test_coarse_demand_still_gets_retention_floor_before_target():
     ladder = LodLadder(LadderPolicy(floor_level=4))
     steps = ladder.plan_tile(TileLodState(tile_number=0), demand(3))
-    assert rungs(steps) == [(Rung.FLOOR, 4), (Rung.DESIRED, 3)]
+    assert rungs(steps) == [(Rung.FLOOR, 5), (Rung.DESIRED, 3)]
     assert steps[0].lane == Lane.DISPLAY_PREVIEW
+
+
+def test_preview_stays_two_levels_coarser_as_target_moves_coarse():
+    ladder = LodLadder(LadderPolicy(floor_level=4))
+
+    for target, preview in ((0, 4), (2, 4), (3, 5), (6, 8)):
+        steps = ladder.plan_tile(TileLodState(tile_number=0), demand(target))
+        [floor] = [step for step in steps if step.rung is Rung.FLOOR]
+        assert floor.level == preview
+        assert floor.level >= target + 2
+
+
+def test_large_montage_spends_two_more_levels_on_preview_latency():
+    ladder = LodLadder(LadderPolicy(floor_level=6))
+
+    steps = ladder.plan_tile(TileLodState(tile_number=0), demand(2))
+
+    [floor] = [step for step in steps if step.rung is Rung.FLOOR]
+    assert floor.level == 6
+    assert floor.level >= 2 + 2
 
 
 def test_target_finer_than_retention_floor_gets_one_coarse_rung():
@@ -209,12 +229,6 @@ _REFUSAL_CASES = (
         2,
     ),
     (
-        "level_not_coarser",
-        LadderPolicy(floor_level=2),
-        TileLodState(tile_number=0),
-        2,
-    ),
-    (
         "no_reduced_input",
         LadderPolicy(floor_level=4, reduced_input_available=False),
         TileLodState(tile_number=0, floor_available=False),
@@ -266,7 +280,6 @@ def test_coarse_rung_refusal_names_the_gate_that_actually_fired():
 
     assert reason_for("native_only") == ladder_module.COARSE_RUNG_NATIVE_ONLY
     assert reason_for("preview_not_allowed") == ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED
-    assert reason_for("level_not_coarser") == ladder_module.COARSE_RUNG_LEVEL_NOT_COARSER
     assert reason_for("no_reduced_input") == ladder_module.COARSE_RUNG_NO_REDUCED_INPUT
     assert reason_for("already_covered") == ladder_module.COARSE_RUNG_ALREADY_COVERED
     assert reason_for("cold_tile_gets_one") == ladder_module.COARSE_RUNG_PLANNED

@@ -43,6 +43,33 @@ from arrayscope.display.lod import LodDemand
 from arrayscope.kernel.task import Lane, Priority
 from arrayscope.render.progressive_scheduling import SchedulingVerdict
 
+COARSE_RUNG_ENABLED_DEFAULT = True
+COARSE_RUNG_MIN_LEVEL_DELTA = 2
+COARSE_RUNG_LARGE_MONTAGE_TILES = 256
+COARSE_RUNG_LARGE_MONTAGE_EXTRA_LEVELS = 2
+
+
+def coarse_rung_level(
+    *,
+    desired_level: int,
+    retention_level: int,
+    montage_tile_count: int = 0,
+) -> int:
+    """Return the preview level required by retention and target quality.
+
+    Two LOD levels are four times coarser per axis and sixteen times fewer
+    texels. Retention may choose an even coarser level, but the level always
+    remains relative to the current target, so an already coarse target cannot
+    collapse the two passes.
+    """
+
+    desired = max(0, int(desired_level))
+    retention = max(0, int(retention_level))
+    level = max(retention, desired + COARSE_RUNG_MIN_LEVEL_DELTA)
+    if int(montage_tile_count) >= COARSE_RUNG_LARGE_MONTAGE_TILES:
+        level += COARSE_RUNG_LARGE_MONTAGE_EXTRA_LEVELS
+    return level
+
 
 class Rung(IntEnum):
     FLOOR = 0
@@ -103,7 +130,7 @@ class LadderPolicy:
     mode: str = "resident"  # "resident" | "native-only"
     floor_level: int = 4
     reduced_input_available: bool = True
-    coarse_rung_enabled: bool = True
+    coarse_rung_enabled: bool = COARSE_RUNG_ENABLED_DEFAULT
     levels_authoritative_rung: Rung = Rung.FLOOR
 
 
@@ -115,7 +142,6 @@ class LadderPolicy:
 COARSE_RUNG_NATIVE_ONLY = "native-only policy: no coarse rung exists"
 COARSE_RUNG_DISABLED = "coarse rung disabled by measured delivery policy"
 COARSE_RUNG_PREVIEW_NOT_ALLOWED = "allow_preview false: tile is covered or too few missing"
-COARSE_RUNG_LEVEL_NOT_COARSER = "preview level not coarser than the demand"
 COARSE_RUNG_NO_REDUCED_INPUT = "no reduced input and no retained floor"
 COARSE_RUNG_ALREADY_COVERED = "tile already has committable coverage"
 COARSE_RUNG_LANE_NOT_ADMITTED = "scheduling verdict does not admit the coarse lane"
@@ -152,9 +178,6 @@ class LodLadder:
             return COARSE_RUNG_DISABLED
         if not bool(state.allow_preview):
             return COARSE_RUNG_PREVIEW_NOT_ALLOWED
-        desired = max(0, int(demand.desired_level))
-        if desired >= max(0, int(policy.floor_level)):
-            return COARSE_RUNG_LEVEL_NOT_COARSER
         if not (policy.reduced_input_available or state.floor_available):
             return COARSE_RUNG_NO_REDUCED_INPUT
         blank = (
@@ -231,7 +254,11 @@ class LodLadder:
         # The admission predicate permits genuinely tile-local pipelines and
         # montage-axis expansions whose identical reduced region is backed by
         # one cacheable real-document stage.
-        preview_target_has_finer_followup = desired < max(0, int(policy.floor_level))
+        preview_level = coarse_rung_level(
+            desired_level=desired,
+            retention_level=policy.floor_level,
+        )
+        preview_target_has_finer_followup = preview_level > desired
         cheap_pre_native = (
             bool(policy.coarse_rung_enabled)
             and bool(state.allow_preview)
@@ -240,12 +267,11 @@ class LodLadder:
         )
         # 1) FLOOR — the one coarse rung, only while the tile is blank.
         if presented is None and ready is None and not resident and cheap_pre_native:
-            floor_level = max(policy.floor_level, desired)
             steps.append(
                 RungStep(
                     tile_number=state.tile_number,
                     rung=Rung.FLOOR,
-                    level=floor_level,
+                    level=preview_level,
                     reduce_from_native=False,
                     lane=Lane.DISPLAY_PREVIEW,
                     priority=Priority.INTERACTIVE,
@@ -377,8 +403,11 @@ class LodLadder:
 __all__ = [
     "COARSE_RUNG_ALREADY_COVERED",
     "COARSE_RUNG_DISABLED",
+    "COARSE_RUNG_ENABLED_DEFAULT",
     "COARSE_RUNG_LANE_NOT_ADMITTED",
-    "COARSE_RUNG_LEVEL_NOT_COARSER",
+    "COARSE_RUNG_LARGE_MONTAGE_EXTRA_LEVELS",
+    "COARSE_RUNG_LARGE_MONTAGE_TILES",
+    "COARSE_RUNG_MIN_LEVEL_DELTA",
     "COARSE_RUNG_NATIVE_ONLY",
     "COARSE_RUNG_NO_REDUCED_INPUT",
     "COARSE_RUNG_PLANNED",
@@ -388,4 +417,5 @@ __all__ = [
     "Rung",
     "RungStep",
     "TileLodState",
+    "coarse_rung_level",
 ]

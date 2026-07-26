@@ -27,6 +27,7 @@ import numpy as np
 
 from arrayscope.core.trace import TRACE, emit_trace
 from arrayscope.display.model.tile_identity import tile_ack_identity
+from arrayscope.render.ladder import COARSE_RUNG_ENABLED_DEFAULT
 from arrayscope.tools.headless_display import (
     capture_output,
     headless_display,
@@ -68,6 +69,7 @@ ZOOMPAN_NEAR_OBSERVE_S = 0.20
 R8_GUI_CALLBACK_MAX_MS = 50.0
 R8_HEARTBEAT_MAX_GAP_MS = 16.0
 R8_WARM_INPUT_MAX_MS = 15.0
+PREVIEW_FIRST_T1_TARGET_MS = 1_000.0
 PROFILE_TRACE_RING_EVENTS = 32_768
 PROFILE_RESIDENCY_PAGE_SAMPLES = 256
 PROFILE_PHYSICAL_SAMPLES_PER_TILE = 64
@@ -985,7 +987,11 @@ def run_profile_montage_workflow(
         )
         base_large["synthetic_scene"] = synthetic_scene or None
         base_scroll["synthetic_scene"] = synthetic_scene or None
-        coarse_rung_enabled = bool(enable_coarse_rung and not disable_coarse_rung)
+        coarse_rung_enabled = bool(COARSE_RUNG_ENABLED_DEFAULT)
+        if enable_coarse_rung:
+            coarse_rung_enabled = True
+        if disable_coarse_rung:
+            coarse_rung_enabled = False
         for base_record in (base_large, base_scroll, base_display_axis):
             base_record["coarse_rung_enabled"] = coarse_rung_enabled
             base_record["coarse_rung_disabled"] = not coarse_rung_enabled
@@ -1034,8 +1040,8 @@ def run_profile_montage_workflow(
             backend=backend,
             image_choice=ImageRenderingBackendChoice,
         )
-        # Explicit A/B override for T1/T2/B measurement. Product defaults to
-        # the target-only arm after the ordered ADR 0059 measurements.
+        # Explicit A/B override for T1/T2/B measurement. Preview-first is the
+        # product arm; only the profiler's B run disables it.
         win.renderer._profile_disable_coarse_rung = bool(disable_coarse_rung)
         win.renderer._profile_enable_coarse_rung = bool(coarse_rung_enabled)
         win.show()
@@ -1138,19 +1144,21 @@ def run_profile_montage_workflow(
             if tuple(getattr(win.document, "steps", ()) or ()):
                 _set_operations(win, ())
             clear_operations_ms = (perf_counter() - clear_start) * 1000.0
+            fit_metrics: dict[str, float] = {}
+            fit_stretch_pulsed["raw"] = _hold_fit_for_montage_build(
+                win,
+                metrics=fit_metrics,
+            )
             state_start = perf_counter()
             win._set_view_state(raw_state)
             set_view_state_ms = (perf_counter() - state_start) * 1000.0
+            # The viewport is part of render intent.  Publish the final fitted
+            # camera before the frame controller derives display tiles, so the
+            # measured build has one 272-tile lifecycle scope instead of first
+            # admitting an automatic-layout subset and retargeting it later.
             render_start = perf_counter()
             win.render(reason="profile-raw-full-montage")
             render_call_ms = (perf_counter() - render_start) * 1000.0
-            fit_metrics: dict[str, float] = {}
-            fit_stretch_pulsed["raw"] = _pulse_fit_stretch(
-                win,
-                app=app,
-                QtCore=QtCore,
-                metrics=fit_metrics,
-            )
             return {
                 "fit_stretch_pulsed": fit_stretch_pulsed["raw"],
                 "action_clear_operations_ms": clear_operations_ms,
@@ -1183,6 +1191,17 @@ def run_profile_montage_workflow(
                 backend=backend,
                 screenshot_dir=screenshot_dir,
             )
+            release_metrics: dict[str, float] = {}
+            _release_fit_after_montage_build(
+                win,
+                app=app,
+                QtCore=QtCore,
+                metrics=release_metrics,
+            )
+            raw_record.update(release_metrics)
+            raw_record["action_fit_stretch_ms"] = float(
+                raw_record.get("action_fit_stretch_ms", 0.0)
+            ) + float(release_metrics.get("fit_stretch_release_total_ms", 0.0))
             _append_record(records, jsonl, {**base_large, **raw_record, "run_temperature": "cold"})
 
         def apply_fft() -> dict[str, object]:
@@ -1197,15 +1216,13 @@ def run_profile_montage_workflow(
                 indices=large_indices,
                 text=":",
             )
-            win._set_view_state(fft_state)
-            win.render(reason="profile-fft-full-montage")
             fit_metrics: dict[str, float] = {}
-            fit_stretch_pulsed["fft"] = _pulse_fit_stretch(
+            fit_stretch_pulsed["fft"] = _hold_fit_for_montage_build(
                 win,
-                app=app,
-                QtCore=QtCore,
                 metrics=fit_metrics,
             )
+            win._set_view_state(fft_state)
+            win.render(reason="profile-fft-full-montage")
             return {
                 "fit_stretch_pulsed": fit_stretch_pulsed["fft"],
                 "action_fit_stretch_ms": float(fit_metrics.get("fit_stretch_total_ms", 0.0)),
@@ -1232,6 +1249,17 @@ def run_profile_montage_workflow(
                 backend=backend,
                 screenshot_dir=screenshot_dir,
             )
+            release_metrics = {}
+            _release_fit_after_montage_build(
+                win,
+                app=app,
+                QtCore=QtCore,
+                metrics=release_metrics,
+            )
+            fft_record.update(release_metrics)
+            fft_record["action_fit_stretch_ms"] = float(
+                fft_record.get("action_fit_stretch_ms", 0.0)
+            ) + float(release_metrics.get("fit_stretch_release_total_ms", 0.0))
             _append_record(
                 records,
                 jsonl,
@@ -4136,6 +4164,74 @@ def _profile_transform_operations(
     )
 
 
+def _hold_fit_for_montage_build(win, *, metrics: dict[str, float] | None = None) -> bool:
+    """Make the full fitted viewport authoritative before admitting build work."""
+
+    fit = getattr(win, "fit_image_to_view", None)
+    if not callable(fit):
+        return False
+    started = perf_counter()
+    fit(True)
+    elapsed_ms = (perf_counter() - started) * 1000.0
+    if metrics is not None:
+        metrics.update(
+            {
+                "fit_stretch_enable_call_ms": float(elapsed_ms),
+                "fit_stretch_enable_delivery_ms": 0.0,
+                "fit_stretch_total_ms": float(elapsed_ms),
+            }
+        )
+    return True
+
+
+def _release_fit_after_montage_build(
+    win, *, app=None, QtCore=None, metrics: dict[str, object] | None = None
+) -> bool:
+    """Release a measured build's Fit hold only after its fill is complete."""
+
+    fit = getattr(win, "fit_image_to_view", None)
+    if not callable(fit):
+        return False
+    total_start = perf_counter()
+    disable_start = perf_counter()
+    fit(False)
+    disable_call_ms = (perf_counter() - disable_start) * 1000.0
+    retarget = getattr(win, "retarget_montage_viewport", None)
+    retarget_start = perf_counter()
+    if callable(retarget):
+        retarget()
+    retarget_call_ms = (perf_counter() - retarget_start) * 1000.0
+    delivery_start = perf_counter()
+    if app is not None and QtCore is not None:
+        _process_events(app, QtCore, count=2)
+    delivery_ms = (perf_counter() - delivery_start) * 1000.0
+    image_view = getattr(win, "img_view", None)
+    controller = getattr(image_view, "viewport_controller", None)
+    mode = getattr(controller, "mode", None)
+    get_view = getattr(image_view, "getView", None)
+    view_range = None
+    if callable(get_view):
+        try:
+            view_range = get_view().viewRange()
+        except Exception:
+            view_range = None
+    if metrics is not None:
+        metrics.update(
+            {
+                "fit_stretch_disable_call_ms": float(disable_call_ms),
+                "fit_stretch_disable_delivery_ms": float(delivery_ms),
+                "fit_stretch_retarget_call_ms": float(retarget_call_ms),
+                "fit_stretch_retarget_delivery_ms": float(delivery_ms),
+                "fit_stretch_release_total_ms": float(
+                    (perf_counter() - total_start) * 1000.0
+                ),
+                "fit_disable_viewport_mode": str(getattr(mode, "value", mode) or ""),
+                "fit_disable_view_range": view_range,
+            }
+        )
+    return True
+
+
 def _pulse_fit_stretch(
     win, *, app=None, QtCore=None, metrics: dict[str, float] | None = None
 ) -> bool:
@@ -4149,8 +4245,9 @@ def _pulse_fit_stretch(
     fit(True)
     enable_call_ms = (perf_counter() - enable_start) * 1000.0
     enable_delivery_start = perf_counter()
-    if app is not None and QtCore is not None:
-        _process_events(app, QtCore, count=10)
+    # Do not deliver the transient Fit-on camera as render intent.  The
+    # profile gesture ends in stretch/AUTO and the full montage must be the
+    # first lifecycle scope admitted by the measured build.
     enable_delivery_ms = (perf_counter() - enable_delivery_start) * 1000.0
     disable_start = perf_counter()
     fit(False)
@@ -4158,18 +4255,6 @@ def _pulse_fit_stretch(
     disable_delivery_start = perf_counter()
     disable_modes: list[str] = []
     disable_ranges: list[object] = []
-    if app is not None and QtCore is not None:
-        for _step in range(5):
-            _process_events(app, QtCore, count=1)
-            image_view = getattr(win, "img_view", None)
-            controller = getattr(image_view, "viewport_controller", None)
-            mode = getattr(controller, "mode", None)
-            disable_modes.append(str(getattr(mode, "value", mode) or ""))
-            try:
-                disable_ranges.append(image_view.getView().viewRange())
-            except Exception:
-                disable_ranges.append(None)
-    disable_delivery_ms = (perf_counter() - disable_delivery_start) * 1000.0
     # Turning Fit off preserves the fitted camera range, so it does not emit a
     # second range-change signal.  The async render started immediately before
     # this pulse can therefore still own the predecessor's smaller visibility
@@ -4183,7 +4268,17 @@ def _pulse_fit_stretch(
     retarget_call_ms = (perf_counter() - retarget_call_start) * 1000.0
     retarget_delivery_start = perf_counter()
     if app is not None and QtCore is not None:
-        _process_events(app, QtCore, count=2)
+        for _step in range(12):
+            _process_events(app, QtCore, count=1)
+            image_view = getattr(win, "img_view", None)
+            controller = getattr(image_view, "viewport_controller", None)
+            mode = getattr(controller, "mode", None)
+            disable_modes.append(str(getattr(mode, "value", mode) or ""))
+            try:
+                disable_ranges.append(image_view.getView().viewRange())
+            except Exception:
+                disable_ranges.append(None)
+    disable_delivery_ms = (perf_counter() - disable_delivery_start) * 1000.0
     retarget_delivery_ms = (perf_counter() - retarget_delivery_start) * 1000.0
     if metrics is not None:
         image_view = getattr(win, "img_view", None)
@@ -5375,9 +5470,11 @@ def _run_phase(
         action_result = action()
         action_elapsed_ms = (perf_counter() - action_start) * 1000.0
         try:
-            completion_timeout_s = max(
-                0.001,
-                float(timeout_s) - max(0.0, perf_counter() - start),
+            completion_timeout_s = bounded_interaction_settle_timeout_s(
+                max(
+                    0.001,
+                    float(timeout_s) - max(0.0, perf_counter() - start),
+                )
             )
             milestones = _wait_for_montage_complete(
                 app,
@@ -5514,7 +5611,21 @@ def _run_phase(
             backend=str(backend),
             phase_start_sequence=phase_start_sequence,
             requested_tiles=int(record.get("requested_tile_count", 0) or 0),
+            requested_tile_numbers=_expected_requested_montage_tiles(
+                getattr(win.renderer, "_frame_session", None)
+            ),
         )
+    )
+    pyqtgraph_rgb_preview_deferred = bool(
+        str(backend) == "pyqtgraph" and str(phase) == "fft_full_tiled_montage"
+    )
+    record["coarse_target_preview_exemption"] = (
+        "pyqtgraph-composited-rgb-format-deferred" if pyqtgraph_rgb_preview_deferred else None
+    )
+    record["coarse_target_preview_required"] = bool(
+        str(phase) in {"raw_full_tiled_montage", "fft_full_tiled_montage"}
+        and bool(record.get("coarse_rung_enabled", False))
+        and not pyqtgraph_rgb_preview_deferred
     )
     return record
 
@@ -5526,6 +5637,7 @@ def _coarse_target_trace_metrics(
     backend: str,
     phase_start_sequence: int | None,
     requested_tiles: int,
+    requested_tile_numbers=(),
 ) -> dict[str, object]:
     """Derive T1/T2 and the two coarse-before-target trace invariants.
 
@@ -5536,6 +5648,12 @@ def _coarse_target_trace_metrics(
     """
 
     requested_tiles = max(0, int(requested_tiles))
+    required_tile_numbers = tuple(
+        dict.fromkeys(int(tile) for tile in tuple(requested_tile_numbers or ()))
+    )
+    if not required_tile_numbers and requested_tiles > 0:
+        required_tile_numbers = tuple(range(requested_tiles))
+    required_tile_set = set(required_tile_numbers)
     rows = tuple(dict(event) for event in tuple(events or ()))
     start = next(
         (
@@ -5587,103 +5705,130 @@ def _coarse_target_trace_metrics(
         for event in rows
         if start_sequence <= int(event.get("sequence", 0) or 0) <= end_sequence
     )
-    # One build action may briefly publish an automatic-layout scope before
-    # fit/stretch installs the final full-grid scope. The final matching
-    # ``scope_started`` edge identifies the generation carried by target task
-    # events. Mixing an earlier generation's target starts with the final
-    # generation's preview ACKs creates a false overlap even though each
-    # generation is internally ordered.
+    # The final matching ``scope_started`` edge owns preview coverage for the
+    # required montage.  Target work is intentionally checked across the whole
+    # phase below: any target execution before this scope completes is still a
+    # violation, even when it belonged to an accidentally published predecessor
+    # scope.
     scope_start = next(
         (
             event
             for event in reversed(phase_window)
             if str(event.get("kind", "")) == "scheduling_phase"
             and str(event.get("event", "")) == "scope_started"
-            and int(event.get("required_tiles", 0) or 0) == requested_tiles
+            and tuple(
+                int(tile) for tile in tuple(event.get("required_tile_numbers", ()) or ())
+            )
+            == required_tile_numbers
         ),
         None,
     )
-    scope_start_sequence = (
-        start_sequence
-        if scope_start is None
-        else int(scope_start.get("sequence", start_sequence) or start_sequence)
+    if scope_start is None:
+        return {
+            "coarse_target_trace_window_complete": False,
+            "coarse_target_order_applicable": False,
+            "coarse_target_order_status": "required-scope-missing",
+            "coarse_target_ack_ordered": None,
+            "coarse_target_execution_ordered": None,
+            "coarse_target_t1_ms": None,
+            "coarse_target_t2_ms": None,
+            "coarse_target_preview_ack_tiles": 0,
+            "coarse_target_target_ack_tiles": 0,
+            "coarse_target_preview_task_finishes": 0,
+            "coarse_target_target_task_starts": 0,
+        }
+    scope_start_sequence = int(scope_start.get("sequence", start_sequence) or start_sequence)
+    next_scope_start = next(
+        (
+            event
+            for event in phase_window
+            if int(event.get("sequence", 0) or 0) > scope_start_sequence
+            and str(event.get("kind", "")) == "scheduling_phase"
+            and str(event.get("event", "")) == "scope_started"
+        ),
+        None,
     )
-    scheduling_generation = (
-        None if scope_start is None else int(scope_start.get("generation", 0) or 0)
+    scope_end_sequence = (
+        end_sequence
+        if next_scope_start is None
+        else int(next_scope_start.get("sequence", end_sequence) or end_sequence) - 1
+    )
+    scheduling_generation = int(scope_start.get("generation", 0) or 0)
+    scope_session_id = int(scope_start.get("session_id", 0) or 0)
+    scope_window = tuple(
+        event
+        for event in phase_window
+        if scope_start_sequence <= int(event.get("sequence", 0) or 0) <= scope_end_sequence
     )
     coverage_closed = next(
         (
             event
-            for event in phase_window
+            for event in scope_window
             if str(event.get("kind", "")) == "scheduling_phase"
             and str(event.get("event", "")) == "coverage_closed"
             and (
-                scheduling_generation is None
-                or int(event.get("generation", 0) or 0) == scheduling_generation
+                int(event.get("generation", 0) or 0) == scheduling_generation
             )
         ),
         None,
     )
-    coverage_closed_sequence = (
-        scope_start_sequence
-        if coverage_closed is None
-        else int(coverage_closed.get("sequence", scope_start_sequence) or scope_start_sequence)
-    )
-    target_window = tuple(
+    scope_accepted_acks = tuple(
         event
-        for event in phase_window
-        if int(event.get("sequence", 0) or 0) >= scope_start_sequence
-    )
-    accepted_acks = tuple(
-        event
-        for event in phase_window
+        for event in scope_window
         if str(event.get("kind", "")) == "backend_ack"
         and bool(event.get("accepted", False))
         and int(event.get("tile", -1)) >= 0
+        and (
+            scope_session_id == 0
+            or int(event.get("session_id", 0) or 0) == scope_session_id
+        )
     )
     preview_acks = tuple(
         event
-        for event in accepted_acks
+        for event in scope_accepted_acks
         if str(event.get("quality", "") or "") in {"preview", "fallback"}
     )
-    preview_pass_present = bool(preview_acks) or any(
-        str(event.get("kind", "")) == "kernel_finish"
-        and int(-1 if event.get("rung", -1) is None else event.get("rung", -1)) == 0
-        for event in phase_window
-    )
-    target_ack_window = (
-        tuple(
-            event
-            for event in phase_window
-            if int(event.get("sequence", 0) or 0) >= coverage_closed_sequence
-        )
-        if preview_pass_present
-        else phase_window
-    )
-    target_acks = tuple(
+    all_target_acks = tuple(
         event
-        for event in target_ack_window
+        for event in phase_window
         if str(event.get("kind", "")) == "backend_ack"
         and bool(event.get("accepted", False))
         and int(event.get("tile", -1)) >= 0
         if str(event.get("quality", "") or "") not in {"", "preview", "fallback"}
     )
+    target_acks = tuple(
+        event
+        for event in all_target_acks
+        if scope_session_id == 0
+        or int(event.get("session_id", 0) or 0) == scope_session_id
+    )
+    preview_starts = tuple(
+        event
+        for event in scope_window
+        if str(event.get("kind", "")) == "kernel_start"
+        and int(-1 if event.get("rung", -1) is None else event.get("rung", -1)) == 0
+        and int(event.get("scheduling_generation", 0) or 0) == scheduling_generation
+        and (
+            scope_session_id == 0
+            or int(event.get("session_id", 0) or 0) == scope_session_id
+        )
+    )
     preview_finishes = tuple(
         event
-        for event in phase_window
+        for event in scope_window
         if str(event.get("kind", "")) == "kernel_finish"
         and int(-1 if event.get("rung", -1) is None else event.get("rung", -1)) == 0
+        and int(event.get("scheduling_generation", 0) or 0) == scheduling_generation
+        and (
+            scope_session_id == 0
+            or int(event.get("session_id", 0) or 0) == scope_session_id
+        )
     )
     target_starts = tuple(
         event
-        for event in target_window
+        for event in phase_window
         if str(event.get("kind", "")) == "kernel_start"
         and int(event.get("rung", -1) or -1) >= 2
-        and (
-            scheduling_generation is None
-            or "scheduling_generation" not in event
-            or int(event.get("scheduling_generation", 0) or 0) == scheduling_generation
-        )
     )
 
     def first_ack_by_tile(events):
@@ -5708,7 +5853,7 @@ def _coarse_target_trace_metrics(
         default=None,
     )
     target_ack_min_ns = min(
-        (int(event.get("ts_ns", 0) or 0) for event in target_acks),
+        (int(event.get("ts_ns", 0) or 0) for event in all_target_acks),
         default=None,
     )
     target_ack_max_ns = max(
@@ -5726,22 +5871,32 @@ def _coarse_target_trace_metrics(
     ack_ordered = bool(
         preview_present
         and requested_tiles > 0
-        and len(preview_tiles) == requested_tiles
-        and len(target_tiles) == requested_tiles
+        and preview_tiles == required_tile_set
+        and target_tiles == required_tile_set
         and preview_ack_max_ns is not None
         and target_ack_min_ns is not None
         and preview_ack_max_ns < target_ack_min_ns
     )
+    preview_started_tasks = {
+        int(event.get("task_seq", event.get("sequence", 0)) or 0) for event in preview_starts
+    }
+    preview_finished_tasks = {
+        int(event.get("task_seq", event.get("sequence", 0)) or 0) for event in preview_finishes
+    }
+    preview_tasks_complete = bool(
+        preview_started_tasks and preview_started_tasks == preview_finished_tasks
+    )
     execution_ordered = bool(
         preview_present
+        and preview_tasks_complete
         and preview_finishes
         and target_starts
         and preview_finish_max_ns is not None
         and target_start_min_ns is not None
         and preview_finish_max_ns < target_start_min_ns
     )
-    preview_complete = requested_tiles > 0 and len(preview_tiles) == requested_tiles
-    target_complete = requested_tiles > 0 and len(target_tiles) == requested_tiles
+    preview_complete = bool(required_tile_set) and preview_tiles == required_tile_set
+    target_complete = bool(required_tile_set) and target_tiles == required_tile_set
     return {
         "coarse_target_trace_window_complete": True,
         "coarse_target_order_applicable": preview_present,
@@ -5766,9 +5921,13 @@ def _coarse_target_trace_metrics(
         "coarse_target_preview_ack_tiles": len(preview_tiles),
         "coarse_target_target_ack_tiles": len(target_tiles),
         "coarse_target_preview_task_finishes": len(preview_finishes),
+        "coarse_target_preview_task_starts": len(preview_starts),
+        "coarse_target_preview_tasks_complete": preview_tasks_complete,
         "coarse_target_target_task_starts": len(target_starts),
         "coarse_target_scope_start_sequence": int(scope_start_sequence),
+        "coarse_target_scope_end_sequence": int(scope_end_sequence),
         "coarse_target_scheduling_generation": scheduling_generation,
+        "coarse_target_required_tile_numbers": required_tile_numbers,
         "coarse_target_coverage_closed_ms": (
             None
             if coverage_closed is None
@@ -7839,7 +7998,21 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
             },
             target="phase_start and phase_complete bound one non-truncated trace window",
         )
-        if bool(record.get("coarse_target_order_applicable", False)):
+        preview_required = bool(record.get("coarse_target_preview_required", False))
+        preview_applicable = bool(record.get("coarse_target_order_applicable", False))
+        if preview_required:
+            require(
+                "coarse_preview_pass_present",
+                preview_applicable,
+                evidence={
+                    "status": record.get("coarse_target_order_status"),
+                    "preview_ack_tiles": record.get("coarse_target_preview_ack_tiles"),
+                    "preview_finishes": record.get("coarse_target_preview_task_finishes"),
+                    "exemption": record.get("coarse_target_preview_exemption"),
+                },
+                target="a supported preview-enabled cell executes and acknowledges its coarse pass",
+            )
+        if preview_applicable:
             require(
                 "coarse_ack_pass_precedes_target_ack",
                 bool(record.get("coarse_target_ack_ordered", False)),
@@ -7864,6 +8037,14 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
                 },
                 target="no target-rung task starts before the last preview task finishes",
             )
+            if preview_required:
+                t1_ms = record.get("coarse_target_t1_ms")
+                require(
+                    "preview_first_t1_target",
+                    t1_ms is not None and float(t1_ms) <= PREVIEW_FIRST_T1_TARGET_MS,
+                    evidence=t1_ms,
+                    target=f"full preview coverage <= {PREVIEW_FIRST_T1_TARGET_MS:.0f} ms",
+                )
     if phase in {"display_x_axis_slice", "display_y_axis_slice"}:
         continuity_min = int(record.get("display_axis_min_physical_tile_count", 0) or 0)
         crop_scenario_names = tuple(record.get("display_axis_crop_scenario_names", ()) or ())
@@ -9943,17 +10124,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--enable-coarse-rung",
         action="store_true",
         help=(
-            "Profile the ordered preview A arm; the measured product default "
-            "is target-only and every JSONL row records the arm"
+            "Explicitly profile the ordered preview A arm (also the product "
+            "default); every JSONL row records the arm"
         ),
     )
     parser.add_argument(
         "--disable-coarse-rung",
         action="store_true",
-        help=(
-            "Explicitly profile the target-only B arm (also the measured "
-            "product default); every JSONL row records the arm"
-        ),
+        help=("Explicitly profile the target-only B arm; every JSONL row records the arm"),
     )
     parser.add_argument(
         "--repeat",

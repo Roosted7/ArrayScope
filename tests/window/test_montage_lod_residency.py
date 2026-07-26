@@ -468,14 +468,22 @@ def test_visible_replacement_retains_presented_payload_until_acknowledged():
 
 def test_preview_level_tracks_coarser_viewport_demand():
     far_zoom = ((0.0, 32.0 * 2 * TILE), (0.0, 32.0 * TILE))
-    session = _session(pyramid=LodPageCache(max_bytes=1 << 24), view_range=far_zoom)
+    session = _session(
+        pyramid=LodPageCache(max_bytes=1 << 24),
+        view_range=far_zoom,
+        count=272,
+    )
     session.lod_preview_min_level = 4
     session.lod_preview_level = 4
 
     session._selected_lod_factor()
 
     assert session.lod_policy_decision.demand.desired_level >= 5
-    assert session.lod_preview_level == session.lod_policy_decision.demand.desired_level
+    assert session.lod_preview_level == session.lod_policy_decision.demand.desired_level + 4
+    assert (
+        render_effects.preview_evaluation_level(session, session.lod_policy_decision.demand)
+        == session.lod_preview_level
+    )
 
 
 def test_resident_mode_falls_back_to_native_and_records_missing_levels():
@@ -5899,6 +5907,41 @@ def test_admitted_preview_completion_replans_unblocked_target_rung(monkeypatch):
     )
 
     assert session._test_replan_requested is True
+
+
+def test_ready_unacknowledged_preview_suppresses_duplicate_floor_evaluation():
+    cache = LodPageCache(max_bytes=1 << 20)
+    session = _session(count=1, pyramid=cache)
+    rendered = session.rendered_tiles.pop(0)
+    session.dirty_payloads.clear()
+    demand = session.lod_policy_decision.demand
+    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+    key = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=int(demand.desired_level) + 2,
+        semantic_source_id=semantic_id,
+    )
+    pages = _materialized_page_set(key, np.asarray(rendered.image))
+    assert session.admit_preview_plane(0, key, pages, quality="preview")
+    session._ensure_floor_payloads((0,))
+    assert session.display_tile_payloads[0].quality == "preview"
+    assert 0 in session.pending_payload_upserts
+    assert 0 not in session.lifecycle.presented_tiles
+
+    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.FLOOR,
+        level=int(demand.desired_level) + 2,
+        reduce_from_native=False,
+        lane=Lane.DISPLAY_PREVIEW,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="preview rung",
+    )
+
+    assert not effects.prepare_rung(_pipeline_intent_for(session), step)
+    assert session.lifecycle.row(0).preview_claims == {}
 
 
 def test_reduced_claim_identity_follows_source_when_scroll_reuses_same_slot_and_frame_key():

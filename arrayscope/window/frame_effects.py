@@ -391,6 +391,47 @@ class FramePipelineEffects:
 
         return evaluate_target
 
+    def evaluate_preview_batch(self, intent, steps):
+        """Return one worker callable for a complete coarse montage scope."""
+
+        if not self._session_is_current(intent):
+            return lambda _token=None: ()
+        session = self.session
+        rows = []
+        for step in tuple(steps or ()):
+            if step.rung != Rung.FLOOR:
+                return lambda _token=None: ()
+            tile = self._tile_for_step(step)
+            if tile is None:
+                return lambda _token=None: ()
+            rows.append((step, tile))
+        if not rows:
+            return lambda _token=None: ()
+        levels = {int(step.level) for step, _tile in rows}
+        if len(levels) != 1:
+            return lambda _token=None: ()
+        demand = getattr(getattr(session, "lod_policy_decision", None), "demand", None)
+        tiles = tuple(tile for _step, tile in rows)
+        seed = tiles[0]
+        level = levels.pop()
+
+        def evaluate_batch(token=None):
+            return render_effects.evaluate_shared_preview(
+                session,
+                seed,
+                tiles,
+                demand=demand,
+                level=level,
+                cancellation_token=token,
+                shader_display=bool(getattr(session, "shader_display", False)),
+                evaluation_context=self.renderer.win._evaluation_context(
+                    ComputeLane.MONTAGE_TILE,
+                    token,
+                ),
+            )
+
+        return evaluate_batch
+
     def tile_states(self, intent, demand, scope: LodAdmissionScope):
         if not self._session_is_current(intent):
             return ()
@@ -708,6 +749,10 @@ class FramePipelineEffects:
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
         if self._step_produces_page_payload(step, tile):
+            if step.rung == Rung.FLOOR and self._display_payload_covers_preview_step(
+                tile_number, tile, step
+            ):
+                return False
             if step.rung == Rung.DESIRED and self._display_payload_covers_display_target(
                 tile_number, tile, step
             ):
@@ -865,6 +910,32 @@ class FramePipelineEffects:
         if record is None or record.target is None:
             return False
         return payload_ref_from_display_payload(payload).satisfies_target(record.target)
+
+    def _display_payload_covers_preview_step(self, tile_number: int, tile, step) -> bool:
+        """Whether a current ready payload already covers one FLOOR request.
+
+        Reduced results enter ``display_tile_payloads`` before their backend
+        transaction is acknowledged.  Releasing the worker claim at that
+        admission boundary is correct, but it used to let each intervening
+        replan submit the same FLOOR evaluation again.  The ready payload is
+        the canonical owner of that gap: it may suppress duplicate work while
+        the phase owner still waits for physical acknowledgement.
+        """
+
+        payload = self.session.display_tile_payloads.get(int(tile_number))
+        if payload is None:
+            return False
+        if int(getattr(payload, "source_index", -1)) != int(getattr(tile, "source_index", -2)):
+            return False
+        semantic_id = self.session.tile_semantic_source_id(tile.source_index)
+        payload_source_id = getattr(payload, "source_id", None)
+        if payload_source_id != semantic_id and _base_source_id(payload_source_id) != semantic_id:
+            return False
+        quality = str(getattr(payload, "quality", "exact") or "exact")
+        if quality not in {"preview", "fallback"}:
+            return False
+        lod = getattr(payload, "lod", None)
+        return bool(lod is not None and int(getattr(lod, "level", 0) or 0) <= int(step.level))
 
     def _display_payload_is_current(self, tile_number: int, tile, *, payload=None) -> bool:
         payload = (
@@ -2554,8 +2625,12 @@ class FramePipelineEffects:
         acknowledged = session.acknowledge_tile_presentation(
             tile_delta, report, levels=committed_levels
         )
-        if image_view_backend_capabilities(renderer.win.img_view).name == "wgpu":
-            session.observe_physically_presented_first_pass_quality(active_payloads)
+        # The acknowledged backend snapshot owns first-pass quality on every
+        # backend. PyQtGraph complex correctly declines a reduced RGB rung;
+        # its exact-only pass therefore has no FLOOR claim to seed quality,
+        # and a WGPU-only observation leaves COVERAGE open forever after the
+        # already-correct exact frame is on screen.
+        session.observe_physically_presented_first_pass_quality(active_payloads)
         phase_closed = False
         if atomic_successor:
             # A successor is complete only after the lifecycle accepts
@@ -2695,6 +2770,32 @@ class FramePipelineEffects:
             reconcile_quotas = getattr(renderer.win, "_apply_resource_governor_decisions", None)
             if callable(reconcile_quotas):
                 reconcile_quotas(refresh_telemetry=False)
+        if phase_closed:
+            # Coverage closes inside the presentation transaction. The
+            # immediate reconciliation above can still see that transaction's
+            # work as busy and legitimately leave refinement lanes at quota
+            # zero. No kernel completion is owed after this callback, so a
+            # queued histogram or target task would otherwise remain parked
+            # forever while the screen is already correct.
+            scheduling_generation = int(session.scheduling_policy.verdict.generation)
+            session_id = int(session.session_id)
+
+            def reconcile_after_phase_close():
+                current = getattr(renderer.win, "_frame_session", None)
+                if current is not session or int(getattr(current, "session_id", 0)) != session_id:
+                    return
+                verdict = session.scheduling_policy.verdict
+                if int(verdict.generation) != scheduling_generation or bool(verdict.coverage_open):
+                    return
+                reconcile = getattr(
+                    renderer.win,
+                    "_apply_resource_governor_decisions",
+                    None,
+                )
+                if callable(reconcile):
+                    reconcile(refresh_telemetry=False)
+
+            _post_low_priority_callback(renderer, reconcile_after_phase_close)
         geometry = replace(geometry, montage_tile_states=session.ensure_tile_states())
         renderer._last_montage_tile_state_publish_ms = (perf_counter() - state_start) * 1000.0
         geometry_start = perf_counter()
@@ -4269,20 +4370,32 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
         )
     if interactive:
         batch_limit = min(8, max(4, int(batch_limit)))
-    # No idle-backlog cohort here: the CPU-windowed tile layer pays a real
-    # per-item cost (window + wrap per tile), so a deep-backlog cohort turns
-    # into one long GUI callback that delays the next gesture's pixels — the
-    # journey matrix caught exactly that on the pyqtgraph scroll rows. The
-    # fixed-cost amortization argument only holds for the upload-only
-    # shader-windowing path (`_persistent_tile_upsert_limits`), and the
-    # pyqtgraph cold fill is evidence-sweep-bound, not commit-bound.
+    verdict = getattr(getattr(session, "scheduling_policy", None), "verdict", None)
+    refinement_cohort = bool(
+        not interactive
+        and bool(getattr(session, "display_committed", False))
+        and verdict is not None
+        and bool(getattr(verdict, "refinement_admissible", False))
+    )
+    if refinement_cohort:
+        # The target pass begins only after the first frame is complete. Its
+        # current 12-item feedback clamp repeated whole-scene publication 20+
+        # times even though 32 items measured within the same ~75-85 ms fixed
+        # transaction cost. Keep the incumbent 32-item bound, and remove only
+        # the inner cold-walk deadline that otherwise fragments that cohort.
+        # Active interactions retain the 4-8 item clamp above.
+        batch_limit = _idle_backlog_cohort(session, batch_limit)
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
     limits = {
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
-        "cold_deadline_ms": presentation_upload_control_budget_ms(
-            window, "tile_layer_commit", decision, interactive=interactive
+        "cold_deadline_ms": (
+            None
+            if refinement_cohort
+            else presentation_upload_control_budget_ms(
+                window, "tile_layer_commit", decision, interactive=interactive
+            )
         ),
         "upsert_cost_fn": pyqtgraph_payload_upload_nbytes,
         "pace_resident_retargets": True,

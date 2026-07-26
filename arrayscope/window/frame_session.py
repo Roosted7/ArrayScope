@@ -1077,6 +1077,7 @@ class FrameSession:
         self.level_generation.revision = int(value)
 
     def __post_init__(self) -> None:
+        self.lifecycle.set_trace_session_id(int(self.session_id))
         self.pending_level_tiles = deque(self.pending_level_tiles)
         self.pending_level_sources = {
             int(source) for source in (self.pending_level_sources or ())
@@ -1266,6 +1267,7 @@ class FrameSession:
             scheduling_scope_signature,
             tuple(sorted(required.intersection(targets))),
             progressive=bool(self.shader_display or self._resident_lod_active()),
+            session_id=int(self.session_id),
         )
 
         # Payload mutation sites report lifecycle events directly.  This scan

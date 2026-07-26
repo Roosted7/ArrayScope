@@ -97,6 +97,7 @@ class ProgressiveSchedulingPolicy:
         required_tiles,
         *,
         progressive: bool,
+        session_id: int = 0,
     ) -> bool:
         """Adopt one required lifecycle scope; return whether it changed."""
 
@@ -119,6 +120,8 @@ class ProgressiveSchedulingPolicy:
             generation=int(self._generation),
             phase=str(self._phase.value),
             required_tiles=len(required),
+            required_tile_numbers=required,
+            session_id=int(session_id),
         )
         return True
 

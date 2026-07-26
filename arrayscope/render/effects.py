@@ -71,7 +71,7 @@ from arrayscope.operations.source_read import read_base_region
 from arrayscope.operations.stage_cache import StageValue
 from arrayscope.presentation import LevelPhase
 from arrayscope.render import lod as render_lod
-from arrayscope.render.ladder import TileLodState
+from arrayscope.render.ladder import TileLodState, coarse_rung_level
 
 SHARED_PREVIEW_ROUTE = ("shared-transform-preview", 1, "sample-display-axes-before-operations")
 
@@ -518,6 +518,7 @@ def evaluate_shared_preview(
         evaluation_context=evaluation_context,
         axis_region_overrides=axis_overrides,
         sample_display_axes=True,
+        source_aligned=getattr(session, "source_anchoring", None) is not None,
     )
     transformed = _evaluate_reduced_preview_volume(
         session.document,
@@ -682,7 +683,9 @@ def _materialize_shared_preview_pages(
     if tuple(source.shape[:2]) != expected_shape:
         raise ValueError(
             "shared preview stored shape disagrees with canonical page coverage: "
-            f"{source.shape[:2]} != {expected_shape}"
+            f"{source.shape[:2]} != {expected_shape}; "
+            f"valid={tuple(plan.valid_source_rect_yx for plan in requested)}, "
+            f"stored={tuple(plan.stored_rect_yx for plan in requested)}"
         )
     covered = np.zeros(expected_shape, dtype=np.bool_)
     pages = []
@@ -1165,7 +1168,10 @@ def preview_pipeline_is_tile_local(session, tile) -> bool:
 def preview_evaluation_level(session, demand) -> int:
     desired = int(getattr(demand, "desired_level", 0) or 0)
     preview = int(getattr(session, "lod_preview_level", 0) or 0)
-    return max(desired, preview)
+    return coarse_rung_level(
+        desired_level=desired,
+        retention_level=preview,
+    )
 
 
 def read_reduced_preview_base_and_state(
@@ -1177,6 +1183,7 @@ def read_reduced_preview_base_and_state(
     evaluation_context=None,
     axis_region_overrides=None,
     sample_display_axes: bool = False,
+    source_aligned: bool = False,
 ) -> tuple[np.ndarray, object]:
     read_spec = _reduced_preview_read_spec(
         document,
@@ -1184,6 +1191,7 @@ def read_reduced_preview_base_and_state(
         factor_xy=factor_xy,
         axis_region_overrides=axis_region_overrides,
         sample_display_axes=sample_display_axes,
+        source_aligned=source_aligned,
     )
     base = read_base_region(
         document.base_data,
@@ -1198,6 +1206,7 @@ def read_reduced_preview_base_and_state(
             base,
             tuple(int(axis) for axis in view_state.image_axes),
             factor_xy,
+            source_starts=read_spec.display_source_starts,
         )
     )
     preview_state = reduced_preview_view_state(
@@ -1216,6 +1225,7 @@ def _reduced_preview_read_spec(
     factor_xy: tuple[int, int],
     axis_region_overrides=None,
     sample_display_axes: bool = False,
+    source_aligned: bool = False,
 ):
     """Plan the real-document region that feeds one reduced preview stage."""
 
@@ -1232,16 +1242,26 @@ def _reduced_preview_read_spec(
     display_x_region = _display_axis_region_for_preview(
         view_state, image_axes[1], base_shape[image_axes[1]]
     )
+    display_source_starts = (
+        {
+            image_axes[0]: _axis_region_first_index(display_y_region),
+            image_axes[1]: _axis_region_first_index(display_x_region),
+        }
+        if source_aligned
+        else {}
+    )
     if sample_display_axes:
         preview_y_region = _sample_preview_axis_region(
             display_y_region,
             base_shape[image_axes[0]],
             max(1, int(factor_xy[1])),
+            source_aligned=source_aligned,
         )
         preview_x_region = _sample_preview_axis_region(
             display_x_region,
             base_shape[image_axes[1]],
             max(1, int(factor_xy[0])),
+            source_aligned=source_aligned,
         )
         reduced_shape[image_axes[0]] = _axis_region_length(
             preview_y_region,
@@ -1258,11 +1278,13 @@ def _reduced_preview_read_spec(
             display_y_region,
             base_shape[image_axes[0]],
             max(1, int(factor_xy[1])),
+            source_aligned=source_aligned,
         )
         reduced_shape[image_axes[1]] = _reduced_axis_length(
             display_x_region,
             base_shape[image_axes[1]],
             max(1, int(factor_xy[0])),
+            source_aligned=source_aligned,
         )
     reduced_shape = tuple(int(size) for size in reduced_shape)
     planning_document = ArrayDocument(
@@ -1300,11 +1322,13 @@ def _reduced_preview_read_spec(
             read_axes[image_axes[0]],
             base_shape[image_axes[0]],
             max(1, int(factor_xy[1])),
+            source_aligned=source_aligned,
         )
         stage_axes[image_axes[1]] = _sample_preview_axis_region(
             read_axes[image_axes[1]],
             base_shape[image_axes[1]],
             max(1, int(factor_xy[0])),
+            source_aligned=source_aligned,
         )
     read_shape = [
         _axis_region_length(axis_region, base_shape[axis])
@@ -1315,10 +1339,17 @@ def _reduced_preview_read_spec(
         region=RegionSpec(tuple(stage_axes)),
         reduced_shape=tuple(int(size) for size in read_shape),
         slice_remap=dict(slice_remap),
+        display_source_starts=display_source_starts,
     )
 
 
-def _sample_preview_axis_region(axis_region: AxisRegion, size: int, factor: int) -> AxisRegion:
+def _sample_preview_axis_region(
+    axis_region: AxisRegion,
+    size: int,
+    factor: int,
+    *,
+    source_aligned: bool = False,
+) -> AxisRegion:
     factor = max(1, int(factor))
     kind = AxisRegionKind(axis_region.kind)
     if factor <= 1:
@@ -1327,9 +1358,16 @@ def _sample_preview_axis_region(axis_region: AxisRegion, size: int, factor: int)
         return AxisRegion(AxisRegionKind.SLICE, (0, int(size), factor))
     if kind == AxisRegionKind.SLICE:
         start, stop, step = axis_region.value
+        start, stop, step = (int(start), int(stop), int(step))
+        if source_aligned and step == 1 and start % factor:
+            first_boundary = min(stop, ((start // factor) + 1) * factor)
+            return AxisRegion(
+                AxisRegionKind.INDICES,
+                (start, *range(first_boundary, stop, factor)),
+            )
         return AxisRegion(
             AxisRegionKind.SLICE,
-            (int(start), int(stop), max(1, int(step)) * factor),
+            (start, stop, max(1, step) * factor),
         )
     if kind == AxisRegionKind.INDICES:
         return AxisRegion(
@@ -1343,8 +1381,32 @@ def _sample_preview_axis_region(axis_region: AxisRegion, size: int, factor: int)
     return axis_region
 
 
-def _reduced_axis_length(axis_region: AxisRegion, size: int, factor: int) -> int:
-    return max(1, int(np.ceil(_axis_region_length(axis_region, size) / max(1, int(factor)))))
+def _reduced_axis_length(
+    axis_region: AxisRegion,
+    size: int,
+    factor: int,
+    *,
+    source_aligned: bool = False,
+) -> int:
+    factor = max(1, int(factor))
+    kind = AxisRegionKind(axis_region.kind)
+    if source_aligned and factor > 1 and kind == AxisRegionKind.SLICE:
+        start, stop, step = (int(value) for value in axis_region.value)
+        if step == 1:
+            return max(1, (stop - 1) // factor - start // factor + 1)
+    return max(1, int(np.ceil(_axis_region_length(axis_region, size) / factor)))
+
+
+def _axis_region_first_index(axis_region: AxisRegion) -> int:
+    kind = AxisRegionKind(axis_region.kind)
+    if kind == AxisRegionKind.ALL:
+        return 0
+    if kind == AxisRegionKind.SLICE:
+        return int(axis_region.value[0])
+    if kind == AxisRegionKind.INDICES:
+        values = tuple(axis_region.value)
+        return 0 if not values else int(values[0])
+    return 0
 
 
 def axis_region_for_preview_indices(values, size: int) -> AxisRegion:
@@ -1364,28 +1426,56 @@ def reduce_array_display_axes(
     array,
     image_axes: tuple[int, int],
     factor_xy: tuple[int, int],
+    *,
+    source_starts: dict[int, int] | None = None,
 ) -> np.ndarray:
     values = np.asarray(array)
     y_axis, x_axis = (int(image_axes[0]), int(image_axes[1]))
     factor_x, factor_y = (max(1, int(factor_xy[0])), max(1, int(factor_xy[1])))
-    reduced = reduce_nd_axis_mean(values, y_axis, factor_y)
-    reduced = reduce_nd_axis_mean(reduced, x_axis, factor_x)
+    source_starts = dict(source_starts or {})
+    reduced = reduce_nd_axis_mean(
+        values,
+        y_axis,
+        factor_y,
+        source_start=int(source_starts.get(y_axis, 0)),
+    )
+    reduced = reduce_nd_axis_mean(
+        reduced,
+        x_axis,
+        factor_x,
+        source_start=int(source_starts.get(x_axis, 0)),
+    )
     return reduced
 
 
-def reduce_nd_axis_mean(values: np.ndarray, axis: int, factor: int) -> np.ndarray:
+def reduce_nd_axis_mean(
+    values: np.ndarray,
+    axis: int,
+    factor: int,
+    *,
+    source_start: int = 0,
+) -> np.ndarray:
     if int(factor) <= 1 or int(values.shape[int(axis)]) <= 1:
         return values
     if int(factor) & (int(factor) - 1):
         raise ValueError("preview reduction factor must be a power of two")
     axis = int(axis)
     length = int(values.shape[axis])
-    starts = np.arange(0, length, int(factor))
+    factor = int(factor)
+    source_start = int(source_start)
+    first_boundary = min(
+        length,
+        ((source_start // factor) + 1) * factor - source_start,
+    )
+    starts = np.asarray(
+        (0, *range(first_boundary, length, factor)),
+        dtype=np.int64,
+    )
     if np.iscomplexobj(values):
         source = values.astype(np.complex64, copy=False)
     else:
         source = values.astype(np.float32, copy=False)
-    if length % int(factor) == 0:
+    if source_start % factor == 0 and length % factor == 0:
         # Tiles are normally power-of-two aligned. Reshape lets NumPy reduce
         # contiguous blocks directly; non-divisible edges retain the exact
         # reduceat/count path below.
@@ -1633,10 +1723,12 @@ def _evaluate_tile_reduced_input_preview(
     """
 
     factor_xy = factor_xy_for_level(demand, int(level))
+    source_aligned = getattr(session, "source_anchoring", None) is not None
     read_spec = _reduced_preview_read_spec(
         session.document,
         tile.view_state,
         factor_xy=factor_xy,
+        source_aligned=source_aligned,
     )
     candidate = _reduced_preview_stage_candidate(
         session.document,
@@ -1651,6 +1743,7 @@ def _evaluate_tile_reduced_input_preview(
             factor_xy=factor_xy,
             cancellation_token=cancellation_token,
             evaluation_context=evaluation_context,
+            source_aligned=source_aligned,
         )
         transformed = _evaluate_reduced_preview_volume(
             session.document,
