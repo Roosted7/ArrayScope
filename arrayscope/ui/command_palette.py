@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pyqtgraph.Qt import QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.ui.icons import material_icon
 
@@ -16,6 +16,8 @@ class PaletteCommand:
     kind: str = "command"
     requires_axis: bool = False
     icon: str = "search"
+    enabled: bool = True
+    unavailable_reason: str = ""
 
 
 class CommandPaletteDialog(QtWidgets.QDialog):
@@ -25,6 +27,7 @@ class CommandPaletteDialog(QtWidgets.QDialog):
         self.setObjectName("CommandPaletteDialog")
         self._commands = tuple(commands)
         self._filtered = self._commands
+        self._visible_commands = self._filtered
 
         layout = QtWidgets.QVBoxLayout()
         self.search = QtWidgets.QLineEdit()
@@ -50,6 +53,7 @@ class CommandPaletteDialog(QtWidgets.QDialog):
             QtWidgets.QDialogButtonBox.StandardButton.Ok
             | QtWidgets.QDialogButtonBox.StandardButton.Cancel
         )
+        self.buttons = buttons
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -63,9 +67,11 @@ class CommandPaletteDialog(QtWidgets.QDialog):
 
     def selected(self):
         row = self.list_widget.currentRow()
-        if row < 0 or row >= len(self._filtered):
+        if row < 0 or row >= len(self._visible_commands):
             return None, None
-        command = self._filtered[row]
+        command = self._visible_commands[row]
+        if not command.enabled:
+            return None, None
         axis = self.axis_combo.currentData() if command.requires_axis else None
         return command, axis
 
@@ -77,14 +83,21 @@ class CommandPaletteDialog(QtWidgets.QDialog):
             if all(word in command.label.lower() or word in command.id.lower() for word in words)
         )
         self.list_widget.clear()
-        for command in self._filtered:
+        self._visible_commands = self._filtered
+        first_enabled = -1
+        for index, command in enumerate(self._visible_commands):
             prefix = "op" if command.kind == "operation" else "cmd"
             item = QtWidgets.QListWidgetItem(
                 material_icon(command.icon), f"{prefix}: {command.label}"
             )
+            if not command.enabled:
+                item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
+                item.setToolTip(command.unavailable_reason)
+            elif first_enabled < 0:
+                first_enabled = index
             self.list_widget.addItem(item)
-        if self._filtered:
-            self.list_widget.setCurrentRow(0)
+        if first_enabled >= 0:
+            self.list_widget.setCurrentRow(first_enabled)
         self._sync_axis_visibility()
 
     def _sync_axis_visibility(self):
@@ -94,3 +107,6 @@ class CommandPaletteDialog(QtWidgets.QDialog):
         label = self.axis_combo.parentWidget()
         if label is not None:
             label.setVisible(True)
+        ok = self.buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
+        if ok is not None:
+            ok.setEnabled(command is not None)

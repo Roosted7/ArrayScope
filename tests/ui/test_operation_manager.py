@@ -1,4 +1,5 @@
 import os
+import sys
 
 import numpy as np
 import pytest
@@ -368,6 +369,59 @@ def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path):
             for i in range(dialog.tree.topLevelItemCount())
         ]
         assert "Problems" in groups
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_command_runtime_and_advanced_environment_editor_share_the_manager(qtbot, tmp_path):
+    from arrayscope.operations import library, registry
+
+    executable = tmp_path / "copy-array"
+    executable.write_text(
+        "#!/usr/bin/env python3\nimport shutil, sys\nshutil.copyfile(sys.argv[-2], sys.argv[-1])\n"
+    )
+    executable.chmod(0o755)
+
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        dialog.new_button.click()
+        process_events(qtbot)
+        operation_id = dialog.selected_operation_id()
+
+        dialog.runtime_combo.setCurrentIndex(dialog.runtime_combo.findData("command"))
+        dialog.command_template_edit.setText(f'"{executable}" {{in}} {{out}}')
+        dialog.command_template_edit.editingFinished.emit()
+        process_events(qtbot)
+
+        wrapper = library.user_operation_wrapper(operation_id)
+        assert wrapper["runtime"] == "command"
+        assert wrapper["command_template"].endswith("{in} {out}")
+        assert dialog.source_box.isHidden()
+        assert dialog.command_box.isVisible()
+        assert registry.get_operation_entry(operation_id).unavailable_reason == ""
+
+        assert not dialog.advanced_panel.isVisible()
+        dialog.advanced_button.setChecked(True)
+        process_events(qtbot)
+        assert dialog.advanced_panel.isVisible()
+        dialog.environment_id_edit.setText("recon")
+        dialog.environment_name_edit.setText("Recon")
+        dialog.environment_kind_combo.setCurrentIndex(
+            dialog.environment_kind_combo.findData("interpreter")
+        )
+        dialog.environment_locator_edit.setText(sys.executable)
+        dialog.environment_variables_edit.setPlainText(
+            "BART_TOOLBOX_PATH=/opt/bart\nRECON_MODE=test"
+        )
+        dialog.environment_save_button.click()
+        process_events(qtbot)
+
+        records = library.execution_environments()
+        assert len(records) == 1
+        assert records[0].id == "recon"
+        assert dict(records[0].variables)["BART_TOOLBOX_PATH"] == "/opt/bart"
     finally:
         dialog.close()
         win.close()

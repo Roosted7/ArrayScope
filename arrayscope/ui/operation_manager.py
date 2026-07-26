@@ -41,6 +41,12 @@ _VIRTUAL_ROLE = QtCore.Qt.ItemDataRole.UserRole + 2
 _PROBLEMS_GROUP = "Problems"
 _KIND_CHOICES = ("int", "float")
 _PARAM_LABEL_ROLE = QtCore.Qt.ItemDataRole.UserRole
+_RUNTIME_CHOICES = (
+    ("Python", "python"),
+    ("Command", "command"),
+    ("Julia", "julia"),
+    ("MATLAB", "matlab"),
+)
 
 
 def _is_user_op(operation_id: str) -> bool:
@@ -104,6 +110,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self._suppress = False
         self._reloading = False
         self._source_infos = {}
+        self._editing_environment_id = ""
 
         root = QtWidgets.QHBoxLayout(self)
 
@@ -159,7 +166,15 @@ class OperationManagerDialog(QtWidgets.QDialog):
         root.addLayout(left)
 
         # -- right: editor ------------------------------------------------
-        right = QtWidgets.QVBoxLayout()
+        right_widget = QtWidgets.QWidget(self)
+        right = QtWidgets.QVBoxLayout(right_widget)
+        self.editor_scroll = QtWidgets.QScrollArea(self)
+        self.editor_scroll.setWidgetResizable(True)
+        self.editor_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.editor_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.editor_scroll.setWidget(right_widget)
         form = QtWidgets.QFormLayout()
         self.label_edit = QtWidgets.QLineEdit(self)
         form.addRow("Label", self.label_edit)
@@ -188,6 +203,10 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.changes_shape_label = QtWidgets.QLabel("", self)
         self.changes_shape_label.setObjectName("OperationsMetaLabel")
         form.addRow("Output", self.changes_shape_label)
+        self.runtime_combo = QtWidgets.QComboBox(self)
+        for label, value in _RUNTIME_CHOICES:
+            self.runtime_combo.addItem(label, value)
+        form.addRow("Runtime", self.runtime_combo)
         self.common_check = QtWidgets.QCheckBox("Show in the Common (pinned) section", self)
         form.addRow("", self.common_check)
         right.addLayout(form)
@@ -228,6 +247,95 @@ class OperationManagerDialog(QtWidgets.QDialog):
         source_layout.addWidget(self.storage_hint)
         right.addWidget(self.source_box)
 
+        self.command_box = QtWidgets.QGroupBox("Command template", self)
+        command_layout = QtWidgets.QFormLayout(self.command_box)
+        self.command_template_edit = QtWidgets.QLineEdit(self)
+        self.command_template_edit.setPlaceholderText("tool --option {parameter} {in} {out}")
+        command_layout.addRow("Arguments", self.command_template_edit)
+        command_hint = QtWidgets.QLabel(
+            "Use {in}, {out}, and each declared parameter. Values remain literal argv tokens.",
+            self,
+        )
+        command_hint.setObjectName("OperationsMetaLabel")
+        command_hint.setWordWrap(True)
+        command_layout.addRow("", command_hint)
+        right.addWidget(self.command_box)
+
+        self.advanced_button = QtWidgets.QToolButton(self)
+        self.advanced_button.setText("Advanced")
+        self.advanced_button.setCheckable(True)
+        self.advanced_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.advanced_button.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        right.addWidget(self.advanced_button)
+
+        self.advanced_panel = QtWidgets.QWidget(self)
+        advanced_layout = QtWidgets.QVBoxLayout(self.advanced_panel)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        runtime_advanced = QtWidgets.QGroupBox("Runtime settings", self)
+        runtime_form = QtWidgets.QFormLayout(runtime_advanced)
+        self.environment_combo = QtWidgets.QComboBox(self)
+        runtime_form.addRow("Environment", self.environment_combo)
+        self.handoff_combo = QtWidgets.QComboBox(self)
+        self.handoff_combo.addItems(["npy", "cfl"])
+        runtime_form.addRow("Array handoff", self.handoff_combo)
+        self.timeout_spin = QtWidgets.QDoubleSpinBox(self)
+        self.timeout_spin.setRange(0.0, 86_400.0)
+        self.timeout_spin.setDecimals(1)
+        self.timeout_spin.setSpecialValueText("No timeout")
+        self.timeout_spin.setSuffix(" s")
+        runtime_form.addRow("Timeout", self.timeout_spin)
+        self.shell_check = QtWidgets.QCheckBox(
+            "Run through the system shell (unsafe; explicit opt-in)", self
+        )
+        runtime_form.addRow("", self.shell_check)
+        self.review_button = QtWidgets.QPushButton("Mark imported command reviewed", self)
+        self.review_button.setVisible(False)
+        runtime_form.addRow("", self.review_button)
+        advanced_layout.addWidget(runtime_advanced)
+
+        self.environments_box = QtWidgets.QGroupBox("Named environments", self)
+        self.environments_box.setMinimumHeight(350)
+        environment_layout = QtWidgets.QVBoxLayout(self.environments_box)
+        environment_form = QtWidgets.QFormLayout()
+        self.environment_editor_combo = QtWidgets.QComboBox(self)
+        environment_form.addRow("Edit", self.environment_editor_combo)
+        self.environment_id_edit = QtWidgets.QLineEdit(self)
+        self.environment_id_edit.setPlaceholderText("e.g. recon")
+        environment_form.addRow("Id", self.environment_id_edit)
+        self.environment_name_edit = QtWidgets.QLineEdit(self)
+        environment_form.addRow("Name", self.environment_name_edit)
+        self.environment_kind_combo = QtWidgets.QComboBox(self)
+        self.environment_kind_combo.addItem("Variables / working directory only", "")
+        self.environment_kind_combo.addItem("Interpreter path", "interpreter")
+        self.environment_kind_combo.addItem("Conda environment", "conda_env")
+        self.environment_kind_combo.addItem("Virtualenv path", "venv_path")
+        environment_form.addRow("Locator", self.environment_kind_combo)
+        self.environment_locator_edit = QtWidgets.QLineEdit(self)
+        environment_form.addRow("Value", self.environment_locator_edit)
+        self.environment_cwd_edit = QtWidgets.QLineEdit(self)
+        environment_form.addRow("Working directory", self.environment_cwd_edit)
+        self.environment_variables_edit = QtWidgets.QPlainTextEdit(self)
+        self.environment_variables_edit.setPlaceholderText(
+            "One NAME=value per line, e.g. BART_TOOLBOX_PATH=/opt/bart"
+        )
+        self.environment_variables_edit.setMaximumHeight(72)
+        self.environment_variables_edit.setMinimumHeight(60)
+        environment_form.addRow("Environment variables", self.environment_variables_edit)
+        environment_layout.addLayout(environment_form)
+        environment_buttons = QtWidgets.QHBoxLayout()
+        self.environment_new_button = QtWidgets.QPushButton("New", self)
+        self.environment_save_button = QtWidgets.QPushButton("Save environment", self)
+        self.environment_remove_button = QtWidgets.QPushButton("Remove", self)
+        environment_buttons.addWidget(self.environment_new_button)
+        environment_buttons.addWidget(self.environment_save_button)
+        environment_buttons.addWidget(self.environment_remove_button)
+        environment_buttons.addStretch(1)
+        environment_layout.addLayout(environment_buttons)
+        advanced_layout.addWidget(self.environments_box)
+        self.advanced_panel.setMinimumHeight(520)
+        self.advanced_panel.setVisible(False)
+        right.addWidget(self.advanced_panel)
+
         right.addWidget(QtWidgets.QLabel("Parameters"))
         self.params_table = QtWidgets.QTableWidget(0, 7, self)
         self.params_table.setHorizontalHeaderLabels(
@@ -265,7 +373,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
         set_button_icon(self.done_button, "done")
         actions.addWidget(self.done_button)
         right.addLayout(actions)
-        root.addLayout(right, 1)
+        root.addWidget(self.editor_scroll, 1)
 
         # -- wiring -------------------------------------------------------
         self.tree.currentItemChanged.connect(lambda *_: self._load_editor())
@@ -284,6 +392,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.icon_edit.editingFinished.connect(self._apply_user_edits)
         self.icon_edit.textChanged.connect(self._update_icon_preview)
         self.requires_axis_check.toggled.connect(self._on_requires_axis_toggled)
+        self.runtime_combo.currentIndexChanged.connect(self._on_runtime_changed)
         self.group_combo.currentTextChanged.connect(self._on_group_changed)
         self.common_check.toggled.connect(self._on_common_toggled)
         self.params_table.cellChanged.connect(lambda *_: self._apply_user_edits())
@@ -294,6 +403,17 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.callable_combo.currentTextChanged.connect(self._on_callable_changed)
         self.copy_radio.toggled.connect(self._update_storage_hint)
         self.link_radio.toggled.connect(self._on_storage_mode_changed)
+        self.command_template_edit.editingFinished.connect(self._apply_runtime_edits)
+        self.environment_combo.currentIndexChanged.connect(self._apply_runtime_edits)
+        self.handoff_combo.currentTextChanged.connect(self._apply_runtime_edits)
+        self.timeout_spin.editingFinished.connect(self._apply_runtime_edits)
+        self.shell_check.toggled.connect(self._apply_runtime_edits)
+        self.advanced_button.toggled.connect(self._toggle_advanced)
+        self.review_button.clicked.connect(self._review_imported_command)
+        self.environment_editor_combo.currentIndexChanged.connect(self._load_environment_editor)
+        self.environment_new_button.clicked.connect(self._new_environment)
+        self.environment_save_button.clicked.connect(self._save_environment)
+        self.environment_remove_button.clicked.connect(self._remove_environment)
 
         library.add_library_listener(self._refresh_tree)
         self._refresh_tree()
@@ -356,11 +476,13 @@ class OperationManagerDialog(QtWidgets.QDialog):
             markers.append("(hidden)")
         if _is_user_op(entry.id):
             markers.append("(user)")
+        if entry.unavailable_reason:
+            markers.append("(unavailable)")
         suffix = ("  " + " ".join(markers)) if markers else ""
         item = QtWidgets.QTreeWidgetItem([f"{entry.label}{suffix}"])
         item.setIcon(0, material_icon(entry.icon or "data_array"))
         item.setData(0, _ID_ROLE, entry.id)
-        item.setToolTip(0, entry.description or entry.id)
+        item.setToolTip(0, entry.unavailable_reason or entry.description or entry.id)
         item.setFlags(
             QtCore.Qt.ItemFlag.ItemIsEnabled
             | QtCore.Qt.ItemFlag.ItemIsSelectable
@@ -470,6 +592,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
                 self.icon_preview.clear()
                 self.requires_axis_check.setChecked(False)
                 self.changes_shape_label.clear()
+                self.runtime_combo.setCurrentIndex(0)
                 self.common_check.setChecked(False)
                 self.source_path_edit.clear()
                 self.callable_combo.clear()
@@ -479,6 +602,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
                 self.copy_radio.setVisible(False)
                 self.link_radio.setVisible(False)
                 self.storage_hint.clear()
+                self.command_template_edit.clear()
                 self.params_table.setRowCount(0)
             finally:
                 self._suppress = False
@@ -511,15 +635,31 @@ class OperationManagerDialog(QtWidgets.QDialog):
                 "Changes shape" if entry.changes_shape else "Preserves shape"
             )
             self.common_check.setChecked(operation_id in library.effective_common_ids())
+            runtime = str(definition.get("runtime") or "python")
+            runtime_index = self.runtime_combo.findData(runtime)
+            self.runtime_combo.setCurrentIndex(max(0, runtime_index))
             self._load_source_editor(definition, is_user=is_user)
+            self.command_template_edit.setText(str(definition.get("command_template") or ""))
+            self.handoff_combo.setCurrentText(str(definition.get("handoff") or "npy"))
+            timeout = definition.get("timeout_s", 600.0)
+            self.timeout_spin.setValue(0.0 if timeout is None else float(timeout))
+            self.shell_check.setChecked(bool(definition.get("shell", False)))
+            self._reload_environment_combos(str(definition.get("environment") or ""))
             self._fill_parameters(entry.parameters, editable=is_user)
         finally:
             self._suppress = False
 
         self._set_icon_row_visible(True)
+        self._sync_runtime_visibility()
         self._apply_editor_editability(is_user)
-        if is_user:
-            wrapper = library.user_operation_wrapper(operation_id) or {}
+        wrapper = library.user_operation_wrapper(operation_id) or {} if is_user else {}
+        review = wrapper.get("review") if isinstance(wrapper, dict) else None
+        self.review_button.setVisible(
+            bool(is_user and isinstance(review, dict) and review.get("required"))
+        )
+        if entry.unavailable_reason:
+            self.status_label.setText(f"Unavailable — {entry.unavailable_reason}")
+        elif is_user:
             template = wrapper.get("template")
             if isinstance(template, dict) and template.get("message"):
                 self.status_label.setText(str(template["message"]))
@@ -556,6 +696,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
             self.description_edit,
             self.icon_edit,
             self.requires_axis_check,
+            self.runtime_combo,
             self.source_box,
             self.source_path_edit,
             self.source_browse_button,
@@ -566,6 +707,13 @@ class OperationManagerDialog(QtWidgets.QDialog):
             self.params_table,
             self.add_param_button,
             self.remove_param_button,
+            self.command_box,
+            self.command_template_edit,
+            self.environment_combo,
+            self.handoff_combo,
+            self.timeout_spin,
+            self.shell_check,
+            self.advanced_button,
         ):
             widget.setEnabled(enabled)
 
@@ -583,6 +731,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
             widget.setReadOnly(not is_user)
             widget.setEnabled(is_user)
         self.requires_axis_check.setEnabled(is_user)
+        self.runtime_combo.setEnabled(is_user)
         self.source_path_edit.setReadOnly(not is_user)
         self.source_path_edit.setEnabled(is_user)
         self.source_browse_button.setEnabled(is_user)
@@ -592,9 +741,190 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.params_table.setEnabled(is_user)
         self.add_param_button.setEnabled(is_user)
         self.remove_param_button.setEnabled(is_user)
+        self.command_template_edit.setReadOnly(not is_user)
+        self.command_template_edit.setEnabled(is_user)
+        self.environment_combo.setEnabled(is_user)
+        self.handoff_combo.setEnabled(is_user)
+        self.timeout_spin.setEnabled(is_user)
+        self.shell_check.setEnabled(is_user)
+        # Environment records are library-wide and remain editable regardless
+        # of whether the selected operation is a system definition.
+        self.advanced_button.setEnabled(True)
+        self.environments_box.setEnabled(True)
         # These act on system ops too, so they stay live regardless.
         self.group_combo.setEnabled(True)
         self.common_check.setEnabled(True)
+
+    def _sync_runtime_visibility(self):
+        runtime = str(self.runtime_combo.currentData() or "python")
+        self.source_box.setVisible(runtime == "python")
+        self.command_box.setVisible(runtime != "python")
+        self.shell_check.setEnabled(
+            bool(_is_user_op(self._loaded_id or "") and runtime == "command")
+        )
+        if runtime != "command":
+            self.shell_check.setChecked(False)
+
+    def _on_runtime_changed(self, _index):
+        self._sync_runtime_visibility()
+        self._apply_runtime_edits()
+
+    def _apply_runtime_edits(self, *_args):
+        if self._suppress or self._reloading:
+            return
+        operation_id = self._loaded_id
+        if operation_id is None or not _is_user_op(operation_id):
+            return
+        runtime = str(self.runtime_combo.currentData() or "python")
+        fields = {
+            "runtime": runtime,
+            "environment": str(self.environment_combo.currentData() or ""),
+            "handoff": self.handoff_combo.currentText(),
+            "timeout_s": None if self.timeout_spin.value() <= 0 else self.timeout_spin.value(),
+            "shell": bool(self.shell_check.isChecked() and runtime == "command"),
+        }
+        if runtime != "python":
+            fields["command_template"] = self.command_template_edit.text().strip()
+        wrapper = library.user_operation_wrapper(operation_id) or {}
+        template = wrapper.get("template")
+        if isinstance(template, dict) and template.get("kind") == "empty":
+            fields["template"] = None
+        library.update_user_operation(operation_id, **fields)
+
+    def _toggle_advanced(self, expanded):
+        self.advanced_panel.setVisible(bool(expanded))
+        self.advanced_button.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if expanded else QtCore.Qt.ArrowType.RightArrow
+        )
+        if expanded:
+            self.adjustSize()
+
+    def _reload_environment_combos(self, selected: str = ""):
+        try:
+            records = library.execution_environments()
+        except Exception:
+            records = ()
+        self.environment_combo.blockSignals(True)
+        self.environment_editor_combo.blockSignals(True)
+        try:
+            self.environment_combo.clear()
+            self.environment_combo.addItem("Current process / none", "")
+            self.environment_editor_combo.clear()
+            self.environment_editor_combo.addItem("New environment…", "")
+            for record in records:
+                self.environment_combo.addItem(record.name, record.id)
+                self.environment_editor_combo.addItem(record.name, record.id)
+            index = self.environment_combo.findData(selected)
+            self.environment_combo.setCurrentIndex(max(0, index))
+            editor_index = self.environment_editor_combo.findData(self._editing_environment_id)
+            self.environment_editor_combo.setCurrentIndex(max(0, editor_index))
+        finally:
+            self.environment_combo.blockSignals(False)
+            self.environment_editor_combo.blockSignals(False)
+        self._load_environment_editor(self.environment_editor_combo.currentIndex())
+
+    def _load_environment_editor(self, _index):
+        environment_id = str(self.environment_editor_combo.currentData() or "")
+        self._editing_environment_id = environment_id
+        record = None
+        if environment_id:
+            try:
+                record = next(
+                    item for item in library.execution_environments() if item.id == environment_id
+                )
+            except (StopIteration, OSError, ValueError):
+                record = None
+        if record is None:
+            self.environment_id_edit.clear()
+            self.environment_name_edit.clear()
+            self.environment_kind_combo.setCurrentIndex(0)
+            self.environment_locator_edit.clear()
+            self.environment_cwd_edit.clear()
+            self.environment_variables_edit.clear()
+            self.environment_remove_button.setEnabled(False)
+            return
+        self.environment_id_edit.setText(record.id)
+        self.environment_name_edit.setText(record.name)
+        locator_kind = ""
+        locator_value = ""
+        for field in ("interpreter", "conda_env", "venv_path"):
+            value = getattr(record, field)
+            if value:
+                locator_kind, locator_value = field, value
+                break
+        index = self.environment_kind_combo.findData(locator_kind)
+        self.environment_kind_combo.setCurrentIndex(max(0, index))
+        self.environment_locator_edit.setText(locator_value)
+        self.environment_cwd_edit.setText(record.working_directory)
+        self.environment_variables_edit.setPlainText(
+            "\n".join(f"{key}={value}" for key, value in record.variables)
+        )
+        self.environment_remove_button.setEnabled(True)
+
+    def _new_environment(self):
+        self.environment_editor_combo.setCurrentIndex(0)
+        self.environment_id_edit.setFocus()
+
+    def _environment_variables(self):
+        variables = {}
+        for line in self.environment_variables_edit.toPlainText().splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "=" not in stripped:
+                raise ValueError(f"environment variable must be NAME=value: {stripped}")
+            key, value = stripped.split("=", 1)
+            if not key.strip():
+                raise ValueError("environment variable name cannot be empty")
+            variables[key.strip()] = value
+        return variables
+
+    def _save_environment(self):
+        environment_id = self.environment_id_edit.text().strip()
+        if not environment_id:
+            show_status_message(self._window, "Environment id is required.", timeout=3000)
+            return
+        locator_kind = str(self.environment_kind_combo.currentData() or "")
+        fields = {
+            "id": environment_id,
+            "name": self.environment_name_edit.text().strip() or environment_id,
+            "interpreter": "",
+            "conda_env": "",
+            "venv_path": "",
+            "working_directory": self.environment_cwd_edit.text().strip(),
+        }
+        if locator_kind:
+            fields[locator_kind] = self.environment_locator_edit.text().strip()
+        try:
+            fields["variables"] = self._environment_variables()
+            if self._editing_environment_id and self._editing_environment_id != environment_id:
+                library.remove_execution_environment(self._editing_environment_id)
+            library.update_execution_environment(**fields)
+        except Exception as exc:
+            show_status_message(self._window, f"Could not save environment: {exc}", timeout=4000)
+            return
+        self._editing_environment_id = environment_id
+        self._reload_environment_combos(str(self.environment_combo.currentData() or ""))
+        show_status_message(self._window, f"Saved environment “{fields['name']}”.", timeout=2500)
+
+    def _remove_environment(self):
+        environment_id = self._editing_environment_id
+        if not environment_id:
+            return
+        if library.remove_execution_environment(environment_id):
+            self._editing_environment_id = ""
+            self._reload_environment_combos()
+            show_status_message(self._window, "Removed execution environment.", timeout=2500)
+
+    def _review_imported_command(self):
+        operation_id = self._loaded_id
+        if operation_id and library.review_user_operation(operation_id):
+            self.select_operation(operation_id)
+            show_status_message(
+                self._window,
+                "Command definition marked reviewed; runtime availability was rechecked.",
+                timeout=3500,
+            )
 
     def _load_source_editor(self, definition, *, is_user: bool):
         source = definition.get("source") or {}

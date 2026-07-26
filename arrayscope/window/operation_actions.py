@@ -90,6 +90,7 @@ class OperationActionsMixin:
         """
 
         menu = QtWidgets.QMenu(self)
+        menu.setToolTipsVisible(True)
         sections = build_operation_listing()
         main_sections = [section for section in sections if not section.is_more]
         more_sections = [section for section in sections if section.is_more]
@@ -98,6 +99,7 @@ class OperationActionsMixin:
             self._add_operation_menu_actions(menu, section.entries, dim, anchor)
         if more_sections:
             more_menu = menu.addMenu(material_icon("more_horiz"), "More…")
+            more_menu.setToolTipsVisible(True)
             for index, section in enumerate(more_sections):
                 self._add_menu_section_header(more_menu, section.title, first=index == 0)
                 self._add_operation_menu_actions(more_menu, section.entries, dim, anchor)
@@ -137,6 +139,9 @@ class OperationActionsMixin:
             set_action_icon(action, _operation_icon_name(entry.id))
             action.setData(entry.id)
             action.setEnabled(self._operation_entry_enabled(entry, dim))
+            if entry.unavailable_reason:
+                action.setToolTip(entry.unavailable_reason)
+                action.setStatusTip(entry.unavailable_reason)
             action.triggered.connect(
                 lambda checked=False, operation_id=entry.id, dim=dim, anchor=anchor: (
                     self.request_operation(operation_id, dim, anchor=anchor)
@@ -179,6 +184,9 @@ class OperationActionsMixin:
             QtWidgets.QMessageBox.warning(
                 self, "Operation Error", f"Failed to apply operation:\n{e}"
             )
+            return None
+        if entry.unavailable_reason:
+            show_status_message(self, entry.unavailable_reason, timeout=4500)
             return None
         form = build_parameter_form(entry, shape=self.data.shape, axis=dim)
         if form is None:
@@ -255,6 +263,8 @@ class OperationActionsMixin:
                 kind="operation",
                 requires_axis=entry.requires_axis,
                 icon=_operation_icon_name(entry.id),
+                enabled=not bool(entry.unavailable_reason),
+                unavailable_reason=entry.unavailable_reason,
             )
             for entry in all_operations()
         ]
@@ -804,6 +814,8 @@ def _operation_enabled_for(entry, ndim, is_complex, shape, dim) -> bool:
     could apply on *some* axis (the dock add flow, before an axis is chosen).
     """
 
+    if entry.unavailable_reason:
+        return False
     if dim is not None and dim >= ndim:
         return False
     if entry.id in _REDUCTION_OPERATION_IDS and ndim <= 1:

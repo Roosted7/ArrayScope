@@ -168,12 +168,24 @@ class OperationAddPopup(EditBubble):
         self._list.addItem(item)
 
     def _add_op_row(self, entry: OperationEntry) -> None:
-        item = QtWidgets.QListWidgetItem(material_icon(entry.icon), entry.label.rstrip("."))
+        reason = str(entry.unavailable_reason or "")
+        label = entry.label.rstrip(".")
+        if reason:
+            label = f"{label}  (unavailable)"
+        item = QtWidgets.QListWidgetItem(material_icon(entry.icon), label)
         item.setData(_ROLE_KIND, _KIND_OP)
         item.setData(_ROLE_OP, entry.id)
-        if entry.description:
+        if reason:
+            item.setToolTip(reason)
+            item.setForeground(
+                QtWidgets.QApplication.palette().brush(
+                    QtGui.QPalette.ColorGroup.Disabled,
+                    QtGui.QPalette.ColorRole.Text,
+                )
+            )
+        elif entry.description:
             item.setToolTip(entry.description)
-        if not self._is_enabled(entry):
+        if reason or not self._is_enabled(entry):
             item.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)
         item.setSizeHint(QtCore.QSize(0, 26))
         self._list.addItem(item)
@@ -236,7 +248,7 @@ class OperationAddPopup(EditBubble):
 
     def _activate_operation(self, op_id: str) -> None:
         entry = self._by_id.get(op_id)
-        if entry is None:
+        if entry is None or entry.unavailable_reason or not self._is_enabled(entry):
             return
         axis = self._selected_axis(entry)
         self.close()
