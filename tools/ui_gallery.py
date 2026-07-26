@@ -477,12 +477,28 @@ def s_operation_add_popup(ctx: Ctx):
     # is a fixed-height scroll area, so bring a revealed backend op into view
     # (selecting it auto-scrolls) to actually show the expanded state.
     popup.set_expanded(True)
-    for op_id in ("sigpy:soft_thresh", "sigpy:hard_thresh", "bart:pics"):
+    for op_id in ("sigpy:soft_thresh", "sigpy:hard_thresh"):
         if popup.select_operation(op_id):
             break
     popup.adjustSize()
     ctx.pump(4)
     ctx.shot(popup, "add_popup_more")
+    # BART examples are intentionally unavailable until the shape-discovery
+    # bundle can characterize them. Keep one disabled row in-frame so disabled
+    # styling and its tooltip-bearing presence are reviewable.
+    unavailable_item = next(
+        (
+            popup._list.item(row)
+            for row in range(popup._list.count())
+            if popup._list.item(row).data(0x0101) == "bart:ecalib"
+        ),
+        None,
+    )
+    if unavailable_item is None:
+        raise RuntimeError("unavailable BART example missing from operation add popup")
+    popup._list.scrollToItem(unavailable_item)
+    ctx.pump(4)
+    ctx.shot(popup, "add_popup_unavailable")
     # Highlight an axis-requiring op so the inline axis combo row appears.
     if not popup.select_operation("crop"):
         raise RuntimeError("crop row not selectable in add popup")
@@ -503,9 +519,9 @@ def s_operation_params_popup(ctx: Ctx):
     ctx.pump(4)
     ctx.shot(popup, "params_crop")
 
-    from arrayscope.operations.packs.sigpy_pack import sigpy_available
+    from arrayscope.operations.registry import all_operations
 
-    if sigpy_available():
+    if "sigpy:soft_thresh" in {entry.id for entry in all_operations()}:
         # soft_thresh has requires_axis=False -> pass dim=None.
         win.request_operation("sigpy:soft_thresh", None, anchor=anchor)
         sig_popup = win._operation_params_popup
@@ -562,6 +578,37 @@ def s_operation_manager(ctx: Ctx):
         ],
     )
     library.set_operation_hidden("fftshift", True)
+    command_id = library.create_empty_user_operation()
+    library.update_user_operation(
+        command_id,
+        label="Command reconstruction",
+        description="Editable external reconstruction command.",
+        runtime="command",
+        command_template="recon-tool --iterations {iterations} {in} {out}",
+        handoff="npy",
+        timeout_s=120,
+        environment="bart",
+        template=None,
+        parameters=[
+            {
+                "name": "iterations",
+                "label": "Iterations",
+                "kind": "int",
+                "default": 30,
+                "minimum": 1,
+                "maximum": 500,
+            }
+        ],
+    )
+    library.update_execution_environment(
+        id="bart",
+        name="BART toolbox",
+        working_directory="/data/reconstruction",
+        variables={
+            "BART_TOOLBOX_PATH": "/opt/bart",
+            "OMP_NUM_THREADS": "4",
+        },
+    )
     library.refresh_user_operations()
 
     win = ctx.window(_volume3d(), size=(900, 760))
@@ -593,6 +640,21 @@ def s_operation_manager(ctx: Ctx):
     dialog._populate_source_file(str(src_dir / "smooth.py"))
     ctx.pump(6)
     ctx.shot(dialog, "source_callable_picker")
+
+    dialog.advanced_button.setChecked(False)
+    if not dialog.select_operation(command_id):
+        raise RuntimeError("command definition missing from operation manager")
+    ctx.pump(6)
+    ctx.shot(dialog, "command_template_advanced_collapsed")
+
+    dialog.advanced_button.setChecked(True)
+    environment_index = dialog.environment_editor_combo.findData("bart")
+    dialog.environment_editor_combo.setCurrentIndex(environment_index)
+    dialog.resize(860, 1060)
+    ctx.pump(6)
+    ctx.shot(dialog, "command_template_environments_expanded")
+    dialog.advanced_button.setChecked(False)
+    dialog.resize(780, 720)
 
     problems_item = None
     for index in range(dialog.tree.topLevelItemCount()):
