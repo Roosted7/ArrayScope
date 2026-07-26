@@ -80,6 +80,7 @@ apply_channel = slice_engine.apply_channel
 complex_to_rgb = slice_engine.complex_to_rgb
 make_image = slice_engine.make_image
 make_image_from_slab = slice_engine.make_image_from_slab
+make_shader_image = slice_engine.make_shader_image
 make_shader_image_from_slab = slice_engine.make_shader_image_from_slab
 make_export_frame = slice_engine.make_export_frame
 make_line = slice_engine.make_line
@@ -260,6 +261,47 @@ def test_make_shader_image_from_slab_keeps_scalar_texture_unscaled_and_histogram
     np.testing.assert_allclose(image.histogram_data, np.log10(data))
     assert image.texture_kind == "scalar_r32f"
     assert image.shader_mapping.scale == "log"
+
+
+@pytest.mark.parametrize(
+    ("dtype", "channel"),
+    [
+        (np.float32, ChannelMode.REAL),
+        (np.complex64, ChannelMode.ABS),
+        (np.complex64, ChannelMode.COMPLEX),
+    ],
+)
+def test_make_shader_image_matches_an_equivalent_pre_sliced_slab(dtype, channel):
+    data = np.arange(4 * 5 * 3, dtype=np.float32).reshape(4, 5, 3).astype(dtype)
+    if np.issubdtype(dtype, np.complexfloating):
+        data = data + 1j * data[::-1]
+    state = state_for(
+        data.shape,
+        image_axes=(1, 0),
+        line_axis=0,
+        slices=(0, 0, 2),
+        channel=channel,
+        scale=ScaleMode.LOG,
+    )
+
+    direct = make_shader_image(
+        data,
+        state,
+        provisional_histogram=True,
+        canonical_orientation=False,
+    )
+    slab = data[:, :, 2]
+    from_slab = make_shader_image_from_slab(
+        slab,
+        _FakeImageRequest(state),
+        provisional_histogram=True,
+        canonical_orientation=False,
+    )
+
+    np.testing.assert_array_equal(direct.data, from_slab.data)
+    np.testing.assert_array_equal(direct.level_data, from_slab.level_data)
+    assert direct.shader_mapping == from_slab.shader_mapping
+    assert direct.texture_kind == from_slab.texture_kind
 
 
 def test_make_shader_image_from_slab_keeps_complex_texture_raw_and_histogram_scaled():

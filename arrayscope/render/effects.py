@@ -42,6 +42,7 @@ from arrayscope.display.shader_mapping import (
 from arrayscope.display.slice_engine import (
     make_image,
     make_image_from_slab,
+    make_shader_image,
     make_shader_image_from_slab,
 )
 from arrayscope.gpu.chunk_summary import aggregate_chunk_summaries, summarize_chunk
@@ -558,9 +559,6 @@ def evaluate_shared_preview(
     shader_preview = bool(shader_display) or (
         not bool(getattr(session, "rgb", False)) and not np.iscomplexobj(transformed)
     )
-    preview_document = (
-        ArrayDocument(transformed, revision=session.document.revision) if shader_preview else None
-    )
     for tile in tuple(tiles or ()):
         _check_preview_cancelled(cancellation_token)
         preview_state = reduced_preview_view_state(
@@ -575,18 +573,13 @@ def evaluate_shared_preview(
         )
         canonical_orientation = bool(getattr(session, "canonical_orientation", False))
         if shader_preview:
-            result = evaluate_image_snapshot(
-                preview_document,
+            value = make_shader_image(
+                transformed,
                 preview_state,
                 colormap_lut=session.colormap_lut,
-                cancellation_token=cancellation_token,
-                degraded=True,
-                shader_display=True,
                 provisional_histogram=True,
-                evaluation_context=evaluation_context,
                 canonical_orientation=canonical_orientation,
             )
-            value = result.value
         else:
             value = make_image(
                 transformed,

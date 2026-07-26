@@ -533,6 +533,29 @@ def test_shared_preview_stays_two_levels_coarser_than_demanded_lod():
     assert {row[1].level_xy for row in previews} == {(3, 3)}
 
 
+def test_shared_preview_slices_the_reduced_volume_without_per_tile_slab_plans(monkeypatch):
+    session = _session()
+    tiles = session.plan.tiles[:2]
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("shared preview must not plan one document slab per tile")
+
+    monkeypatch.setattr(effects, "evaluate_image_snapshot", forbidden)
+
+    previews = effects.evaluate_shared_preview(
+        session,
+        tiles[0],
+        tiles,
+        demand=_demand(0),
+        level=2,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert len(previews) == 2
+
+
 def test_reduced_preview_base_samples_display_axes_before_operation_input():
     session = _session()
     demand = _demand(1)

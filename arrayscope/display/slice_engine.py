@@ -183,6 +183,38 @@ def make_image_from_slab(slab, request, colormap_lut=None, *, canonical_orientat
     )
 
 
+def make_shader_image(
+    data,
+    state,
+    colormap_lut=None,
+    *,
+    provisional_histogram: bool = False,
+    canonical_orientation: bool = False,
+):
+    """Create a shader-capable image directly from an in-memory volume.
+
+    Unlike ``make_shader_image_from_slab``, this owns the display-axis slice.
+    Shared montage preview uses it after evaluating one reduced volume so each
+    logical tile does not re-enter the document slab planner.
+    """
+
+    state = _validated_state_for_data(data, state)
+    if state.image_axes is None:
+        raise ValueError("image_axes must be set to make an image")
+
+    image_data, present_axes = _extract_display_axes(data, state, state.image_axes)
+    image_data = _apply_display_axis_ranges(image_data, state, present_axes)
+    image_data = _reorder_present_axes(
+        image_data, present_axes, _reorder_target_axes(state.image_axes, canonical_orientation)
+    )
+    return _make_shader_display_image(
+        _ensure_image_rank(image_data),
+        state,
+        colormap_lut=colormap_lut,
+        provisional_histogram=provisional_histogram,
+    )
+
+
 def make_shader_image_from_slab(
     slab,
     request,
@@ -204,8 +236,21 @@ def make_shader_image_from_slab(
     image_data = _reorder_present_axes(
         image_data, present_axes, _reorder_target_axes(state.image_axes, canonical_orientation)
     )
-    image_data = _ensure_image_rank(image_data)
+    return _make_shader_display_image(
+        _ensure_image_rank(image_data),
+        state,
+        colormap_lut=colormap_lut,
+        provisional_histogram=provisional_histogram,
+    )
 
+
+def _make_shader_display_image(
+    image_data,
+    state,
+    *,
+    colormap_lut=None,
+    provisional_histogram: bool,
+):
     channel = _channel_mode(state.channel)
     if np.iscomplexobj(image_data):
         component = _shader_component_for_channel(channel)
