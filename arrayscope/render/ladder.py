@@ -187,9 +187,19 @@ class LodLadder:
         steps: list[RungStep] = []
 
         presented = state.presented_level
-        presented_preview = (
-            str(getattr(state, "presented_quality", "exact") or "exact") == "preview"
-        )
+        # Both vocabularies circulate: the lifecycle records a retained floor
+        # as quality="fallback" while its display payload is labelled
+        # "preview" (tile_identity maps between them), and `ready_preview`
+        # below has always accepted the pair. Accepting only "preview" here
+        # made a presented fallback AT the desired level read as converged and
+        # plan no refinement at all -- member 5 of the 2026-07-16 churn
+        # starvation family, whose belt-and-braces guard in the shared exact
+        # pass ADR 0059 retired. A non-exact payload never satisfies a demand,
+        # whatever it is called.
+        presented_preview = str(getattr(state, "presented_quality", "exact") or "exact") in {
+            "preview",
+            "fallback",
+        }
         resident = frozenset(int(level) for level in state.resident_levels)
         ready = None if state.ready_level is None else int(state.ready_level)
         ready_preview = str(state.ready_quality or "") in {"preview", "fallback"}

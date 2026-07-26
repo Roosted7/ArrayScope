@@ -297,3 +297,39 @@ def test_raw_montage_has_one_coarse_rung_then_refines():
     assert (
         ladder.coarse_rung_refusal(floored, demand(2)) == ladder_module.COARSE_RUNG_ALREADY_COVERED
     )
+
+
+def test_fallback_at_the_desired_level_still_plans_a_desired_step():
+    """2026-07-16 churn starvation, member 5 of the deferred-stage/commit
+    lost-wakeup family (docs/redesign/stale-empty-tiles-2026-07-16.md).
+
+    A tile presenting a retained FALLBACK floor AT the (re-coarsened) desired
+    level has correct-looking pixels and an open exact target. Filtering it out
+    of refinement parked 38 such tiles with the kernel idle, immune to
+    retargets. ADR 0059 retired the shared exact pass that used to carry this
+    invariant, so it is pinned here on the owner that carries it now: a
+    non-exact payload never satisfies the demand, whatever its level.
+    """
+
+    ladder = LodLadder(LadderPolicy(floor_level=4))
+    for quality in ("preview", "fallback"):
+        state = TileLodState(
+            tile_number=0,
+            resident_levels=(2,),
+            presented_level=2,
+            presented_quality=quality,
+            current_presentation_quality=quality,
+        )
+        rungs = [step.rung for step in ladder.plan_tile(state, demand(2))]
+        assert Rung.DESIRED in rungs, f"{quality} at the desired level must still refine"
+
+    # The exact payload at the same level is what settles it — otherwise this
+    # test would pass just as well against a ladder that never converges.
+    settled = TileLodState(
+        tile_number=0,
+        resident_levels=(2,),
+        presented_level=2,
+        presented_quality="exact",
+        current_presentation_quality="exact",
+    )
+    assert [step.rung for step in ladder.plan_tile(settled, demand(2))] == []
