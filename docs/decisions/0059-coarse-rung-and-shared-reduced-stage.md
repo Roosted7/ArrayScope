@@ -40,7 +40,7 @@ gate 1's per-tile arm cost 65.5 s of worker time because each tile ran a full
 evaluation is expensive per tile. The symptom was reported correctly; the
 cause was not.
 
-### The reduction dominates the transform, so the coarse level is not a cost lever
+### The level is a 10× compute lever — and the retention floor already lands past its knee
 
 Measured directly on the dataset (three runs, best of):
 
@@ -53,12 +53,38 @@ Measured directly on the dataset (three runs, best of):
 | 4 | 21×21×272 | 35.5 ms | **1.0 ms** | 36.5 ms |
 | 5 | 11×11×272 | 15.8 ms | 0.6 ms | 16.3 ms |
 
-At level 4 the transform costs **1.0 ms** and the reduction that feeds it costs
-**35.5 ms** — 97% of the work is a full pass over the 30.7 M source texels,
-which no choice of level avoids. This is the same wall the instrumentation
-session hit from the other side (16× input buys ~2×). **A coarser preview level
-cannot buy meaningful compute**, because the input must be read in full to be
-reduced at all.
+Read the table honestly: **level is a large compute lever.** Level 1 costs
+358.7 ms and level 4 costs 36.5 ms — 10×, and the reduce column halves per
+level (230.5 → 118.1 → 63.9 → 35.5 → 15.8) rather than staying flat. An
+earlier draft of this ADR claimed the reduction was level-independent "because
+it reads the whole source either way"; that is refuted by its own table. The
+reduce cost scales with the *output*, not the input, so a read-bound constant
+is exactly what it is not. (Cross-checked on a synthetic `(336,336,272)`
+float32 volume: reduce 26.3/17.2/10.6/10.2/7.7 ms for factors 2/4/8/16/32 —
+flatter than the numbers above, same 100×+ transform swing.)
+
+What actually removes the compute-side level driver is narrower, and it is a
+clamp rather than a physical law. `preview_level_for_tile_shape` ends in
+`max(int(min_level), level)`, and `frame_controller` passes
+`min_level=PREVIEW_FLOOR_MIN_LEVEL = 4`, so **the retention formula can never
+choose a level finer than 4** — and `preview_evaluation_level` only ever
+coarsens it further (`max(desired, preview)`). Level 4 is already past the knee
+where the transform stops mattering (1.0 ms of a 36.5 ms rung). A compute-aware
+level driver would therefore have nothing left to optimise *given today's
+floor*.
+
+Stated so a future reader is not misled: **a finer coarse rung is not free. If
+`PREVIEW_FLOOR_MIN_LEVEL` ever moves finer, the compute term returns as a ~10×
+lever and this decision must be revisited.** The claim below is conditional on
+that floor, not on level-independence.
+
+Nor is 35.5 ms a floor on the reduction itself — it is an implementation, not
+physics. `render/effects.py:reduce_nd_axis_mean` is pure NumPy and makes **two
+separate axis passes** with a dtype conversion, materialising an intermediate;
+the accelerated kernel in `display/_numba_pyramid` (njit, `parallel=True`,
+`prange`) serves only 2D pyramid pages and returns `None` until its kernels
+finish compiling, so the reduced *volume* path never reaches it. That gap is
+the likeliest reason these numbers run 3–4× above the synthetic cross-check.
 
 ### The serial cost is the fan-out, not the evaluation
 
@@ -105,10 +131,10 @@ CoarseRung(level, retained: bool, evaluate_at: reduced | native_then_reduce)
 `preview_level_for_tile_shape(target_edge=48)` — whole-stack footprint against
 spare display budget — which answers its own question well. The proposed
 second driver, a compute-derived preview level "adaptive to operation cost per
-texel", **is dropped**: the table above shows the transform is 1.0 ms at the
-level that formula already picks, and the reduction that dominates is
-level-independent because it reads the whole source either way. There is no
-compute-side level to choose.
+texel", **is dropped as redundant, not as worthless**: the retention formula's
+`min_level=4` clamp already lands past the knee, where the transform is 1.0 ms
+of a 36.5 ms rung, so a compute-aware driver could only agree with it. It stops
+being redundant the moment that floor moves finer, where level is worth 10×.
 
 This is the simplification the §7 proposal was reaching for. The coarse rung's
 real degrees of freedom are **who evaluates it** and **how the result is fanned
@@ -201,6 +227,19 @@ Expected, and each one is a gate below rather than a claim:
   and no first-pixel claim should be made without measuring it: it is the
   standing "per-commit whole-montage cost" queue item, and the coarse rung
   merely stops being the reason it is not reached.
+  [The per-commit dossier](../redesign/per-commit-transaction-count-2026-07-26.md)
+  prices it: `apply` is 63–69% of every commit and scales with `presented`
+  rather than with the delta, so two commits per fill cost 93.0 and 89.8 ms
+  while carrying a *zero* delta at 272 presented. The implementation's
+  obligation is therefore narrow but real — **the fan-out must not multiply the
+  number of commits.** Parallel fan-out tasks must feed the existing bounded
+  commit cohorts, not one commit per task.
+
+- **Non-goal: optimising the reduction.** Even erasing it entirely saves 35.5 ms
+  against 643 ms of compute and 3171 ms of admission — 5% of compute, under 1%
+  end-to-end. This is the fourth time this investigation has found the
+  arithmetic irrelevant beside the scheduling shape, and it is recorded here so
+  the numba gap noted above is not reopened as an optimisation.
 
 ### Gates
 
@@ -211,9 +250,13 @@ Expected, and each one is a gate below rather than a claim:
    attach/hit diagnostics), not 272.
 3. Coarse-rung acks carry the operation key at `quality="preview"`, and every
    tile's coarse ack precedes its exact ack.
-4. Full refined stays at or under baseline (~5.2 s, order-balanced pair; the
-   FFT stage from single runs only — `--repeat 3` inflates it 40% through
-   worker contention).
+4. Full refined stays at or under baseline (~5.2 s). Quote a **median over at
+   least three order-balanced passes** and say how many: the per-commit dossier
+   found the refinement is bistable — one unmodified baseline pass took 49
+   batches over 8.0 s with `fully_visible_ms` 16 015 against the usual 2
+   batches over 0.28 s — so a single pass can land on that tail and prove
+   nothing. The FFT stage must still come from single runs, never `--repeat`,
+   which inflates it 40% through worker contention.
 5. `montage_quality_rung_evaluations` shows the coarse rung's cost, and the
    ladder gate counters no longer report `floor already covers this level` as
    the dominant refusal on the raw stage.
@@ -226,9 +269,12 @@ Expected, and each one is a gate below rather than a claim:
   applies to the *evaluation*, which stays single). Rejected because it leaves
   two owners of "evaluate once, fan out", keeps the global barrier, and
   reproduces by hand what the stage cache does by construction.
-- **Adaptive compute-driven preview level** (§7's proposal). Rejected on the
-  measurement above: at the level retention already picks, the transform costs
-  1.0 ms.
+- **Adaptive compute-driven preview level** (§7's proposal). Rejected as
+  redundant *under today's floor*: `PREVIEW_FLOOR_MIN_LEVEL = 4` means
+  retention never picks finer than level 4, where the transform is 1.0 ms of a
+  36.5 ms rung, so a compute-aware driver has nothing to add. Not rejected on
+  the grounds that level is cheap — level 1 costs 10× level 4, and this bullet
+  reverses if the floor ever moves finer.
 - **Keep FLOOR and PREVIEW separate and fix the guard.** Rejected: their levels
   come from one value today, and the merged rung needs one level anyway once
   the compute driver is dropped.
