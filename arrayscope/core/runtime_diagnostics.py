@@ -157,6 +157,17 @@ class MontageRuntimeDiagnostics:
     # counter — usable where the stage's own wall clock is too noisy to show a
     # change (raw montage spread is 4.0-4.9 s on the reference machine).
     tile_lod_rung_evaluations: tuple[dict[str, object], ...] = ()
+    # Why tiles got no FLOOR/PREVIEW rung, cumulative over the session's
+    # plans and measured in TILE-PLANS (one tile in one plan), commonest first,
+    # plus the policy those plans were made against.  "No coarse rung" is
+    # otherwise an absence, and an absence names no cause — reading the code to
+    # guess got the FFT answer wrong.  Cumulative rather than last-plan because
+    # a settled fill's final plan is converged, and its reason ("covered") is
+    # the opposite of the cold-fill answer the question is about.
+    tile_lod_coarse_rung_gates: tuple[tuple[str, int], ...] = ()
+    tile_lod_ladder_floor_level: int = -1
+    tile_lod_ladder_preview_level: int = -1
+    tile_lod_ladder_reduced_input: bool = False
     # ADR 0050 zero-redundant-work counters: histogram/level recomputes caused
     # by display-LOD level swaps must stay 0; the reuse counters make the
     # avoided work observable in JSONL A/B traces.
@@ -990,6 +1001,10 @@ _MONTAGE_COVERED = frozenset(
         "tile_lod_preview_reduced_last_gate",
         "tile_lod_preview_presentations",
         "tile_lod_rung_evaluations",
+        "tile_lod_coarse_rung_gates",
+        "tile_lod_ladder_floor_level",
+        "tile_lod_ladder_preview_level",
+        "tile_lod_ladder_reduced_input",
         "tile_lod_stats_cross_level_reuses",
         "tile_lod_stats_recomputes",
         "tile_lod_cross_level_reductions",
@@ -1138,6 +1153,30 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         or int(row.get("raw_resident_layers", 0) or 0) > 0
         or int(row.get("codec_resident_layers", 0) or 0) > 0
     )
+    coarse_rung_gate_lines = (
+        (
+            (
+                "Coarse rung: "
+                f"floor=L{montage.tile_lod_ladder_floor_level} "
+                f"preview=L{montage.tile_lod_ladder_preview_level} "
+                f"reduced_input={_bool_text(montage.tile_lod_ladder_reduced_input)}"
+            ),
+            *(
+                (
+                    "  no coarse rung (tile-plans): "
+                    + "; ".join(
+                        f"{count}x {reason or 'planned'}"
+                        for reason, count in montage.tile_lod_coarse_rung_gates
+                        if reason
+                    ),
+                )
+                if any(reason for reason, _count in montage.tile_lod_coarse_rung_gates)
+                else ()
+            ),
+        )
+        if montage.tile_lod_ladder_preview_level >= 0
+        else ()
+    )
     rung_evaluation_lines = (
         (
             "Rung evaluation: "
@@ -1147,6 +1186,11 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
                     f"{int(row.get('calls', 0) or 0)}x"
                     f"{float(row.get('total_ms', 0.0) or 0.0):.0f}ms"
                     f"/max {float(row.get('max_ms', 0.0) or 0.0):.0f}"
+                    + (
+                        f" DISCARDED {int(row.get('discarded', 0) or 0)}"
+                        if int(row.get("discarded", 0) or 0)
+                        else ""
+                    )
                 )
                 for row in montage.tile_lod_rung_evaluations
             ),
@@ -1306,6 +1350,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"hist_recomputes={montage.tile_histogram_lod_swap_recomputes} "
             f"hist_reuses={montage.tile_histogram_cross_level_reuses}"
         ),
+        *coarse_rung_gate_lines,
         *rung_evaluation_lines,
         # -- timings, grouped; n/a entries hidden --
         _ms_group(

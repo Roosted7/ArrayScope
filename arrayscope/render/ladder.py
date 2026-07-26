@@ -110,11 +110,82 @@ class LadderPolicy:
     levels_authoritative_rung: Rung = Rung.PREVIEW
 
 
+#: Why a tile got no coarse (FLOOR/PREVIEW) rung, in the order `plan_tile`
+#: decides it.  Interned constants, not f-strings: the refusal is asked once per
+#: tile per replan (272 tiles x ~25 replans on a cold montage fill), so the
+#: answer must cost a few comparisons and no allocation.  The numbers that go
+#: with a verdict travel beside it, once per plan, not once per tile.
+COARSE_RUNG_NATIVE_ONLY = "native-only policy: no coarse rung exists"
+COARSE_RUNG_PREVIEW_NOT_ALLOWED = "allow_preview false: tile is covered or too few missing"
+COARSE_RUNG_LEVEL_NOT_COARSER = "preview level not coarser than the demand"
+COARSE_RUNG_NO_REDUCED_INPUT = "no reduced input and no retained floor"
+COARSE_RUNG_ALREADY_COVERED = "tile already has committable coverage"
+COARSE_RUNG_FLOOR_COVERS_LEVEL = "floor already covers this level"
+COARSE_RUNG_LANE_NOT_ADMITTED = "scheduling verdict does not admit the coarse lane"
+COARSE_RUNG_PLANNED = ""
+
+
 class LodLadder:
     """Pure rung planner. Construct once per policy; plan per tile+demand."""
 
     def __init__(self, policy: LadderPolicy | None = None) -> None:
         self.policy = policy or LadderPolicy()
+
+    # ------------------------------------------------------------ reporting
+
+    def coarse_rung_refusal(
+        self,
+        state: TileLodState,
+        demand: LodDemand,
+        verdict: SchedulingVerdict | None = None,
+    ) -> str:
+        """Why this tile gets no FLOOR/PREVIEW step, or `""` if it gets one.
+
+        "The ladder planned no coarse rung" is otherwise an absence, and an
+        absence names no cause: the 2026-07-26 preview-LOD work attributed a
+        missing FFT preview to `allow_preview` by reading code, and the
+        attribution was wrong.  This answers the question from the same
+        expressions `plan_tile` decides with, evaluated in the same order.
+        """
+
+        policy = self.policy
+        if policy.mode == "native-only":
+            return COARSE_RUNG_NATIVE_ONLY
+        if not bool(state.allow_preview):
+            return COARSE_RUNG_PREVIEW_NOT_ALLOWED
+        desired = max(0, int(demand.desired_level))
+        if desired >= max(0, int(policy.preview_level)):
+            return COARSE_RUNG_LEVEL_NOT_COARSER
+        if not (policy.reduced_input_available or state.floor_available):
+            return COARSE_RUNG_NO_REDUCED_INPUT
+        # Past the shared gate: whichever coarse rung survives its own guard is
+        # the one that would be planned.
+        blank = (
+            state.presented_level is None
+            and state.ready_level is None
+            and not state.resident_levels
+        )
+        if blank:
+            lane = Lane.DISPLAY_PREVIEW
+            if verdict is not None and not verdict.admits_lane(lane):
+                return COARSE_RUNG_LANE_NOT_ADMITTED
+            return COARSE_RUNG_PLANNED
+        if not policy.reduced_input_available:
+            return COARSE_RUNG_ALREADY_COVERED
+        preview_level = max(int(policy.preview_level), desired)
+        finest = min(
+            [float(level) for level in state.resident_levels]
+            + [
+                float(value)
+                for value in (state.presented_level, state.ready_level)
+                if value is not None
+            ]
+        )
+        if preview_level >= finest:
+            return COARSE_RUNG_FLOOR_COVERS_LEVEL
+        if verdict is not None and not verdict.admits_lane(Lane.DISPLAY_PREVIEW):
+            return COARSE_RUNG_LANE_NOT_ADMITTED
+        return COARSE_RUNG_PLANNED
 
     # ------------------------------------------------------------ planning
 
@@ -324,4 +395,18 @@ class LodLadder:
         )
 
 
-__all__ = ["LadderPolicy", "LodLadder", "Rung", "RungStep", "TileLodState"]
+__all__ = [
+    "COARSE_RUNG_ALREADY_COVERED",
+    "COARSE_RUNG_FLOOR_COVERS_LEVEL",
+    "COARSE_RUNG_LANE_NOT_ADMITTED",
+    "COARSE_RUNG_LEVEL_NOT_COARSER",
+    "COARSE_RUNG_NATIVE_ONLY",
+    "COARSE_RUNG_NO_REDUCED_INPUT",
+    "COARSE_RUNG_PLANNED",
+    "COARSE_RUNG_PREVIEW_NOT_ALLOWED",
+    "LadderPolicy",
+    "LodLadder",
+    "Rung",
+    "RungStep",
+    "TileLodState",
+]

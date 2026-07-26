@@ -31,6 +31,7 @@ def test_calls_and_time_accumulate_per_rung_and_level():
             "rung_name": "floor",
             "level": 4,
             "calls": 2,
+            "discarded": 0,
             "total_ms": 8.0,
             "max_ms": 6.0,
         },
@@ -39,6 +40,7 @@ def test_calls_and_time_accumulate_per_rung_and_level():
             "rung_name": "desired",
             "level": 2,
             "calls": 1,
+            "discarded": 0,
             "total_ms": 1.5,
             "max_ms": 1.5,
         },
@@ -105,3 +107,36 @@ def test_concurrent_recording_loses_no_calls():
     assert len(rows) == 4
     assert all(int(row["calls"]) == 500 for row in rows)
     assert all(row["total_ms"] == 0.5 for row in rows)
+
+
+def test_discarded_evaluations_are_counted_beside_the_cost_that_spent_them():
+    """Spent-and-thrown-away has to be separable from spent-and-used.
+
+    Measured on the FFT montage: 8 level-1 evaluations at a 1041 ms mean, all
+    discarded, inside a 5.5 s stage. The aggregate time alone cannot say that.
+    """
+
+    timings = RungEvaluationTimings()
+    for _ in range(8):
+        timings.record(Rung.DESIRED, 1, 1_040_000_000)
+        timings.record_discarded(Rung.DESIRED, 1)
+    timings.record(Rung.DESIRED, 2, 20_000_000)
+
+    rows = {(int(row["rung"]), int(row["level"])): row for row in timings.rows()}
+    assert rows[(2, 1)]["calls"] == 8
+    assert rows[(2, 1)]["discarded"] == 8
+    # Priced from the row itself: discarded x mean.
+    mean_ms = float(rows[(2, 1)]["total_ms"]) / int(rows[(2, 1)]["calls"])
+    assert int(rows[(2, 1)]["discarded"]) * mean_ms == 8320.0
+    assert rows[(2, 2)]["discarded"] == 0
+
+
+def test_a_discard_with_no_timed_call_still_reports_a_row():
+    """A discard must never be silently dropped for lack of a timing partner."""
+
+    timings = RungEvaluationTimings()
+    timings.record_discarded(Rung.PREVIEW, 4)
+
+    (row,) = timings.rows()
+    assert (row["rung"], row["level"], row["calls"], row["discarded"]) == (1, 4, 0, 1)
+    assert row["total_ms"] == 0.0

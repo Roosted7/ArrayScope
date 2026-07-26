@@ -638,3 +638,124 @@ def test_failed_rung_evaluation_still_reports_the_work_it_burned():
     drain(kernel)
 
     assert sum(int(row["calls"]) for row in pipeline.rung_timings.rows()) == 2
+
+
+def test_superseded_rung_evaluation_is_counted_as_discarded_work():
+    """A finished evaluation that cannot commit is spent work, and says so."""
+
+    kernel, _effects, pipeline = make_pipeline(tiles=1)
+    pipeline.retarget(intent(semantic="doc-v1"), demand(1), scope(0, missing=1))
+    # Semantic change before the results drain: nothing may commit.
+    pipeline.retarget(intent(semantic="doc-v2"), demand(1), scope(0, missing=1))
+    drain(kernel)
+
+    rows = {(int(r["rung"]), int(r["level"])): r for r in pipeline.rung_timings.rows()}
+    assert sum(int(r["discarded"]) for r in rows.values()) >= 2
+    assert all(int(r["discarded"]) <= int(r["calls"]) for r in rows.values())
+
+
+def test_committed_rung_evaluation_is_not_counted_as_discarded():
+    kernel, effects, pipeline = make_pipeline(tiles=1)
+    pipeline.retarget(intent(), demand(1), scope(0, missing=1))
+    drain(kernel)
+
+    assert effects.batches
+    assert all(int(row["discarded"]) == 0 for row in pipeline.rung_timings.rows())
+
+
+def test_plan_reports_why_tiles_got_no_coarse_rung():
+    """A plan of pure DESIRED steps must name the gate, not just omit rungs."""
+
+    from arrayscope.render import ladder as ladder_module
+
+    _kernel, _effects, pipeline = make_pipeline(
+        tiles=2, floor_level=4, preview_level=4, reduced_input_available=False
+    )
+    pipeline.retarget(intent(), demand(2), scope(0, 1, missing=2))
+
+    assert [rung for _tile, rung, _level in pipeline.last_plan_steps] == [2, 2]
+    assert pipeline.last_coarse_rung_refusals == ((ladder_module.COARSE_RUNG_NO_REDUCED_INPUT, 2),)
+
+
+def test_tiles_that_got_a_coarse_rung_are_not_reported_as_refused():
+    _kernel, _effects, pipeline = make_pipeline(tiles=2)
+    pipeline.retarget(intent(), demand(1), scope(0, 1, missing=2))
+
+    assert any(rung == 0 for _tile, rung, _level in pipeline.last_plan_steps)
+    assert pipeline.last_coarse_rung_refusals == ()
+
+
+def test_rung_superseded_before_it_ran_is_not_counted_as_spent_work():
+    """Discards must count evaluations, not admissions.
+
+    A queued rung the kernel supersedes before a worker picks it up spent
+    nothing. Counting those made the FFT stage report 32 discarded level-1
+    evaluations against 8 that ran — a 45.9 s waste inside a 5.4 s stage.
+    """
+
+    backend = ManualBackend()
+    kernel = Kernel(backend, handler_error_hook=lambda ctx, exc: None)
+    effects = StubEffects(tiles=2)
+    pipeline = FramePipeline(kernel, effects, LodLadder())
+
+    # Queue work, then supersede the whole scope before any worker runs it.
+    pipeline.retarget(intent(semantic="doc-v1"), demand(1), scope(0, 1, missing=2))
+    assert effects.evaluated == []
+    pipeline.retarget(intent(semantic="doc-v2"), demand(1), scope(0, 1, missing=2))
+    while backend.run_next():
+        drain(kernel)
+    drain(kernel)
+
+    rows = pipeline.rung_timings.rows()
+    for row in rows:
+        assert int(row["discarded"]) <= int(row["calls"]), (
+            f"{row['rung_name']}@L{row['level']} reports {row['discarded']} discarded "
+            f"against {row['calls']} evaluations"
+        )
+
+
+def test_discarded_never_exceeds_calls_even_when_everything_is_superseded():
+    kernel, effects, pipeline = make_pipeline(tiles=3)
+    for generation in range(4):
+        pipeline.retarget(
+            intent(semantic=f"doc-v{generation}"), demand(1), scope(0, 1, 2, missing=3)
+        )
+    drain(kernel)
+
+    rows = pipeline.rung_timings.rows()
+    assert rows
+    assert sum(int(row["calls"]) for row in rows) == len(effects.evaluated)
+    assert all(int(row["discarded"]) <= int(row["calls"]) for row in rows)
+
+
+def test_coarse_rung_gate_history_survives_the_plan_that_converges():
+    """The cumulative gate must not be overwritten by the converged plan.
+
+    A settled fill's last plan refuses coarse rungs because the tiles are now
+    covered. Reporting only that answers "why was there no preview" with the
+    reason there is no longer any need for one — the mistake this whole
+    mechanism exists to prevent.
+    """
+
+    from arrayscope.render import ladder as ladder_module
+
+    _kernel, _effects, pipeline = make_pipeline(
+        tiles=1, floor_level=4, preview_level=4, reduced_input_available=False
+    )
+    pipeline.retarget(intent(), demand(2), scope(0, missing=1))
+    cold = dict(pipeline.coarse_rung_refusals())
+    assert cold == {ladder_module.COARSE_RUNG_NO_REDUCED_INPUT: 1}
+
+    # Converged replan: the tile is covered, so the reason changes.
+    effects_states = pipeline.effects.states
+    effects_states[0] = TileLodState(
+        tile_number=0, resident_levels=(2,), presented_level=2, allow_preview=False
+    )
+    pipeline.retarget(intent(), demand(2), scope(0, missing=0))
+
+    assert pipeline.last_coarse_rung_refusals == (
+        (ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED, 1),
+    )
+    history = dict(pipeline.coarse_rung_refusals())
+    assert history[ladder_module.COARSE_RUNG_NO_REDUCED_INPUT] == 1
+    assert history[ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED] == 1

@@ -358,12 +358,21 @@ class FrameRuntimeMixin:
             return submitted
         montage_commit.rearm_ready_stage_dependents(session)
         submitted += pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
+        ladder_policy = getattr(getattr(pipeline, "ladder", None), "policy", None)
         emit_trace(
             "pipeline_plan",
             session_id=int(getattr(session, "session_id", 0) or 0),
             submitted=int(submitted),
             states=tuple(getattr(pipeline, "last_plan_states", ()) or ()),
             steps=tuple(getattr(pipeline, "last_plan_steps", ()) or ()),
+            # The policy the steps were planned against, and why the coarse
+            # rungs are absent when they are.  Without these a plan of pure
+            # rung=2 steps names no cause for its own missing preview.
+            policy_floor_level=int(getattr(ladder_policy, "floor_level", -1)),
+            policy_preview_level=int(getattr(ladder_policy, "preview_level", -1)),
+            policy_reduced_input=bool(getattr(ladder_policy, "reduced_input_available", False)),
+            demand_level=int(getattr(session.lod_policy_decision.demand, "desired_level", -1)),
+            coarse_rung_refusals=tuple(getattr(pipeline, "last_coarse_rung_refusals", ()) or ()),
             first_pixels_presented=bool(session.visible_first_pixels_presented()),
             required_tile_count=len(session.required_tile_numbers()),
             scheduling_phase=str(session.scheduling_policy.verdict.phase.value),

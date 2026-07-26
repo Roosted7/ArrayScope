@@ -8417,3 +8417,33 @@ def test_montage_axis_fft_with_known_display_axes_reaches_the_shared_route():
         getattr(renderer, "_montage_preview_reduced_last_gate", "")
         == "resident policy keeps the parallel per-tile target"
     )
+
+
+def test_tile_local_commuting_pipeline_still_reports_the_ladder_as_owner(monkeypatch):
+    """A genuinely tile-local pipeline is a hand-off, not a refusal."""
+
+    session = _session(count=2, mode=LOD_POLICY_RESIDENT, pyramid=LodPageCache(max_bytes=1 << 20))
+    session.document = ArrayDocument(np.ones((TILE, TILE, 8), dtype=np.float32))
+    monkeypatch.setattr(
+        render_effects,
+        "preview_pipeline_commutes_for_display_lod",
+        lambda _session, _tile: True,
+    )
+    monkeypatch.setattr(
+        render_effects, "preview_pipeline_is_tile_local", lambda _session, _tile: True
+    )
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+
+    assert (
+        effects.submit_shared_transform_floor(
+            LodAdmissionScope(visible_tile_numbers=frozenset({0, 1}))
+        )
+        == 0
+    )
+
+    assert int(getattr(renderer, "_montage_preview_reduced_blocked", 0)) == 0
+    assert (
+        getattr(renderer, "_montage_preview_reduced_last_gate", "")
+        == "per-tile rungs own reduced input"
+    )

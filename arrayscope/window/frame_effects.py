@@ -1311,7 +1311,10 @@ class FramePipelineEffects:
             # This asks tile-locality, not commuting, because the ladder's
             # `reduced_input_available` does: asking the commuting question
             # here disowned every montage-axis FFT to a per-tile owner that
-            # plans no rung for it, so neither side produced.
+            # plans no rung for it, so neither side produced. A pipeline that
+            # commutes without being tile-local therefore falls through to the
+            # shared route below and is reported by the gate that actually
+            # declines it, rather than being counted as owned here.
             self._preview_reduced_gate("per-tile rungs own reduced input")
             return 0
         if not render_effects.shared_preview_is_useful(session, seed, demand):

@@ -6485,6 +6485,22 @@ def _phase_record(
         "montage_quality_rung_evaluations": [
             dict(row) for row in tuple(getattr(montage, "tile_lod_rung_evaluations", ()) or ())
         ],
+        # Why tiles got no coarse rung, cumulative over the session's plans in
+        # tile-plans, and the policy those plans used. Names the cause of a
+        # preview-less plan instead of leaving it to be read off the source.
+        "montage_quality_coarse_rung_gates": [
+            [str(reason), int(count)]
+            for reason, count in tuple(getattr(montage, "tile_lod_coarse_rung_gates", ()) or ())
+        ],
+        "montage_quality_ladder_floor_level": int(
+            getattr(montage, "tile_lod_ladder_floor_level", -1)
+        ),
+        "montage_quality_ladder_preview_level": int(
+            getattr(montage, "tile_lod_ladder_preview_level", -1)
+        ),
+        "montage_quality_ladder_reduced_input": bool(
+            getattr(montage, "tile_lod_ladder_reduced_input", False)
+        ),
         "montage_quality_preview_presentations": int(
             getattr(montage, "tile_lod_preview_presentations", 0) or 0
         ),

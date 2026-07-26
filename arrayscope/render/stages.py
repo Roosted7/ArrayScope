@@ -180,13 +180,14 @@ class RungEvaluationTimings:
     evaluations.
     """
 
-    __slots__ = ("_calls", "_lock", "_max_ns", "_total_ns")
+    __slots__ = ("_calls", "_discarded", "_lock", "_max_ns", "_total_ns")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._calls: dict[tuple[int, int], int] = {}
         self._total_ns: dict[tuple[int, int], int] = {}
         self._max_ns: dict[tuple[int, int], int] = {}
+        self._discarded: dict[tuple[int, int], int] = {}
 
     def record(self, rung: int, level: int, elapsed_ns: int) -> None:
         """Account one finished evaluation, however it ended.
@@ -203,23 +204,40 @@ class RungEvaluationTimings:
             if elapsed_ns > self._max_ns.get(bucket, 0):
                 self._max_ns[bucket] = elapsed_ns
 
+    def record_discarded(self, rung: int, level: int) -> None:
+        """Account one evaluation whose result was never committed.
+
+        Counted, not timed: the discard is learned on the GUI thread when the
+        result arrives too late to commit, by which point the worker's own
+        elapsed reading is gone.  Price it as ``discarded * total_ms / calls``
+        from the same row — on the 272-tile FFT montage that reads 8 discarded
+        level-1 evaluations against a 1041 ms mean, i.e. ~8 s of a 5.5 s stage.
+        """
+
+        bucket = (int(rung), int(level))
+        with self._lock:
+            self._discarded[bucket] = self._discarded.get(bucket, 0) + 1
+
     def rows(self) -> tuple[dict[str, object], ...]:
         """One row per observed ``(rung, level)``, coarse rungs first."""
 
         with self._lock:
-            buckets = sorted(self._calls.items())
+            buckets = sorted(set(self._calls) | set(self._discarded))
+            calls = dict(self._calls)
             totals = dict(self._total_ns)
             maxima = dict(self._max_ns)
+            discarded = dict(self._discarded)
         return tuple(
             {
                 "rung": int(rung),
                 "rung_name": Rung(rung).name.lower() if rung in _RUNG_VALUES else str(rung),
                 "level": int(level),
-                "calls": int(calls),
+                "calls": int(calls.get((rung, level), 0)),
+                "discarded": int(discarded.get((rung, level), 0)),
                 "total_ms": totals.get((rung, level), 0) / 1e6,
                 "max_ms": maxima.get((rung, level), 0) / 1e6,
             }
-            for (rung, level), calls in buckets
+            for rung, level in buckets
         )
 
 

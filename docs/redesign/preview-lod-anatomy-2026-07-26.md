@@ -17,8 +17,10 @@ FLOOR/PREVIEW merge that follows from both, §8 answers the upload questions,
 §10 replaces this dossier's two inferences with counters (both held) and adds
 the per-rung evaluation cost: a 16× input reduction buys only ~2.5× on raw
 data, and on the FFT stage — now that its stall *and* its gate 1 are fixed —
-the counters find that **gate 1 alone still produces no preview**, while 8 s of
-FFT evaluation is computed and discarded every run.
+the counters find that **gate 1 alone still produces no preview** — it falls in
+the seam between the ladder's *tile-local* test and the shared route's
+*commuting* one (§10f) — while 8 s of FFT evaluation is computed and discarded
+every run ([its own dossier](discarded-rung-evaluation-2026-07-26.md)).
 
 **§6c adjudicates gate 2 and closes the §6 thesis with a correction.** Opening
 the shared route does produce the preview — 272 presentations, first pixel 2.5×
@@ -84,7 +86,10 @@ reach for to ask "did the reduced-input preview path run?".
 **Now wired** (see §10) to `submit_shared_transform_floor`, plus a
 `tile_lod_preview_reduced_last_gate` string so a 0 says *why*. On this raw
 montage they read `0/0/0` with gate `per-tile rungs own reduced input` — the
-per-tile ladder rungs are the owner, and §10's rung timings measure them. Two
+per-tile ladder rungs are the owner, and §10's rung timings measure them; on the
+FFT montage they read `0/24/0` with gate
+`commutes but not tile-local: no preview owner` (§10f). §10g adds the ladder's
+own gate string, which is what names §2's collapse from the plan side. Two
 siblings in the same family are **still dead** and were left alone:
 `_montage_quality_ingest_reductions` and
 `_montage_quality_stage_hits_serving_derivations` are assigned nowhere either.
@@ -810,21 +815,20 @@ come from a completed run instead of a truncated one; `51601f50` then closed
 | stage elapsed | 5595 ms | 5506 ms |
 | first FFT pixel | 2564 ms | 3649 ms |
 | `first_preview_floor_fill_ms` | n/a | n/a |
-| preview_reduced scheduled / blocked | 0 / **23** | 0 / **0** |
-| preview_reduced last gate | `resident lod policy mode` | `per-tile rungs own reduced input` |
+| preview_reduced scheduled / blocked | 0 / **23** | 0 / **24** |
+| preview_reduced last gate | `resident lod policy mode` | `commutes but not tile-local: no preview owner` |
 | planned `rung=1` steps | 0 | **0** |
 | uploads | 1088 complex + 240 scalar, all L0 | identical |
 
 **Gate 1 was necessary and is not sufficient.** Closing it does exactly what
 §6 predicted of it — the shared path stops being refused for the wrong reason
-(`blocked` 23 → 0) and ownership moves to the per-tile ladder — and then **no
-preview appears anyway**. The ladder plans `(0,4)=333` (raw tiles from the
-earlier phase), `(2,1)=304`, `(2,2)=6206`, and **not one `rung=1` step**,
-because every FFT tile state arrives with `allow_preview=False`. §6 said its
-two gates "each suffice to cause it"; measured, the causes are not
+(`resident lod policy mode`) and ownership moves toward the per-tile ladder —
+and then **no preview appears anyway**. The ladder plans `(0,4)=333` (raw tiles from the
+earlier phase), `(2,1)=304`, `(2,2)=6206`, and **not one `rung=1` step**. §6
+said its two gates "each suffice to cause it"; measured, the causes are not
 interchangeable — clearing the capability gate hands the question to a ladder
-that then declines it, and §2's collapsed FLOOR/PREVIEW rung is what is left to
-fix. That is §7's merge, and it is now the blocking item rather than a tidy-up.
+that then declines it. §10f names which ladder gate, having first named the
+wrong one.
 
 **Uploads, all at level 0 again** — and 2.2× the raw stage's bytes, on both
 tips:
@@ -867,6 +871,82 @@ Two more things fall out of that table, and neither moved between the tips.
    scales — texels in — is not the term that dominates. Cold-vs-warm stage
    cache is, by 63×.
 
+### 10f. Which ladder gate drops the FFT preview — and a retraction
+
+§10e attributed the missing `rung=1` to `allow_preview=False` on every FFT tile
+state. **That was wrong.** The claim was read off `last_plan_states` from the
+*final* plan of the run, when every tile was already at level 2 and therefore
+correctly not eligible for a coarse rung. The cold-fill states say the
+opposite: at the FFT session's first plans, all 272 tiles report
+`allow_preview=True`, `resident_levels=()`, `presented=None`, `ready=None` —
+genuinely blank and genuinely eligible.
+
+Both candidates a reader would reach for are refuted, and the second is
+refuted by a fact §10e already recorded without drawing the conclusion:
+
+- **`effects.py`'s `allow_preview`** — measured True on all 272 cold tiles. Not
+  this.
+- **§2's FLOOR/PREVIEW collapse** (`preview_level < finest_available()` failing
+  as `4 < 4`) — cannot be it either, because the FFT session plans **zero
+  `rung=0` steps too**. That guard only runs after a FLOOR step exists to
+  collide with; a cause that stops both rungs has to fire earlier.
+
+The gate that actually fires, now reported rather than inferred
+(`tile_lod_coarse_rung_gates`, 5787 tile-plans of 6344 on the FFT stage):
+
+> **`no reduced input and no retained floor`**
+
+`cheap_pre_native` needs `policy.reduced_input_available or state.floor_available`,
+and the trace now carries the policy: **`reduced_input=False`** on the FFT
+session (`floor=L4 preview=L4`), versus `reduced_input=True` on the raw session.
+
+And this is deliberate, not a regression. Gate 1's own branch introduced a
+*separate* predicate for the ladder — `preview_pipeline_is_tile_local`, distinct
+from the now-axis-aware `preview_pipeline_commutes_for_display_lod` — whose
+docstring records the measurement that motivated it: routing this FFT pipeline
+to per-tile rungs took tile worker time from **3.5 s to 65.5 s** and left every
+tile on a level-4 preview that never refined. A montage-axis FFT is *not*
+tile-local: one output tile needs the whole axis-2 column, so a per-tile rung
+re-runs the whole transform per tile.
+
+**So the FFT preview now falls in the seam between two predicates.**
+`submit_shared_transform_floor` asks *commutes* (True since gate 1) and defers
+to "per-tile rungs"; the ladder asks *tile-local* (False, correctly) and plans
+nothing coarse. Both owners decline, each for a defensible reason.
+
+Two consequences worth stating plainly:
+
+1. **§7's FLOOR/PREVIEW merge is a detour for operation pipelines.** It fixes a
+   real thing — §10g shows the raw stage's dominant refusal *is* the collapse —
+   but the ladder is not the intended owner of an FFT preview and should not
+   become one. The intended owner is the shared transform route, i.e. gate 2,
+   which the axis-aware session owns.
+2. The early return in `submit_shared_transform_floor` used to read
+   "commuting pipelines get per-tile FLOOR/DESIRED rungs" and report
+   `per-tile rungs own reduced input` — a hand-off to an owner that refuses the
+   work, announced as though someone had it. **Fixed here**: the branch now asks
+   the ladder's own question, and a pipeline that commutes without being
+   tile-local is counted as blocked with the gate
+   `commutes but not tile-local: no preview owner` (measured: 24 per FFT run,
+   0 per raw run). A hand-off is still reported as a hand-off; only the
+   ownerless case became a refusal.
+
+### 10g. The raw montage's own refusal is §2's collapse, named
+
+Same counter on `raw_full_tiled_montage` (`reduced_input=True`, `floor=L4`,
+`preview=L4`), cumulative over the fill:
+
+| tile-plans | reason |
+|---:|---|
+| 2927 | **`floor already covers this level`** |
+| 2176 | `allow_preview false: tile is covered or too few missing` |
+
+The dominant reason is §2's collapse, now a reading rather than a code
+inference: the tile takes FLOOR at level 4 and every later plan then refuses
+PREVIEW because a level-4 payload already exists. The two stages fail for
+genuinely different reasons and the counter separates them — which is the whole
+point of pushing the gate string down a layer.
+
 ## Open questions, left open deliberately
 
 - **Why 18 transactions for the preview and 2 for the refinement.** This is
@@ -890,8 +970,14 @@ Two more things fall out of that table, and neither moved between the tips.
   plans no `rung=1` step, so there is no reduced-input evaluation to time. What
   §10e does refute is the claim's *premise* — input size is not what sets
   evaluation cost on this pipeline; cold-vs-warm stage cache is, by 63×.
-- **Why every FFT tile state carries `allow_preview=False`** even with gate 1
-  closed (§10e). This is now the blocking item for §6's order of magnitude, and
-  it points at §7's FLOOR/PREVIEW merge rather than at the capability gate.
-- **The 8 s of discarded FFT evaluation per FFT stage** (§10e). Newly visible,
-  unchanged across both fixes, and the largest thing the counters found.
+- ~~**Why every FFT tile state carries `allow_preview=False`**~~ — it does not;
+  it is True on every cold tile. Retracted and answered in §10f: the gate is
+  `no reduced input and no retained floor`, because the ladder asks
+  *tile-local*, which a montage-axis FFT correctly is not.
+- **Close the predicate seam in `submit_shared_transform_floor`** (§10f): it
+  defers to per-tile rungs on *commuting*, while the ladder admits them on
+  *tile-local*, so a pipeline that is one but not the other has no owner. This
+  is now the blocking item for §6's order of magnitude — not §7's merge.
+- **The 8 s of discarded FFT evaluation per FFT stage**, and the ~124 duplicate
+  level-2 evaluations beside it, now have their own dossier:
+  [discarded-rung-evaluation](discarded-rung-evaluation-2026-07-26.md).

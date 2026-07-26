@@ -185,3 +185,133 @@ def test_ladder_carries_canonical_tile_rank_across_every_rung():
     )
 
     assert {step.scheduling_rank for step in steps} == {3}
+
+
+# ---- coarse-rung refusal reporting -------------------------------------------
+#
+# "The ladder planned no coarse rung" is an absence, and an absence names no
+# cause. The 2026-07-26 preview-LOD work attributed a missing FFT preview to
+# `allow_preview` by reading the source, and the attribution was wrong: the
+# real gate fires two clauses earlier. These pin the reported reason to what
+# `plan_tile` actually does, so the two cannot drift.
+
+_REFUSAL_CASES = (
+    ("native_only", LadderPolicy(mode="native-only"), TileLodState(tile_number=0), 2),
+    (
+        "preview_not_allowed",
+        LadderPolicy(floor_level=4, preview_level=4),
+        TileLodState(tile_number=0, allow_preview=False),
+        2,
+    ),
+    (
+        "level_not_coarser",
+        LadderPolicy(floor_level=4, preview_level=2),
+        TileLodState(tile_number=0),
+        2,
+    ),
+    (
+        "no_reduced_input",
+        LadderPolicy(floor_level=4, preview_level=4, reduced_input_available=False),
+        TileLodState(tile_number=0, floor_available=False),
+        2,
+    ),
+    (
+        "floor_covers_level",
+        LadderPolicy(floor_level=4, preview_level=4),
+        TileLodState(tile_number=0, resident_levels=(4,), presented_level=4),
+        2,
+    ),
+    (
+        "cold_tile_gets_one",
+        LadderPolicy(floor_level=4, preview_level=4),
+        TileLodState(tile_number=0),
+        2,
+    ),
+    (
+        "retained_floor_without_reduced_input",
+        LadderPolicy(floor_level=4, preview_level=4, reduced_input_available=False),
+        TileLodState(tile_number=0, floor_available=True),
+        2,
+    ),
+)
+
+
+def test_coarse_rung_refusal_agrees_with_what_plan_tile_does():
+    """A reported reason must be empty exactly when a coarse rung is planned."""
+
+    for name, policy, state, level in _REFUSAL_CASES:
+        ladder = LodLadder(policy)
+        steps = ladder.plan_tile(state, demand(level))
+        planned = any(step.rung in (Rung.FLOOR, Rung.PREVIEW) for step in steps)
+        reason = ladder.coarse_rung_refusal(state, demand(level))
+        assert planned == (reason == ""), (
+            f"{name}: planned={planned} but reason={reason!r} "
+            f"(rungs={[step.rung for step in steps]})"
+        )
+
+
+def test_coarse_rung_refusal_names_the_gate_that_actually_fired():
+    from arrayscope.render import ladder as ladder_module
+
+    def reason_for(name):
+        policy, state, level = next(
+            (policy, state, level) for case, policy, state, level in _REFUSAL_CASES if case == name
+        )
+        return LodLadder(policy).coarse_rung_refusal(state, demand(level))
+
+    assert reason_for("native_only") == ladder_module.COARSE_RUNG_NATIVE_ONLY
+    assert reason_for("preview_not_allowed") == ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED
+    assert reason_for("level_not_coarser") == ladder_module.COARSE_RUNG_LEVEL_NOT_COARSER
+    assert reason_for("no_reduced_input") == ladder_module.COARSE_RUNG_NO_REDUCED_INPUT
+    assert reason_for("floor_covers_level") == ladder_module.COARSE_RUNG_FLOOR_COVERS_LEVEL
+    assert reason_for("cold_tile_gets_one") == ladder_module.COARSE_RUNG_PLANNED
+    # A retained floor still earns a coarse rung with no reduced input at all.
+    assert reason_for("retained_floor_without_reduced_input") == ladder_module.COARSE_RUNG_PLANNED
+
+
+def test_measured_fft_state_is_refused_for_no_reduced_input_not_allow_preview():
+    """The montage-axis FFT case, as measured on the 272-tile stage.
+
+    `allow_preview` is True and the tile is genuinely blank; the ladder still
+    plans nothing coarse because `reduced_input_available` is False (the FFT is
+    not tile-local). Both candidates that were guessed from the source —
+    `allow_preview` and the `preview_level < finest_available()` collapse — are
+    downstream of this one, which is why the plan carries no `rung=0` either.
+    """
+
+    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=4, reduced_input_available=False))
+    state = TileLodState(tile_number=0, allow_preview=True, floor_available=False)
+
+    from arrayscope.render import ladder as ladder_module
+
+    steps = ladder.plan_tile(state, demand(2))
+    assert [step.rung for step in steps] == [Rung.DESIRED]
+    assert (
+        ladder.coarse_rung_refusal(state, demand(2)) == ladder_module.COARSE_RUNG_NO_REDUCED_INPUT
+    )
+
+
+def test_raw_montage_preview_is_refused_by_the_floor_it_just_planned():
+    """§2's FLOOR/PREVIEW collapse, named by the counter instead of inferred.
+
+    Both levels come from one session value, so a tile that took FLOOR at
+    level 4 then fails PREVIEW's `4 < 4` guard. The refusal only reports this
+    once the floor is resident — while both are planned in one pass the tile
+    does have a coarse rung, which is what makes the collapse invisible.
+    """
+
+    from arrayscope.render import ladder as ladder_module
+
+    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=4))
+    cold = TileLodState(tile_number=0)
+    assert [step.rung for step in ladder.plan_tile(cold, demand(2))] == [
+        Rung.FLOOR,
+        Rung.DESIRED,
+    ]
+
+    floored = TileLodState(tile_number=0, resident_levels=(4,), presented_level=4)
+    assert Rung.PREVIEW not in [step.rung for step in ladder.plan_tile(floored, demand(2))]
+    assert (
+        ladder.coarse_rung_refusal(floored, demand(2))
+        == ladder_module.COARSE_RUNG_FLOOR_COVERS_LEVEL
+    )

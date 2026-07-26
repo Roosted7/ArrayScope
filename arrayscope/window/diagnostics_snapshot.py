@@ -251,6 +251,12 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             getattr(window.renderer, "_montage_preview_reduced_last_gate", "") or ""
         ),
         tile_lod_rung_evaluations=_rung_evaluation_rows(session),
+        tile_lod_coarse_rung_gates=_coarse_rung_gate_rows(session),
+        tile_lod_ladder_floor_level=int(getattr(_ladder_policy(session), "floor_level", -1)),
+        tile_lod_ladder_preview_level=int(getattr(_ladder_policy(session), "preview_level", -1)),
+        tile_lod_ladder_reduced_input=bool(
+            getattr(_ladder_policy(session), "reduced_input_available", False)
+        ),
         tile_lod_preview_presentations=0
         if session is None
         else int(getattr(session, "lod_preview_presentations", 0) or 0),
@@ -912,6 +918,31 @@ def _montage_payload_level_counts(session) -> tuple[tuple[int, int], ...]:
         level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
         counts[level] = counts.get(level, 0) + 1
     return tuple(sorted(counts.items()))
+
+
+def _coarse_rung_gate_rows(session) -> tuple[tuple[str, int], ...]:
+    """Cumulative "why no coarse rung" over the session, in tile-plans.
+
+    Cumulative, not last-plan: the final plan of a settled fill is converged,
+    and reporting its refusal would answer "why was there no preview" with the
+    reason the tiles are *now* covered.
+    """
+
+    getter = getattr(getattr(session, "pipeline", None), "coarse_rung_refusals", None)
+    if not callable(getter):
+        return ()
+    return tuple((str(reason), int(count)) for reason, count in getter())
+
+
+def _ladder_policy(session):
+    """The ladder policy the session's pipeline plans against, or None.
+
+    Read rather than re-derived: `reduced_input_available` is captured once at
+    pipeline construction, so what the plan used and what the predicate would
+    say now can differ — and the plan is what the counters describe.
+    """
+
+    return getattr(getattr(getattr(session, "pipeline", None), "ladder", None), "policy", None)
 
 
 def _rung_evaluation_rows(session) -> tuple[dict[str, object], ...]:

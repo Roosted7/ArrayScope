@@ -21,7 +21,7 @@ acknowledgement.
 
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from time import perf_counter_ns
@@ -159,6 +159,14 @@ class FramePipeline:
         self._admission_generation = 0
         self._admission_continuation_armed = False
         self._admission_continuation_sequence = 0
+        # Cumulative over the session's plans, in tile-plans (one tile in one
+        # plan), NOT tiles.  Deliberately not last-plan-only: the last plan of
+        # a settled fill is the converged one, and its refusal ('allow_preview
+        # false: covered') is the opposite of the cold-fill answer someone
+        # asking "why was there no preview" needs.  The trace keeps the
+        # per-plan, time-resolved view.
+        self._coarse_rung_refusals: Counter[str] = Counter()
+        self.last_coarse_rung_refusals: tuple[tuple[str, int], ...] = ()
 
     # ----------------------------------------------------------- lifecycle
 
@@ -210,6 +218,20 @@ class FramePipeline:
         self.last_plan_steps = tuple(
             (int(step.tile_number), int(step.rung), int(step.level)) for step in steps
         )
+        # Why the coarse rungs are absent, aggregated per plan.  A plan with no
+        # rung=0/rung=1 step says nothing about why on its own, and reading the
+        # code to guess got the FFT answer wrong once already.  One Counter bump
+        # per coarse-less tile, and only for tiles that actually lack one.
+        coarse_tiles = {
+            int(step.tile_number) for step in steps if step.rung in (Rung.FLOOR, Rung.PREVIEW)
+        }
+        refusals: Counter[str] = Counter()
+        for state in states:
+            if int(state.tile_number) in coarse_tiles:
+                continue
+            refusals[self.ladder.coarse_rung_refusal(state, demand, verdict)] += 1
+        self.last_coarse_rung_refusals = tuple(sorted(refusals.items()))
+        self._coarse_rung_refusals.update(refusals)
         self.counters.ladder_plans += 1
         submitted = 0
         presented_preview_tiles = {
@@ -233,6 +255,11 @@ class FramePipeline:
             self._arm_admission_continuation(admission_generation)
         self._flush_ready()
         return submitted
+
+    def coarse_rung_refusals(self) -> tuple[tuple[str, int], ...]:
+        """Cumulative "why no coarse rung", in tile-plans, commonest first."""
+
+        return tuple(sorted(self._coarse_rung_refusals.items(), key=lambda row: (-row[1], row[0])))
 
     def close(self) -> None:
         self._admission_generation += 1
@@ -306,9 +333,18 @@ class FramePipeline:
             or (step.rung == Rung.EXACT and coverage_pass_open)
             else 1
         )
+        # One mutable flag per submission, written by the worker wrapper and
+        # read by the GUI-thread callbacks.  A dropped rung is only *spent*
+        # work if its evaluation actually ran: the kernel also supersedes
+        # queued tasks that never started, and counting those as discarded
+        # priced 32 discards against 8 evaluations -- a 45.9 s waste inside a
+        # 5.4 s stage, which is how the conflation announced itself.
+        evaluated = [False]
         spec = TaskSpec(
             key=step_key,
-            fn=self._timed_rung_evaluation(step, self.effects.evaluate_rung(intent, step)),
+            fn=self._timed_rung_evaluation(
+                step, self.effects.evaluate_rung(intent, step), evaluated
+            ),
             lane=step.lane,
             priority=step.priority,
             scheduling_rank=int(step.scheduling_rank),
@@ -334,13 +370,17 @@ class FramePipeline:
         )
         handle = self.kernel.submit(
             spec,
-            on_done=lambda payload, intent=intent, step=step: self._on_rung_done(
-                intent, step, payload
+            on_done=lambda payload, intent=intent, step=step, ran=evaluated: self._on_rung_done(
+                intent, step, payload, ran
             ),
-            on_error=lambda exc, intent=intent, step=step: self._on_rung_error(intent, step, exc),
-            on_stale=lambda intent=intent, step=step: self._on_rung_stale(intent, step),
-            on_reuse=lambda payload, intent=intent, step=step: self._on_rung_reusable(
-                intent, step, payload
+            on_error=lambda exc, intent=intent, step=step, ran=evaluated: self._on_rung_error(
+                intent, step, exc, ran
+            ),
+            on_stale=lambda intent=intent, step=step, ran=evaluated: self._on_rung_stale(
+                intent, step, ran
+            ),
+            on_reuse=lambda payload, intent=intent, step=step, ran=evaluated: (
+                self._on_rung_reusable(intent, step, payload, ran)
             ),
         )
         if handle is not None:
@@ -350,7 +390,9 @@ class FramePipeline:
         self.effects.rung_dropped(intent, step)
         return False
 
-    def _timed_rung_evaluation(self, step: RungStep, evaluate: Callable[..., Any]):
+    def _timed_rung_evaluation(
+        self, step: RungStep, evaluate: Callable[..., Any], evaluated: list[bool]
+    ):
         """Wrap a rung's worker function so its cost lands in ``rung_timings``.
 
         The wrapper is the whole evaluation and nothing else: no per-tile
@@ -365,6 +407,7 @@ class FramePipeline:
 
         def timed(*args, **kwargs):
             started_ns = perf_counter_ns()
+            evaluated[0] = True
             try:
                 return evaluate(*args, **kwargs)
             finally:
@@ -438,21 +481,46 @@ class FramePipeline:
 
     # Handlers run on the GUI thread (kernel bridge drain).
 
-    def _on_rung_done(self, intent: RenderIntent, step: RungStep, payload) -> None:
+    def _on_rung_done(
+        self, intent: RenderIntent, step: RungStep, payload, evaluated: list[bool] | None = None
+    ) -> None:
         current = self._current_intent
         if not self._intent_step_matches_current(intent, step, current):
-            self.effects.rung_dropped(intent, step)
+            self._discard_rung(intent, step, evaluated)
             return
         if payload is None:
-            self.effects.rung_dropped(intent, step)
+            self._discard_rung(intent, step, evaluated)
             return
         self._ready_upserts.append((intent, step, payload))
         self._flush_ready()
 
-    def _on_rung_reusable(self, intent: RenderIntent, step: RungStep, payload) -> None:
+    def _on_rung_reusable(
+        self, intent: RenderIntent, step: RungStep, payload, evaluated: list[bool] | None = None
+    ) -> None:
         # Stale-but-reusable: worker side may have populated caches, but this
         # rung must never commit. It still owns lifecycle claims from
         # prepare_rung(), so release those with the preparing intent.
+        self._discard_rung(intent, step, evaluated)
+
+    def _discard_rung(
+        self, intent: RenderIntent, step: RungStep, evaluated: list[bool] | None = None
+    ) -> None:
+        """Release a rung that can never commit; count it only if it ran.
+
+        A rung whose evaluation ran is spent work, and counting it beside the
+        cost of the rung that spent it turns "the stage took 5.5 s" into "8 s
+        of level-1 FFT was computed and thrown away".  A rung superseded while
+        still queued spent nothing and must not be counted, or the waste reads
+        larger than the stage that contains it.
+        """
+
+        if evaluated is not None and evaluated[0]:
+            # Consume the flag: one submission's evaluation is at most one
+            # discard however many delivery callbacks it reaches (a superseded
+            # reusable task can be told twice).  This bounds `discarded` by
+            # `calls` structurally rather than by hoping the paths line up.
+            evaluated[0] = False
+            self.rung_timings.record_discarded(int(step.rung), int(step.level))
         self.effects.rung_dropped(intent, step)
 
     @staticmethod
@@ -463,11 +531,19 @@ class FramePipeline:
         current_source = current.source_id_for_tile(int(step.tile_number))
         return previous_source == current_source
 
-    def _on_rung_stale(self, intent: RenderIntent, step: RungStep) -> None:
-        self.effects.rung_dropped(intent, step)
+    def _on_rung_stale(
+        self, intent: RenderIntent, step: RungStep, evaluated: list[bool] | None = None
+    ) -> None:
+        self._discard_rung(intent, step, evaluated)
 
-    def _on_rung_error(self, intent: RenderIntent, step: RungStep, exc: BaseException) -> None:
-        self.effects.rung_dropped(intent, step)
+    def _on_rung_error(
+        self,
+        intent: RenderIntent,
+        step: RungStep,
+        exc: BaseException,
+        evaluated: list[bool] | None = None,
+    ) -> None:
+        self._discard_rung(intent, step, evaluated)
         raise exc
 
     def _flush_ready(self) -> None:
