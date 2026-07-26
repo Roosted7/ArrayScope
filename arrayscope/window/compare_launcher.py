@@ -96,6 +96,7 @@ class CompareCursorGroup:
         self._members.append(window)
 
     def remove(self, window) -> None:
+        source_id = str(getattr(window, "_operation_source_id", "") or "")
         try:
             self._members.remove(window)
         except ValueError:
@@ -103,6 +104,8 @@ class CompareCursorGroup:
         # Renumber remaining members so labels stay dense (A, B, C…).
         for index, member in enumerate(self._members):
             member.compare_label = chr(ord("A") + index)
+            if source_id:
+                member._refresh_operation_slot_bindings(document_id=source_id)
 
     def members(self) -> tuple:
         return tuple(self._members)

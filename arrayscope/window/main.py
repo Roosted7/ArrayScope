@@ -41,6 +41,7 @@ from arrayscope.window.file_view_session import FileViewSessionMixin
 from arrayscope.window.inspection import InspectionWorkflowMixin
 from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.operation_actions import OperationActionsMixin
+from arrayscope.window.operation_slots import OperationSlotSourcesMixin
 from arrayscope.window.render import RenderOrchestrator
 from arrayscope.window.render_coordinator import RenderCoordinator
 from arrayscope.window.state_sync import StateSyncMixin
@@ -50,6 +51,7 @@ class ArrayScopeWindow(
     WindowMenuMixin,
     DisplayControlBuildMixin,
     StateSyncMixin,
+    OperationSlotSourcesMixin,
     OperationActionsMixin,
     CompareLauncherMixin,
     FileViewSessionMixin,
@@ -89,6 +91,7 @@ class ArrayScopeWindow(
     ):
         configure_gui_gc_latency()
         super().__init__()
+        self._init_operation_slot_sources()
         self.renderer = RenderOrchestrator(self)
         self.resize(600, 800)
         self._settings = Qt.QtCore.QSettings()

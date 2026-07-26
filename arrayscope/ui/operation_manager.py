@@ -362,6 +362,34 @@ class OperationManagerDialog(QtWidgets.QDialog):
         params_buttons.addStretch(1)
         right.addLayout(params_buttons)
 
+        right.addWidget(QtWidgets.QLabel("Input slots"))
+        self.slots_table = QtWidgets.QTableWidget(0, 4, self)
+        self.slots_table.setHorizontalHeaderLabels(["Name", "Label", "Accepts", "Description"])
+        slots_header = self.slots_table.horizontalHeader()
+        slots_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        slots_header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        slots_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        slots_header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for column, width in enumerate((90, 110, 190)):
+            slots_header.resizeSection(column, width)
+        self.slots_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.slots_table.setMinimumHeight(135)
+        self.slots_table.verticalHeader().setVisible(False)
+        right.addWidget(self.slots_table)
+        slot_buttons = QtWidgets.QHBoxLayout()
+        self.add_slot_button = QtWidgets.QToolButton(self)
+        set_button_icon(self.add_slot_button, "add", tooltip="Add an input slot")
+        self.remove_slot_button = QtWidgets.QToolButton(self)
+        set_button_icon(
+            self.remove_slot_button,
+            "delete",
+            tooltip="Remove the selected input slot",
+        )
+        slot_buttons.addWidget(self.add_slot_button)
+        slot_buttons.addWidget(self.remove_slot_button)
+        slot_buttons.addStretch(1)
+        right.addLayout(slot_buttons)
+
         self.status_label = QtWidgets.QLabel("", self)
         self.status_label.setObjectName("OperationsMetaLabel")
         self.status_label.setWordWrap(True)
@@ -396,8 +424,11 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.group_combo.currentTextChanged.connect(self._on_group_changed)
         self.common_check.toggled.connect(self._on_common_toggled)
         self.params_table.cellChanged.connect(lambda *_: self._apply_user_edits())
+        self.slots_table.cellChanged.connect(lambda *_: self._apply_user_edits())
         self.add_param_button.clicked.connect(self._add_parameter_row)
         self.remove_param_button.clicked.connect(self._remove_parameter_row)
+        self.add_slot_button.clicked.connect(self._add_input_slot_row)
+        self.remove_slot_button.clicked.connect(self._remove_input_slot_row)
         self.source_browse_button.clicked.connect(self._choose_source_file)
         self.source_path_edit.editingFinished.connect(self._retarget_source)
         self.callable_combo.currentTextChanged.connect(self._on_callable_changed)
@@ -604,6 +635,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
                 self.storage_hint.clear()
                 self.command_template_edit.clear()
                 self.params_table.setRowCount(0)
+                self.slots_table.setRowCount(0)
             finally:
                 self._suppress = False
             item = self.tree.currentItem()
@@ -646,6 +678,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
             self.shell_check.setChecked(bool(definition.get("shell", False)))
             self._reload_environment_combos(str(definition.get("environment") or ""))
             self._fill_parameters(entry.parameters, editable=is_user)
+            self._fill_input_slots(entry.input_slots, editable=is_user)
         finally:
             self._suppress = False
 
@@ -705,8 +738,11 @@ class OperationManagerDialog(QtWidgets.QDialog):
             self.link_radio,
             self.common_check,
             self.params_table,
+            self.slots_table,
             self.add_param_button,
             self.remove_param_button,
+            self.add_slot_button,
+            self.remove_slot_button,
             self.command_box,
             self.command_template_edit,
             self.environment_combo,
@@ -739,8 +775,11 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.copy_radio.setEnabled(is_user)
         self.link_radio.setEnabled(is_user)
         self.params_table.setEnabled(is_user)
+        self.slots_table.setEnabled(is_user)
         self.add_param_button.setEnabled(is_user)
         self.remove_param_button.setEnabled(is_user)
+        self.add_slot_button.setEnabled(is_user)
+        self.remove_slot_button.setEnabled(is_user)
         self.command_template_edit.setReadOnly(not is_user)
         self.command_template_edit.setEnabled(is_user)
         self.environment_combo.setEnabled(is_user)
@@ -1048,6 +1087,76 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.params_table.removeRow(row)
         self._apply_user_edits()
 
+    def _fill_input_slots(self, input_slots, *, editable: bool):
+        self.slots_table.blockSignals(True)
+        try:
+            self.slots_table.setRowCount(0)
+            for slot in input_slots:
+                self._append_input_slot_row(slot)
+            self.slots_table.setEditTriggers(
+                QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+                | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+                if editable
+                else QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+            )
+        finally:
+            self.slots_table.blockSignals(False)
+
+    def _append_input_slot_row(self, slot=None):
+        row = self.slots_table.rowCount()
+        self.slots_table.insertRow(row)
+        name = getattr(slot, "name", "") if slot is not None else ""
+        label = getattr(slot, "label", name.replace("_", " ").title()) if slot is not None else ""
+        accepts = (
+            ", ".join(getattr(slot, "accepts", ()))
+            if slot is not None
+            else "dimension-set, open-document, saved-array"
+        )
+        description = getattr(slot, "description", "") if slot is not None else ""
+        for column, text in enumerate((name, label, accepts, description)):
+            self.slots_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(text)))
+
+    def _add_input_slot_row(self):
+        if not _is_user_op(self._loaded_id or ""):
+            return
+        self._append_input_slot_row()
+        self._apply_user_edits()
+
+    def _remove_input_slot_row(self):
+        row = self.slots_table.currentRow()
+        if row < 0:
+            return
+        self.slots_table.removeRow(row)
+        self._apply_user_edits()
+
+    def _table_input_slots(self):
+        slots = []
+        for row in range(self.slots_table.rowCount()):
+            items = [self.slots_table.item(row, column) for column in range(4)]
+            name = "" if items[0] is None else items[0].text().strip()
+            if not name:
+                continue
+            label = (
+                name.replace("_", " ").title()
+                if items[1] is None or not items[1].text().strip()
+                else items[1].text().strip()
+            )
+            accepts = tuple(
+                value.strip()
+                for value in ("" if items[2] is None else items[2].text()).split(",")
+                if value.strip()
+            )
+            description = "" if items[3] is None else items[3].text().strip()
+            slots.append(
+                {
+                    "name": name,
+                    "label": label,
+                    "accepts": list(accepts),
+                    "description": description,
+                }
+            )
+        return slots
+
     def _table_parameters(self):
         parameters = []
         for row in range(self.params_table.rowCount()):
@@ -1104,6 +1213,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
             icon=self.icon_edit.text().strip() or "extension",
             requires_axis=self.requires_axis_check.isChecked(),
             parameters=self._table_parameters(),
+            input_slots=self._table_input_slots(),
         )
 
     def _on_requires_axis_toggled(self, _checked):

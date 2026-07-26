@@ -10,6 +10,8 @@ the document once its popup is confirmed.
 from __future__ import annotations
 
 import os
+import stat
+import sys
 
 import numpy as np
 import pytest
@@ -118,3 +120,41 @@ def test_native_soft_threshold_parameter_flow(qtbot):
     assert _op_ids(win) == ["soft_threshold"]
     op = win.document.steps[0].operation
     assert op.threshold == pytest.approx(0.5)
+
+
+def test_bart_pics_lands_from_ui_with_a_bound_second_array(qtbot, tmp_path, monkeypatch):
+    from arrayscope.operations import plugins, registry
+    from arrayscope.operations.input_slots import SLOT_DIMENSION_SET
+    from arrayscope.operations.packs import bart_pack
+
+    executable = tmp_path / "fake_bart"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import shutil, sys\n"
+        "primary, sensitivities, output = sys.argv[-3:]\n"
+        "assert primary != sensitivities\n"
+        "for suffix in ('.hdr', '.cfl'):\n"
+        "    shutil.copyfile(primary + suffix, output + suffix)\n"
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr(bart_pack, "bart_available", lambda env=None: True)
+    monkeypatch.setattr(bart_pack, "bart_executable", lambda env=None: str(executable))
+    registry._reset_operation_packs()
+    plugins._reset_plugin_cache()
+
+    win = _window(qtbot, shape=(3, 4, 5))
+    win.request_operation("bart:pics")
+    popup = win._operation_params_popup
+    assert popup is not None
+    popup._spins["iterations"].setValue(7)
+    popup._slot_combos["sensitivities"].setCurrentIndex(1)
+    popup._accept()
+    process_events(qtbot)
+
+    step = win.document.steps[0]
+    assert step.operation.plugin_id == "bart:pics"
+    assert dict(step.operation.slot_bindings)["sensitivities"].kind == SLOT_DIMENSION_SET
+    np.testing.assert_allclose(
+        win.operation_evaluator.current_data(),
+        np.asarray(win.base_data, dtype=np.complex64),
+    )

@@ -188,15 +188,23 @@ class OperationActionsMixin:
         if entry.unavailable_reason:
             show_status_message(self, entry.unavailable_reason, timeout=4500)
             return None
-        form = build_parameter_form(entry, shape=self.data.shape, axis=dim)
+        form = build_parameter_form(
+            entry,
+            shape=self.data.shape,
+            axis=dim,
+            slot_options=self._slot_source_options(entry),
+        )
         if form is None:
             return self._commit_operation(operation_id, dim)
 
         popup = OperationParamsPopup(
             entry,
             form,
-            lambda values, operation_id=operation_id, dim=dim: self._commit_operation(
-                operation_id, dim, parameters=values
+            lambda values, bindings, operation_id=operation_id, dim=dim: self._commit_operation(
+                operation_id,
+                dim,
+                parameters=values,
+                slot_bindings=bindings,
             ),
             parent=self,
         )
@@ -218,10 +226,21 @@ class OperationActionsMixin:
                 previous.deleteLater()
         setattr(self, attr, popup)
 
-    def _commit_operation(self, operation_id, dim=None, parameters=None):
+    def _commit_operation(
+        self,
+        operation_id,
+        dim=None,
+        parameters=None,
+        *,
+        slot_bindings=None,
+    ):
         try:
             self.operation_coordinator.append_operation(
-                operation_id, axis=dim, parameters=parameters or {}
+                operation_id,
+                axis=dim,
+                parameters=parameters or {},
+                slot_bindings=slot_bindings,
+                slot_resolver=self._resolve_operation_slot,
             )
             if dim is not None:
                 self._last_operation_axis = int(dim)
@@ -474,7 +493,11 @@ class OperationActionsMixin:
 
     def load_operation_recipe_from_path(self, file_path):
         try:
-            steps = load_recipe_steps(file_path, self.base_data.shape)
+            steps = load_recipe_steps(
+                file_path,
+                self.base_data.shape,
+                slot_resolver=self._resolve_operation_slot,
+            )
             self.operation_coordinator.load_steps(steps)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Recipe Load Error", f"Failed to load recipe:\n{e}")
@@ -528,6 +551,17 @@ class OperationActionsMixin:
         )
 
     def set_operation_enabled(self, index, enabled):
+        if (
+            bool(enabled)
+            and 0 <= int(index) < len(self.document.steps)
+            and self.document.steps[int(index)].unavailable_reason
+        ):
+            show_status_message(
+                self,
+                self.document.steps[int(index)].unavailable_reason,
+                timeout=4500,
+            )
+            return
         try:
             self.operation_coordinator.set_enabled(index, enabled)
             self._set_document(self.operation_coordinator.document)
@@ -547,10 +581,16 @@ class OperationActionsMixin:
             entry = get_operation_entry(operation_id)
         except Exception:
             return
-        if not entry.parameters:
+        if not entry.parameters and not entry.input_slots:
             return
         axis = getattr(operation, "axis", None)
-        form = build_parameter_form(entry, shape=self.base_data.shape, axis=axis)
+        form = build_parameter_form(
+            entry,
+            shape=self.base_data.shape,
+            axis=axis,
+            slot_options=self._slot_source_options(entry),
+            slot_bindings=dict(getattr(operation, "slot_bindings", ()) or ()),
+        )
         if form is None:
             return
         # Seed the form with the operation's current values so the popup opens
@@ -559,10 +599,21 @@ class OperationActionsMixin:
             if value is not None:
                 form.set_value(name, value)
 
-        def _apply(values, index=index, operation_id=operation_id, axis=axis):
+        def _apply(
+            values,
+            bindings,
+            index=index,
+            operation_id=operation_id,
+            axis=axis,
+        ):
             try:
                 self.operation_coordinator.replace_operation(
-                    index, operation_id, axis=axis, parameters=values
+                    index,
+                    operation_id,
+                    axis=axis,
+                    parameters=values,
+                    slot_bindings=bindings,
+                    slot_resolver=self._resolve_operation_slot,
                 )
                 self._set_document(self.operation_coordinator.document)
             except Exception as e:
@@ -590,11 +641,17 @@ class OperationActionsMixin:
         if axis == int(getattr(operation, "axis", -1)):
             return
         parameters = {
-            parameter.name: getattr(operation, parameter.name) for parameter in entry.parameters
+            parameter.name: operation_parameter_values(operation, entry).get(parameter.name)
+            for parameter in entry.parameters
         }
         try:
             self.operation_coordinator.replace_operation(
-                index, operation_id, axis=axis, parameters=parameters
+                index,
+                operation_id,
+                axis=axis,
+                parameters=parameters,
+                slot_bindings=dict(getattr(operation, "slot_bindings", ()) or ()),
+                slot_resolver=self._resolve_operation_slot,
             )
             self._set_document(self.operation_coordinator.document)
         except Exception as e:

@@ -286,6 +286,44 @@ def test_parameter_metadata_parity_and_default_layout(qtbot, tmp_path):
         win.close()
 
 
+def test_input_slot_schema_is_editable_in_the_manager(qtbot, tmp_path):
+    from arrayscope.operations import library, registry
+
+    src = _write_source(
+        tmp_path,
+        "blend.py",
+        "def blend(data, reference):\n    return data + reference\n",
+    )
+    operation_id = library.import_custom_operation(src, "blend")
+    library.update_user_operation(
+        operation_id,
+        parameters=[],
+        input_slots=[
+            {
+                "name": "reference",
+                "label": "Reference",
+                "description": "A second array.",
+                "accepts": ["dimension-set", "open-document", "saved-array"],
+            }
+        ],
+    )
+
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        assert dialog.select_operation(operation_id)
+        assert dialog.slots_table.rowCount() == 1
+        assert dialog.slots_table.item(0, 0).text() == "reference"
+        assert "open-document" in dialog.slots_table.item(0, 2).text()
+
+        dialog.slots_table.item(0, 1).setText("Reference data")
+        process_events(qtbot)
+        assert registry.get_operation_entry(operation_id).input_slots[0].label == "Reference data"
+    finally:
+        dialog.close()
+        win.close()
+
+
 def test_reset_all_clears_layout_and_unhides(qtbot, monkeypatch):
     from arrayscope.operations import library
 

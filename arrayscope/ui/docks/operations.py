@@ -38,7 +38,7 @@ def _operation_has_parameters(operation) -> bool:
         entry = get_operation_entry(operation_id_for(operation))
     except Exception:
         return False
-    return bool(entry.parameters)
+    return bool(entry.parameters or entry.input_slots)
 
 
 def _operation_params_text(operation) -> str:
@@ -377,7 +377,12 @@ class OperationStackDock(StandardDockWidget):
                 operation = self._steps[row].operation if self._steps else operations[row]
                 item = QtWidgets.QListWidgetItem()
                 item.setData(Qt.QtCore.Qt.ItemDataRole.UserRole, row)
-                item.setSizeHint(Qt.QtCore.QSize(220, 58))
+                unavailable = (
+                    bool(getattr(self._steps[row], "unavailable_reason", ""))
+                    if self._steps
+                    else False
+                )
+                item.setSizeHint(Qt.QtCore.QSize(220, 88 if unavailable else 58))
                 item.setToolTip("Drag to reorder. Right-click for operation actions.")
                 flags = item.flags()
                 flags |= (
@@ -444,8 +449,12 @@ class OperationStackDock(StandardDockWidget):
             )
         left_col.addWidget(axis_button, 0, Qt.QtCore.Qt.AlignmentFlag.AlignHCenter)
         enabled = QtWidgets.QCheckBox()
+        step_reason = (
+            str(getattr(self._steps[index], "unavailable_reason", "") or "") if self._steps else ""
+        )
         enabled.setChecked(self._steps[index].enabled if self._steps else True)
-        enabled.setToolTip("Enable operation")
+        enabled.setEnabled(not bool(step_reason))
+        enabled.setToolTip(step_reason or "Enable operation")
         enabled.toggled.connect(
             lambda checked, index=index: (
                 self._on_enabled_changed(index, checked)
@@ -467,6 +476,12 @@ class OperationStackDock(StandardDockWidget):
             params.setToolTip(params_text)
             params.setStyleSheet("QLabel { font-size: 8pt; }")
             text_col.addWidget(params)
+        if step_reason:
+            unavailable = QtWidgets.QLabel(f"Unavailable — {step_reason}")
+            unavailable.setWordWrap(True)
+            unavailable.setToolTip(step_reason)
+            unavailable.setStyleSheet("QLabel { color: #d9534f; font-size: 8pt; }")
+            text_col.addWidget(unavailable)
         full_meta = self._operation_meta_text(index, compact=False)
         compact_meta = self._operation_meta_text(index, compact=True)
         meta = ElidedLabel(compact_meta)
@@ -704,6 +719,7 @@ def _operation_row_snapshot_key(operations, *, steps, operation_shapes, operatio
                 type(step.operation),
                 step.operation,
                 bool(getattr(step, "enabled", True)),
+                str(getattr(step, "unavailable_reason", "") or ""),
             )
             for step in steps
         )

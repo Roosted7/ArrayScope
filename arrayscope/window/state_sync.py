@@ -259,6 +259,8 @@ class StateSyncMixin:
         self._update_channel_controls()
         self._update_operation_dock()
         self._notify_sync("operations")
+        self._watch_operation_slot_files()
+        self._notify_operation_source_changed()
 
     def _sync_controls_to_current_data(self):
         ndim = self.data.ndim

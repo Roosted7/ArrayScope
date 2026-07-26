@@ -229,6 +229,63 @@ def roi_values(image_2d, geometry: RoiGeometry):
     raise ValueError(f"unsupported ROI kind: {geometry.kind}")
 
 
+def roi_mask(shape_2d, geometry: RoiGeometry) -> np.ndarray:
+    """Rasterize one ROI as a 2-D boolean mask in its image-plane coordinates."""
+
+    height, width = (int(shape_2d[0]), int(shape_2d[1]))
+    shape = (max(0, height), max(0, width))
+    geometry = geometry if isinstance(geometry, RoiGeometry) else RoiGeometry(**geometry)
+    if geometry.kind == RoiKind.RECTANGLE:
+        mask = np.zeros(shape, dtype=bool)
+        if geometry.rect is None:
+            return mask
+        x, y, rect_width, rect_height = geometry.rect
+        x0 = max(0, int(np.floor(min(x, x + rect_width))))
+        x1 = min(width, int(np.ceil(max(x, x + rect_width))))
+        y0 = max(0, int(np.floor(min(y, y + rect_height))))
+        y1 = min(height, int(np.ceil(max(y, y + rect_height))))
+        if x1 > x0 and y1 > y0:
+            mask[y0:y1, x0:x1] = True
+        return mask
+    if geometry.kind == RoiKind.FREEHAND_POLYGON:
+        return polygon_roi_mask(shape, geometry.points)
+
+    mask = np.zeros(shape, dtype=bool)
+    points = geometry.points[:2] if geometry.kind == RoiKind.LINE else geometry.points
+    for p0, p1 in itertools.pairwise(points):
+        distance = float(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
+        count = max(2, int(np.ceil(distance)) + 1)
+        xs = np.rint(np.linspace(p0[0], p1[0], count)).astype(int)
+        ys = np.rint(np.linspace(p0[1], p1[1], count)).astype(int)
+        valid = (xs >= 0) & (xs < width) & (ys >= 0) & (ys < height)
+        mask[ys[valid], xs[valid]] = True
+    radius = max(0, int(np.ceil(float(geometry.line_width) * 0.5)) - 1)
+    if radius:
+        mask = ndimage.binary_dilation(mask, iterations=radius)
+    return mask
+
+
+def roi_coordinates(geometry: RoiGeometry) -> np.ndarray:
+    """Represent one ROI as an ``N x 2`` float64 coordinate array."""
+
+    geometry = geometry if isinstance(geometry, RoiGeometry) else RoiGeometry(**geometry)
+    if geometry.kind == RoiKind.RECTANGLE:
+        if geometry.rect is None:
+            return np.empty((0, 2), dtype=np.float64)
+        x, y, width, height = geometry.rect
+        points = (
+            (x, y),
+            (x + width, y),
+            (x + width, y + height),
+            (x, y + height),
+        )
+    else:
+        points = geometry.points
+    if not points:
+        return np.empty((0, 2), dtype=np.float64)
+    return np.asarray(points, dtype=np.float64).reshape(-1, 2)
+
+
 def roi_values_for_region(
     image_2d, geometry: RoiGeometry, *, offset: tuple[float, float] = (0.0, 0.0)
 ):

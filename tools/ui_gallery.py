@@ -531,6 +531,28 @@ def s_operation_params_popup(ctx: Ctx):
         ctx.pump(4)
         ctx.shot(sig_popup, "params_sigpy")
 
+    from arrayscope.operations.parameter_forms import build_parameter_form
+    from arrayscope.operations.registry import get_operation_entry
+    from arrayscope.ui.operation_params_popup import OperationParamsPopup
+
+    pics_entry = get_operation_entry("bart:pics")
+    pics_form = build_parameter_form(
+        pics_entry,
+        shape=win.data.shape,
+        slot_options=win._slot_source_options(pics_entry),
+    )
+    pics_popup = OperationParamsPopup(
+        pics_entry,
+        pics_form,
+        lambda _values, _bindings: None,
+        parent=win,
+    )
+    pics_popup._slot_combos["sensitivities"].setCurrentIndex(1)
+    pics_popup.adjustSize()
+    pics_popup.show()
+    ctx.pump(4)
+    ctx.shot(pics_popup, "params_input_slot")
+
 
 @scenario("operation_manager")
 def s_operation_manager(ctx: Ctx):
@@ -584,7 +606,7 @@ def s_operation_manager(ctx: Ctx):
         label="Command reconstruction",
         description="Editable external reconstruction command.",
         runtime="command",
-        command_template="recon-tool --iterations {iterations} {in} {out}",
+        command_template=("recon-tool --iterations {iterations} {in} {sensitivities} {out}"),
         handoff="npy",
         timeout_s=120,
         environment="bart",
@@ -597,6 +619,14 @@ def s_operation_manager(ctx: Ctx):
                 "default": 30,
                 "minimum": 1,
                 "maximum": 500,
+            }
+        ],
+        input_slots=[
+            {
+                "name": "sensitivities",
+                "label": "Sensitivity maps",
+                "description": "Second array handed to the reconstruction command.",
+                "accepts": ["dimension-set", "open-document", "saved-array"],
             }
         ],
     )
@@ -645,6 +675,8 @@ def s_operation_manager(ctx: Ctx):
     if not dialog.select_operation(command_id):
         raise RuntimeError("command definition missing from operation manager")
     ctx.pump(6)
+    dialog.resize(860, 900)
+    ctx.shot(dialog, "input_slot_editor")
     ctx.shot(dialog, "command_template_advanced_collapsed")
 
     dialog.advanced_button.setChecked(True)
@@ -668,6 +700,49 @@ def s_operation_manager(ctx: Ctx):
     ctx.pump(6)
     ctx.shot(dialog, "problems")
     dialog.close()
+
+
+@scenario("operation_unresolved_slot")
+def s_operation_unresolved_slot(ctx: Ctx):
+    from arrayscope.operations import registry
+    from arrayscope.operations.input_slots import SLOT_ROI_MASK, OperationInputSlot
+    from arrayscope.operations.pipeline import ArrayDocument, OperationStep
+    from arrayscope.operations.plugins import PluginOperationSpec
+
+    spec = PluginOperationSpec(
+        id="gallery:roi-input",
+        label="Apply ROI mask",
+        build=lambda _axis, _params, slots: lambda data: data * slots["mask"],
+        input_slots=(
+            OperationInputSlot(
+                "mask",
+                "ROI mask",
+                "One ROI rasterized in the current image plane.",
+                accepts=(SLOT_ROI_MASK,),
+            ),
+        ),
+        group="Gallery",
+    )
+    registry.register_pack_operation(spec)
+    operation = registry.create_operation(spec.id)
+    reason = operation.current_unavailable_reason()
+
+    win = ctx.window(_volume3d(), size=(1000, 720))
+    win._set_document(
+        ArrayDocument(
+            win.base_data,
+            steps=(
+                OperationStep(
+                    operation,
+                    enabled=False,
+                    unavailable_reason=reason,
+                ),
+            ),
+        )
+    )
+    win.operation_dock.widget().resize(430, 600)
+    ctx.pump(6)
+    ctx.shot(win.operation_dock.widget(), "unresolved_slot_unavailable")
 
 
 @scenario("operation_chip_menu")

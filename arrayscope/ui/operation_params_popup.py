@@ -17,9 +17,11 @@ from collections.abc import Callable
 
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from arrayscope.operations.input_slots import SLOT_SAVED_ARRAY, SlotBinding
 from arrayscope.operations.parameter_forms import ParameterForm
 from arrayscope.operations.registry import OperationEntry
 from arrayscope.ui.bubbles import EditBubble
+from arrayscope.ui.file_dialogs import get_open_file_name
 from arrayscope.ui.icons import material_icon, set_button_icon
 
 # Generous fallbacks for an unbounded side of a field, so a spinbox never
@@ -48,7 +50,7 @@ class OperationParamsPopup(EditBubble):
         self,
         entry: OperationEntry,
         form: ParameterForm,
-        on_accept: Callable[[dict], None],
+        on_accept: Callable[[dict, dict], None],
         parent=None,
     ) -> None:
         super().__init__(parent, icon_name=None)
@@ -63,6 +65,7 @@ class OperationParamsPopup(EditBubble):
         self._form = form
         self._on_accept = on_accept
         self._spins: dict[str, QtWidgets.QAbstractSpinBox] = {}
+        self._slot_combos: dict[str, QtWidgets.QComboBox] = {}
         self._derived_labels: list[QtWidgets.QLabel] = []
         self._syncing = False
 
@@ -76,6 +79,43 @@ class OperationParamsPopup(EditBubble):
         self._fields_layout = QtWidgets.QFormLayout()
         self._fields_layout.setContentsMargins(0, 0, 0, 0)
         self._fields_layout.setSpacing(4)
+        for slot in form.slot_fields:
+            row = QtWidgets.QWidget(self)
+            row_layout = QtWidgets.QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
+            combo = QtWidgets.QComboBox(self)
+            combo.addItem("Choose input…", SlotBinding(""))
+            for option in slot.options:
+                combo.addItem(option.label, option.binding)
+                index = combo.count() - 1
+                combo.setItemData(index, option.description, QtCore.Qt.ItemDataRole.ToolTipRole)
+                if not option.available:
+                    item = combo.model().item(index)
+                    if item is not None:
+                        item.setEnabled(False)
+                    combo.setItemData(
+                        index,
+                        option.unavailable_reason,
+                        QtCore.Qt.ItemDataRole.ToolTipRole,
+                    )
+            if slot.binding.is_bound and combo.findData(slot.binding) < 0:
+                combo.addItem(slot.binding.label or slot.binding.kind, slot.binding)
+            combo.setCurrentIndex(max(0, combo.findData(slot.binding)))
+            combo.setToolTip(slot.description)
+            combo.currentIndexChanged.connect(
+                lambda _index, name=slot.name: self._on_slot_changed(name)
+            )
+            self._slot_combos[slot.name] = combo
+            row_layout.addWidget(combo, 1)
+            if SLOT_SAVED_ARRAY in slot.accepts:
+                browse = QtWidgets.QToolButton(self)
+                set_button_icon(browse, "folder_open", tooltip="Choose a saved array")
+                browse.clicked.connect(
+                    lambda _checked=False, name=slot.name: self._choose_saved_array(name)
+                )
+                row_layout.addWidget(browse)
+            self._fields_layout.addRow(slot.label, row)
         for field in form.fields:
             spin = self._make_spin(field)
             self._spins[field.name] = spin
@@ -158,6 +198,36 @@ class OperationParamsPopup(EditBubble):
         self._form.set_value(name, self._spins[name].value())
         self._sync_from_form()
 
+    def _on_slot_changed(self, name: str) -> None:
+        combo = self._slot_combos[name]
+        binding = combo.currentData()
+        self._form.set_binding(
+            name,
+            binding if isinstance(binding, SlotBinding) else SlotBinding(""),
+        )
+        self._refresh_validation()
+
+    def _choose_saved_array(self, name: str) -> None:
+        path, _selected_filter = get_open_file_name(
+            self,
+            "Choose saved array",
+            "",
+            "NumPy arrays (*.npy)",
+        )
+        if not path:
+            return
+        binding = SlotBinding(
+            SLOT_SAVED_ARRAY,
+            path=path,
+            label=f"Saved array — {path.rsplit('/', 1)[-1]}",
+        )
+        combo = self._slot_combos[name]
+        index = combo.findData(binding)
+        if index < 0:
+            combo.addItem(binding.label, binding)
+            index = combo.count() - 1
+        combo.setCurrentIndex(index)
+
     def _sync_from_form(self) -> None:
         """Push every field's current model value back into its widget.
 
@@ -205,6 +275,7 @@ class OperationParamsPopup(EditBubble):
         if self._form.validate() is not None:
             return
         values = dict(self._form.values())
+        bindings = dict(self._form.bindings())
         if self._on_accept is not None:
-            self._on_accept(values)
+            self._on_accept(values, bindings)
         self.close()

@@ -83,6 +83,8 @@ class InspectionWorkflowMixin:
     def _on_roi_created(self, selection):
         self.roi_store = self.roi_store.upsert(selection)
         self._refresh_inspection_dock()
+        if not getattr(self, "_suppress_operation_slot_roi_events", False):
+            self._refresh_operation_slot_bindings(roi_id=str(selection.id))
 
     def _on_roi_changed(self, _roi_id, _geometry):
         if hasattr(self, "img_view"):
@@ -90,10 +92,14 @@ class InspectionWorkflowMixin:
                 _roi_id
             )
         self._refresh_inspection_dock()
+        if not getattr(self, "_suppress_operation_slot_roi_events", False):
+            self._refresh_operation_slot_bindings(roi_id=str(_roi_id))
 
     def _on_roi_deleted(self, _roi_id):
         self.roi_store = self.roi_store.remove(_roi_id)
         self._refresh_inspection_dock()
+        if not getattr(self, "_suppress_operation_slot_roi_events", False):
+            self._refresh_operation_slot_bindings(roi_id=str(_roi_id))
 
     def _delete_roi(self, roi_id):
         if hasattr(self, "img_view"):
@@ -703,9 +709,14 @@ class InspectionWorkflowMixin:
             dataclasses.replace(selection, **changes) if str(selection.id) == roi_id else selection
             for selection in self.img_view.roiSelections()
         )
-        self.img_view.setRoiSelections(selections, selected_id=roi_id)
+        self._suppress_operation_slot_roi_events = True
+        try:
+            self.img_view.setRoiSelections(selections, selected_id=roi_id)
+        finally:
+            self._suppress_operation_slot_roi_events = False
         self.roi_store = self.roi_store.replace_all(self.img_view.roiSelections()).select(roi_id)
         self._refresh_inspection_dock()
+        self._refresh_operation_slot_bindings(roi_id=roi_id)
         self._notify_sync("rois")
 
     def _rename_roi(self, roi_id, global_pos=None):

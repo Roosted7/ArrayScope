@@ -11,8 +11,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pyqtgraph.Qt import QtWidgets
 
+from arrayscope.operations.input_slots import (
+    SLOT_DIMENSION_SET,
+    OperationInputSlot,
+    SlotBinding,
+    SlotSourceOption,
+)
 from arrayscope.operations.parameter_forms import build_parameter_form
-from arrayscope.operations.registry import get_operation_entry
+from arrayscope.operations.registry import OperationEntry, get_operation_entry
 from arrayscope.ui.operation_params_popup import OperationParamsPopup
 from tests.ui.helpers import process_events
 
@@ -26,7 +32,7 @@ def _crop_popup(qtbot, on_accept):
 
 
 def test_crop_form_renders_two_spinboxes_and_derived_line(qtbot):
-    popup, _form = _crop_popup(qtbot, on_accept=lambda values: None)
+    popup, _form = _crop_popup(qtbot, on_accept=lambda values, bindings: None)
     spins = popup.findChildren(QtWidgets.QSpinBox)
     assert len(spins) == 2
     # The derived "Output length" line is present and reflects the full axis.
@@ -35,7 +41,7 @@ def test_crop_form_renders_two_spinboxes_and_derived_line(qtbot):
 
 
 def test_editing_start_past_stop_nudges_stop(qtbot):
-    popup, form = _crop_popup(qtbot, on_accept=lambda values: None)
+    popup, form = _crop_popup(qtbot, on_accept=lambda values, bindings: None)
     # Full axis is [0, 10). Drag start up to 10 -> stop is nudged to stay above.
     popup._spins["start"].setValue(10)
     process_events(qtbot, count=2)
@@ -47,7 +53,7 @@ def test_editing_start_past_stop_nudges_stop(qtbot):
 def test_invalid_state_disables_confirm(qtbot):
     entry = get_operation_entry("crop")
     form = build_parameter_form(entry, shape=(4, 10, 6), axis=1)
-    popup = OperationParamsPopup(entry, form, lambda values: None)
+    popup = OperationParamsPopup(entry, form, lambda values, bindings: None)
     qtbot.addWidget(popup)
     # Force a bound violation directly (start below its minimum of 0) so
     # form.validate() returns a message; the popup must reflect it.
@@ -64,12 +70,57 @@ def test_invalid_state_disables_confirm(qtbot):
 
 def test_accept_delivers_values_dict(qtbot):
     captured = {}
-    popup, _form = _crop_popup(qtbot, on_accept=lambda values: captured.update(values))
+    popup, _form = _crop_popup(qtbot, on_accept=lambda values, bindings: captured.update(values))
     popup._spins["start"].setValue(2)
     popup._spins["stop"].setValue(7)
     process_events(qtbot, count=2)
     popup._accept()
     assert captured == {"start": 2, "stop": 7}
+
+
+def test_slot_renders_beside_parameters_and_accepts_binding(qtbot):
+    slot = OperationInputSlot(
+        "reference",
+        "Reference array",
+        "Choose an auxiliary array.",
+        accepts=(SLOT_DIMENSION_SET,),
+    )
+    entry = OperationEntry(
+        id="test:slot-popup",
+        label="Slot popup",
+        operation_type=object,
+        input_slots=(slot,),
+    )
+    binding = SlotBinding(
+        SLOT_DIMENSION_SET,
+        source_id="document",
+        indices=(None, None),
+        label="Current dimension set",
+    )
+    form = build_parameter_form(
+        entry,
+        shape=(4, 5),
+        slot_options={
+            "reference": (SlotSourceOption(binding, binding.label, "Current displayed plane."),)
+        },
+    )
+    captured = {}
+    popup = OperationParamsPopup(
+        entry,
+        form,
+        lambda values, bindings: captured.update(
+            values=values,
+            bindings=bindings,
+        ),
+    )
+    qtbot.addWidget(popup)
+
+    assert popup._confirm.isEnabled() is False
+    assert popup._slot_combos["reference"].count() == 2
+    popup._slot_combos["reference"].setCurrentIndex(1)
+    popup._accept()
+
+    assert captured == {"values": {}, "bindings": {"reference": binding}}
 
 
 @pytest.mark.skipif(
@@ -79,7 +130,7 @@ def test_accept_delivers_values_dict(qtbot):
 def test_float_op_uses_double_spinbox(qtbot):
     entry = get_operation_entry("soft_threshold")
     form = build_parameter_form(entry, shape=(4, 5), axis=0)
-    popup = OperationParamsPopup(entry, form, lambda values: None)
+    popup = OperationParamsPopup(entry, form, lambda values, bindings: None)
     qtbot.addWidget(popup)
     assert popup.findChildren(QtWidgets.QDoubleSpinBox)
     popup._spins["threshold"].setValue(0.5)
