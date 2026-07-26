@@ -58,11 +58,22 @@ def operation_output_dtype(input_dtype, operation) -> np.dtype | None:
     return np.dtype(input_dtype)
 
 
+def operation_output_signature(input_shape, input_dtype, operation):
+    """Resolve shape and dtype together when an operation discovers both."""
+
+    input_shape = tuple(int(size) for size in input_shape)
+    dtype = None if input_dtype is None else np.dtype(input_dtype)
+    if dtype is not None and hasattr(operation, "characterize_output"):
+        output_shape, output_dtype = operation.characterize_output(input_shape, dtype)
+        return tuple(int(size) for size in output_shape), np.dtype(output_dtype)
+    output_shape = tuple(int(size) for size in operation.output_shape(input_shape))
+    return output_shape, operation_output_dtype(dtype, operation)
+
+
 def estimate_operation_cost(input_shape, input_dtype, operation) -> OperationCost:
     input_shape = tuple(int(size) for size in input_shape)
     input_dtype = None if input_dtype is None else np.dtype(input_dtype)
-    output_shape = tuple(int(size) for size in operation.output_shape(input_shape))
-    output_dtype = operation_output_dtype(input_dtype, operation)
+    output_shape, output_dtype = operation_output_signature(input_shape, input_dtype, operation)
     input_bytes = _array_bytes(input_shape, input_dtype)
     output_bytes = _array_bytes(output_shape, output_dtype)
     capabilities = _operation_capabilities(

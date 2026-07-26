@@ -20,7 +20,12 @@ import pytest
 
 from arrayscope.operations import plugins
 from arrayscope.operations.capabilities import OperationClass, OperationKind
-from arrayscope.operations.plugin_conformance import verify_region_conformance
+from arrayscope.operations.plugin_conformance import (
+    CharacterizationMismatch,
+    characterization_stats,
+    characterize_operation,
+    verify_region_conformance,
+)
 from arrayscope.operations.plugins import PluginOperationSpec
 from arrayscope.operations.regions import (
     AxisRegionKind,
@@ -270,3 +275,85 @@ def test_honored_op_is_faithful_through_the_operation_evaluator(primed):
     plugin_image = OperationEvaluator(plugin_document).image(state)
     oracle_image = OperationEvaluator(oracle_document).image(state)
     np.testing.assert_allclose(np.asarray(plugin_image.data), np.asarray(oracle_image.data))
+
+
+@pytest.mark.parametrize(
+    ("operation_id", "fn", "expected_kind", "expected_shape"),
+    [
+        ("demo:identity", lambda a: a, "identity", (7, 9)),
+        (
+            "demo:pad",
+            lambda a: np.pad(a, ((1, 2), (3, 0))),
+            "pad_crop",
+            (10, 12),
+        ),
+        ("demo:decimate", lambda a: a[:, ::2], "axis_scaled", (7, 5)),
+        ("demo:permute", lambda a: a.transpose(1, 0), "permutation", (9, 7)),
+        ("demo:reduce", lambda a: a.mean(axis=0), "axis_reduced", (9,)),
+        ("demo:scale", lambda a: np.repeat(a, 2, axis=0), "axis_scaled", (14, 9)),
+        ("demo:fixed", lambda a: np.zeros((2, 3), dtype=a.dtype), "fixed_size", (2, 3)),
+    ],
+)
+def test_characterization_fits_only_named_conservative_shape_rules(
+    operation_id, fn, expected_kind, expected_shape
+):
+    spec = PluginOperationSpec(id=operation_id, label=operation_id, fn=fn, changes_shape=True)
+
+    result = characterize_operation(spec, (7, 9), np.dtype("float32"))
+
+    assert result.predictable is True
+    assert result.shape_rule.kind == expected_kind
+    assert result.output_shape == expected_shape
+    assert result.probe_calls == 5
+    assert result.probe_elements <= 7 * 9 + 10 * 9 + 13 * 9 + 7 * 12 + 7 * 15
+
+
+def test_unfit_shape_is_exact_and_whole_array_instead_of_extrapolated():
+    spec = PluginOperationSpec(
+        id="demo:parity-shape",
+        label="Parity shape",
+        fn=lambda a: np.pad(a, ((0, a.shape[0] % 2), (0, 0))),
+        changes_shape=True,
+    )
+    plugins._SPEC_CACHE[spec.id] = spec
+    operation = plugins.create_plugin_operation(spec.id)
+
+    characterization = characterize_operation(spec, (7, 9), np.dtype("float32"))
+    capabilities = operation.capabilities((7, 9), np.dtype("float32"))
+
+    assert characterization.predictable is False
+    assert characterization.shape_rule.kind == "exact"
+    assert characterization.output_shape == (8, 9)
+    assert capabilities.cache_stage is True
+    assert capabilities.blocking_axes == (0, 1)
+    assert capabilities.chunkable_axes == ()
+
+
+def test_runtime_mismatch_withholds_result_invalidates_and_demotes():
+    calls = 0
+
+    def inconsistent(data):
+        nonlocal calls
+        calls += 1
+        if calls <= 5:
+            return data
+        return np.pad(data, ((0, 1), (0, 0)))
+
+    spec = PluginOperationSpec(
+        id="demo:inconsistent",
+        label="Inconsistent",
+        fn=inconsistent,
+        changes_shape=True,
+    )
+    plugins._SPEC_CACHE[spec.id] = spec
+    operation = plugins.create_plugin_operation(spec.id)
+    data = np.ones((7, 9), dtype=np.float32)
+
+    assert operation.output_shape(data.shape) == data.shape
+    with pytest.raises(CharacterizationMismatch, match="result was withheld"):
+        operation.apply(data)
+
+    assert operation.output_shape(data.shape) == (8, 9)
+    assert operation.capabilities(data.shape, data.dtype).cache_stage is True
+    assert operation._characterization_hint.predictable is False
+    assert characterization_stats()["invalidated"] == 1

@@ -16,6 +16,7 @@ from arrayscope.operations.capabilities import (
     OperationKind,
     default_chunkable_axes,
 )
+from arrayscope.operations.cost import operation_output_signature
 from arrayscope.operations.regions import (
     AxisRegion,
     AxisRegionKind,
@@ -1376,7 +1377,9 @@ class ArrayDocument:
         base_shape = np.shape(self.base_data)
         base_axes = axes_for_shape(axes, base_shape)
         current_shape = evaluate_shape(
-            base_shape, tuple(step.operation for step in steps if step.enabled)
+            base_shape,
+            tuple(step.operation for step in steps if step.enabled),
+            base_dtype=getattr(self.base_data, "dtype", None),
         )
         current_axes = output_axes_for_operations(
             base_axes, tuple(step.operation for step in steps if step.enabled)
@@ -1466,10 +1469,11 @@ def evaluate(base_data, operations):
     return data
 
 
-def evaluate_shape(base_shape, operations) -> Shape:
+def evaluate_shape(base_shape, operations, *, base_dtype=None) -> Shape:
     shape = tuple(int(size) for size in base_shape)
+    dtype = None if base_dtype is None else np.dtype(base_dtype)
     for operation in operations:
-        shape = operation.output_shape(shape)
+        shape, dtype = operation_output_signature(shape, dtype, operation)
     return shape
 
 

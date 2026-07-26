@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import EntryPoint, entry_points
+
+import numpy as np
 
 from arrayscope.operations.capabilities import (
     OperationCapabilities,
@@ -37,7 +39,14 @@ from arrayscope.operations.capabilities import (
     OperationKind,
     default_chunkable_axes,
 )
-from arrayscope.operations.plugin_conformance import verify_region_conformance
+from arrayscope.operations.plugin_conformance import (
+    CharacterizationMismatch,
+    OperationCharacterization,
+    characterization_stats,
+    characterize_operation,
+    record_runtime_mismatch,
+    reset_characterization_cache,
+)
 from arrayscope.operations.regions import (
     AxisRegion,
     AxisRegionKind,
@@ -59,30 +68,18 @@ _LOGGER = logging.getLogger(__name__)
 # Cache of loaded specs keyed by plugin id.  Populated on first use only.
 _SPEC_CACHE: dict[str, PluginOperationSpec] = {}
 
-# Tier-2 conformance gate state.
-#
-# A region (Tier-2) claim is honored -- the op allowed to run per-region -- only
-# after the conformance harness passes for that (id, axis, params).  We cache the
-# verdict here so the property test runs once per bound op, and expose a stats
-# counter so the honor/downgrade decision is observable (testing law #2: never
-# silently drop a claim).  Keyed by (plugin_id, axis, sorted-params).
-_REGION_HONOR: dict[tuple[str, int | None, tuple[tuple[str, object], ...]], bool] = {}
-_REGION_STATS: dict[str, int] = {"verified": 0, "honored": 0, "rejected": 0}
-
-# The synthetic probe the gate property-tests the claim against.  The verdict is
-# generic (a claim is a claim about the op, not about one runtime array), so a
-# fixed shape/dtype set + fixed seed makes the decision deterministic and
-# reproducible -- two reconstructions of the same recipe reach the same verdict.
 _REGION_PROBE_SHAPE = (5, 4, 3)
-_REGION_PROBE_DTYPES: tuple[object, ...] = ("float64", "int32")
-_REGION_PROBE_SEED = 0xA11CE  # fixed, arbitrary -> deterministic verdict
-_REGION_PROBE_SAMPLES = 16
 
 
 def region_conformance_stats() -> dict[str, int]:
     """Observable Tier-2 gate tally: verified / honored / rejected claims."""
 
-    return dict(_REGION_STATS)
+    stats = characterization_stats()
+    return {
+        "verified": stats["region_verified"],
+        "honored": stats["region_honored"],
+        "rejected": stats["region_rejected"],
+    }
 
 
 @dataclass(frozen=True)
@@ -134,6 +131,10 @@ class PluginOperationSpec:
     runtime: str = "python"
     runtime_config: Mapping[str, object] | None = None
     environment_id: str = ""
+    # Dynamic identity is part of the characterization key. Linked user files
+    # provide a callable that returns their current mtime; command-backed specs
+    # provide the command template text.
+    source_identity: object = None
 
     def __post_init__(self) -> None:
         if (self.fn is None) == (self.build is None):
@@ -184,6 +185,11 @@ class PluginOperation:
     plugin_id: str
     axis: int | None = None
     params: tuple[tuple[str, object], ...] = ()
+    _shape_hint: Shape | None = field(default=None, compare=False, repr=False)
+    _dtype_hint: object = field(default=None, compare=False, repr=False)
+    _characterization_hint: OperationCharacterization | None = field(
+        default=None, compare=False, repr=False
+    )
 
     def _spec(self) -> PluginOperationSpec:
         return load_plugin_spec(self.plugin_id)
@@ -191,10 +197,29 @@ class PluginOperation:
     def _params(self) -> dict[str, object]:
         return dict(self.params)
 
-    def _region_honored(self) -> bool:
-        # A Tier-2 region claim is honored per (id, axis, params) only after the
-        # conformance gate passes; otherwise this op behaves as Tier-1 OPAQUE.
-        return is_region_honored(self.plugin_id, self.axis, self.params)
+    def _characterize(self, shape: Shape, dtype) -> OperationCharacterization:
+        characterization = characterize_operation(
+            self._spec(),
+            tuple(shape),
+            np.dtype(dtype),
+            axis=self.axis,
+            params=self._params(),
+        )
+        object.__setattr__(self, "_shape_hint", tuple(shape))
+        object.__setattr__(self, "_dtype_hint", np.dtype(dtype))
+        object.__setattr__(self, "_characterization_hint", characterization)
+        return characterization
+
+    def characterize_output(self, shape: Shape, dtype) -> tuple[Shape, np.dtype]:
+        characterization = self._characterize(shape, dtype)
+        return characterization.output_shape, characterization.output_dtype
+
+    def _region_honored(self, shape: Shape | None = None, dtype=None) -> bool:
+        if shape is None:
+            shape = self._shape_hint or _REGION_PROBE_SHAPE
+        if dtype is None:
+            dtype = self._dtype_hint or np.dtype("float64")
+        return self._characterize(shape, dtype).region_honored
 
     @property
     def execution_class(self) -> OperationClass:
@@ -203,19 +228,68 @@ class PluginOperation:
         return OperationClass.SHADER_ON_READ if self._region_honored() else OperationClass.OPAQUE
 
     def apply(self, data):
+        array = np.asarray(data)
+        characterization = self._characterize(array.shape, array.dtype)
         fn = self._spec().resolve_fn(self.axis, self._params())
-        return fn(data)
+        result = np.asarray(fn(data))
+        predicted_shape = characterization.output_shape
+        predicted_dtype = characterization.output_dtype
+        if tuple(result.shape) != predicted_shape or result.dtype != predicted_dtype:
+            record_runtime_mismatch(
+                characterization,
+                actual_shape=result.shape,
+                actual_dtype=result.dtype,
+            )
+            raise CharacterizationMismatch(
+                f"operation {self.plugin_id!r} returned shape {tuple(result.shape)} / "
+                f"dtype {result.dtype}, but its cached characterization predicted "
+                f"{predicted_shape} / {predicted_dtype}; the result was withheld and "
+                "the operation was demoted to unpredictable"
+            )
+        return result
 
     def output_shape(self, shape: Shape) -> Shape:
-        return self._spec().resolve_output_shape(shape, self.axis, self._params())
+        dtype = self._dtype_hint or np.dtype("float32")
+        return self._characterize(shape, dtype).output_shape
 
     def output_dtype(self, input_dtype):
-        return self._spec().resolve_output_dtype(input_dtype)
+        shape = self._shape_hint or _REGION_PROBE_SHAPE
+        return self._characterize(shape, input_dtype).output_dtype
+
+    def output_axes(self, axes):
+        from dataclasses import replace
+
+        from arrayscope.core.axis_info import AxisInfo
+
+        input_shape = tuple(axis.size for axis in axes)
+        dtype = self._dtype_hint or np.dtype("float32")
+        rule = self._characterize(input_shape, dtype).shape_rule
+        output = []
+        for output_axis, axis_rule in enumerate(rule.axes):
+            if axis_rule.source_axis is None:
+                output.append(
+                    AxisInfo(
+                        id=f"{self.plugin_id}:axis-{output_axis}",
+                        label=f"Dim {output_axis}",
+                        size=axis_rule.predict(input_shape),
+                    )
+                )
+                continue
+            source = axes[axis_rule.source_axis]
+            size = axis_rule.predict(input_shape)
+            if axis_rule.mode == "offset" and int(axis_rule.value) == 0:
+                output.append(replace(source, size=size))
+            else:
+                output.append(replace(source, size=size, spacing=None, origin=None))
+        return tuple(output)
 
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
         ndim = len(tuple(input_shape))
         all_axes = tuple(range(ndim))
-        if self._region_honored():
+        characterization = self._characterize(
+            input_shape, np.dtype("float32") if input_dtype is None else input_dtype
+        )
+        if characterization.region_honored:
             # Tier-2 (verified windowable): a per-region ELEMENTWISE stage, the
             # same shape the built-in pointwise ops (Conjugate) use.  It blocks
             # and expands no axis, so a display-axis window shift is a subset of
@@ -245,7 +319,7 @@ class PluginOperation:
         )
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
-        if self._region_honored():
+        if self._region_honored(input_shape):
             # Windowable: producing the output sub-region needs exactly that
             # sub-region of the input (identity map, as elementwise ops declare).
             return output_region
@@ -413,14 +487,7 @@ def create_plugin_operation(
             value = float(value)
         bound_params.append((parameter.name, value))
 
-    operation = PluginOperation(
-        plugin_id=operation_id, axis=resolved_axis, params=tuple(bound_params)
-    )
-    if spec.region_capable:
-        # Adjudicate the Tier-2 claim up front so the honor/downgrade decision
-        # (and its warning + stat) happens at construction, not lazily mid-render.
-        is_region_honored(operation_id, operation.axis, operation.params)
-    return operation
+    return PluginOperation(plugin_id=operation_id, axis=resolved_axis, params=tuple(bound_params))
 
 
 def recipe_item_for_plugin_operation(operation: PluginOperation, *, enabled: bool) -> dict:
@@ -438,62 +505,17 @@ def recipe_item_for_plugin_operation(operation: PluginOperation, *, enabled: boo
 def is_region_honored(
     plugin_id: str, axis: int | None = None, params: tuple[tuple[str, object], ...] = ()
 ) -> bool:
-    """Whether this bound op's Tier-2 region claim passed conformance.
-
-    The verdict is computed once (property-tested) and cached.  A spec that does
-    not opt in (``region_capable=False``) is never honored -- it stays a Tier-1
-    OPAQUE whole-array op.
-    """
-
-    import numpy as np
-
+    """Whether the default signature's joint characterization honors regions."""
     spec = load_plugin_spec(plugin_id)
     if not spec.region_capable:
         return False
-
-    key = (plugin_id, axis, tuple(params))
-    cached = _REGION_HONOR.get(key)
-    if cached is not None:
-        return cached
-
-    # Property-test the claim across the probe dtypes.  A claim is honored only
-    # if it holds for EVERY probe (one counterexample downgrades it).
-    param_map = dict(params)
-    honored = True
-    first_failure = None
-    for dtype in _REGION_PROBE_DTYPES:
-        result = verify_region_conformance(
-            spec,
-            _REGION_PROBE_SHAPE,
-            dtype,
-            rng=np.random.default_rng(_REGION_PROBE_SEED),
-            axis=axis,
-            params=param_map,
-            samples=_REGION_PROBE_SAMPLES,
-        )
-        if not result.honored:
-            honored = False
-            first_failure = result
-            break
-
-    _REGION_HONOR[key] = honored
-    _REGION_STATS["verified"] += 1
-    if honored:
-        _REGION_STATS["honored"] += 1
-    else:
-        _REGION_STATS["rejected"] += 1
-        # Downgrade, don't refuse: the underlying fn is still a correct Tier-1
-        # OPAQUE op, so we run it whole-array (correct, just not the fast path)
-        # rather than break the user's pipeline over a performance annotation.
-        # The refusal to trust the fast path is what matters, and it is loud.
-        _LOGGER.warning(
-            "plugin operation %r declared region_capable but FAILED conformance "
-            "(%s); downgrading to OPAQUE whole-array. It will produce correct "
-            "pixels but cannot run per-region.",
-            plugin_id,
-            first_failure.reason if first_failure is not None else "no detail",
-        )
-    return honored
+    return characterize_operation(
+        spec,
+        _REGION_PROBE_SHAPE,
+        np.dtype("float64"),
+        axis=axis,
+        params=dict(params),
+    ).region_honored
 
 
 def _entry_point_origin(entry_point: EntryPoint) -> str:
@@ -506,5 +528,4 @@ def _reset_plugin_cache() -> None:
     """Clear the loaded-spec cache (test seam for re-discovery)."""
 
     _SPEC_CACHE.clear()
-    _REGION_HONOR.clear()
-    _REGION_STATS.update(verified=0, honored=0, rejected=0)
+    reset_characterization_cache()

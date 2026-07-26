@@ -100,6 +100,8 @@ def output_axes_for_operations(axes, operations) -> AxisInfoTuple:
 
 
 def output_axes_for_operation(axes, operation) -> AxisInfoTuple:
+    if hasattr(operation, "output_axes"):
+        return tuple(operation.output_axes(tuple(axes)))
     name = type(operation).__name__
     if name in {"Crop"}:
         axis = _axis(operation, axes)

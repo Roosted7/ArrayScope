@@ -15,6 +15,7 @@ from arrayscope.operations.capabilities import (
     OperationKind,
     default_chunkable_axes,
 )
+from arrayscope.operations.cost import operation_output_signature
 from arrayscope.operations.regions import RegionSpec
 
 
@@ -93,7 +94,7 @@ def optimize_operations(base_shape, base_dtype, operations) -> OptimizedOperatio
         raise ValueError(
             f"optimized operation dtype {output_dtype} does not match original dtype {original_dtype}"
         )
-    if tuple(evaluate_shape(base_shape, optimized)) != tuple(original_shape):
+    if tuple(evaluate_shape(base_shape, optimized, base_dtype=base_dtype)) != tuple(original_shape):
         raise ValueError("optimized operation shape contract does not match original operations")
 
     return OptimizedOperationPlan(
@@ -236,10 +237,7 @@ def _prefix_shape_dtype(base_shape, base_dtype, operations):
     shape = shapes[0]
     dtype = dtypes[0]
     for operation in tuple(operations):
-        shape = tuple(int(size) for size in operation.output_shape(shape))
-        if dtype is not None and hasattr(operation, "output_dtype"):
-            dtype = operation.output_dtype(dtype)
-            dtype = None if dtype is None else np.dtype(dtype)
+        shape, dtype = operation_output_signature(shape, dtype, operation)
         shapes.append(shape)
         dtypes.append(dtype)
     return tuple(shapes), tuple(dtypes)
