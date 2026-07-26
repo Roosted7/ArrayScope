@@ -13,8 +13,10 @@ magnitude — and the system currently produces none at all (§6). §7 proposes 
 FLOOR/PREVIEW merge that follows from both, §8 answers the upload questions,
 §9 records that the levels/histogram merge into the pyramid already exists.
 §10 replaces this dossier's two inferences with counters (both held) and adds
-the per-rung evaluation cost, which shows a 16× input reduction buying only
-~2.5× on raw data.
+the per-rung evaluation cost: a 16× input reduction buys only ~2.5× on raw
+data, and on the FFT stage — now that its stall is fixed — the counters find
+8 s of FFT evaluation computed and discarded per run, with the shared
+reduced-input preview refused 23 times.
 
 Field report that opened this: *"loading the NIfTI with a full montage over
 the third dimension takes many seconds. It often runs two quality levels, but
@@ -292,7 +294,10 @@ identically. **Triaged and fixed 2026-07-26** — a leaked page-pool layer, not
 an LOD or preview defect; see
 [wgpu-pool-layer-leak-2026-07-26.md](wgpu-pool-layer-leak-2026-07-26.md). The
 stage now completes 272/272, so the §6 numbers below (which were taken from
-the truncated runs) should be re-measured on the fixed tip.
+the truncated runs) should be re-measured on the fixed tip. **§10e re-measures
+them:** "zero previews" survives unchanged, the first FFT pixel moves to
+2564 ms, and the rung counters find 8 s of FFT evaluation discarded per run
+that a truncated stage could not have shown.
 
 Two independent gates each suffice to cause it:
 
@@ -307,6 +312,9 @@ Two independent gates each suffice to cause it:
    and `resident` is the montage default. That path is the one ADR 0050
    designed for exactly this case ("preview-then-refine for expensive
    commuting pipelines"), and `_evaluate_reduced_preview_volume` implements it.
+   §10e measures the refusal: **23 blocked calls per run, last gate
+   `resident lod policy mode`** — this gate is not merely reachable, it fires
+   on every retarget of the stage.
 
 Gate 1 is worth spelling out, because the case is stronger than "accept a
 quality compromise". This pipeline's FFT axis is the **montage** axis, not a
@@ -620,15 +628,12 @@ Five in-process repeats of the raw stage (`--repeat 5`, §10c):
 Two rungs, never a `PREVIEW` row — §2's FLOOR/PREVIEW collapse, confirmed from
 the evaluation side rather than from acknowledgements.
 
-**FLOOR/DESIRED total-time ratio: median 0.40, range 0.24–0.50.** A 16x input
-reduction buys a **~2.5x** cheaper evaluation, not 16x. That is the expected
+**FLOOR/DESIRED total-time ratio: median 0.40, range 0.24–0.50.** A 16× input
+reduction buys a **~2.5×** cheaper evaluation, not 16×. That is the expected
 shape for a raw pipeline — §5 already ruled out the preview level on raw data
 for two other reasons, and this adds a third: the saving the preview rung is
-supposed to bank is not there to bank. It does **not** test §6's claim, which
-is about *operation* pipelines; `fft_full_tiled_montage` still hits the
-pre-existing 271/272 stall guard (unchanged, untriaged, owned elsewhere), so
-the counter is in place for that measurement but the measurement has not been
-made.
+supposed to bank is not there to bank. §10e takes the same counter to the
+*operation* pipeline §6 is about, where the answer is different again.
 
 Absolute times here are wall time per evaluation under whatever load the
 machine has, not CPU time — the five repeats span 2329–3139 ms for the same
@@ -671,6 +676,64 @@ inside noise in the favourable direction. Cost per upload is two integer dict
 bumps; cost per rung evaluation is one lock and three dict bumps against a
 multi-millisecond evaluation.
 
+### 10e. The FFT stage, re-taken over the stall fix
+
+`ccb951fc` closed the 271/272 stall, so §6's stage finishes and its numbers can
+be taken from a completed run instead of a truncated one. One run,
+`--stages load_data,fft_full_tiled_montage`, stage elapsed **5595 ms**
+(three repeats: 5632 / 5646 / 5803, spread 170 ms — six times tighter than the
+raw stage's 1098 ms, so this stage does not need `--repeat` to be trustworthy).
+
+**§6's gate 2 is now a counter, not a code reading.**
+`tile_lod_preview_reduced_*` reports **scheduled 0, blocked 23, failures 0,
+last gate `resident lod policy mode`**. Twenty-three times per run the pipeline
+asked for the shared reduced-input preview and `shared_preview_is_useful`'s
+opening `resident` clause refused it. This is what the three dead counters
+should have been saying all along.
+
+**Uploads, all at level 0 again** — and 2.2× the raw stage's bytes:
+
+| level | representation | uploads | bytes |
+|---:|---|---:|---:|
+| 0 | `complex_rg32f` | 1088 | 570 425 344 |
+| 0 | `scalar_r32f` | 240 | 62 914 560 |
+
+633 MB of native-plane uploads, no reduced row anywhere. `complex_rg32f` is
+8 B/texel, which is where the factor over §10a's 285 MB comes from.
+
+**Rung evaluation, split by lane and outcome** (from the trace's `rung` /
+`level` / `fn_ns`; the diagnostics rows aggregate the same work):
+
+| rung | level | lane | outcome | calls | mean | total |
+|---|---:|---|---|---:|---:|---:|
+| FLOOR | 4 | display_preview | completed | 62 | 5.3 ms | 326 ms |
+| DESIRED | 2 | display_preview | completed | 514 | 21.6 ms | 11 098 ms |
+| DESIRED | 1 | display_preparation | completed | 60 | 21.6 ms | 1 293 ms |
+| **DESIRED** | **1** | **display_preview** | **stale** | **8** | **1000.6 ms** | **8 005 ms** |
+
+Three things fall out of that table.
+
+1. **Eight seconds of FFT evaluation is computed and thrown away, every run.**
+   Eight cold `DESIRED(level=1)` tasks at almost exactly 1 s each, all
+   `stale` — superseded before they could commit. Inside a 5.6 s stage on four
+   workers, that is the single largest lever these counters found, and it is
+   precisely the waste ADR 0050's shared reduced-input preview exists to
+   prevent — the path the counter above shows refused 23 times per run.
+2. **Input size is not what sets evaluation cost here.** The *same*
+   `(DESIRED, level 1)` costs 21.6 ms in one lane and 1000.6 ms in the other, a
+   **46× spread at identical input size**. The cheap ones hit a warm stage
+   cache; the expensive ones are the cold first-and-only presentable rung for a
+   tile with nothing (`has_first_pixel` False routes DESIRED to
+   DISPLAY_PREVIEW). And level 1 carries 4× the texels of level 2 yet costs the
+   same 21.6 ms when warm.
+   So "reduced input is ~16× cheaper" cannot be read off this stage: the
+   reduced-input evaluation never runs, and the term the claim scales — texels
+   in — is not the term that dominates. Cold-vs-warm stage cache is.
+3. **Still zero previews on the FFT pipeline**, over the fix: the only FLOOR
+   rows are 62 level-4 raw tiles inherited from the earlier phase, and the
+   stage reports `first_preview_floor_fill_ms = n/a` with the first FFT pixel at
+   2564 ms. §6's finding survives the stall fix intact.
+
 ## Open questions, left open deliberately
 
 - **Why 18 transactions for the preview and 2 for the refinement.** This is
@@ -688,5 +751,11 @@ multi-millisecond evaluation.
   that never finished**, so its FFT numbers are a lower bound on work done and
   need re-taking. §10e re-takes them over the fix.
 - ~~**Which page keys the 1088 uploads belong to**~~ — answered by §10a.
-- ~~**Is reduced-input evaluation ~16× cheaper for op pipelines?**~~ — answered
-  by §10e, over the stall fix. It is not: **1.5×** for this FFT pipeline.
+- **Is reduced-input evaluation ~16× cheaper for op pipelines?** Still open, and
+  §10e explains why it cannot be measured here: the reduced-input preview never
+  runs on this stage (23 refused calls per run, all `resident lod policy mode`),
+  so there is no reduced-input evaluation to time. What §10e does refute is the
+  claim's *premise* — input size is not what sets evaluation cost on this
+  pipeline; cold-vs-warm stage cache is, by 46×.
+- **The 8 s of discarded FFT evaluation per FFT stage** (§10e). Newly visible
+  and the largest thing the counters found.
