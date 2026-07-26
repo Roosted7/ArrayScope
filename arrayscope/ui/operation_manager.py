@@ -1,4 +1,4 @@
-"""Operation manager: browse, arrange, hide, import and edit operations.
+"""Operation manager: browse, arrange, duplicate and edit operations.
 
 This is the operations analogue of :mod:`arrayscope.ui.colormap_designer`. It is
 the flagship UI of the custom-operations feature and deliberately mirrors the
@@ -13,8 +13,9 @@ colormap designer's interaction model:
   fully editable and are removed outright.
 - Edits save automatically (on edit-finish / toggle), matching the colormap
   designer -- no explicit Save button, no silent loss.
-- The right column is a live editor for the selected op; the "Add" button walks
-  the "connect up a custom function" import flow.
+- The right column is the product's one operation editor. ``New`` creates an
+  unfinished entry in place; source/callable selection and copy/link storage
+  live in this same editor rather than a second modal editor.
 
 The dialog registers a library listener so an external mutation (a recipe load,
 another window's edit) rebuilds the tree in place, preserving selection by id.
@@ -27,6 +28,7 @@ import os
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from arrayscope.operations import library
+from arrayscope.operations.operation_definitions import export_operation_definition
 from arrayscope.operations.registry import get_operation_entry
 from arrayscope.ui.file_dialogs import get_open_file_name
 from arrayscope.ui.icons import material_icon, set_button_icon, set_label_icon
@@ -38,43 +40,11 @@ _VIRTUAL_ROLE = QtCore.Qt.ItemDataRole.UserRole + 2
 
 _PROBLEMS_GROUP = "Problems"
 _KIND_CHOICES = ("int", "float")
+_PARAM_LABEL_ROLE = QtCore.Qt.ItemDataRole.UserRole
 
 
 def _is_user_op(operation_id: str) -> bool:
     return str(operation_id).startswith("user:")
-
-
-# TODO(integration): a small ``library.user_operation_source_path(id)`` helper
-# would remove this local wrapper scan (the library already has a private
-# ``_wrapper_path_for_id``). Kept here so this chunk does not edit library.py.
-def _user_op_source_path(operation_id: str) -> str | None:
-    """Absolute path to the ``.py`` backing a user op, or ``None``."""
-
-    import json
-
-    directory = library.user_operations_directory()
-    if not os.path.isdir(directory):
-        return None
-    for file_name in sorted(os.listdir(directory)):
-        if not file_name.endswith(".json") or file_name in (
-            "layout.json",
-            "hidden-operations.json",
-        ):
-            continue
-        path = os.path.join(directory, file_name)
-        try:
-            with open(path) as handle:
-                payload = json.load(handle)
-        except Exception:
-            continue
-        if str(payload.get("id") or "") != str(operation_id):
-            continue
-        source = payload.get("source") or {}
-        rel_or_abs = str(source.get("path") or "")
-        if not rel_or_abs:
-            return None
-        return rel_or_abs if os.path.isabs(rel_or_abs) else os.path.join(directory, rel_or_abs)
-    return None
 
 
 class _OperationTree(QtWidgets.QTreeWidget):
@@ -127,25 +97,33 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self._window = window
         self.setWindowTitle("Operations")
         self.setWindowFlag(QtCore.Qt.WindowType.Tool, True)
-        self.resize(780, 500)
+        self.resize(780, 720)
+        self.setMinimumSize(720, 620)
+        self.setSizeGripEnabled(True)
         self._loaded_id = None
         self._suppress = False
         self._reloading = False
+        self._source_infos = {}
 
         root = QtWidgets.QHBoxLayout(self)
 
         # -- left: library tree -------------------------------------------
         left = QtWidgets.QVBoxLayout()
         self.tree = _OperationTree(self)
-        self.tree.setMinimumWidth(300)
+        self.tree.setMinimumWidth(210)
         left.addWidget(self.tree, 1)
         hint = QtWidgets.QLabel("Drag to rearrange operations and groups")
         hint.setObjectName("OperationsMetaLabel")
         left.addWidget(hint)
 
         tree_buttons = QtWidgets.QHBoxLayout()
-        self.add_button = QtWidgets.QToolButton(self)
-        set_button_icon(self.add_button, "add", tooltip="Import a custom operation…")
+        self.new_button = QtWidgets.QToolButton(self)
+        set_button_icon(self.new_button, "add", tooltip="New operation")
+        # Compatibility for callers of the original manager API; this is now
+        # an in-manager creation action, never a modal import editor.
+        self.add_button = self.new_button
+        self.duplicate_button = QtWidgets.QToolButton(self)
+        set_button_icon(self.duplicate_button, "data_object", tooltip="Duplicate selected to edit")
         self.remove_button = QtWidgets.QToolButton(self)
         set_button_icon(self.remove_button, "delete", tooltip="Hide")
         self.unhide_button = QtWidgets.QToolButton(self)
@@ -159,7 +137,8 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.reset_all_button = QtWidgets.QToolButton(self)
         set_button_icon(self.reset_all_button, "refresh", tooltip="Reset layout and unhide all")
         for button in (
-            self.add_button,
+            self.new_button,
+            self.duplicate_button,
             self.remove_button,
             self.unhide_button,
             self.open_file_button,
@@ -198,24 +177,60 @@ class OperationManagerDialog(QtWidgets.QDialog):
         form.addRow(self.icon_form_label, self.icon_row_widget)
         self.requires_axis_check = QtWidgets.QCheckBox("Requires an axis", self)
         form.addRow("", self.requires_axis_check)
+        self.changes_shape_label = QtWidgets.QLabel("", self)
+        self.changes_shape_label.setObjectName("OperationsMetaLabel")
+        form.addRow("Output", self.changes_shape_label)
         self.common_check = QtWidgets.QCheckBox("Show in the Common (pinned) section", self)
         form.addRow("", self.common_check)
         right.addLayout(form)
 
+        self.source_box = QtWidgets.QGroupBox("Implementation", self)
+        source_layout = QtWidgets.QVBoxLayout(self.source_box)
+        source_form = QtWidgets.QFormLayout()
+        source_row = QtWidgets.QHBoxLayout()
+        self.source_path_edit = QtWidgets.QLineEdit(self)
+        self.source_path_edit.setPlaceholderText("Choose a Python source file")
+        self.source_browse_button = QtWidgets.QToolButton(self)
+        set_button_icon(
+            self.source_browse_button, "folder_open", tooltip="Choose Python source file"
+        )
+        source_row.addWidget(self.source_path_edit, 1)
+        source_row.addWidget(self.source_browse_button)
+        source_holder = QtWidgets.QWidget(self)
+        source_holder.setLayout(source_row)
+        source_row.setContentsMargins(0, 0, 0, 0)
+        source_form.addRow("Source file", source_holder)
+        self.callable_combo = QtWidgets.QComboBox(self)
+        source_form.addRow("Callable", self.callable_combo)
+        source_layout.addLayout(source_form)
+
+        storage_row = QtWidgets.QHBoxLayout()
+        self.copy_radio = QtWidgets.QRadioButton("Copy into ArrayScope", self)
+        self.link_radio = QtWidgets.QRadioButton("Link to original", self)
+        storage_row.addWidget(self.copy_radio)
+        storage_row.addWidget(self.link_radio)
+        storage_row.addStretch(1)
+        source_layout.addLayout(storage_row)
+        self.storage_hint = QtWidgets.QLabel("", self)
+        self.storage_hint.setObjectName("OperationsMetaLabel")
+        self.storage_hint.setWordWrap(True)
+        source_layout.addWidget(self.storage_hint)
+        right.addWidget(self.source_box)
+
         right.addWidget(QtWidgets.QLabel("Parameters"))
-        self.params_table = QtWidgets.QTableWidget(0, 6, self)
+        self.params_table = QtWidgets.QTableWidget(0, 7, self)
         self.params_table.setHorizontalHeaderLabels(
-            ["Name", "Kind", "Default", "Min", "Max", "Step"]
+            ["Name", "Kind", "Default", "Min", "Max", "Step", "Description"]
         )
         header = self.params_table.horizontalHeader()
-        # Fit all six columns at the default dialog width (no horizontal
-        # scrollbar, no truncated header): the name column absorbs the slack,
-        # Kind hugs its combo, and the four numeric columns share the rest.
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        for _column in range(2, 6):
-            header.setSectionResizeMode(_column, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for column in range(6):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for column, width in enumerate((82, 58, 62, 48, 48, 48)):
+            header.resizeSection(column, width)
+        self.params_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.params_table.setMinimumHeight(215)
         self.params_table.verticalHeader().setVisible(False)
         right.addWidget(self.params_table, 1)
         params_buttons = QtWidgets.QHBoxLayout()
@@ -244,7 +259,8 @@ class OperationManagerDialog(QtWidgets.QDialog):
         # -- wiring -------------------------------------------------------
         self.tree.currentItemChanged.connect(lambda *_: self._load_editor())
         self.tree.orderEdited.connect(self._persist_layout)
-        self.add_button.clicked.connect(self._import_operation)
+        self.new_button.clicked.connect(self._new_operation)
+        self.duplicate_button.clicked.connect(self._duplicate_operation)
         self.remove_button.clicked.connect(self._remove_or_hide)
         self.unhide_button.clicked.connect(self._unhide)
         self.open_file_button.clicked.connect(self._open_code_file)
@@ -262,6 +278,11 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.params_table.cellChanged.connect(lambda *_: self._apply_user_edits())
         self.add_param_button.clicked.connect(self._add_parameter_row)
         self.remove_param_button.clicked.connect(self._remove_parameter_row)
+        self.source_browse_button.clicked.connect(self._choose_source_file)
+        self.source_path_edit.editingFinished.connect(self._retarget_source)
+        self.callable_combo.currentTextChanged.connect(self._on_callable_changed)
+        self.copy_radio.toggled.connect(self._update_storage_hint)
+        self.link_radio.toggled.connect(self._on_storage_mode_changed)
 
         library.add_library_listener(self._refresh_tree)
         self._refresh_tree()
@@ -433,10 +454,15 @@ class OperationManagerDialog(QtWidgets.QDialog):
                 self.label_edit.clear()
                 self.id_label.clear()
                 self.description_edit.clear()
+                self.changes_shape_label.clear()
+                self.source_path_edit.clear()
+                self.callable_combo.clear()
                 self.params_table.setRowCount(0)
             finally:
                 self._suppress = False
-            self.status_label.setText("Select an operation to edit it.")
+            item = self.tree.currentItem()
+            problem = item.toolTip(0) if item is not None and item.data(0, _VIRTUAL_ROLE) else ""
+            self.status_label.setText(problem or "Select an operation to edit it.")
             self._sync_button_states()
             return
         try:
@@ -446,6 +472,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
             return
         is_user = _is_user_op(operation_id)
         hidden = operation_id in library.hidden_operations()
+        definition = export_operation_definition(entry)
 
         self._suppress = True
         try:
@@ -456,24 +483,33 @@ class OperationManagerDialog(QtWidgets.QDialog):
             self.icon_edit.setText(entry.icon or "")
             self._update_icon_preview()
             self.requires_axis_check.setChecked(entry.requires_axis)
+            self.changes_shape_label.setText(
+                "Changes shape" if entry.changes_shape else "Preserves shape"
+            )
             self.common_check.setChecked(operation_id in library.effective_common_ids())
+            self._load_source_editor(definition, is_user=is_user)
             self._fill_parameters(entry.parameters, editable=is_user)
         finally:
             self._suppress = False
 
-        self._set_icon_row_visible(is_user)
+        self._set_icon_row_visible(True)
         self._apply_editor_editability(is_user)
         if is_user:
-            self.status_label.setText(
-                "User operation — edits save automatically. Remove deletes it and its files."
-            )
+            wrapper = library.user_operation_wrapper(operation_id) or {}
+            template = wrapper.get("template")
+            if isinstance(template, dict) and template.get("message"):
+                self.status_label.setText(str(template["message"]))
+            else:
+                self.status_label.setText(
+                    "User operation — every shown value is editable and saves automatically."
+                )
         elif hidden:
             self.status_label.setText(
-                "Hidden system operation — Restore returns it to the listing."
+                "Hidden system operation — Restore returns it; Duplicate makes an editable copy."
             )
         else:
             self.status_label.setText(
-                "System operation — its definition is read-only; hide it or move it to another group."
+                "System definition — read-only here. Duplicate makes an editable user copy."
             )
         self._sync_button_states()
 
@@ -496,6 +532,12 @@ class OperationManagerDialog(QtWidgets.QDialog):
             self.description_edit,
             self.icon_edit,
             self.requires_axis_check,
+            self.source_box,
+            self.source_path_edit,
+            self.source_browse_button,
+            self.callable_combo,
+            self.copy_radio,
+            self.link_radio,
             self.common_check,
             self.params_table,
             self.add_param_button,
@@ -512,16 +554,66 @@ class OperationManagerDialog(QtWidgets.QDialog):
         the Common toggle -- stay enabled. A user op is fully editable.
         """
 
+        self.source_box.setEnabled(True)
         for widget in (self.label_edit, self.description_edit, self.icon_edit):
             widget.setReadOnly(not is_user)
             widget.setEnabled(is_user)
         self.requires_axis_check.setEnabled(is_user)
+        self.source_path_edit.setReadOnly(not is_user)
+        self.source_path_edit.setEnabled(is_user)
+        self.source_browse_button.setEnabled(is_user)
+        self.callable_combo.setEnabled(is_user)
+        self.copy_radio.setEnabled(is_user)
+        self.link_radio.setEnabled(is_user)
         self.params_table.setEnabled(is_user)
         self.add_param_button.setEnabled(is_user)
         self.remove_param_button.setEnabled(is_user)
         # These act on system ops too, so they stay live regardless.
         self.group_combo.setEnabled(True)
         self.common_check.setEnabled(True)
+
+    def _load_source_editor(self, definition, *, is_user: bool):
+        source = definition.get("source") or {}
+        self.callable_combo.clear()
+        self._source_infos = {}
+        if is_user:
+            operation_id = str(definition.get("id") or "")
+            path = library.user_operation_source_path(operation_id) or ""
+            self.source_path_edit.setText(path)
+            if path:
+                try:
+                    infos = library.introspect_python_source(path)
+                except Exception:
+                    infos = []
+                self._source_infos = {info.name: info for info in infos}
+                self.callable_combo.addItems([info.name for info in infos])
+            callable_name = str(source.get("callable") or "")
+            if callable_name and self.callable_combo.findText(callable_name) < 0:
+                self.callable_combo.addItem(callable_name)
+            self.callable_combo.setCurrentText(callable_name)
+            is_link = str(source.get("mode") or "import") == "link"
+            self.link_radio.setChecked(is_link)
+            self.copy_radio.setChecked(not is_link)
+        else:
+            self.source_path_edit.setText(self._system_source_text(source))
+            callable_name = str(source.get("class") or source.get("name") or source.get("id") or "")
+            if callable_name:
+                self.callable_combo.addItem(callable_name)
+            self.copy_radio.setChecked(False)
+            self.link_radio.setChecked(False)
+        self._update_storage_hint()
+
+    @staticmethod
+    def _system_source_text(source):
+        mode = str(source.get("mode") or "")
+        if mode == "native":
+            return f"{source.get('module', '')}.{source.get('class', '')}".strip(".")
+        if mode == "pack":
+            return f"Pack: {source.get('provider') or source.get('id')}"
+        if mode == "entry-point":
+            provider = source.get("distribution") or source.get("value")
+            return f"Entry point: {provider}"
+        return str(source.get("path") or "")
 
     def _set_icon_row_visible(self, visible: bool):
         self.icon_form_label.setVisible(visible)
@@ -555,7 +647,14 @@ class OperationManagerDialog(QtWidgets.QDialog):
 
         name = getattr(parameter, "name", "") if parameter is not None else ""
         kind = getattr(parameter, "kind", "float") if parameter is not None else "float"
-        self.params_table.setItem(row, 0, QtWidgets.QTableWidgetItem(name))
+        name_item = QtWidgets.QTableWidgetItem(name)
+        label = (
+            getattr(parameter, "label", name.replace("_", " ").title())
+            if parameter is not None
+            else ""
+        )
+        name_item.setData(_PARAM_LABEL_ROLE, label)
+        self.params_table.setItem(row, 0, name_item)
         kind_combo = QtWidgets.QComboBox()
         kind_combo.addItems(_KIND_CHOICES)
         kind_combo.setCurrentText(kind if kind in _KIND_CHOICES else "float")
@@ -565,6 +664,8 @@ class OperationManagerDialog(QtWidgets.QDialog):
         for column, attribute in ((2, "default"), (3, "minimum"), (4, "maximum"), (5, "step")):
             value = getattr(parameter, attribute, None) if parameter is not None else None
             self.params_table.setItem(row, column, QtWidgets.QTableWidgetItem(_text(value)))
+        description = getattr(parameter, "description", "") if parameter is not None else ""
+        self.params_table.setItem(row, 6, QtWidgets.QTableWidgetItem(description))
 
     def _add_parameter_row(self):
         if not _is_user_op(self._loaded_id or ""):
@@ -590,13 +691,16 @@ class OperationManagerDialog(QtWidgets.QDialog):
             kind = kind_widget.currentText() if kind_widget is not None else "float"
             payload = {
                 "name": name,
-                "label": name.replace("_", " ").title(),
+                "label": (name_item.data(_PARAM_LABEL_ROLE) or name.replace("_", " ").title()),
                 "kind": kind,
             }
             for column, key in ((2, "default"), (3, "minimum"), (4, "maximum"), (5, "step")):
                 value = self._parse_number(self.params_table.item(row, column), kind)
                 if value is not None:
                     payload[key] = value
+            description_item = self.params_table.item(row, 6)
+            if description_item is not None and description_item.text().strip():
+                payload["description"] = description_item.text().strip()
             parameters.append(payload)
         return parameters
 
@@ -670,11 +774,17 @@ class OperationManagerDialog(QtWidgets.QDialog):
     def _sync_button_states(self):
         operation_id = self.selected_operation_id()
         if operation_id is None:
-            for button in (self.remove_button, self.unhide_button, self.open_file_button):
+            for button in (
+                self.duplicate_button,
+                self.remove_button,
+                self.unhide_button,
+                self.open_file_button,
+            ):
                 button.setEnabled(False)
             return
         is_user = _is_user_op(operation_id)
         hidden = operation_id in library.hidden_operations()
+        self.duplicate_button.setEnabled(True)
         self.remove_button.setEnabled(True)
         set_button_icon(
             self.remove_button,
@@ -726,7 +836,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
         operation_id = self.selected_operation_id()
         if operation_id is None or not _is_user_op(operation_id):
             return
-        path = _user_op_source_path(operation_id)
+        path = library.user_operation_source_path(operation_id)
         if not path or not os.path.exists(path):
             show_status_message(self._window, "Could not locate the code file.", timeout=3000)
             return
@@ -750,16 +860,49 @@ class OperationManagerDialog(QtWidgets.QDialog):
         library.reset_layout()
         show_status_message(self._window, "Reset operations to defaults.", timeout=2500)
 
+    def _new_operation(self):
+        try:
+            operation_id = library.create_empty_user_operation()
+        except Exception as exc:
+            show_status_message(self._window, f"Could not create operation: {exc}", timeout=4000)
+            return
+        self.select_operation(operation_id)
+        show_status_message(
+            self._window,
+            "Created an empty operation — choose a source file or open its code.",
+            timeout=3500,
+        )
+
+    def _duplicate_operation(self):
+        source_id = self.selected_operation_id()
+        if source_id is None:
+            return
+        try:
+            operation_id = library.duplicate_operation(source_id)
+        except Exception as exc:
+            show_status_message(self._window, f"Duplicate failed: {exc}", timeout=4000)
+            return
+        self.select_operation(operation_id)
+        wrapper = library.user_operation_wrapper(operation_id) or {}
+        template = wrapper.get("template") or {}
+        message = str(template.get("message") or "Created an editable copy.")
+        show_status_message(self._window, message, timeout=4500)
+
     # ------------------------------------------------------------------
-    # Import flow
+    # Source / callable editor
     # ------------------------------------------------------------------
 
-    def _import_operation(self):
+    def _choose_source_file(self):
+        if not _is_user_op(self._loaded_id or ""):
+            return
         path, _ = get_open_file_name(
-            self, "Import a custom operation", "", "Python (*.py);;All files (*)"
+            self, "Choose operation source", "", "Python (*.py);;All files (*)"
         )
         if not path:
             return
+        self._populate_source_file(path)
+
+    def _populate_source_file(self, path):
         try:
             infos = library.introspect_python_source(path)
         except Exception as exc:
@@ -770,195 +913,61 @@ class OperationManagerDialog(QtWidgets.QDialog):
                 self._window, "That file has no top-level functions to import.", timeout=4000
             )
             return
-        existing_groups = [
-            group for group, _entries in library.grouped_operations(include_hidden=True)
-        ]
-        dialog = _OperationImportDialog(self, path, infos, existing_groups)
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return
-        result = dialog.result_payload()
+        self._suppress = True
         try:
-            operation_id = library.import_custom_operation(
+            self.source_path_edit.setText(path)
+            self._source_infos = {info.name: info for info in infos}
+            self.callable_combo.clear()
+            self.callable_combo.addItems([info.name for info in infos])
+            self.callable_combo.setCurrentIndex(0)
+        finally:
+            self._suppress = False
+        self._retarget_source(infer=True)
+
+    def _on_callable_changed(self, _name):
+        if self._suppress or self._reloading:
+            return
+        self._retarget_source(infer=True)
+
+    def _on_storage_mode_changed(self, checked):
+        self._update_storage_hint()
+        if not checked or self._suppress or self._reloading:
+            return
+        self._retarget_source(infer=False)
+
+    def _update_storage_hint(self, *_args):
+        if self.link_radio.isChecked():
+            self.storage_hint.setText(
+                "Linked: edits to the original file are picked up automatically."
+            )
+        elif self.copy_radio.isChecked():
+            self.storage_hint.setText(
+                "Copied: ArrayScope keeps its own file, independent of the original."
+            )
+        else:
+            self.storage_hint.setText(
+                "System implementation. Duplicate it to choose editable source storage."
+            )
+
+    def _retarget_source(self, *, infer=True):
+        if self._suppress or self._reloading:
+            return
+        operation_id = self._loaded_id
+        if operation_id is None or not _is_user_op(operation_id):
+            return
+        path = self.source_path_edit.text().strip()
+        callable_name = self.callable_combo.currentText().strip()
+        if not path or not callable_name:
+            return
+        try:
+            library.update_user_operation_source(
+                operation_id,
                 path,
-                result["callable"],
-                link=result["link"],
-                label=result["label"],
-                description=result["description"],
-                group=result["group"],
-                icon=result["icon"],
+                callable_name,
+                link=self.link_radio.isChecked(),
+                infer=infer,
             )
         except Exception as exc:
-            show_status_message(self._window, f"Import failed: {exc}", timeout=4000)
+            show_status_message(self._window, f"Could not update source: {exc}", timeout=4000)
             return
-        # Follow with the edited parameters / requires_axis when the user changed
-        # them beyond what auto-fill produced.
-        if result["params_edited"] or result["requires_axis_edited"]:
-            library.update_user_operation(
-                operation_id,
-                requires_axis=result["requires_axis"],
-                parameters=result["parameters"],
-            )
         self.select_operation(operation_id)
-        show_status_message(self._window, f"Imported “{result['label']}”.", timeout=2500)
-
-
-class _OperationImportDialog(QtWidgets.QDialog):
-    """Compact "connect up a custom function" panel (auto-filled, editable)."""
-
-    def __init__(self, parent, path, infos, existing_groups):
-        super().__init__(parent)
-        self.setWindowTitle("Import a custom operation")
-        self.resize(480, 460)
-        self._path = path
-        self._infos = {info.name: info for info in infos}
-
-        layout = QtWidgets.QVBoxLayout(self)
-        form = QtWidgets.QFormLayout()
-        self.function_combo = QtWidgets.QComboBox(self)
-        self.function_combo.addItems([info.name for info in infos])
-        form.addRow("Function", self.function_combo)
-        self.label_edit = QtWidgets.QLineEdit(self)
-        form.addRow("Label", self.label_edit)
-        self.description_edit = QtWidgets.QLineEdit(self)
-        form.addRow("Description", self.description_edit)
-        self.group_combo = QtWidgets.QComboBox(self)
-        self.group_combo.setEditable(True)
-        self.group_combo.addItems(existing_groups or ["User"])
-        self.group_combo.setCurrentText("User")
-        form.addRow("Group", self.group_combo)
-        icon_row = QtWidgets.QHBoxLayout()
-        self.icon_edit = QtWidgets.QLineEdit(self)
-        self.icon_edit.setText("extension")
-        self.icon_preview = QtWidgets.QLabel(self)
-        icon_row.addWidget(self.icon_edit, 1)
-        icon_row.addWidget(self.icon_preview)
-        icon_holder = QtWidgets.QWidget(self)
-        icon_holder.setLayout(icon_row)
-        icon_row.setContentsMargins(0, 0, 0, 0)
-        form.addRow("Icon", icon_holder)
-        self.requires_axis_check = QtWidgets.QCheckBox("Requires an axis", self)
-        form.addRow("", self.requires_axis_check)
-        layout.addLayout(form)
-
-        layout.addWidget(QtWidgets.QLabel("Detected parameters"))
-        self.params_table = QtWidgets.QTableWidget(0, 4, self)
-        self.params_table.setHorizontalHeaderLabels(["Name", "Kind", "Default", "Description"])
-        self.params_table.horizontalHeader().setStretchLastSection(True)
-        self.params_table.verticalHeader().setVisible(False)
-        layout.addWidget(self.params_table, 1)
-
-        mode_box = QtWidgets.QGroupBox("How should the code be stored?", self)
-        mode_layout = QtWidgets.QVBoxLayout(mode_box)
-        self.copy_radio = QtWidgets.QRadioButton("Import a copy (recommended)", self)
-        self.copy_radio.setChecked(True)
-        copy_hint = QtWidgets.QLabel(
-            "Copies the file into ArrayScope — the operation keeps working if you move or edit the original."
-        )
-        copy_hint.setObjectName("OperationsMetaLabel")
-        copy_hint.setWordWrap(True)
-        self.link_radio = QtWidgets.QRadioButton("Link to the file", self)
-        link_hint = QtWidgets.QLabel(
-            "Keeps a live link to the original — edits you make to it are picked up automatically."
-        )
-        link_hint.setObjectName("OperationsMetaLabel")
-        link_hint.setWordWrap(True)
-        for widget in (self.copy_radio, copy_hint, self.link_radio, link_hint):
-            mode_layout.addWidget(widget)
-        layout.addWidget(mode_box)
-
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok
-            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
-            parent=self,
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-        self.function_combo.currentTextChanged.connect(self._load_function)
-        self.icon_edit.textChanged.connect(self._update_icon_preview)
-        self._auto_filled_params = ()
-        self._auto_requires_axis = False
-        self._update_icon_preview()
-        self._load_function(self.function_combo.currentText())
-
-    def _update_icon_preview(self, *_args):
-        set_label_icon(
-            self.icon_preview, self.icon_edit.text().strip() or "extension", icon_size=18
-        )
-
-    def _load_function(self, name):
-        info = self._infos.get(name)
-        if info is None:
-            return
-        self.label_edit.setText(name.replace("_", " ").title())
-        self.description_edit.setText(info.doc)
-        self.requires_axis_check.setChecked(info.has_axis)
-        self._auto_requires_axis = info.has_axis
-        self._auto_filled_params = info.params
-        self.params_table.setRowCount(0)
-        for parameter in info.params:
-            row = self.params_table.rowCount()
-            self.params_table.insertRow(row)
-            self.params_table.setItem(row, 0, QtWidgets.QTableWidgetItem(parameter.name))
-            kind_combo = QtWidgets.QComboBox()
-            kind_combo.addItems(_KIND_CHOICES)
-            kind_combo.setCurrentText(
-                parameter.kind if parameter.kind in _KIND_CHOICES else "float"
-            )
-            self.params_table.setCellWidget(row, 1, kind_combo)
-            default = "" if parameter.default is None else str(parameter.default)
-            self.params_table.setItem(row, 2, QtWidgets.QTableWidgetItem(default))
-            self.params_table.setItem(row, 3, QtWidgets.QTableWidgetItem(""))
-
-    def _table_parameters(self):
-        parameters = []
-        for row in range(self.params_table.rowCount()):
-            name_item = self.params_table.item(row, 0)
-            name = name_item.text().strip() if name_item is not None else ""
-            if not name:
-                continue
-            kind_widget = self.params_table.cellWidget(row, 1)
-            kind = kind_widget.currentText() if kind_widget is not None else "float"
-            payload = {"name": name, "label": name.replace("_", " ").title(), "kind": kind}
-            default_item = self.params_table.item(row, 2)
-            default_text = default_item.text().strip() if default_item is not None else ""
-            if default_text:
-                try:
-                    payload["default"] = int(default_text) if kind == "int" else float(default_text)
-                except ValueError:
-                    payload["default"] = default_text
-            description_item = self.params_table.item(row, 3)
-            if description_item is not None and description_item.text().strip():
-                payload["description"] = description_item.text().strip()
-            parameters.append(payload)
-        return parameters
-
-    def _params_edited(self, parameters):
-        auto = []
-        for parameter in self._auto_filled_params:
-            payload = {
-                "name": parameter.name,
-                "label": parameter.name.replace("_", " ").title(),
-                "kind": parameter.kind,
-            }
-            if parameter.default is not None:
-                payload["default"] = parameter.default
-            auto.append(payload)
-        return parameters != auto
-
-    def result_payload(self):
-        parameters = self._table_parameters()
-        return {
-            "callable": self.function_combo.currentText(),
-            "label": self.label_edit.text().strip() or self.function_combo.currentText(),
-            "description": self.description_edit.text().strip(),
-            "group": self.group_combo.currentText().strip() or "User",
-            "icon": self.icon_edit.text().strip() or "extension",
-            "link": self.link_radio.isChecked(),
-            "requires_axis": self.requires_axis_check.isChecked(),
-            "requires_axis_edited": self.requires_axis_check.isChecked()
-            != self._auto_requires_axis,
-            "parameters": parameters,
-            "params_edited": self._params_edited(parameters),
-        }

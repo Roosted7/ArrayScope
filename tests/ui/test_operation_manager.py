@@ -130,53 +130,52 @@ def test_drag_persist_moves_op_between_groups(qtbot):
         win.close()
 
 
-def test_import_flow_end_to_end(qtbot, tmp_path, monkeypatch):
+def test_new_and_source_picker_stay_in_manager(qtbot, tmp_path, monkeypatch):
     from arrayscope.operations import library
     from arrayscope.operations.registry import get_operation_entry
     from arrayscope.ui import operation_manager
 
     src = _write_source(tmp_path, "ops.py", _AXIS_AND_PLAIN_SRC)
-
-    # The import panel auto-fills from introspection of the first function.
-    panel = operation_manager._OperationImportDialog(
-        None, src, library.introspect_python_source(src), ["User", "Reduce"]
-    )
-    qtbot.addWidget(panel)
-    assert panel.function_combo.currentText() == "shift"
-    assert panel.requires_axis_check.isChecked() is True
-    assert panel.description_edit.text() == "Roll one axis by amount."
-    assert panel.params_table.rowCount() == 1
-    assert panel.params_table.item(0, 0).text() == "amount"
-    panel.close()
-
-    # Drive the manager's Add flow: choose the file, accept the panel unchanged.
     monkeypatch.setattr(operation_manager, "get_open_file_name", lambda *a, **k: (src, ""))
-    monkeypatch.setattr(
-        operation_manager._OperationImportDialog,
-        "exec",
-        lambda self: QtWidgets.QDialog.DialogCode.Accepted,
-    )
 
     win = _window(qtbot)
     dialog = _manager(qtbot, win)
     try:
-        dialog.add_button.click()
+        assert not hasattr(operation_manager, "_OperationImportDialog")
+        dialog.new_button.click()
+        process_events(qtbot)
+        new_id = dialog.selected_operation_id()
+        assert new_id == "user:new_operation"
+        assert dialog.label_edit.text() == "New operation"
+        assert dialog.source_box.isVisible()
+
+        dialog.source_browse_button.click()
         process_events(qtbot)
 
-        op_id = "user:shift"
-        assert op_id in {entry.id for entry in library.grouped_operations()[0][1]} or any(
-            op_id == e.id for _g, es in library.grouped_operations() for e in es
-        )
-        # An imported op copies its code file into the ops directory.
-        ops_dir = library.user_operations_directory()
-        assert os.path.exists(os.path.join(ops_dir, "shift.py"))
+        # AST inference fills ordinary editable fields in this same manager.
+        assert dialog.callable_combo.currentText() == "shift"
+        assert [
+            dialog.callable_combo.itemText(i) for i in range(dialog.callable_combo.count())
+        ] == [
+            "shift",
+            "double",
+        ]
+        assert dialog.requires_axis_check.isChecked() is True
+        assert dialog.description_edit.text() == "Roll one axis by amount."
+        assert dialog.params_table.rowCount() == 1
+        assert dialog.params_table.columnCount() == 7
+        assert dialog.params_table.item(0, 0).text() == "amount"
+        assert get_operation_entry(new_id).label == "Shift"
 
-        # Editing the Label via the editor writes through update_user_operation.
-        assert dialog.select_operation(op_id)
+        # Copy mode owns an independent source file under the existing entry id.
+        ops_dir = library.user_operations_directory()
+        assert os.path.exists(os.path.join(ops_dir, "new_operation.py"))
+
+        # Inferred values remain ordinary editable values.
         dialog.label_edit.setText("Rolled")
         dialog.label_edit.editingFinished.emit()
         process_events(qtbot)
-        assert get_operation_entry(op_id).label == "Rolled"
+        assert get_operation_entry(new_id).label == "Rolled"
     finally:
         dialog.close()
         win.close()
@@ -190,21 +189,97 @@ def test_link_mode_stores_absolute_path(qtbot, tmp_path, monkeypatch):
 
     monkeypatch.setattr(operation_manager, "get_open_file_name", lambda *a, **k: (src, ""))
 
-    def _accept_link(self):
-        self.link_radio.setChecked(True)
-        return QtWidgets.QDialog.DialogCode.Accepted
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        dialog.new_button.click()
+        process_events(qtbot)
+        operation_id = dialog.selected_operation_id()
+        dialog.link_radio.setChecked(True)
+        dialog.source_browse_button.click()
+        process_events(qtbot)
+        stored = library.user_operation_source_path(operation_id)
+        assert stored == os.path.abspath(src)
+        wrapper = library.user_operation_wrapper(operation_id)
+        assert wrapper["source"]["mode"] == "link"
+    finally:
+        dialog.close()
+        win.close()
 
-    monkeypatch.setattr(operation_manager._OperationImportDialog, "exec", _accept_link)
+
+def test_duplicate_system_selection_becomes_editable_user_copy(qtbot):
+    from arrayscope.operations import library, registry
 
     win = _window(qtbot)
     dialog = _manager(qtbot, win)
     try:
-        dialog.add_button.click()
+        assert dialog.select_operation("conjugate")
+        assert dialog.label_edit.isEnabled() is False
+        assert dialog.duplicate_button.isEnabled() is True
+        assert "Duplicate" in dialog.status_label.text()
+
+        dialog.duplicate_button.click()
         process_events(qtbot)
-        stored = operation_manager._user_op_source_path("user:scale")
-        assert stored == os.path.abspath(src)
-        # No copy was made into the ops directory.
-        assert not os.path.exists(os.path.join(library.user_operations_directory(), "scale.py"))
+
+        operation_id = dialog.selected_operation_id()
+        assert operation_id.startswith("user:")
+        assert dialog.label_edit.isEnabled() is True
+        assert dialog.params_table.isEnabled() is True
+        assert registry.get_operation_entry(operation_id).label == "Conjugate copy"
+        data = np.array([1 + 2j], dtype=np.complex64)
+        assert np.array_equal(
+            registry.create_operation(operation_id).apply(data),
+            np.conjugate(data),
+        )
+        assert library.user_operation_wrapper(operation_id)["template"]["kind"] == "native-copy"
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_parameter_metadata_parity_and_default_layout(qtbot, tmp_path):
+    from arrayscope.operations import library, registry
+
+    src = _write_source(
+        tmp_path,
+        "bounded.py",
+        "def bounded(data, gain: float = 0.5):\n    return data * gain\n",
+    )
+    operation_id = library.import_custom_operation(src, "bounded")
+    library.update_user_operation(
+        operation_id,
+        parameters=[
+            {
+                "name": "gain",
+                "label": "Gain",
+                "kind": "float",
+                "default": 0.5,
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "step": 0.05,
+                "description": "Scale factor.",
+            }
+        ],
+    )
+
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        assert dialog.select_operation(operation_id)
+        process_events(qtbot)
+        assert dialog.params_table.columnCount() == 7
+        assert dialog.params_table.item(0, 3).text() == "0.0"
+        assert dialog.params_table.item(0, 4).text() == "1.0"
+        assert dialog.params_table.item(0, 5).text() == "0.05"
+        assert dialog.params_table.item(0, 6).text() == "Scale factor."
+        assert dialog.params_table.minimumHeight() >= 200
+        assert dialog.params_table.horizontalScrollBar().maximum() == 0
+
+        dialog.params_table.item(0, 6).setText("Editable help.")
+        process_events(qtbot)
+        assert (
+            registry.get_operation_entry(operation_id).parameters[0].description == "Editable help."
+        )
     finally:
         dialog.close()
         win.close()
