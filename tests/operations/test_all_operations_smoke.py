@@ -47,6 +47,10 @@ _EXPECTATIONS: dict[str, dict] = {
         "axis": 1,
         "dtypes": (np.dtype(np.complex64),),
     },
+    "squeeze": {
+        "shape": (6, 1, 10),
+        "axis": 1,
+    },
 }
 
 

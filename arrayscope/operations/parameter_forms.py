@@ -332,6 +332,133 @@ def _percentile_form(
     return ParameterForm([q], derive=derive)
 
 
+def _pad_form(entry: OperationEntry, *, shape: Shape | None, axis: int | None) -> ParameterForm:
+    """pad: context defaults centre the axis in its next power-of-two length."""
+
+    del entry
+    length = _axis_length(shape, axis)
+    if length is None:
+        before_value = after_value = 0
+    else:
+        target = 1 << max(length - 1, 0).bit_length()
+        total = target - length
+        before_value = total // 2
+        after_value = total - before_value
+    before = ParameterField(
+        name="before",
+        label="Before",
+        kind="int",
+        value=before_value,
+        minimum=0,
+        maximum=1_000_000,
+        step=1,
+        description="Samples added before the axis.",
+    )
+    after = ParameterField(
+        name="after",
+        label="After",
+        kind="int",
+        value=after_value,
+        minimum=0,
+        maximum=1_000_000,
+        step=1,
+        description="Samples added after the axis.",
+    )
+    mode = ParameterField(
+        name="mode",
+        label="Mode",
+        kind="int",
+        value=0,
+        minimum=0,
+        maximum=2,
+        step=1,
+        description="0 = zero, 1 = edge, 2 = reflect.",
+    )
+
+    def derive(form: ParameterForm) -> list[DerivedValue]:
+        if length is None:
+            return []
+        output = length + int(form.field("before").value) + int(form.field("after").value)
+        return [
+            DerivedValue("Current length", str(length)),
+            DerivedValue("Output length", str(output)),
+        ]
+
+    return ParameterForm([before, after, mode], derive=derive)
+
+
+def _resample_form(
+    entry: OperationEntry, *, shape: Shape | None, axis: int | None
+) -> ParameterForm:
+    """resample: fractional factor plus exact context-derived output length."""
+
+    del entry
+    length = _axis_length(shape, axis)
+    factor = ParameterField(
+        name="factor",
+        label="Factor",
+        kind="float",
+        value=1.0,
+        minimum=0.01,
+        maximum=100.0,
+        step=0.05,
+        description="Fractional output/input length ratio.",
+    )
+    order = ParameterField(
+        name="order",
+        label="Spline order",
+        kind="int",
+        value=1,
+        minimum=0,
+        maximum=3,
+        step=1,
+        description="Interpolation order from 0 (nearest) through 3 (cubic).",
+    )
+    mode = ParameterField(
+        name="mode",
+        label="Boundary mode",
+        kind="int",
+        value=2,
+        minimum=0,
+        maximum=2,
+        step=1,
+        description="0 = zero, 1 = nearest, 2 = reflect.",
+    )
+
+    def derive(form: ParameterForm) -> list[DerivedValue]:
+        if length is None:
+            return []
+        value = max(1, int(length * float(form.field("factor").value) + 0.5))
+        return [
+            DerivedValue("Current length", str(length)),
+            DerivedValue("Output length", str(value)),
+        ]
+
+    return ParameterForm([factor, order, mode], derive=derive)
+
+
+def _transpose_form(
+    entry: OperationEntry, *, shape: Shape | None, axis: int | None
+) -> ParameterForm:
+    """transpose: bound the partner axis and default to the next axis."""
+
+    del entry
+    ndim = len(shape) if shape is not None else None
+    resolved_axis = None if axis is None or ndim is None else axis % ndim
+    default = 0 if ndim is None else (int(resolved_axis or 0) + 1) % ndim
+    other_axis = ParameterField(
+        name="other_axis",
+        label="Other axis",
+        kind="int",
+        value=default,
+        minimum=0,
+        maximum=None if ndim is None else ndim - 1,
+        step=1,
+        description="Second axis in the permutation.",
+    )
+    return ParameterForm([other_axis])
+
+
 # Keyed by op id. An op absent here falls back to the metadata-driven default
 # form, which already honors the parameter default / min / max / step / desc.
 _FORM_PROVIDERS: dict[str, Callable[..., ParameterForm]] = {
@@ -340,6 +467,9 @@ _FORM_PROVIDERS: dict[str, Callable[..., ParameterForm]] = {
     "sigpy:downsample": _downsample_form,
     "sigpy:upsample": _upsample_form,
     "percentile": _percentile_form,
+    "pad": _pad_form,
+    "resample": _resample_form,
+    "transpose": _transpose_form,
 }
 
 

@@ -20,6 +20,7 @@ from arrayscope.operations.regions import (
     AxisRegion,
     AxisRegionKind,
     RegionSpec,
+    apply_region,
     axis_in_region_result,
     axis_region_kind,
     insert_region_axis,
@@ -625,6 +626,320 @@ class Percentile:
     ):
         del output_region, evaluation_context
         return _percentile(data, self.q, axis_in_region_result(input_region, self.axis))
+
+
+@dataclass(frozen=True)
+class Roll:
+    axis: int
+    amount: int
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        return np.roll(data, int(self.amount), axis=axis)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        _validate_axis(shape, self.axis)
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _axis_transform_capabilities(input_shape, (axis,), real_linear=True)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del evaluation_context
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        shifted = np.roll(data, int(self.amount), axis=slab_axis)
+        return take_axis_region(
+            shifted, output_region.axes[axis], shifted.shape[slab_axis], axis=slab_axis
+        )
+
+
+@dataclass(frozen=True)
+class Pad:
+    axis: int
+    before: int
+    after: int
+    mode: int
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        return _pad(data, axis, self.before, self.after, self.mode)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axis = _validate_axis(shape, self.axis)
+        before, after = _pad_widths(self.before, self.after)
+        return _replace_axis(shape, axis, shape[axis] + before + after)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _axis_transform_capabilities(
+            input_shape, (axis,), kind=OperationKind.RESHAPE, cache_stage=True
+        )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del evaluation_context
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        padded = _pad(data, slab_axis, self.before, self.after, self.mode)
+        return take_axis_region(
+            padded, output_region.axes[axis], padded.shape[slab_axis], axis=slab_axis
+        )
+
+
+@dataclass(frozen=True)
+class Resample:
+    axis: int
+    factor: float
+    order: int
+    mode: int
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        return _resample(data, axis, self.factor, self.order, self.mode)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axis = _validate_axis(shape, self.axis)
+        return _replace_axis(shape, axis, _resampled_length(shape[axis], self.factor))
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        order = _interpolation_order(self.order)
+        return _axis_transform_capabilities(
+            input_shape,
+            (axis,),
+            kind=OperationKind.RESHAPE,
+            temp_multiplier=3.0 if order > 1 else 2.0,
+            cache_stage=True,
+        )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del evaluation_context
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        resampled = _resample(data, slab_axis, self.factor, self.order, self.mode)
+        return take_axis_region(
+            resampled, output_region.axes[axis], resampled.shape[slab_axis], axis=slab_axis
+        )
+
+
+@dataclass(frozen=True)
+class Transpose:
+    axis: int
+    other_axis: int
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        other_axis = _validate_axis(data.shape, self.other_axis)
+        return np.swapaxes(data, axis, other_axis)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axis = _validate_axis(shape, self.axis)
+        other_axis = _validate_axis(shape, self.other_axis)
+        output = list(shape)
+        output[axis], output[other_axis] = output[other_axis], output[axis]
+        return tuple(output)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        other_axis = _validate_axis(input_shape, self.other_axis)
+        return _axis_transform_capabilities(
+            input_shape,
+            (axis, other_axis),
+            kind=OperationKind.RESHAPE,
+            cache_stage=True,
+            real_linear=True,
+        )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        del output_region
+        _validate_axis(input_shape, self.axis)
+        _validate_axis(input_shape, self.other_axis)
+        return RegionSpec(tuple(AxisRegion(AxisRegionKind.ALL) for _ in input_shape))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del input_region, evaluation_context
+        return apply_region(self.apply(data), output_region)
+
+
+@dataclass(frozen=True)
+class Squeeze:
+    axis: int
+
+    def apply(self, data):
+        axis = _validate_squeeze_axis(data.shape, self.axis)
+        return np.squeeze(data, axis=axis)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axis = _validate_squeeze_axis(shape, self.axis)
+        return _remove_axis(shape, axis)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_squeeze_axis(input_shape, self.axis)
+        return _axis_transform_capabilities(
+            input_shape, (axis,), kind=OperationKind.RESHAPE, real_linear=True
+        )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_squeeze_axis(input_shape, self.axis)
+        return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del output_region, evaluation_context
+        return np.squeeze(data, axis=axis_in_region_result(input_region, self.axis))
+
+
+@dataclass(frozen=True)
+class Difference:
+    axis: int
+
+    def apply(self, data):
+        axis = _validate_difference_axis(data.shape, self.axis)
+        return np.diff(data, axis=axis)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axis = _validate_difference_axis(shape, self.axis)
+        return _replace_axis(shape, axis, shape[axis] - 1)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_difference_axis(input_shape, self.axis)
+        return _axis_transform_capabilities(
+            input_shape, (axis,), kind=OperationKind.RESHAPE, real_linear=True
+        )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_difference_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del evaluation_context
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        difference = np.diff(data, axis=slab_axis)
+        return take_axis_region(
+            difference,
+            output_region.axes[axis],
+            difference.shape[slab_axis],
+            axis=slab_axis,
+        )
+
+
+@dataclass(frozen=True)
+class Gradient:
+    axis: int
+
+    def apply(self, data):
+        axis = _validate_difference_axis(data.shape, self.axis)
+        return _gradient(data, axis)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        _validate_difference_axis(shape, self.axis)
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        if _is_integer_dtype(input_dtype):
+            return np.dtype(np.float32)
+        return np.dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_difference_axis(input_shape, self.axis)
+        return _axis_transform_capabilities(input_shape, (axis,), real_linear=True)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_difference_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del evaluation_context
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        gradient = _gradient(data, slab_axis)
+        return take_axis_region(
+            gradient, output_region.axes[axis], gradient.shape[slab_axis], axis=slab_axis
+        )
+
+
+@dataclass(frozen=True)
+class CumulativeSum:
+    axis: int
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        array = np.asarray(data)
+        return np.cumsum(array, axis=axis, dtype=array.dtype)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        _validate_axis(shape, self.axis)
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _axis_transform_capabilities(input_shape, (axis,), real_linear=True)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del evaluation_context
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        array = np.asarray(data)
+        cumulative = np.cumsum(array, axis=slab_axis, dtype=array.dtype)
+        return take_axis_region(
+            cumulative, output_region.axes[axis], cumulative.shape[slab_axis], axis=slab_axis
+        )
 
 
 @dataclass(frozen=True)
@@ -1405,6 +1720,100 @@ def _percentile(data, q, axis):
     return np.asarray(result).astype(output_dtype, copy=False)
 
 
+def _pad_widths(before, after):
+    before = int(before)
+    after = int(after)
+    if before < 0 or after < 0:
+        raise ValueError("pad widths must be non-negative")
+    return before, after
+
+
+def _array_mode(mode):
+    modes = {0: "constant", 1: "edge", 2: "reflect"}
+    try:
+        return modes[int(mode)]
+    except KeyError as exc:
+        raise ValueError("mode must be 0 (zero), 1 (edge), or 2 (reflect)") from exc
+
+
+def _interpolation_mode(mode):
+    modes = {0: "constant", 1: "nearest", 2: "reflect"}
+    try:
+        return modes[int(mode)]
+    except KeyError as exc:
+        raise ValueError("mode must be 0 (zero), 1 (nearest), or 2 (reflect)") from exc
+
+
+def _pad(data, axis, before, after, mode):
+    before, after = _pad_widths(before, after)
+    mode_name = _array_mode(mode)
+    widths = [(0, 0)] * np.ndim(data)
+    widths[axis] = (before, after)
+    if mode_name == "reflect" and np.shape(data)[axis] < 2 and (before or after):
+        raise ValueError("reflect padding requires at least two samples on the axis")
+    return np.pad(data, widths, mode=mode_name)
+
+
+def _resampled_length(length, factor):
+    factor = float(factor)
+    if not np.isfinite(factor) or factor <= 0:
+        raise ValueError("resample factor must be finite and greater than zero")
+    return max(1, int(np.floor(int(length) * factor + 0.5)))
+
+
+def _interpolation_order(order):
+    order = int(order)
+    if order < 0 or order > 3:
+        raise ValueError("interpolation order must be between 0 and 3")
+    return order
+
+
+def _resample(data, axis, factor, order, mode):
+    from scipy import ndimage
+
+    array = np.asarray(data)
+    target = _resampled_length(array.shape[axis], factor)
+    order = _interpolation_order(order)
+    mode_name = _interpolation_mode(mode)
+    zoom = [1.0] * array.ndim
+    zoom[axis] = target / array.shape[axis]
+    result = ndimage.zoom(
+        array,
+        zoom,
+        order=order,
+        mode=mode_name,
+        cval=0.0,
+        prefilter=order > 1,
+        grid_mode=False,
+    )
+    if result.shape[axis] != target:
+        raise RuntimeError(
+            f"resampler produced axis length {result.shape[axis]}, expected {target}"
+        )
+    return result.astype(array.dtype, copy=False)
+
+
+def _validate_squeeze_axis(shape, axis):
+    axis = _validate_axis(shape, axis)
+    if int(shape[axis]) != 1:
+        raise ValueError(f"axis {axis} must have size 1 to squeeze")
+    return axis
+
+
+def _validate_difference_axis(shape, axis):
+    axis = _validate_axis(shape, axis)
+    if int(shape[axis]) < 2:
+        raise ValueError(f"axis {axis} must have at least two samples")
+    return axis
+
+
+def _gradient(data, axis):
+    array = np.asarray(data)
+    if _is_integer_dtype(array.dtype):
+        array = array.astype(np.float32)
+    return np.gradient(array, axis=axis, edge_order=1)
+
+
 def _is_integer_dtype(dtype) -> bool:
     return np.dtype(dtype).kind in "biu"
 
@@ -1470,4 +1879,25 @@ def _reduction_capabilities(
         blocking_axes=(axis,),
         expands_request_axes=(axis,),
         temp_multiplier=temp_multiplier,
+    )
+
+
+def _axis_transform_capabilities(
+    input_shape: Shape,
+    axes,
+    *,
+    kind: OperationKind = OperationKind.TRANSFORM,
+    temp_multiplier: float = 1.0,
+    cache_stage: bool = False,
+    real_linear: bool = False,
+) -> OperationCapabilities:
+    axes = tuple(dict.fromkeys(_validate_axis(input_shape, axis) for axis in axes))
+    return _capabilities(
+        kind,
+        ndim=len(input_shape),
+        blocking_axes=axes,
+        expands_request_axes=axes,
+        temp_multiplier=temp_multiplier,
+        cache_stage=cache_stage,
+        real_linear=real_linear,
     )

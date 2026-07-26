@@ -11,7 +11,10 @@ from arrayscope.operations.pipeline import (
     CombineRealImagAxis,
     Conjugate,
     Crop,
+    CumulativeSum,
+    Difference,
     FFTShift,
+    Gradient,
     HardThreshold,
     ImaginaryPart,
     LogMagnitude,
@@ -22,17 +25,22 @@ from arrayscope.operations.pipeline import (
     Minimum,
     Normalize,
     Offset,
+    Pad,
     Percentile,
     Phase,
     Power,
     RealPart,
+    Resample,
     ReverseAxis,
+    Roll,
     RootSumSquares,
     Scale,
     SoftThreshold,
     SplitComplexAxis,
+    Squeeze,
     StandardDeviation,
     Sum,
+    Transpose,
     Variance,
 )
 from arrayscope.operations.registry import operation_entries
@@ -63,6 +71,14 @@ def test_every_registered_operation_declares_dtype_and_capabilities():
         "var": Variance(axis=1),
         "median": Median(axis=1),
         "percentile": Percentile(axis=1, q=50),
+        "roll": Roll(axis=1, amount=0),
+        "pad": Pad(axis=1, before=1, after=1, mode=0),
+        "resample": Resample(axis=1, factor=1.0, order=1, mode=2),
+        "transpose": Transpose(axis=1, other_axis=2),
+        "squeeze": Squeeze(axis=1),
+        "difference": Difference(axis=1),
+        "gradient": Gradient(axis=1),
+        "cumulative_sum": CumulativeSum(axis=1),
         "sum": Sum(axis=1),
         "max": Maximum(axis=1),
         "min": Minimum(axis=1),
@@ -80,6 +96,8 @@ def test_every_registered_operation_declares_dtype_and_capabilities():
             if entry.id == "combine_real_imag"
             else (4, 5, 1)
             if entry.id == "split_complex"
+            else (4, 1, 6)
+            if entry.id == "squeeze"
             else shape
         )
         op_dtype = np.dtype(np.complex64) if entry.id == "split_complex" else dtype

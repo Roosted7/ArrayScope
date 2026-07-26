@@ -109,7 +109,7 @@ def output_axes_for_operation(axes, operation) -> AxisInfoTuple:
     if name in {"ReverseAxis"}:
         axis = _axis(operation, axes)
         return _replace_axis(axes, axis, _reversed_axis(axes[axis]))
-    if name in {"FFTShift"}:
+    if name in {"FFTShift", "Roll"}:
         # Samples are rotated, so index->coordinate mapping is no longer affine.
         axis = _axis(operation, axes)
         return _replace_axis(axes, axis, replace(axes[axis], spacing=None, origin=None))
@@ -117,11 +117,76 @@ def output_axes_for_operation(axes, operation) -> AxisInfoTuple:
         # The axis moves to a reciprocal domain; physical unit/spacing no longer apply.
         axis = _axis(operation, axes)
         return _replace_axis(axes, axis, replace(axes[axis], unit=None, spacing=None, origin=None))
-    if name in {"Conjugate"}:
+    if name in {
+        "Clip",
+        "Conjugate",
+        "CumulativeSum",
+        "Gradient",
+        "HardThreshold",
+        "ImaginaryPart",
+        "LogMagnitude",
+        "Magnitude",
+        "Normalize",
+        "Offset",
+        "Phase",
+        "Power",
+        "RealPart",
+        "Scale",
+        "SoftThreshold",
+    }:
         return tuple(axes)
-    if name in {"Mean", "Sum", "Maximum", "Minimum", "RootSumSquares"}:
+    if name in {
+        "Maximum",
+        "Mean",
+        "Median",
+        "Minimum",
+        "Percentile",
+        "RootSumSquares",
+        "StandardDeviation",
+        "Sum",
+        "Variance",
+    }:
         axis = _axis(operation, axes)
         return tuple(axis_info for index, axis_info in enumerate(axes) if index != axis)
+    if name in {"Difference"}:
+        axis = _axis(operation, axes)
+        source = axes[axis]
+        origin = source.origin
+        if origin is not None and source.spacing is not None:
+            origin += source.spacing / 2
+        return _replace_axis(axes, axis, replace(source, size=source.size - 1, origin=origin))
+    if name in {"Pad"}:
+        axis = _axis(operation, axes)
+        source = axes[axis]
+        origin = source.origin
+        if origin is not None and source.spacing is not None:
+            origin -= int(operation.before) * source.spacing
+        return _replace_axis(
+            axes,
+            axis,
+            replace(
+                source,
+                size=source.size + int(operation.before) + int(operation.after),
+                origin=origin,
+            ),
+        )
+    if name in {"Resample"}:
+        axis = _axis(operation, axes)
+        source = axes[axis]
+        size = operation.output_shape(tuple(item.size for item in axes))[axis]
+        spacing = source.spacing
+        if spacing is not None and size > 1 and source.size > 1:
+            spacing *= (source.size - 1) / (size - 1)
+        return _replace_axis(axes, axis, replace(source, size=size, spacing=spacing))
+    if name in {"Squeeze"}:
+        axis = _axis(operation, axes)
+        return tuple(axis_info for index, axis_info in enumerate(axes) if index != axis)
+    if name in {"Transpose"}:
+        axis = _axis(operation, axes)
+        other_axis = int(operation.other_axis) % len(axes)
+        result = list(axes)
+        result[axis], result[other_axis] = result[other_axis], result[axis]
+        return tuple(result)
     if name in {"CombineRealImagAxis"}:
         axis = _axis(operation, axes)
         return _replace_axis(

@@ -90,6 +90,41 @@ def test_crop_editing_start_past_stop_nudges_stop():
     assert form.derived() == [DerivedValue("Output length", "1")]
 
 
+def test_pad_form_centres_to_next_power_of_two_and_tracks_asymmetry():
+    entry = get_operation_entry("pad")
+    form = build_parameter_form(entry, shape=(4, 10, 6), axis=1)
+
+    assert form.values() == {"before": 3, "after": 3, "mode": 0}
+    assert form.derived() == [
+        DerivedValue("Current length", "10"),
+        DerivedValue("Output length", "16"),
+    ]
+    form.set_value("before", 1)
+    form.set_value("after", 4)
+    assert form.derived()[-1] == DerivedValue("Output length", "15")
+
+
+def test_resample_form_accepts_fractional_factor_and_derives_rounded_length():
+    entry = get_operation_entry("resample")
+    form = build_parameter_form(entry, shape=(4, 10, 6), axis=1)
+
+    form.set_value("factor", 0.65)
+
+    assert form.values()["factor"] == 0.65
+    assert form.derived() == [
+        DerivedValue("Current length", "10"),
+        DerivedValue("Output length", "7"),
+    ]
+
+
+def test_transpose_form_bounds_and_defaults_partner_axis_from_context():
+    entry = get_operation_entry("transpose")
+    form = build_parameter_form(entry, shape=(4, 10, 6), axis=1)
+
+    assert form.field("other_axis").value == 2
+    assert form.field("other_axis").maximum == 2
+
+
 def test_crop_editing_start_at_ceiling_pulls_start_back():
     entry = get_operation_entry("crop")
     form = build_parameter_form(entry, shape=(4, 10, 6), axis=1)
