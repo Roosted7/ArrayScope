@@ -146,6 +146,20 @@ def test_duplicate_shape_changer_is_loud_template_not_false_shape_claim():
         operation.apply(np.ones((2, 2), dtype=np.float32))
 
 
+def test_every_listed_operation_can_be_duplicated():
+    source_entries = registry.all_operations()
+
+    duplicate_ids = [library.duplicate_operation(entry.id) for entry in source_entries]
+
+    assert len(duplicate_ids) == len(source_entries)
+    assert len(set(duplicate_ids)) == len(source_entries)
+    assert all(operation_id.startswith("user:") for operation_id in duplicate_ids)
+    assert all(
+        library.user_operation_wrapper(operation_id)["template"]["source_id"] == source_entry.id
+        for operation_id, source_entry in zip(duplicate_ids, source_entries, strict=True)
+    )
+
+
 def test_duplicate_label_and_slug_collisions_are_numbered():
     first = library.duplicate_operation("conjugate")
     second = library.duplicate_operation("conjugate")

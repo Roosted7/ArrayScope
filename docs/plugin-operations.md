@@ -389,11 +389,22 @@ manager UI drives:
   top-level functions **without importing or executing** it (pure `ast`). It
   works even on a file that would fail to import (a top-level `raise`, a missing
   dependency), so the manager can still offer its callables.
+- `create_empty_user_operation() -> str` — write a deliberately unfinished,
+  loud template and return its new `user:<slug>` id for in-manager editing.
+- `duplicate_operation(id) -> str` — write an editable user copy. Native
+  shape-preserving code is copied into a function; pack/entry-point operations
+  get a working adapter that names the dependency; shape-changing operations
+  become an explicit blocked template until discovered shapes land (never a
+  false shape-preserving claim).
+- `update_user_operation_source(id, path, callable, *, link, infer=True)` —
+  retarget the existing entry, copy or link its code, and expose AST-inferred
+  label/description/axis/parameters through the ordinary editable wrapper
+  fields.
 - `import_custom_operation(py_path, callable_name, *, link=False, label=None, …)
-  -> str` — auto-fill the wrapper from introspection, write it (copying the code
-  for import mode), refresh, and return the new `user:<slug>` id.
+  -> str` remains the Qt-free convenience API for programmatic import.
 - `remove_user_operation(id, *, delete_files=True)`,
-  `update_user_operation(id, **wrapper_fields)`.
+  `update_user_operation(id, **wrapper_fields)`,
+  `user_operation_wrapper(id)`, and `user_operation_source_path(id)`.
 - `refresh_user_operations()` — re-scan the directory and re-register. The app
   calls this at startup (as it does for the colormap library) so recipes that
   reference a `user:` op resolve.
@@ -440,28 +451,33 @@ shown greyed with a `(hidden)` marker so they can be restored; user ops carry a
   discards the persisted arrangement (`reset_layout`) and clears every hidden
   flag.
 
-The right column edits the selected op. System ops expose only their group
-(moving them writes a layout override) and a **Common** toggle that pins them to
-the top section. User ops are fully editable — label, description, group, icon
-(with a live preview), *requires axis*, and a parameters table — with every
-change auto-saved through `update_user_operation` (no explicit Save).
+The right column is the product's **one operation editor**. It renders every
+operation through the Qt-free declarative definition exporter
+(`operations.operation_definitions`): identity, shape/axis interface, full
+parameter metadata, and a source body. System definitions are visibly
+read-only except for group (a layout override) and the **Common** toggle.
+**Duplicate** creates and selects an editable `user:` copy. User ops expose
+label, description, group, icon (with a live preview), *requires axis*, source
+file, callable, copy-vs-link storage, and the full parameter metadata table
+(name, kind, default, min, max, step, description). Changes auto-save; there is
+no separate Save and no second parameter editor.
 
 ### Connecting up a custom function (import vs. link)
 
-The **Add** (`+`) button walks the import flow: pick a `.py` file, and the
-manager introspects its top-level functions (`introspect_python_source`, pure
-`ast`, never executing your code) and opens a panel with everything auto-filled
-and still editable — the function to wrap, label, description, group, icon, the
-detected parameters, and the *requires axis* flag. The key choice is how the
-code is stored:
+**New** creates an empty user entry and selects it without leaving the manager.
+Choose a `.py` source file in the right-hand implementation section; the
+callable picker is populated by `introspect_python_source` (pure `ast`, never
+executing user code). Choosing a callable fills label, description,
+*requires axis*, parameter names, kinds, and defaults into the same ordinary
+editable controls. Inference is visible initial data, never hidden policy. The
+storage choice sits directly below it:
 
 - **Import a copy (recommended)** copies the file into the operations directory,
   so the op keeps working if you move or edit the original.
 - **Link to the file** keeps a live link to the original path; edits you make to
   it are picked up automatically (mtime-keyed re-import).
 
-Confirming registers the op (`import_custom_operation`) and selects it in the
-tree; any edits you made to the detected parameters or *requires axis* beyond
-the auto-fill are followed with an `update_user_operation`. The **Open the code
-file** button opens a user op's `.py` in your default editor, and **Open the
-operations folder** opens the directory itself.
+Retargeting keeps the same selected `user:` id through
+`update_user_operation_source`; there is no confirm dialog or second editor.
+The **Open the code file** button opens a user op's `.py` in your default
+editor, and **Open the operations folder** opens the directory itself.

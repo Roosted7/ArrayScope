@@ -62,7 +62,8 @@ file **never** breaks startup: it is caught, logged, recorded in
 The operation manager UI (a separate chunk) builds on this module: it renders
 :func:`grouped_operations`, persists arrangements through
 :func:`apply_library_layout`, toggles :func:`set_operation_hidden`, and calls
-:func:`import_custom_operation` / :func:`remove_user_operation` /
+:func:`create_empty_user_operation` / :func:`duplicate_operation` /
+:func:`update_user_operation_source` / :func:`remove_user_operation` /
 :func:`update_user_operation`.
 """
 

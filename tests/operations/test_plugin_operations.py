@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 from arrayscope.operations import plugins, recipes, registry
+from arrayscope.operations.operation_definitions import export_operation_definition
 from arrayscope.operations.pipeline import ArrayDocument, OperationStep
 
 GROUP = plugins.PLUGIN_ENTRY_POINT_GROUP
@@ -137,6 +138,21 @@ def test_plugin_operation_applies_to_ndarray(demo_plugin):
     data = np.arange(4 * 3).reshape(4, 3)
     operation = registry.create_operation("demo-ops:reverse_rows")
     np.testing.assert_array_equal(operation.apply(data), data[::-1])
+
+
+def test_entry_point_plugin_exports_provider_and_interface(demo_plugin):
+    definition = export_operation_definition("demo-ops:roll")
+
+    assert definition["tier"] == "plugin"
+    assert definition["source"] == {
+        "mode": "entry-point",
+        "group": GROUP,
+        "name": "demo-ops:roll",
+        "value": f"{PLUGIN_MODULE}:make_roll",
+        "distribution": "",
+    }
+    assert definition["requires_axis"] is True
+    assert definition["parameters"][0]["name"] == "shift"
 
 
 def test_reverse_rows_is_reversible(demo_plugin):
