@@ -366,9 +366,13 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.slots_table = QtWidgets.QTableWidget(0, 4, self)
         self.slots_table.setHorizontalHeaderLabels(["Name", "Label", "Accepts", "Description"])
         slots_header = self.slots_table.horizontalHeader()
-        slots_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        slots_header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        slots_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        # Interactive rather than Fixed: "Accepts" holds a comma-joined list of
+        # binding kinds ("dimension-set, open-document, roi, npy-file") that no
+        # fixed width fits, so the user must be able to widen it. Only the last
+        # column stretches, and every cell carries its full text as a tooltip so
+        # an elided value is still readable without resizing.
+        for column in (0, 1, 2):
+            slots_header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.Interactive)
         slots_header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
         for column, width in enumerate((90, 110, 190)):
             slots_header.resizeSection(column, width)
@@ -1114,7 +1118,11 @@ class OperationManagerDialog(QtWidgets.QDialog):
         )
         description = getattr(slot, "description", "") if slot is not None else ""
         for column, text in enumerate((name, label, accepts, description)):
-            self.slots_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(text)))
+            item = QtWidgets.QTableWidgetItem(str(text))
+            # "Accepts" and "Description" routinely exceed their column, so keep
+            # the full value reachable on hover instead of only after a resize.
+            item.setToolTip(str(text))
+            self.slots_table.setItem(row, column, item)
 
     def _add_input_slot_row(self):
         if not _is_user_op(self._loaded_id or ""):
