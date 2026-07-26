@@ -18,8 +18,11 @@ from arrayscope.operations.pipeline import (
     Magnitude,
     Maximum,
     Mean,
+    Median,
     Minimum,
+    Normalize,
     Offset,
+    Percentile,
     Phase,
     Power,
     RealPart,
@@ -28,7 +31,9 @@ from arrayscope.operations.pipeline import (
     Scale,
     SoftThreshold,
     SplitComplexAxis,
+    StandardDeviation,
     Sum,
+    Variance,
 )
 from arrayscope.operations.registry import operation_entries
 
@@ -51,8 +56,13 @@ def test_every_registered_operation_declares_dtype_and_capabilities():
         "clip": Clip(minimum=-1.0, maximum=1.0),
         "soft_threshold": SoftThreshold(threshold=0.1),
         "hard_threshold": HardThreshold(threshold=0.1),
+        "normalize": Normalize(axis=1),
         "mean": Mean(axis=1),
         "rss": RootSumSquares(axis=1),
+        "std": StandardDeviation(axis=1),
+        "var": Variance(axis=1),
+        "median": Median(axis=1),
+        "percentile": Percentile(axis=1, q=50),
         "sum": Sum(axis=1),
         "max": Maximum(axis=1),
         "min": Minimum(axis=1),
@@ -93,7 +103,17 @@ def test_fft_declares_blocking_expanded_axis_and_stage_cache():
 
 @pytest.mark.parametrize(
     "operation",
-    [Mean(axis=1), Sum(axis=1), Maximum(axis=1), Minimum(axis=1), RootSumSquares(axis=1)],
+    [
+        Mean(axis=1),
+        Sum(axis=1),
+        Maximum(axis=1),
+        Minimum(axis=1),
+        RootSumSquares(axis=1),
+        StandardDeviation(axis=1),
+        Variance(axis=1),
+        Median(axis=1),
+        Percentile(axis=1, q=50),
+    ],
 )
 def test_reductions_declare_blocking_and_expanded_axis(operation):
     capabilities = operation.capabilities((4, 8, 16), np.float32)

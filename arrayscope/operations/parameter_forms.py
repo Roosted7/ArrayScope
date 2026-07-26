@@ -305,6 +305,33 @@ def _upsample_form(
     return ParameterForm([factor], derive=derive)
 
 
+def _percentile_form(
+    entry: OperationEntry, *, shape: Shape | None, axis: int | None
+) -> ParameterForm:
+    """percentile: pin q to its mathematical bounds and show the sample count."""
+
+    del entry
+    length = _axis_length(shape, axis)
+    q = ParameterField(
+        name="q",
+        label="Percentile",
+        kind="float",
+        value=50.0,
+        minimum=0.0,
+        maximum=100.0,
+        step=1.0,
+        description="Percentile from 0 through 100, inclusive.",
+    )
+
+    def derive(form: ParameterForm) -> list[DerivedValue]:
+        del form
+        if length is None:
+            return []
+        return [DerivedValue("Samples on axis", str(length))]
+
+    return ParameterForm([q], derive=derive)
+
+
 # Keyed by op id. An op absent here falls back to the metadata-driven default
 # form, which already honors the parameter default / min / max / step / desc.
 _FORM_PROVIDERS: dict[str, Callable[..., ParameterForm]] = {
@@ -312,6 +339,7 @@ _FORM_PROVIDERS: dict[str, Callable[..., ParameterForm]] = {
     "sigpy:resize": _resize_form,
     "sigpy:downsample": _downsample_form,
     "sigpy:upsample": _upsample_form,
+    "percentile": _percentile_form,
 }
 
 

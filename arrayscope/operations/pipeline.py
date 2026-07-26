@@ -455,6 +455,179 @@ class HardThreshold:
 
 
 @dataclass(frozen=True)
+class Normalize:
+    """L2-normalize each line along one selected axis."""
+
+    axis: int
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        return _normalize(data, axis)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        _validate_axis(shape, self.axis)
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        if _is_integer_dtype(input_dtype):
+            return np.dtype(np.float32)
+        return np.dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        return _capabilities(
+            OperationKind.TRANSFORM,
+            ndim=len(input_shape),
+            blocking_axes=(axis,),
+            expands_request_axes=(axis,),
+            temp_multiplier=3.0,
+            cache_stage=True,
+        )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del evaluation_context
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        normalized = _normalize(data, slab_axis)
+        return take_axis_region(
+            normalized, output_region.axes[axis], normalized.shape[slab_axis], axis=slab_axis
+        )
+
+
+@dataclass(frozen=True)
+class StandardDeviation:
+    axis: int
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        return _std(data, axis)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axis = _validate_axis(shape, self.axis)
+        return _remove_axis(shape, axis)
+
+    def output_dtype(self, input_dtype):
+        return _variance_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _reduction_capabilities(input_shape, self.axis, temp_multiplier=2.0)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del output_region, evaluation_context
+        return _std(data, axis_in_region_result(input_region, self.axis))
+
+
+@dataclass(frozen=True)
+class Variance:
+    axis: int
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        return _variance(data, axis)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axis = _validate_axis(shape, self.axis)
+        return _remove_axis(shape, axis)
+
+    def output_dtype(self, input_dtype):
+        return _variance_dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _reduction_capabilities(input_shape, self.axis, temp_multiplier=2.0)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del output_region, evaluation_context
+        return _variance(data, axis_in_region_result(input_region, self.axis))
+
+
+@dataclass(frozen=True)
+class Median:
+    axis: int
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        return _median(data, axis)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axis = _validate_axis(shape, self.axis)
+        return _remove_axis(shape, axis)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        if _is_integer_dtype(input_dtype):
+            return np.dtype(np.float32)
+        return np.dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _reduction_capabilities(input_shape, self.axis, temp_multiplier=2.0)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del output_region, evaluation_context
+        return _median(data, axis_in_region_result(input_region, self.axis))
+
+
+@dataclass(frozen=True)
+class Percentile:
+    axis: int
+    q: float
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        return _percentile(data, self.q, axis)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axis = _validate_axis(shape, self.axis)
+        return _remove_axis(shape, axis)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        if _is_integer_dtype(input_dtype):
+            return np.dtype(np.float32)
+        return np.dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        return _reduction_capabilities(input_shape, self.axis, temp_multiplier=3.0)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return insert_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del output_region, evaluation_context
+        return _percentile(data, self.q, axis_in_region_result(input_region, self.axis))
+
+
+@dataclass(frozen=True)
 class Mean:
     axis: int
 
@@ -1178,6 +1351,60 @@ def _hard_threshold(data, threshold):
     return np.where(np.abs(array) >= threshold, array, array.dtype.type(0))
 
 
+def _normalize(data, axis):
+    array = np.asarray(data)
+    if _is_integer_dtype(array.dtype):
+        array = array.astype(np.float32)
+    norm = np.sqrt(np.sum(np.abs(array) ** 2, axis=axis, keepdims=True))
+    result = np.zeros_like(array)
+    np.divide(array, norm, out=result, where=norm != 0)
+    return result
+
+
+def _variance_dtype(input_dtype):
+    if input_dtype is None:
+        return None
+    if _is_integer_dtype(input_dtype):
+        return np.dtype(np.float32)
+    return np.std(np.empty((1,), dtype=np.dtype(input_dtype))).dtype
+
+
+def _std(data, axis):
+    array = np.asarray(data)
+    if _is_integer_dtype(array.dtype):
+        array = array.astype(np.float32)
+    return np.std(array, axis=axis, ddof=1)
+
+
+def _variance(data, axis):
+    array = np.asarray(data)
+    if _is_integer_dtype(array.dtype):
+        array = array.astype(np.float32)
+    return np.var(array, axis=axis, ddof=1)
+
+
+def _median(data, axis):
+    array = np.asarray(data)
+    if _is_integer_dtype(array.dtype):
+        array = array.astype(np.float32)
+    return np.median(array, axis=axis)
+
+
+def _percentile(data, q, axis):
+    q = float(q)
+    if not 0 <= q <= 100:
+        raise ValueError("percentile must be between 0 and 100")
+    array = np.asarray(data)
+    output_dtype = np.dtype(np.float32) if _is_integer_dtype(array.dtype) else array.dtype
+    if np.iscomplexobj(array):
+        result = np.percentile(array.real, q, axis=axis) + 1j * np.percentile(
+            array.imag, q, axis=axis
+        )
+    else:
+        result = np.percentile(array, q, axis=axis)
+    return np.asarray(result).astype(output_dtype, copy=False)
+
+
 def _is_integer_dtype(dtype) -> bool:
     return np.dtype(dtype).kind in "biu"
 
@@ -1230,4 +1457,17 @@ def _elementwise_capabilities(
         can_fuse=True,
         lod_commuting=True,
         real_linear=real_linear,
+    )
+
+
+def _reduction_capabilities(
+    input_shape: Shape, axis: int, *, temp_multiplier: float = 1.0
+) -> OperationCapabilities:
+    axis = _validate_axis(input_shape, axis)
+    return _capabilities(
+        OperationKind.REDUCTION,
+        ndim=len(input_shape),
+        blocking_axes=(axis,),
+        expands_request_axes=(axis,),
+        temp_multiplier=temp_multiplier,
     )
