@@ -1,10 +1,11 @@
 # ADR 0059: One coarse rung, fed by a shared reduced-input stage
 
-- **Status:** Accepted and implemented (2026-07-26). Supersedes the scheduling half of ADR
-  0050's "reduce-before-ops and preview-then-refine" section: the two routes it
-  designed still exist as *evaluation* capabilities, but this ADR replaces the
-  shared-transform *scheduling* path with the stage cache the native path
-  already uses, and collapses FLOOR/PREVIEW into one rung.
+- **Status:** Accepted and implemented (2026-07-26), with the global
+  coarse-before-refine product ordering still open. Supersedes the scheduling
+  half of ADR 0050's "reduce-before-ops and preview-then-refine" section: the
+  two routes it designed still exist as *evaluation* capabilities, but this
+  ADR replaces the shared-transform *scheduling* path with the stage cache the
+  native path already uses, and collapses FLOOR/PREVIEW into one rung.
 - **Number:** 0059 was free at `59592c26`. Parallel worktrees have collided on
   ADR numbers before; renumber on integration if 0059 is taken.
 
@@ -199,16 +200,32 @@ value as *evaluation* helpers; what retires is the parallel scheduling path,
 its ownership predicates, and the `resident` policy gate that had to exist to
 keep the two owners apart.
 
-The global barrier retires with it, and this is the part worth stating
-carefully, because [§6c arm C](../redesign/preview-lod-anatomy-2026-07-26.md)
-proved a naive removal fails: with the shared preview and the per-tile target
-running concurrently, the per-tile rungs win the race and the preview presents
-**0 of 272** tiles while still paying its full evaluation. The barrier is what
-made the shared route coherent. It is not needed here because the ladder
-already enforces the same ordering *per tile* — coarse rung before DESIRED for
-each tile independently — which is strictly weaker than a global barrier and
-therefore does not serialize. Ordering was never the reason for the barrier;
-having a fan-out that could not be interleaved was.
+The shared route's acknowledge-all *presentation* barrier retires with it.
+[§6c arm C](../redesign/preview-lod-anatomy-2026-07-26.md) proved that barrier
+cannot simply be removed while the old route remains: per-tile targets win the
+race and the shared preview presents **0 of 272** tiles while still paying its
+full evaluation.
+
+The initial implementation replaced that global order with the ladder's
+per-tile order: each tile acknowledged coarse before exact, but already-covered
+tiles could refine while other required tiles were still blank. That is a
+weaker guarantee, but it is **not product-equivalent**. On the WGPU FFT montage
+the first exact ACK arrived at 5169 ms while the last coarse ACK arrived at
+7286 ms; dogfooding showed sharp tiles replacing blocky tiles before the
+coarse pass completed. A useful coarse pass promises all required data first,
+then quality.
+
+The existing `COVERAGE` → `REFINE` owner cannot be used as a flag flip to repair
+this. A follow-up routed covered tiles' `DESIRED` work back to
+`DISPLAY_PREPARATION`, so `SchedulingVerdict.admits_lane` held it until
+coverage closed from lifecycle first-pixel truth. That passed the ordering
+counter in all three measured passes, but serialized enough work to regress the
+order-balanced WGPU whole-fill median from **5400.0 ms to 6651.4 ms**
+(**+1251.4 ms / +23.2%**). It was reverted. This refutes the proposed mechanism,
+not the product order: a future implementation must preserve incremental
+bounded coarse presentation, admit no `DESIRED` while a required tile is still
+blank, and stay within the whole-fill bar without restoring the retired shared
+scheduler.
 
 ## Consequences
 
@@ -248,8 +265,9 @@ Expected, and each one is a gate below rather than a claim:
 2. On the FFT montage: exactly one stage materialization for the coarse rung
    across all 272 tiles (counter-pinned via the stage manager's
    attach/hit diagnostics), not 272.
-3. Coarse-rung acks carry the operation key at `quality="preview"`, and every
-   tile's coarse ack precedes its exact ack.
+3. Coarse-rung acks carry the operation key at `quality="preview"`, and across
+   the required scope `max(coarse ACK) < min(exact ACK)`. Per-tile order is
+   insufficient.
 4. Full refined stays at or under baseline (~5.2 s). Quote a **median over at
    least three order-balanced passes** and say how many: the per-commit dossier
    found the refinement is bistable — one unmodified baseline pass took 49
@@ -272,7 +290,8 @@ Implemented on local `main` at `6ad55232`.
   a synthetic-document key cannot pass the gate.
 - In five WGPU single-run FFT passes, every one of the 272 operation-bearing
   level-4 `quality="preview"` acknowledgements preceded that tile's
-  operation-bearing level-2 exact acknowledgement.
+  operation-bearing level-2 exact acknowledgement. This was the original
+  gate; the product regression above shows why it was too weak.
 - Gate 4 used five passes per arm in the order-balanced sequence
   `baseline, branch, branch, baseline, baseline, branch, baseline, branch,
   branch, baseline`. Full-refined medians were **5388.3 ms baseline** and
@@ -284,28 +303,26 @@ Implemented on local `main` at `6ad55232`.
   declined rather than substituting a full native FFT plane. The physical page
   allocation is still 256×256 per 21×21 logical tile, as expected.
 - The same five-pass branch cohort's median complete coarse-floor fill was
-  **5321.4 ms**, only 10.7 ms before the full-refined median. **That comparison
-  understates the result and should not be read as the first-pixel outcome:**
-  both terms are *whole-fill* medians, so they measure when the LAST tile
-  reaches each rung, and a progressive fill can never show a gain that way.
-  Per-tile, from the ACK trace of one FFT pass on this tip, the coarse rung is
-  a genuine preview rather than a flash:
-
-  | | ms |
-  |---|---:|
-  | first coarse ACK carrying the operation key | **3124** |
-  | first exact ACK carrying it | **5169** |
-  | per-tile coarse→exact gap | min 274, p25 606, **median 875**, p75 1874, max 2674 |
-  | tiles whose gap is under 50 ms | **0 of 272** |
-
-  So the first FFT pixel arrives about **2.0 s earlier** than the 5076 ms
-  measured on the pre-branch tip, and every tile shows its coarse rung for at
-  least 274 ms. Admission still dominates the *settle* time, which is why the
-  whole-fill medians barely move — but the rung is early where earliness is
-  the point. The 21×21 source is visibly blocky when drawn at roughly 57 px,
-  and the now-default minification filter correctly does not engage while that
-  source is magnified, so what a user sees is blocky-then-sharp with a median
-  875 ms between them.
+  **5321.4 ms**, only 10.7 ms before the full-refined median. This is not a
+  first-pixel speedup claim: admission remains dominant, and the original
+  per-tile overlap violated the whole-montage ordering promise. The 21×21
+  source is visibly blocky when drawn at roughly 57 px, and the now-default
+  minification filter correctly does not engage while that source is
+  magnified.
+- The rejected phase-gated follow-up used three passes per arm in the
+  order-balanced sequence `branch, main, main, branch, branch, main`. All
+  branch traces satisfied the stronger global ordering gate; the separation
+  from last coarse ACK to first exact ACK was 1966–2466 ms. Whole-fill values
+  were 5400.0/5329.4/5774.3 ms on main and
+  6325.6/6651.4/7357.9 ms on the branch, giving medians of 5400.0 and
+  6651.4 ms. The code was reverted.
+- The maintained-backend check was run this time. The full 272-tile
+  PyQtGraph FFT run had zero rung errors and zero raised tasks after
+  `1a050f5d`, but did not settle before the 120 s process watchdog. The bounded
+  32-tile run completed in 3826.1 ms with zero reduced-preview failures and
+  zero unsettled targets. That distinguishes the fixed exception/retry freeze
+  from the still-red full-grid throughput; it does not call the full backend
+  gate green.
 - A three-pass in-process raw run (`--repeat 3`) reported only
   `tile already has committable coverage` and `allow_preview false` as coarse
   refusal reasons; `floor already covers this level` is gone.

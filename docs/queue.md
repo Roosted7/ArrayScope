@@ -58,6 +58,24 @@ with reasons recorded in the ledger: sigpy `nufft`/`espirit`/`fwt`/`iwt` and
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
+- **ADR 0059 global coarse-before-refine order — OPEN.** The landed per-tile
+  successor allows exact ACKs to overlap the remaining coarse pass by 2.1 s,
+  which dogfoods as sharp tiles replacing blocky tiles while other tiles are
+  still blank. Reclassifying covered `DESIRED` work onto
+  `DISPLAY_PREPARATION` correctly enforced
+  `max(coarse ACK) < min(exact ACK)` in three WGPU passes, but regressed the
+  order-balanced whole-fill median 5400.0→6651.4 ms (+23.2%) and was reverted
+  ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
+  Exit gate: global ACK order across all required tiles, WGPU whole-fill median
+  within the ±10% bar over at least three order-balanced passes, and a
+  completing PyQtGraph FFT montage; do not restore the retired shared scheduler
+  or multiply bounded presentation cohorts.
+- **A ladder rung exception retries without bound — OPEN, separate from ADR
+  0059 ordering.** The PyQtGraph RGB-format failure admitted 18,314 preview
+  tasks and raised 17,538 times because `_on_rung_error` replanned the same
+  target. Make a rung failure terminal for that target with a named outcome,
+  analogous to the commit-path `raised` outcome below; do not fold it into a
+  coarse-ordering change.
 - **An exception on the presentation-commit path is laundered into an
   anonymous stall — DONE 2026-07-26.** Found while root-causing the 272-tile
   FFT montage stall; a `RuntimeError` from page-pool exhaustion and an
