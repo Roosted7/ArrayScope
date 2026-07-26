@@ -24,6 +24,9 @@ class ImageViewBackendCapabilities:
     # generic persistent residency: the backend must bind later source-window
     # shifts by origin against those canonical pages.
     canonical_source_plane_residency: bool = False
+    # Whether one complete coarse montage can be represented by a physically
+    # bounded aggregate instead of one backend object per logical tile.
+    compact_preview_aggregate_min_tiles: int = 0
     # Whether the backend can bind a page whose per-axis reduction differs
     # (for example y/64 with x/128 from an anisotropic viewport aspect).
     # A backend that keys its ladder as one isotropic mip chain cannot, so
@@ -44,6 +47,7 @@ PYQTGRAPH_CAPABILITIES = ImageViewBackendCapabilities(
     tile_residency_kind="cpu_item",
     shader_windowing=False,
     native_pointer_interaction=True,
+    compact_preview_aggregate_min_tiles=256,
     # ImageItems read a transposed VIEW of the canonical tile buffer, so an X/Y
     # axis-order swap re-lays-out existing items instead of re-materializing.
     display_axis_transpose=True,
@@ -60,6 +64,7 @@ WGPU_CAPABILITIES = ImageViewBackendCapabilities(
     shader_windowing=True,
     native_pointer_interaction=False,
     canonical_source_plane_residency=True,
+    compact_preview_aggregate_min_tiles=256,
     # ``plane_chunk_key`` keys every page as ``reduction=(level, level)`` and
     # the executor addresses one isotropic mip span per plane, so an
     # anisotropic page has no representable identity on this backend.
@@ -96,6 +101,9 @@ def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
             ),
             canonical_source_plane_residency=bool(
                 getattr(capabilities, "canonical_source_plane_residency", False)
+            ),
+            compact_preview_aggregate_min_tiles=int(
+                getattr(capabilities, "compact_preview_aggregate_min_tiles", 0) or 0
             ),
             anisotropic_lod_pages=bool(getattr(capabilities, "anisotropic_lod_pages", True)),
             display_axis_transpose=bool(getattr(capabilities, "display_axis_transpose", False)),

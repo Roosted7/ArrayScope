@@ -3447,6 +3447,71 @@ def test_pyqtgraph_idle_refinement_uses_bounded_fixed_cost_cohort():
     assert limits["cold_deadline_ms"] is None
 
 
+def test_pyqtgraph_full_preview_cap_bypass_requires_explicit_aggregate_marker():
+    from arrayscope.window import frame_effects as montage_commit
+
+    required = tuple(range(272))
+    payloads = {
+        tile: SimpleNamespace(quality="preview", image=np.zeros((6, 6), dtype=np.float32))
+        for tile in required
+    }
+    session = SimpleNamespace(
+        scheduling_policy=SimpleNamespace(
+            verdict=SchedulingVerdict(3, SchedulingPhase.COVERAGE, required)
+        ),
+        aggregate_preview_transaction=(3, required),
+        display_tile_payloads=payloads,
+        display_committed=False,
+        dirty_payloads=dict.fromkeys(required),
+        pending_payload_upserts={},
+        pending_removals=set(),
+        has_pending_level_update=lambda: False,
+        has_stale_level_presentations=lambda: False,
+        required_target_unsettled_tiles=lambda: required,
+    )
+    window = _window_ns(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="pyqtgraph",
+                persistent_tile_residency=True,
+                tile_residency_kind="cpu_item",
+                shader_windowing=False,
+                compact_preview_aggregate_min_tiles=256,
+            )
+        ),
+        _viewport_interaction_active=False,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=2,
+                byte_cap=4096,
+                budget_ms=2.0,
+            )
+        ),
+    )
+
+    aggregate = montage_commit.tile_layer_upsert_limits(window, session)
+    assert aggregate["max_upserts"] == 272
+    assert aggregate["cold_deadline_ms"] is None
+
+    session.aggregate_preview_transaction = None
+    governed = montage_commit.tile_layer_upsert_limits(window, session)
+    assert governed["max_upserts"] == 2
+    assert governed["cold_deadline_ms"] is not None
+
+    session.aggregate_preview_transaction = (3, required)
+    window.img_view.rendering_capabilities = ImageViewBackendCapabilities(
+        name="wgpu",
+        persistent_tile_residency=True,
+        tile_residency_kind="gpu_atlas",
+        shader_windowing=True,
+        compact_preview_aggregate_min_tiles=256,
+    )
+    window.img_view.tiledPayloadResident = lambda _payload: True
+    wgpu_aggregate = montage_commit.tile_layer_upsert_limits(window, session)
+    assert wgpu_aggregate["max_upserts"] == 272
+    assert wgpu_aggregate["upsert_cost_fn"] is montage_commit.vispy_payload_upload_nbytes
+
+
 def test_pyqtgraph_floor_progress_commits_stay_governed():
     # A floor-progress commit carries no dirty/pending work at limits
     # decision time — the build's floor pass materializes preview upserts

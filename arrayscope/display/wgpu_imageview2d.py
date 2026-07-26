@@ -2221,7 +2221,9 @@ class WgpuImageView2D(ImageViewShell):
             texture_uploads=uploads,
             texture_upload_bytes=int(report.upload_bytes),
             page_count=len(executor.page_table.resident_keys()),
-            active_pages=sum(len(info["page_keys"]) for info in committed_tiles.values()),
+            active_pages=len(
+                {key for info in committed_tiles.values() for key in tuple(info["page_keys"])}
+            ),
             estimated_gpu_bytes=int(executor.active_resident_bytes),
             budget_bytes=int(tile_residency_budget_bytes or 0),
             shader_uniform_updates=1,

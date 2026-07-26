@@ -6,6 +6,7 @@ from pyqtgraph.Qt import QtCore, QtGui
 
 from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
+from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
@@ -242,8 +243,6 @@ def test_large_preview_prefix_is_not_acknowledged_as_physical_coverage(qt_app):
 
 
 def test_compact_preview_paints_through_the_real_pyqtgraph_scene(qtbot):
-    from arrayscope.display.imageview2d import ImageView2D
-
     count = 256
     geometry = _geometry(count)
     payloads = {tile: _preview_payload(tile) for tile in range(count)}

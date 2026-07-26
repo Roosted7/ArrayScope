@@ -1201,6 +1201,33 @@ class FramePipelineEffects:
         replan_needed = self._admit_ready_payloads(batch.upserts)
         if not self._session_is_current():
             return
+        verdict = self.session.scheduling_policy.verdict
+        batch_steps = tuple(
+            row[0]
+            for row in tuple(batch.upserts or ())
+            if isinstance(row, tuple) and len(row) == 2
+        )
+        batch_tiles = tuple(int(step.tile_number) for step in batch_steps)
+        required = tuple(int(tile) for tile in verdict.required_tiles)
+        if (
+            bool(verdict.coverage_open)
+            and batch_steps
+            and all(step.rung == Rung.FLOOR for step in batch_steps)
+            and len(batch_tiles) == len(set(batch_tiles))
+            and set(batch_tiles) == set(required)
+            and all(
+                str(
+                    getattr(self.session.display_tile_payloads.get(int(tile)), "quality", "")
+                    or ""
+                )
+                in {"preview", "fallback"}
+                for tile in required
+            )
+        ):
+            self.session.aggregate_preview_transaction = (
+                int(verdict.generation),
+                tuple(sorted(required)),
+            )
         if replan_needed:
             # A reduced rung can complete after a newer viewport demand has
             # made its payload inadmissible. Releasing its lifecycle claim is
@@ -4402,6 +4429,7 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
         )
     if interactive:
         batch_limit = min(8, max(4, int(batch_limit)))
+    aggregate_preview = _complete_aggregate_preview_scope(window, session)
     verdict = getattr(getattr(session, "scheduling_policy", None), "verdict", None)
     refinement_cohort = bool(
         not interactive
@@ -4419,12 +4447,18 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
         batch_limit = _idle_backlog_cohort(session, batch_limit)
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
+    if aggregate_preview is not None:
+        # The worker batch and scheduling verdict prove this is the complete
+        # current FLOOR set; the backend capability proves it becomes one
+        # bounded physical aggregate. Only this explicit pair may bypass the
+        # ordinary per-ImageItem cap/deadline.
+        batch_limit = max(int(batch_limit), len(aggregate_preview))
     limits = {
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
         "cold_deadline_ms": (
             None
-            if refinement_cohort
+            if refinement_cohort or aggregate_preview is not None
             else presentation_upload_control_budget_ms(
                 window, "tile_layer_commit", decision, interactive=interactive
             )
@@ -4433,6 +4467,29 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
         "pace_resident_retargets": True,
     }
     return limits
+
+
+def _complete_aggregate_preview_scope(window, session) -> tuple[int, ...] | None:
+    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
+    minimum_tiles = int(
+        getattr(capabilities, "compact_preview_aggregate_min_tiles", 0) or 0
+    )
+    if minimum_tiles <= 0:
+        return None
+    verdict = getattr(getattr(session, "scheduling_policy", None), "verdict", None)
+    if verdict is None or not bool(getattr(verdict, "coverage_open", False)):
+        return None
+    required = tuple(sorted(int(tile) for tile in verdict.required_tiles))
+    marker = getattr(session, "aggregate_preview_transaction", None)
+    if marker != (int(verdict.generation), required):
+        return None
+    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+    if len(required) < minimum_tiles or any(
+        str(getattr(payloads.get(tile), "quality", "") or "") not in {"preview", "fallback"}
+        for tile in required
+    ):
+        return None
+    return required
 
 
 def presentation_upload_control_budget_ms(
@@ -4795,6 +4852,9 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         batch_limit = _idle_backlog_cohort(session, batch_limit)
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
+    aggregate_preview = _complete_aggregate_preview_scope(window, session)
+    if aggregate_preview is not None:
+        batch_limit = max(int(batch_limit), len(aggregate_preview))
     wgpu_native_prefetch = bool(
         capabilities.name == "wgpu"
         and any(
@@ -4823,7 +4883,9 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
         "upsert_cost_fn": (
-            wgpu_payload_upload_nbytes
+            vispy_payload_upload_nbytes
+            if aggregate_preview is not None
+            else wgpu_payload_upload_nbytes
             if capabilities.name == "wgpu"
             else texture_payload_upload_nbytes
         ),

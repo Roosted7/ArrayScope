@@ -1590,6 +1590,7 @@ def test_large_preview_montage_uses_shared_pages_with_per_tile_ack_truth(
         diagnostics = view.wgpuPresentationDiagnostics()
         assert diagnostics["wgpu_preview_atlas_tiles"] == tile_count
         assert diagnostics["wgpu_preview_atlas_pages"] == expected_pages
+        assert view.lastImageUploadTiming().tile_layer_active_pages == expected_pages
         assert view.residentHistogramEvidence(payloads) == ()
         assert view._wgpu_executor.histogram_dispatches_total == dispatches_before
         region = committed["tiles"][144]["world_rect"]
@@ -1687,6 +1688,7 @@ def test_exact_refinement_preserves_shared_preview_pages_and_mixed_ack_truth(qt_
         diagnostics = view.wgpuPresentationDiagnostics()
         assert diagnostics["wgpu_preview_atlas_tiles"] == tile_count - len(refined)
         assert diagnostics["wgpu_preview_atlas_pages"] == 2
+        assert view.lastImageUploadTiming().tile_layer_active_pages == 10
         region = view._wgpu_committed["tiles"][0]["world_rect"]
         view.getView().setRange(
             xRange=(region[0], region[0] + region[2]),
