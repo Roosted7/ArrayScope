@@ -55,7 +55,7 @@ from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.glyph_atlas import GlyphAtlas
 from arrayscope.display.imageview2d import ArrayScopeGraphicsView, ImageViewShell
-from arrayscope.display.model.tile_identity import tile_ack_identity
+from arrayscope.display.model.tile_identity import TileIdentity, tile_ack_identity
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.overlay_geometry import (
     montage_overlay_rgba,
@@ -136,6 +136,20 @@ class _WgpuPayloadBinding:
     upload_chunks: tuple[tuple[int, int], ...]
     source_anchored: bool
     lod_level: int
+
+
+@dataclass(frozen=True)
+class _WgpuTiledBindingSignature:
+    """Construction-owned proof of the currently submitted tile binding."""
+
+    payload_identities: tuple[tuple[int, object], ...]
+    representation: str
+    mapping_mode: str
+    layout_identity: object
+    transposed: bool
+    executor: object
+    page_table_generation: int
+    histogram_obligation: object
 
 
 _WGPU_REP_BY_KIND = {
@@ -436,6 +450,9 @@ class WgpuImageView2D(ImageViewShell):
             minification_filter=self._minification_filter_enabled,
         )
         self._wgpu_committed: dict[str, object] | None = None
+        self._wgpu_tiled_binding_signature: _WgpuTiledBindingSignature | None = None
+        self._wgpu_binding_fast_path_commits = 0
+        self._wgpu_binding_full_republications = 0
         self._wgpu_tile_instances_cache: tuple[object, tuple[TileInstance, ...]] | None = None
         self._wgpu_last_report_uploads = 0
         self._wgpu_last_draw_error: str = ""
@@ -638,6 +655,7 @@ class WgpuImageView2D(ImageViewShell):
         )
         # Rebuild discards residency; committed evidence must not survive it.
         self._wgpu_committed = None
+        self._wgpu_tiled_binding_signature = None
         self._wgpu_overlay_geometry_dirty = True
         # EVERY atlas upload-currency tracker belongs here: a fresh executor
         # starts with a 1x1 transparent texture, and these versions are what
@@ -1438,6 +1456,43 @@ class WgpuImageView2D(ImageViewShell):
                 symlog_constant,
                 phase_color,
             ) = self._wgpu_commit_plan(payloads, source_mapping, rgb_already_windowed)
+            level_lo, level_hi = (float(levels[0]), float(levels[1]))
+            if not level_hi > level_lo:
+                level_hi = level_lo + 1e-6
+            mapping_state = DisplayMapping(
+                mode=mode,
+                level_lo=level_lo,
+                level_hi=level_hi,
+                lut=self._wgpu_resolve_lut_bytes(source_mapping),
+                scale=scale,
+                symlog_constant=symlog_constant,
+                phase_color=phase_color,
+                pixel_grid=self._pixel_grid_enabled,
+                clip_indicator=self._clip_indicator_enabled,
+                minification_filter=self._minification_filter_enabled,
+            )
+            physical_identities = _wgpu_physical_payload_identities(payloads)
+            layout_identity = _wgpu_layout_identity(geometry, frame_plan=frame_plan)
+            transposed = _display_axes_transposed(geometry)
+            if self._wgpu_tiled_binding_reusable(
+                physical_identities=physical_identities,
+                representation=representation,
+                mapping_mode=mode,
+                layout_identity=layout_identity,
+                transposed=transposed,
+                tile_delta=tile_delta,
+            ):
+                return self._apply_wgpu_mapping_only_tiled_presentation(
+                    img,
+                    histogramPlotData=histogramPlotData,
+                    histogramRange=histogramRange,
+                    levels=(level_lo, level_hi),
+                    viewport_policy=viewport_policy,
+                    rgb_already_windowed=rgb_already_windowed,
+                    tile_delta=tile_delta,
+                    mapping_state=mapping_state,
+                )
+
             layout = tile_layout_map(geometry, frame_plan=frame_plan)
             missing = sorted(set(payloads) - set(layout))
             if missing:
@@ -1445,9 +1500,6 @@ class WgpuImageView2D(ImageViewShell):
                     f"wgpu commit payload tiles {missing} have no montage/frame-plan "
                     "layout region — refusing to guess destination geometry"
                 )
-            level_lo, level_hi = (float(levels[0]), float(levels[1]))
-            if not level_hi > level_lo:
-                level_hi = level_lo + 1e-6
 
             textures = {
                 tile: self._wgpu_payload_texture(payloads[tile], representation)
@@ -1693,28 +1745,17 @@ class WgpuImageView2D(ImageViewShell):
                     )
                     scheduled_evidence_keys.add(histogram_evidence_key)
 
-            lut = self._wgpu_resolve_lut_bytes(source_mapping)
-            self._wgpu_mapping_state = DisplayMapping(
-                mode=mode,
-                level_lo=level_lo,
-                level_hi=level_hi,
-                lut=lut,
-                scale=scale,
-                symlog_constant=symlog_constant,
-                phase_color=phase_color,
-                pixel_grid=self._pixel_grid_enabled,
-                clip_indicator=self._clip_indicator_enabled,
-                minification_filter=self._minification_filter_enabled,
-            )
+            self._wgpu_mapping_state = mapping_state
             display_shape = tile_layout_shape(geometry, frame_plan=frame_plan)
             self._wgpu_committed = {
                 "tiles": committed_tiles,
                 "representation": representation,
                 "display_shape": display_shape,
+                "budget_bytes": int(tile_residency_budget_bytes or 0),
                 # Payloads are canonical (sorted image axes); an X/Y swap is a
                 # display transform the vertex shader applies via a UV axis swap
                 # (world rects stay display-oriented, source windows canonical).
-                "transposed": _display_axes_transposed(geometry),
+                "transposed": transposed,
             }
             self._montage_display_mode = "wgpu_tile_layer"
 
@@ -1784,6 +1825,150 @@ class WgpuImageView2D(ImageViewShell):
                     wait_completed=report.wait_completed,
                 )
 
+            stats = self._finish_wgpu_tiled_presentation(
+                img,
+                histogramPlotData=histogramPlotData,
+                histogramRange=histogramRange,
+                levels=(level_lo, level_hi),
+                viewport_policy=viewport_policy,
+                rgb_already_windowed=rgb_already_windowed,
+                tile_delta=tile_delta,
+                report=report,
+                planned_upload_tiles=tuple(planned_upload_tiles),
+                tile_residency_budget_bytes=tile_residency_budget_bytes,
+                upload_ms=upload_ms,
+                binding_fast_path=False,
+            )
+            if physical_identities is not None and layout_identity is not None:
+                self._wgpu_tiled_binding_signature = _WgpuTiledBindingSignature(
+                    payload_identities=physical_identities,
+                    representation=representation,
+                    mapping_mode=mode,
+                    layout_identity=layout_identity,
+                    transposed=transposed,
+                    executor=executor,
+                    page_table_generation=int(executor.page_table.generation),
+                    histogram_obligation=self._wgpu_histogram_evidence_obligation,
+                )
+            else:
+                self._wgpu_tiled_binding_signature = None
+            return stats
+        finally:
+            self._applying_presentation = applying
+            self._finish_upload_timing()
+
+    def _wgpu_tiled_binding_reusable(
+        self,
+        *,
+        physical_identities,
+        representation: str,
+        mapping_mode: str,
+        layout_identity,
+        transposed: bool,
+        tile_delta,
+    ) -> bool:
+        """Whether this commit can reuse the submitted binding by construction."""
+
+        signature = self._wgpu_tiled_binding_signature
+        executor = self._wgpu_executor
+        committed = self._wgpu_committed
+        if (
+            signature is None
+            or executor is None
+            or committed is None
+            or physical_identities is None
+            or layout_identity is None
+            or signature.executor is not executor
+            or signature.layout_identity != layout_identity
+            or signature.payload_identities != physical_identities
+            or signature.representation != str(representation)
+            or signature.mapping_mode != str(mapping_mode)
+            or signature.transposed != bool(transposed)
+            or signature.page_table_generation != int(executor.page_table.generation)
+            or signature.histogram_obligation != self._wgpu_histogram_evidence_obligation
+            or bool(dict(getattr(tile_delta, "upserts", {}) or {}))
+            or bool(tuple(getattr(tile_delta, "removals", ()) or ()))
+        ):
+            return False
+        if not self._wgpu_histogram_evidence_required:
+            return True
+        for info in dict(committed.get("tiles", {}) or {}).values():
+            if bool(info.get("prepared_histogram_evidence")):
+                continue
+            evidence_key = info.get("histogram_evidence_key")
+            if evidence_key not in self._wgpu_histogram_evidence:
+                return False
+        return True
+
+    def _apply_wgpu_mapping_only_tiled_presentation(
+        self,
+        img,
+        *,
+        histogramPlotData,
+        histogramRange,
+        levels,
+        viewport_policy,
+        rgb_already_windowed: bool,
+        tile_delta,
+        mapping_state: DisplayMapping,
+    ) -> TileLayerUpdateStats:
+        """Publish uniforms/metadata while preserving the complete tile binding."""
+
+        self._wgpu_mapping_state = mapping_state
+        self._montage_display_mode = "wgpu_tile_layer"
+        commands = [SetDisplayMapping(mapping_state)]
+        camera = self._wgpu_camera_command()
+        if camera is not None:
+            commands.append(camera)
+        start = perf_counter()
+        report = self._submit_wgpu(tuple(commands))
+        upload_ms = (perf_counter() - start) * 1000.0
+        self._wgpu_last_report_uploads = int(report.uploads)
+        return self._finish_wgpu_tiled_presentation(
+            img,
+            histogramPlotData=histogramPlotData,
+            histogramRange=histogramRange,
+            levels=levels,
+            viewport_policy=viewport_policy,
+            rgb_already_windowed=rgb_already_windowed,
+            tile_delta=tile_delta,
+            report=report,
+            planned_upload_tiles=(),
+            tile_residency_budget_bytes=int(
+                (self._wgpu_committed or {}).get("budget_bytes", 0) or 0
+            ),
+            upload_ms=upload_ms,
+            binding_fast_path=True,
+        )
+
+    def _finish_wgpu_tiled_presentation(
+        self,
+        img,
+        *,
+        histogramPlotData,
+        histogramRange,
+        levels,
+        viewport_policy,
+        rgb_already_windowed: bool,
+        tile_delta,
+        report,
+        planned_upload_tiles,
+        tile_residency_budget_bytes: int,
+        upload_ms: float,
+        binding_fast_path: bool,
+    ) -> TileLayerUpdateStats:
+        """Finish one tiled commit from either the full or mapping-only path."""
+
+        executor = self._wgpu_executor
+        committed = self._wgpu_committed or {}
+        committed_tiles = dict(committed.get("tiles", {}) or {})
+        representation = str(committed.get("representation", "") or "")
+        display_shape = tuple(int(value) for value in committed.get("display_shape", (1, 1)))
+        if binding_fast_path:
+            # The unchanged page-table generation proves the exact physical
+            # residency set is still the one acknowledged by the full commit.
+            presented = tuple(int(tile) for tile in committed.get("presented_tiles", ()))
+        else:
             # Physical truth per tile: acknowledge only tiles whose pages the
             # page table actually holds after the submit — partial residency
             # acknowledges the resident subset, never the request.
@@ -1795,88 +1980,91 @@ class WgpuImageView2D(ImageViewShell):
                     for key in committed_tiles[tile]["page_keys"]
                 )
             )
-            presented_identities = {tile: committed_tiles[tile]["identity"] for tile in presented}
-            delta_upserts = dict(getattr(tile_delta, "upserts", {}) or {})
-            committed_upserts = tuple(
-                tile
-                for tile, payload in delta_upserts.items()
-                if presented_identities.get(int(tile)) == tile_ack_identity(payload)
-            )
+            committed["presented_tiles"] = presented
+            self._wgpu_committed = committed
+        presented_identities = {tile: committed_tiles[tile]["identity"] for tile in presented}
+        delta_upserts = dict(getattr(tile_delta, "upserts", {}) or {})
+        committed_upserts = tuple(
+            tile
+            for tile, payload in delta_upserts.items()
+            if presented_identities.get(int(tile)) == tile_ack_identity(payload)
+        )
 
-            # Shared shell bookkeeping (placeholder image, histogram bounds,
-            # display levels) mirrors the VisPy backend's minimal set.
-            self.image = img
-            self.histogramSource = None
-            # ``None`` means that this commit carries no histogram metadata;
-            # it is not a command to erase the last accepted semantic
-            # histogram. Refined aggregation and tiled acknowledgement are
-            # independently paced, so a later metadata-free commit commonly
-            # follows the one that publishes the aggregate.
-            if histogramPlotData is not None and not callable(histogramPlotData):
-                previous_histogram = self.histogramPlotSource
-                self.histogramPlotSource = histogramPlotData
-                if (
-                    previous_histogram is not histogramPlotData
-                    or getattr(self.histogramImageItem, "image", None) is None
-                ):
-                    self._bind_histogram_item(self.histogramImageItem)
-                    self._set_image_item_data(
-                        self.histogramImageItem,
-                        self._histogram_plot_data(None),
-                        self._histogram_levels_for_display(levels),
-                        role="histogram",
-                    )
-            self.setHistogramDataBounds(histogramRange)
-            self._displayLevels = (level_lo, level_hi)
-            self._wgpu_last_levels = (level_lo, level_hi)
-            self._sync_wgpu_histogram_widget_bounds((level_lo, level_hi), histogramRange)
+        # Shared shell bookkeeping (placeholder image, histogram bounds,
+        # display levels) mirrors the VisPy backend's minimal set.
+        self.image = img
+        self.histogramSource = None
+        # ``None`` means that this commit carries no histogram metadata; it is
+        # not a command to erase the last accepted semantic histogram.
+        if histogramPlotData is not None and not callable(histogramPlotData):
+            previous_histogram = self.histogramPlotSource
+            self.histogramPlotSource = histogramPlotData
+            if (
+                previous_histogram is not histogramPlotData
+                or getattr(self.histogramImageItem, "image", None) is None
+            ):
+                self._bind_histogram_item(self.histogramImageItem)
+                self._set_image_item_data(
+                    self.histogramImageItem,
+                    self._histogram_plot_data(None),
+                    self._histogram_levels_for_display(levels),
+                    role="histogram",
+                )
+        self.setHistogramDataBounds(histogramRange)
+        level_lo, level_hi = (float(levels[0]), float(levels[1]))
+        self._displayLevels = (level_lo, level_hi)
+        self._wgpu_last_levels = (level_lo, level_hi)
+        self._sync_wgpu_histogram_widget_bounds((level_lo, level_hi), histogramRange)
 
-            structure_key = (display_shape, representation, bool(rgb_already_windowed))
-            viewport_key = (
-                structure_key,
-                str(getattr(viewport_policy, "value", viewport_policy)),
-            )
-            if structure_key != self._last_wgpu_structure_key:
-                self._sync_wgpu_bounds(display_shape)
-                self._update_profile_line_bounds()
-                self._updateAspectRatio()
-                self._last_wgpu_structure_key = structure_key
-            if viewport_key != self._last_wgpu_viewport_key:
-                self._apply_viewport_policy(display_shape, viewport_policy, image_origin=(0.0, 0.0))
-                self._last_wgpu_viewport_key = viewport_key
-            self._sync_wgpu_overlay_geometry()
+        structure_key = (display_shape, representation, bool(rgb_already_windowed))
+        viewport_key = (
+            structure_key,
+            str(getattr(viewport_policy, "value", viewport_policy)),
+        )
+        if structure_key != self._last_wgpu_structure_key:
+            self._sync_wgpu_bounds(display_shape)
+            self._update_profile_line_bounds()
+            self._updateAspectRatio()
+            self._last_wgpu_structure_key = structure_key
+        if viewport_key != self._last_wgpu_viewport_key:
+            self._apply_viewport_policy(display_shape, viewport_policy, image_origin=(0.0, 0.0))
+            self._last_wgpu_viewport_key = viewport_key
+        self._sync_wgpu_overlay_geometry()
 
-            uploads = int(report.uploads)
-            resident_pages = len(executor.page_table.resident_keys())
-            updated = tuple(planned_upload_tiles) if uploads > 0 else ()
-            stats = TileLayerUpdateStats(
-                visible_items=len(committed_tiles),
-                presented_tiles=presented,
-                committed_upserts=committed_upserts,
-                presented_identities=presented_identities,
-                updated_tiles=updated,
-                items_created=0,
-                items_updated=len(updated),
-                items_skipped=len(committed_tiles) - len(updated),
-                existing_items_shown=len(committed_tiles) - len(updated),
-                resident_items=len(presented),
-                storage_capacity=executor.pool_budget(representation),
-                texture_uploads=uploads,
-                texture_upload_bytes=int(report.upload_bytes),
-                page_count=resident_pages,
-                active_pages=sum(len(info["page_keys"]) for info in committed_tiles.values()),
-                estimated_gpu_bytes=int(executor.active_resident_bytes),
-                budget_bytes=int(tile_residency_budget_bytes or 0),
-                shader_uniform_updates=1,
-                upload_ms=upload_ms,
-            )
-            self._record_tile_layer_stats(stats)
-            self._record_upload_timing("tile_layer_upload_ms", upload_ms)
-            self._request_wgpu_canvas_draw(count_presentation=True)
-            return stats
-        finally:
-            self._applying_presentation = applying
-            self._finish_upload_timing()
+        uploads = int(report.uploads)
+        updated = tuple(planned_upload_tiles) if uploads > 0 else ()
+        existing_items = 0 if binding_fast_path else len(committed_tiles) - len(updated)
+        if binding_fast_path:
+            self._wgpu_binding_fast_path_commits += 1
+        else:
+            self._wgpu_binding_full_republications += 1
+        stats = TileLayerUpdateStats(
+            visible_items=len(committed_tiles),
+            presented_tiles=presented,
+            committed_upserts=committed_upserts,
+            presented_identities=presented_identities,
+            updated_tiles=updated,
+            items_created=0,
+            items_updated=len(updated),
+            items_skipped=len(committed_tiles) - len(updated),
+            existing_items_shown=existing_items,
+            resident_items=len(presented),
+            storage_capacity=executor.pool_budget(representation),
+            texture_uploads=uploads,
+            texture_upload_bytes=int(report.upload_bytes),
+            page_count=len(executor.page_table.resident_keys()),
+            active_pages=sum(len(info["page_keys"]) for info in committed_tiles.values()),
+            estimated_gpu_bytes=int(executor.active_resident_bytes),
+            budget_bytes=int(tile_residency_budget_bytes or 0),
+            shader_uniform_updates=1,
+            binding_fast_path_commits=int(binding_fast_path),
+            binding_full_republications=int(not binding_fast_path),
+            upload_ms=upload_ms,
+        )
+        self._record_tile_layer_stats(stats)
+        self._record_upload_timing("tile_layer_upload_ms", upload_ms)
+        self._request_wgpu_canvas_draw(count_presentation=True)
+        return stats
 
     def _wgpu_commit_plan(self, payloads, source_mapping, rgb_already_windowed):
         """Validate one commit; return representation and mapping uniforms.
@@ -2107,6 +2295,7 @@ class WgpuImageView2D(ImageViewShell):
 
     def hide_tiled_presentation(self, reason: str) -> None:
         self._wgpu_committed = None
+        self._wgpu_tiled_binding_signature = None
         self._wgpu_histogram_evidence.clear()
         self._wgpu_histogram_evidence_ready.clear()
         self._clear_wgpu_tiles()
@@ -2125,6 +2314,7 @@ class WgpuImageView2D(ImageViewShell):
         if not hide_pixels:
             return
         self._wgpu_committed = None
+        self._wgpu_tiled_binding_signature = None
         self._clear_wgpu_tiles()
         self._montage_display_mode = "none"
         self.imageItem.setVisible(False)
@@ -2137,6 +2327,7 @@ class WgpuImageView2D(ImageViewShell):
             self._submit_wgpu((*evictions, UpdateTileInstances(())))
             self._request_wgpu_canvas_draw()
         self._wgpu_committed = None
+        self._wgpu_tiled_binding_signature = None
         self._wgpu_histogram_evidence.clear()
         self._wgpu_histogram_evidence_ready.clear()
         self._last_wgpu_structure_key = None
@@ -2766,6 +2957,8 @@ class WgpuImageView2D(ImageViewShell):
             "wgpu_page_pools": page_pools,
             "wgpu_residency_binding_cache_hits": int(self._wgpu_residency_binding_cache_hits),
             "wgpu_residency_binding_cache_misses": int(self._wgpu_residency_binding_cache_misses),
+            "wgpu_binding_fast_path_commits": int(self._wgpu_binding_fast_path_commits),
+            "wgpu_binding_full_republications": int(self._wgpu_binding_full_republications),
             "wgpu_atomic_warm_pinned_pages": (
                 0
                 if executor is None
@@ -2877,6 +3070,59 @@ def _display_axes_transposed(geometry) -> bool:
     image_axes = getattr(getattr(geometry, "view_state", None), "image_axes", None) or ()
     image_axes = tuple(int(axis) for axis in image_axes)
     return len(image_axes) == 2 and image_axes[0] > image_axes[1]
+
+
+def _wgpu_layout_identity(geometry, *, frame_plan=None) -> object:
+    """Canonical immutable identity of tile placement, without rebuilding it."""
+
+    if frame_plan is not None:
+        return (
+            getattr(frame_plan, "semantic_key", None),
+            tuple(getattr(frame_plan, "scene_region_signature", ()) or ()),
+        )
+    montage = getattr(geometry, "montage", None)
+    if montage is None:
+        return None
+    return (
+        tuple(int(value) for value in getattr(montage, "indices", ()) or ()),
+        tuple(int(value) for value in getattr(montage, "tile_shape", ()) or ()),
+        int(getattr(montage, "columns", 0) or 0),
+        int(getattr(montage, "rows", 0) or 0),
+        int(getattr(montage, "gap", 0) or 0),
+    )
+
+
+def _wgpu_physical_payload_identities(
+    payloads,
+) -> tuple[tuple[int, object], ...] | None:
+    """Return canonical tile-binding identities, excluding presentation levels.
+
+    ``TileIdentity`` already owns document/operation/source selection, LOD,
+    representation, complex mapping, semantic generation, and quality.
+    Its real/imag plane provenance is intentionally excluded from normal
+    semantic equality, so include those records explicitly here: pointer,
+    shape, strides, and dtype are physical binding inputs even when the
+    source pixels mean the same thing. ``TilePresentationIdentity`` is not
+    consulted; levels/LUT/scale are uniform state and are the reason this
+    mapping-only path exists.
+    """
+
+    rows = []
+    for tile in sorted(payloads):
+        identity = tile_ack_identity(payloads[tile])
+        if not isinstance(identity, TileIdentity):
+            return None
+        rows.append(
+            (
+                int(tile),
+                (
+                    identity,
+                    identity.real_plane,
+                    identity.imag_plane,
+                ),
+            )
+        )
+    return tuple(rows)
 
 
 def _wgpu_payload_plane_identity(payload) -> object:

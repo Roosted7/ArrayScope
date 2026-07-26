@@ -417,6 +417,84 @@ construction may change both wrapper stability and the transaction population.
 Artifacts remain gitignored under
 `tests/artifacts/unchanged-binding-fast-path-2026-07-26/`.
 
+### 8.5 TileIdentity is the physical token — mapping-only fast path landed
+
+Retaken after ADR 0059 at local-main tip `fe8bca3a`. The literal wrapper
+predicate in §8.4 was too strong: `TileIdentity` already separates pixel and
+binding identity from `TilePresentationIdentity`, which owns
+`levels_generation`, levels, scale, and LUT identity. The WGPU predicate now
+keys the complete presented tile set on each tile's `TileIdentity` plus its
+explicit real/imag `ArrayPlaneIdentity` records. The explicit plane records
+matter because they are deliberately excluded from normal `TileIdentity`
+equality; pointer, shape, strides, and dtype still change a physical upload.
+
+The remaining construction-owned guards are representation, shader mapping
+mode, immutable layout/transpose identity, the executor object, and the page
+table's binding generation. The generation is the O(1) resident-set proof: it
+changes on bind, eviction, re-admission, and slot remap, but not on LRU touches.
+The path also refuses removals, **all upserts**, and incomplete histogram
+evidence. The all-upsert refusal is intentional: this change publishes only
+mapping/metadata. An unchanged-binding target acknowledgement remains
+recommendation 2's separate ADR-ladder problem.
+
+When the predicate holds, WGPU submits `SetDisplayMapping` plus the current
+camera, reuses the committed tile/page/instance state, and performs the same
+shell-level level, histogram, viewport, overlay, and acknowledgement
+bookkeeping. Per-commit trace counters state which arm ran:
+`binding_fast_path_commits` and `binding_full_republications`.
+
+The safety matrix is explicit:
+
+- LOD/source sampling, representation, complex mapping, crop/window semantic
+  generation, and atomic-successor document generation are in `TileIdentity`;
+- real/imag buffer replacement is in the explicit plane records;
+- tile placement and transpose are in the layout/transpose guards;
+- eviction, re-admission, and remap change the page-table generation;
+- display minification, levels, scale, colormap, and LUT are mapping state and
+  are deliberately updated without rebinding;
+- a non-empty upsert stays on the full path, even if its physical identity is
+  equal.
+
+The red-first oracle is not a timing assertion. Fault injection forces the fast
+path across a changed float plane: the framebuffer retains the predecessor's
+0.2 value (51 in RGBA8) where the CPU reference requires 0.8 (204), and the
+pixel assertion fails. The positive level and LUT cases update the same
+framebuffer to the CPU reference with zero uploads/rebinds. Focused tests also
+change every identity dimension above and exercise eviction/re-admission plus
+slot remap.
+
+**Direct evidence.** The post-ADR unmodified `--repeat 3` baseline produced six
+final 272-tile, zero-delta metadata commits at 62.1–69.5 ms (median 65.2 ms);
+all six reported `resident_rebinds=272`. Because system load later rose enough
+to push raw-stage wall time from roughly 5 s to 8–10 s, the A/B used ten
+order-balanced processes (`base, fast, fast, base, base, fast, fast, base,
+base, fast`), each with three in-process repeats: 15 passes per arm. Stage wall
+time is not used. The qualifying transaction populations were:
+
+| arm | commits | lower quartile | median | range | fast/full | resident rebinds |
+|---|---:|---:|---:|---:|---:|---:|
+| full republication | 26 | 89.0 ms | 114.2 ms | 64.6–560.6 ms | 0 / 26 | 7,072 |
+| mapping only | 30 | 53.8 ms | 64.4 ms | 42.5–113.7 ms | 30 / 0 | 0 |
+
+The lower quartile is the primary loaded-machine estimate: **35.1 ms removed
+per metadata commit (39%)**. The median says 49.7 ms/44%, but is more load
+sensitive and is not the headline. The target work counter is exact: 30/30
+optimized commits skipped all 272 resident rebinds.
+
+The real-Wayland `montage_scroll_scalar` plus `montage_zoompan_scalar`
+`--repeat 3` check exercised 80 mapping-only commits. All 80 had zero upserts
+and zero resident rebinds; none crossed the unsafe predicate boundary. Their
+lower quartile/median were 10.0/11.3 ms. Under the recorded high load the
+standing callback, heartbeat, warm-input, and zoom native-precondition gates
+remained red, so this is not a claim that the gesture bars are green. The
+correctness counters stayed clean: zero stale presentations, zero stale-level
+tiles, and zero coarse-rung pixel failures.
+
+ADR 0059 has already landed and is included in every number above. If its
+coarse-rung upload policy changes again, rerun the raw and gesture populations:
+that can change how often `TileIdentity`, LOD, or the resident page-table
+generation remains stable, even though it does not weaken the predicate.
+
 ## Reproduce
 
 ```

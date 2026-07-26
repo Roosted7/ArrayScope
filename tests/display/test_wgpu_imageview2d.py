@@ -9,6 +9,7 @@ loud rejections at the honest scope boundary.
 
 import contextlib
 import os
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -282,6 +283,69 @@ def _payload(
     )
 
 
+def _typed_scalar_payload(
+    tile_number,
+    image,
+    *,
+    semantic_generation=("typed", 0),
+    lod_level=0,
+    shader_mapping=None,
+    quality="exact",
+    source_anchor=None,
+    presentation_generation=1,
+):
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.model.tile_identity import (
+        TileIdentity,
+        TileLodIdentity,
+        TilePresentationIdentity,
+        array_plane_identities,
+        complex_mapping_identity,
+    )
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    image = np.asarray(image)
+    factor = 1 << int(lod_level)
+    real_plane, imag_plane = array_plane_identities(image)
+    identity = TileIdentity(
+        document_generation=("typed-doc", 1),
+        operation_key=("typed-op",),
+        source_index=tile_number,
+        image_axes=(0, 1),
+        axis_flips=(False, False),
+        channel="real",
+        complex_mapping=complex_mapping_identity(shader_mapping),
+        texture_kind=TexturePlaneKind.SCALAR_R32F,
+        semantic_generation=semantic_generation,
+        lod=TileLodIdentity(level=lod_level, factor=factor),
+        quality=quality,
+        real_plane=real_plane,
+        imag_plane=imag_plane,
+    )
+    return DisplayTilePayload(
+        tile_number,
+        tile_number,
+        image,
+        None,
+        ("typed", tile_number, semantic_generation, lod_level),
+        lod=LodInfo(
+            level=lod_level,
+            factor=factor,
+            source_shape=tuple(int(value) for value in image.shape[:2]),
+            texture_shape=tuple(int(value) for value in image.shape[:2]),
+        ),
+        shader_mapping=shader_mapping,
+        quality=quality,
+        tile_identity=identity,
+        presentation_identity=TilePresentationIdentity(
+            levels_generation=presentation_generation,
+            levels=(0.0, 1.0),
+        ),
+        source_anchor=source_anchor,
+    )
+
+
 def _lod_payload(
     tile_number,
     image,
@@ -369,6 +433,266 @@ def _center_pixel(view):
     target = view._wgpu_executor.read_target()
     h, w = target.shape[:2]
     return target[h // 2, w // 2]
+
+
+def test_mapping_only_commit_reuses_typed_binding_and_updates_levels(qt_app):
+    """Fresh level-bearing wrappers keep one physical TileIdentity binding."""
+
+    geometry = _montage_geometry((32, 32), 1, 1, loaded=1)
+    image = np.full((32, 32), 0.2, dtype=np.float32)
+    first = _typed_scalar_payload(0, image, presentation_generation=1)
+    second = replace(
+        first,
+        presentation_identity=replace(
+            first.presentation_identity,
+            levels_generation=2,
+            levels=(0.0, 0.25),
+        ),
+    )
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        full = _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_tile_payloads={0: first},
+        )
+        fast = _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 0.25),
+            histogramRange=(0.0, 1.0),
+            montage_dirty_tiles=(),
+            montage_tile_payloads={0: second},
+        )
+        _rerender_internal(view)
+
+        assert full.binding_full_republications == 1
+        assert fast.binding_fast_path_commits == 1
+        assert fast.binding_full_republications == 0
+        assert fast.resident_rebinds == 0
+        assert fast.texture_uploads == 0
+        assert np.allclose(_center_pixel(view), (204, 204, 204, 255), atol=2)
+        diagnostics = view.wgpuPresentationDiagnostics()
+        assert diagnostics["wgpu_binding_fast_path_commits"] == 1
+        assert diagnostics["wgpu_binding_full_republications"] == 1
+    finally:
+        view.close()
+
+
+def test_mapping_only_commit_applies_lut_without_rebinding(qt_app):
+    """Colormap changes are uniform/LUT state, not a tile-binding change."""
+
+    from arrayscope.display.shader_mapping import ShaderMapping
+
+    red = np.zeros((256, 3), dtype=np.uint8)
+    red[:, 0] = 255
+    green = np.zeros((256, 3), dtype=np.uint8)
+    green[:, 1] = 255
+    geometry = _montage_geometry((32, 32), 1, 1, loaded=1)
+    image = np.full((32, 32), 0.5, dtype=np.float32)
+    first = _typed_scalar_payload(0, image, shader_mapping=ShaderMapping(lut_data=red))
+    second = replace(
+        first,
+        shader_mapping=ShaderMapping(lut_data=green),
+        presentation_identity=replace(first.presentation_identity, levels_generation=2),
+    )
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_tile_payloads={0: first},
+        )
+        report = _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_dirty_tiles=(),
+            montage_tile_payloads={0: second},
+        )
+        _rerender_internal(view)
+
+        assert report.binding_fast_path_commits == 1
+        assert report.texture_uploads == 0
+        assert np.allclose(_center_pixel(view), (0, 255, 0, 255), atol=2)
+    finally:
+        view.close()
+
+
+def test_unchanged_upsert_does_not_cross_mapping_only_boundary(qt_app):
+    """Target acknowledgement stays on the full path until the ADR ladder owns it."""
+
+    geometry = _montage_geometry((32, 32), 1, 1, loaded=1)
+    payload = _typed_scalar_payload(0, np.full((32, 32), 0.2, dtype=np.float32))
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_tile_payloads={0: payload},
+        )
+        report = _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_tile_payloads={0: payload},
+        )
+
+        assert report.binding_fast_path_commits == 0
+        assert report.binding_full_republications == 1
+    finally:
+        view.close()
+
+
+def test_forced_mapping_only_bypass_turns_framebuffer_oracle_red(qt_app, monkeypatch):
+    """Fault injection: changed plane bytes must not pass as mapping-only."""
+
+    geometry = _montage_geometry((32, 32), 1, 1, loaded=1)
+    predecessor = _typed_scalar_payload(
+        0,
+        np.full((32, 32), 0.2, dtype=np.float32),
+    )
+    successor = _typed_scalar_payload(
+        0,
+        np.full((32, 32), 0.8, dtype=np.float32),
+        presentation_generation=2,
+    )
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_tile_payloads={0: predecessor},
+        )
+        monkeypatch.setattr(view, "_wgpu_tiled_binding_reusable", lambda **_kwargs: True)
+        report = _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_tile_payloads={0: successor},
+        )
+        _rerender_internal(view)
+
+        assert report.binding_fast_path_commits == 1
+        actual = _center_pixel(view)
+        with pytest.raises(AssertionError):
+            np.testing.assert_allclose(actual, (204, 204, 204, 255), atol=2)
+        assert np.allclose(actual, (51, 51, 51, 255), atol=2)
+    finally:
+        view.close()
+
+
+def test_physical_tile_identity_covers_every_binding_dimension():
+    from arrayscope.display.model.tile_identity import TileLodIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+    from arrayscope.display.wgpu_imageview2d import _wgpu_physical_payload_identities
+
+    image = np.full((8, 8), 0.2, dtype=np.float32)
+    payload = _typed_scalar_payload(0, image)
+    identity = payload.tile_identity
+    baseline = _wgpu_physical_payload_identities({0: payload})
+
+    changes = (
+        replace(identity, lod=TileLodIdentity(level=1, factor=2)),
+        replace(identity, texture_kind=TexturePlaneKind.COMPLEX_RG32F),
+        replace(identity, complex_mapping=("phase_color", "abs", "mapped")),
+        replace(identity, semantic_generation=("crop-window", 1)),
+        replace(identity, document_generation=("atomic-successor", 2)),
+        _typed_scalar_payload(0, image.copy()).tile_identity,
+    )
+    for changed in changes:
+        assert (
+            _wgpu_physical_payload_identities({0: replace(payload, tile_identity=changed)})
+            != baseline
+        )
+
+
+def test_layout_identity_covers_shift_and_transpose():
+    from arrayscope.display.wgpu_imageview2d import (
+        _display_axes_transposed,
+        _wgpu_layout_identity,
+    )
+
+    baseline = _montage_geometry((8, 10), 2, 1, loaded=2, gap=1)
+    shifted = _montage_geometry((8, 10), 1, 2, loaded=2, gap=1)
+    transposed = replace(
+        baseline,
+        view_state=baseline.view_state.with_image_axes(1, 0),
+    )
+
+    assert _wgpu_layout_identity(baseline) != _wgpu_layout_identity(shifted)
+    assert _display_axes_transposed(baseline) is False
+    assert _display_axes_transposed(transposed) is True
+
+
+def test_page_eviction_readmission_and_remap_force_full_republication(qt_app):
+    geometry = _montage_geometry((32, 32), 1, 1, loaded=1)
+    payload = _typed_scalar_payload(0, np.full((32, 32), 0.2, dtype=np.float32))
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_tile_payloads={0: payload},
+        )
+        table = view._wgpu_executor.page_table
+        key = table.resident_keys()[0]
+        entry = table._entries[key]
+        generation = table.generation
+        slot = table.unbind(key)
+        table.bind(key, slot, nbytes=entry.nbytes, pinned=entry.pinned)
+        assert table.generation == generation + 2
+
+        report = _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_dirty_tiles=(),
+            montage_tile_payloads={0: payload},
+        )
+        assert report.binding_fast_path_commits == 0
+        assert report.binding_full_republications == 1
+
+        generation = table.generation
+        table.remap_slots(lambda current: current)
+        assert table.generation == generation + 1
+        report = _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            histogramRange=(0.0, 1.0),
+            montage_dirty_tiles=(),
+            montage_tile_payloads={0: payload},
+        )
+        assert report.binding_fast_path_commits == 0
+        assert report.binding_full_republications == 1
+    finally:
+        view.close()
 
 
 def test_wgpu_physical_rows_report_resident_draw_geometry(qt_app):

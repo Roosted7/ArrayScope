@@ -62,6 +62,11 @@ class TileLayerUpdateStats:
     lod_level_swaps_with_upload: int = 0
     superseded_reclaimed_under_pressure: int = 0
     shader_uniform_updates: int = 0
+    # WGPU mapping-only publication accounting. Per-commit, mutually
+    # exclusive: the backend either reused the complete physical tile
+    # binding or rebuilt/rebound it. CPU backends leave both at zero.
+    binding_fast_path_commits: int = 0
+    binding_full_republications: int = 0
     # Physical presentation truth (P9): count of desired-vs-physical page
     # divergences (stale mapping key/uniform, stale levels, stale per-quad
     # mode buffer) detected AND repaired during this update.  Zero on a

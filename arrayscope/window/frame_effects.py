@@ -2812,6 +2812,8 @@ class FramePipelineEffects:
             uploads=int(getattr(report, "texture_uploads", 0) or 0),
             upload_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
             resident_rebinds=int(getattr(report, "resident_rebinds", 0) or 0),
+            binding_fast_path_commits=int(getattr(report, "binding_fast_path_commits", 0) or 0),
+            binding_full_republications=int(getattr(report, "binding_full_republications", 0) or 0),
             vertex_uploads=int(getattr(report, "vertex_uploads", 0) or 0),
             level_revision=int(
                 getattr(getattr(session, "level_generation", None), "revision", 0) or 0

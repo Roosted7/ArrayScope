@@ -280,24 +280,28 @@ The bounded implementation target is:
 3. **Presentation:** when page keys, representation, sampling, geometry, and
    mapping are physically unchanged, skip the tile-rebind transaction. A
    level/histogram-only update must update its uniforms/metadata without
-   re-enumerating 272 tile bindings. **Follow-up on `6ad55232`: the literal
-   payload-object predicate does not hold today.** Both final metadata-only
-   commits carried 272 fresh `DisplayTilePayload` wrappers because the new
-   level generation is part of each wrapper's required presentation identity,
-   even though sampled wrappers retained the same image object, source ID, and
-   LOD. A one-pass predicate probe reported 272/272 object mismatches on both
-   commits, so no fast path landed; see per-commit dossier §8.4. The missing
-   prerequisite is a canonical physical-binding identity separate from the
-   level-bearing wrapper, owned across payload construction/lifecycle rather
-   than inferred in the WGPU backend.
+   re-enumerating 272 tile bindings. **Landed after ADR 0059:** the canonical
+   token was already present one layer below the fresh wrapper:
+   `TileIdentity` excludes the level-bearing `TilePresentationIdentity`.
+   WGPU now keys the binding on `TileIdentity` plus the explicitly compared
+   real/imag plane records, representation/mapping mode, layout/transpose,
+   executor, and page-table binding generation. It refuses every upsert, so
+   recommendation 2's unchanged-binding settlement acknowledgement is not
+   smuggled into this presentation change. In ten order-balanced real-Wayland
+   processes (15 in-process passes per arm), 30/30 qualifying commits took the
+   fast path with zero resident rebinds versus 26/26 full republishes and
+   7,072 rebinds. The loaded-machine lower quartile moved 89.0 → 53.8 ms; see
+   per-commit dossier §8.5 for the red-first framebuffer oracle and full
+   safety matrix.
 4. **Fallback:** retain the existing CPU display rung for PyQtGraph and for
    WGPU paths where the renderer proves that the target changes the physical
-   binding. ADR 0059 work may change that predicate; rerun this gate after it
-   lands.
+   binding. ADR 0059 is included in the follow-up measurements. Rerun them if
+   its coarse-rung upload policy changes, because that can change how often
+   the identity and resident-set predicate holds.
 
-No production patch is proposed here because the evidence/settlement split
-crosses the active ADR 0059 ladder work. The diagnosis identifies the owner
-seams and the counters a later change must hold.
+The presentation half is now implemented. The evidence/settlement split
+remains separate work because it crosses the ADR ladder: this fast path neither
+suppresses target payload construction nor manufactures an exact target ACK.
 
 ## Is the CPU LOD pyramid's WGPU display role dead?
 

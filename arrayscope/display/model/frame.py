@@ -668,6 +668,8 @@ class TileCommitReport:
     pyqtgraph_items_created: int = 0
     cpu_windowed_tiles: int = 0
     resident_rebinds: int = 0
+    binding_fast_path_commits: int = 0
+    binding_full_republications: int = 0
     existing_items_shown: int = 0
     relocated_tiles: int = 0
     storage_rebuilds: int = 0
@@ -728,6 +730,8 @@ class TileCommitReport:
             "pyqtgraph_items_created",
             "cpu_windowed_tiles",
             "resident_rebinds",
+            "binding_fast_path_commits",
+            "binding_full_republications",
             "existing_items_shown",
             "relocated_tiles",
             "storage_rebuilds",
