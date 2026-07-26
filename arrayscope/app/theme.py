@@ -544,10 +544,10 @@ QComboBox:disabled, QLineEdit:disabled, QAbstractSpinBox:disabled {{
     color: {t.text_muted};
     background: {t.window};
 }}
-QComboBox::drop-down {{
-    border: none;
-    width: 18px;
-}}
+/* No ::drop-down / ::down-arrow rules on purpose: styling either subcontrol
+   makes Qt stop drawing the native arrow primitive, and QSS can only replace it
+   with an `image:` asset we do not ship -- which left every combobox in the app
+   looking exactly like a read-only line edit. */
 QComboBox QAbstractItemView {{
     background: {t.surface};
     color: {t.text};

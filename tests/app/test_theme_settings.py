@@ -128,6 +128,18 @@ def test_native_palette_hover_token_is_distinct_from_alt_and_base():
     assert tokens.surface_alt != tokens.base
 
 
+def test_stylesheet_leaves_the_combobox_arrow_to_the_native_style():
+    # Regression: styling ``QComboBox::drop-down`` (or ``::down-arrow``) makes Qt
+    # drop the native arrow primitive and QSS can only replace it with an image
+    # asset we do not ship -- every combobox then looked like a read-only line
+    # edit, which is how the custom-operation import dialog hid its function
+    # picker. Keep both subcontrols unstyled.
+    for tokens in (theme.DARK_TOKENS, theme.LIGHT_TOKENS):
+        stylesheet = theme.build_stylesheet(tokens)
+        assert "QComboBox::drop-down" not in stylesheet
+        assert "QComboBox::down-arrow" not in stylesheet
+
+
 def test_theme_backend_keeps_builtin_palette_even_when_optional_backend_available():
     result = theme.choose_theme_backend("light", available_backends=("qdarktheme",))
 
