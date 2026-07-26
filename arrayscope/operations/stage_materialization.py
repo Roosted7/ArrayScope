@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 from arrayscope.core.memory_budget import format_bytes
@@ -37,6 +38,7 @@ class StageMaterializationDiagnostics:
     consequence: str = ""
     key_summary: str = ""
     in_flight: int = 0
+    hits: int = 0
     scheduled: int = 0
     attached: int = 0
     completed: int = 0
@@ -48,7 +50,9 @@ class StageMaterializationDiagnostics:
 class StageMaterializationManager:
     def __init__(self, stage_cache):
         self.stage_cache = stage_cache
+        self._lock = threading.RLock()
         self._in_flight: dict[StageKey, StageMaterializationRequest] = {}
+        self._hits = 0
         self._scheduled = 0
         self._attached = 0
         self._completed = 0
@@ -72,102 +76,187 @@ class StageMaterializationManager:
             else self.stage_cache.get(key)
         )
         if value is not None:
+            with self._lock:
+                self._hits += 1
             self._record("hit", candidate, key, "stage already cached")
             return StageMaterializationResult("hit", key, value=value)
         estimated = candidate.estimated_nbytes
         budget = int(getattr(self.stage_cache, "max_bytes", 0))
         if estimated is not None and int(estimated) > budget:
-            self._refused += 1
+            with self._lock:
+                self._refused += 1
             if hasattr(self.stage_cache, "note_refused"):
                 self.stage_cache.note_refused(self._candidate_text(candidate))
             self._record("refused", candidate, key, "each tile may recompute FFT")
             return StageMaterializationResult("refused", key, reason="over budget")
-        if key in self._in_flight:
-            self._attached += 1
-            self._record("in-flight", candidate, key, "tiles wait for shared stage")
-            return StageMaterializationResult("attached", key, request=self._in_flight[key])
-        request = StageMaterializationRequest(
-            key=key, candidate=candidate, document_key=document_key
-        )
-        self._in_flight[key] = request
-        self._scheduled += 1
+        with self._lock:
+            if key in self._in_flight:
+                self._attached += 1
+                request = self._in_flight[key]
+                self._record("in-flight", candidate, key, "tiles wait for shared stage")
+                return StageMaterializationResult("attached", key, request=request)
+            request = StageMaterializationRequest(
+                key=key, candidate=candidate, document_key=document_key
+            )
+            self._in_flight[key] = request
+            self._scheduled += 1
         self._record("scheduled", candidate, key, "tiles wait for shared stage")
         return StageMaterializationResult("scheduled", key, request=request)
 
     def complete(self, key: StageKey, value) -> None:
-        self._in_flight.pop(key, None)
-        self._completed += 1
+        with self._lock:
+            self._in_flight.pop(key, None)
+            self._completed += 1
         self._record_key("completed", key, "shared stage ready")
 
     def cancel(self, key: StageKey) -> None:
-        self._in_flight.pop(key, None)
-        self._cancelled += 1
+        with self._lock:
+            self._in_flight.pop(key, None)
+            self._cancelled += 1
         self._record_key("cancelled", key, "stale stage ignored")
 
     def fail(self, key: StageKey, exc) -> None:
-        self._in_flight.pop(key, None)
-        self._failed += 1
+        with self._lock:
+            self._in_flight.pop(key, None)
+            self._failed += 1
         self._record_key("failed", key, str(exc))
 
+    def materialize_singleflight(
+        self,
+        document_key,
+        candidate: StageCacheCandidate,
+        compute,
+        *,
+        should_abort=None,
+    ):
+        """Return one cached stage value while duplicate workers attach.
+
+        This is the worker-side twin of ``request_stage``.  The ordinary
+        montage stage path schedules a dedicated kernel task after
+        ``request_stage``; reduced preview rungs are already kernel tasks, so
+        their first worker computes and every duplicate waits on the stage
+        cache's existing single-flight slot.  Both paths publish the same
+        manager diagnostics.
+        """
+
+        key = self.key_for_candidate(document_key, candidate)
+        while True:
+            value = self.stage_cache.get(key)
+            if value is not None:
+                with self._lock:
+                    self._hits += 1
+                self._record("hit", candidate, key, "stage already cached")
+                return value
+            estimated = candidate.estimated_nbytes
+            budget = int(getattr(self.stage_cache, "max_bytes", 0))
+            if estimated is not None and int(estimated) > budget:
+                with self._lock:
+                    self._refused += 1
+                if hasattr(self.stage_cache, "note_refused"):
+                    self.stage_cache.note_refused(self._candidate_text(candidate))
+                self._record("refused", candidate, key, "preview stage exceeds budget")
+                return None
+            if self.stage_cache.begin_compute(key):
+                request = StageMaterializationRequest(
+                    key=key, candidate=candidate, document_key=document_key
+                )
+                with self._lock:
+                    self._in_flight[key] = request
+                    self._scheduled += 1
+                self._record("scheduled", candidate, key, "tiles wait for shared stage")
+                value = None
+                try:
+                    value = compute()
+                    if value is not None:
+                        self.stage_cache.put(key, value)
+                    self.complete(key, value)
+                    return value
+                except BaseException as exc:
+                    self.fail(key, exc)
+                    raise
+                finally:
+                    self.stage_cache.finish_compute(key, value)
+            with self._lock:
+                self._attached += 1
+            self._record("in-flight", candidate, key, "tiles wait for shared stage")
+            finished, value = self.stage_cache.wait_for_compute(
+                key,
+                should_abort=should_abort,
+            )
+            if value is not None:
+                return value
+            if not finished:
+                return None
+
     def invalidate_document(self, document_key) -> None:
-        for key in tuple(self._in_flight):
+        with self._lock:
+            keys = tuple(self._in_flight)
+        for key in keys:
             if key.document_key == document_key:
                 self.cancel(key)
 
     def clear(self) -> None:
-        for key in tuple(self._in_flight):
+        with self._lock:
+            keys = tuple(self._in_flight)
+        for key in keys:
             self.cancel(key)
 
     def diagnostics(self) -> StageMaterializationDiagnostics:
-        return StageMaterializationDiagnostics(
-            decision=self._last.decision,
-            candidate_bytes=self._last.candidate_bytes,
-            budget_bytes=int(getattr(self.stage_cache, "max_bytes", 0)),
-            consequence=self._last.consequence,
-            key_summary=self._last.key_summary,
-            in_flight=len(self._in_flight),
-            scheduled=int(self._scheduled),
-            attached=int(self._attached),
-            completed=int(self._completed),
-            cancelled=int(self._cancelled),
-            failed=int(self._failed),
-            refused=int(self._refused),
-        )
+        with self._lock:
+            return StageMaterializationDiagnostics(
+                decision=self._last.decision,
+                candidate_bytes=self._last.candidate_bytes,
+                budget_bytes=int(getattr(self.stage_cache, "max_bytes", 0)),
+                consequence=self._last.consequence,
+                key_summary=self._last.key_summary,
+                in_flight=len(self._in_flight),
+                hits=int(self._hits),
+                scheduled=int(self._scheduled),
+                attached=int(self._attached),
+                completed=int(self._completed),
+                cancelled=int(self._cancelled),
+                failed=int(self._failed),
+                refused=int(self._refused),
+            )
 
     def _record(
         self, decision: str, candidate: StageCacheCandidate, key: StageKey, consequence: str
     ) -> None:
-        self._last = StageMaterializationDiagnostics(
-            decision=str(decision),
-            candidate_bytes=None
-            if candidate.estimated_nbytes is None
-            else int(candidate.estimated_nbytes),
-            budget_bytes=int(getattr(self.stage_cache, "max_bytes", 0)),
-            consequence=str(consequence),
-            key_summary=self._key_text(key),
-            in_flight=len(self._in_flight),
-            scheduled=int(self._scheduled),
-            attached=int(self._attached),
-            completed=int(self._completed),
-            cancelled=int(self._cancelled),
-            failed=int(self._failed),
-            refused=int(self._refused),
-        )
+        with self._lock:
+            self._last = StageMaterializationDiagnostics(
+                decision=str(decision),
+                candidate_bytes=None
+                if candidate.estimated_nbytes is None
+                else int(candidate.estimated_nbytes),
+                budget_bytes=int(getattr(self.stage_cache, "max_bytes", 0)),
+                consequence=str(consequence),
+                key_summary=self._key_text(key),
+                in_flight=len(self._in_flight),
+                hits=int(self._hits),
+                scheduled=int(self._scheduled),
+                attached=int(self._attached),
+                completed=int(self._completed),
+                cancelled=int(self._cancelled),
+                failed=int(self._failed),
+                refused=int(self._refused),
+            )
 
     def _record_key(self, decision: str, key: StageKey, consequence: str) -> None:
-        self._last = StageMaterializationDiagnostics(
-            decision=str(decision),
-            budget_bytes=int(getattr(self.stage_cache, "max_bytes", 0)),
-            consequence=str(consequence),
-            key_summary=self._key_text(key),
-            in_flight=len(self._in_flight),
-            scheduled=int(self._scheduled),
-            attached=int(self._attached),
-            completed=int(self._completed),
-            cancelled=int(self._cancelled),
-            failed=int(self._failed),
-            refused=int(self._refused),
-        )
+        with self._lock:
+            self._last = StageMaterializationDiagnostics(
+                decision=str(decision),
+                budget_bytes=int(getattr(self.stage_cache, "max_bytes", 0)),
+                consequence=str(consequence),
+                key_summary=self._key_text(key),
+                in_flight=len(self._in_flight),
+                hits=int(self._hits),
+                scheduled=int(self._scheduled),
+                attached=int(self._attached),
+                completed=int(self._completed),
+                cancelled=int(self._cancelled),
+                failed=int(self._failed),
+                refused=int(self._refused),
+            )
 
     def _candidate_text(self, candidate: StageCacheCandidate) -> str:
         nbytes = (

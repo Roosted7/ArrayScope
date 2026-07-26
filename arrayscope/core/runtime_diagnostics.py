@@ -141,11 +141,10 @@ class MontageRuntimeDiagnostics:
     tile_lod_page_families: tuple[tuple[tuple[int, ...], str, int], ...] = ()
     tile_lod_pending_materializations: int = 0
     tile_lod_materializations_completed: int = 0
-    # Shared reduced-input preview path (`submit_shared_transform_floor`):
-    # evaluations submitted, calls the gate refused, and evaluations that
-    # errored, plus the last gate verdict.  On a montage the mode gate refuses
-    # every call, which is the point of counting: "never ran" and "ran and
-    # found nothing" must not look alike.
+    # Reduced-input coarse ladder: per-tile evaluations submitted, calls
+    # refused before submission, and evaluations that errored, plus the last
+    # gate verdict. Stage-manager diagnostics separately prove whether those
+    # tasks shared one real-document materialization.
     tile_lod_preview_reduced_scheduled: int = 0
     tile_lod_preview_reduced_blocked: int = 0
     tile_lod_preview_reduced_failures: int = 0
@@ -156,7 +155,7 @@ class MontageRuntimeDiagnostics:
     # counter — usable where the stage's own wall clock is too noisy to show a
     # change (raw montage spread is 4.0-4.9 s on the reference machine).
     tile_lod_rung_evaluations: tuple[dict[str, object], ...] = ()
-    # Why tiles got no FLOOR/PREVIEW rung, cumulative over the session's
+    # Why tiles got no coarse FLOOR rung, cumulative over the session's
     # plans and measured in TILE-PLANS (one tile in one plan), commonest first,
     # plus the policy those plans were made against.  "No coarse rung" is
     # otherwise an absence, and an absence names no cause — reading the code to
@@ -165,7 +164,6 @@ class MontageRuntimeDiagnostics:
     # the opposite of the cold-fill answer the question is about.
     tile_lod_coarse_rung_gates: tuple[tuple[str, int], ...] = ()
     tile_lod_ladder_floor_level: int = -1
-    tile_lod_ladder_preview_level: int = -1
     tile_lod_ladder_reduced_input: bool = False
     # `PipelineCounters.as_dict()`: intents, ladder_plans, tasks_submitted,
     # interactive_native_deferred, commit_batches, acks_confirmed,
@@ -1008,7 +1006,6 @@ _MONTAGE_COVERED = frozenset(
         "tile_lod_rung_evaluations",
         "tile_lod_coarse_rung_gates",
         "tile_lod_ladder_floor_level",
-        "tile_lod_ladder_preview_level",
         "tile_lod_ladder_reduced_input",
         "tile_lod_pipeline_counters",
         "tile_lod_stats_cross_level_reuses",
@@ -1163,7 +1160,6 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             (
                 "Coarse rung: "
                 f"floor=L{montage.tile_lod_ladder_floor_level} "
-                f"preview=L{montage.tile_lod_ladder_preview_level} "
                 f"reduced_input={_bool_text(montage.tile_lod_ladder_reduced_input)} "
                 f"native_deferred="
                 f"{int(montage.tile_lod_pipeline_counters.get('interactive_native_deferred', 0))}"
@@ -1181,7 +1177,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
                 else ()
             ),
         )
-        if montage.tile_lod_ladder_preview_level >= 0
+        if montage.tile_lod_ladder_floor_level >= 0
         else ()
     )
     rung_evaluation_lines = (
@@ -1538,7 +1534,8 @@ def _stage_materialization_line(name: str, diagnostics) -> str:
         f"{name}: decision={getattr(diagnostics, 'decision', '') or 'n/a'}, "
         f"candidate={candidate_text}, budget={format_bytes(int(getattr(diagnostics, 'budget_bytes', 0)))}, "
         f"in-flight={getattr(diagnostics, 'in_flight', 0)}, scheduled={getattr(diagnostics, 'scheduled', 0)}, "
-        f"attached={getattr(diagnostics, 'attached', 0)}, completed={getattr(diagnostics, 'completed', 0)}, "
+        f"attached={getattr(diagnostics, 'attached', 0)}, hits={getattr(diagnostics, 'hits', 0)}, "
+        f"completed={getattr(diagnostics, 'completed', 0)}, "
         f"refused={getattr(diagnostics, 'refused', 0)}, consequence={getattr(diagnostics, 'consequence', '') or 'n/a'}"
     )
 

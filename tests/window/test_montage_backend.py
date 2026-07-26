@@ -160,9 +160,7 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
             tile_stage_keys=(),
         ),
     )
-    effects = SimpleNamespace(
-        submit_shared_transform_floor=lambda _scope: 0,
-    )
+    effects = SimpleNamespace()
     pipeline = SimpleNamespace(
         effects=effects,
         retarget=lambda _intent, _demand, _scope: 0,

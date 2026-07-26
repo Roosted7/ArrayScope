@@ -268,11 +268,10 @@ class FrameRuntimeMixin:
                             getattr(session, "lod_policy_mode", "native-only") or "native-only"
                         ),
                         floor_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
-                        preview_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
-                        # Per-tile preview rungs are cheap only for pipelines
-                        # whose display-LOD result is independently tileable.
-                        # Non-commuting but reduced-input-suitable pipelines
-                        # such as FFT use the shared transform-preview path.
+                        # Admission remains tile-local: genuinely independent
+                        # pipelines pass directly; a montage-axis expansion
+                        # passes only when its identical real-document region
+                        # is backed by one cacheable shared stage.
                         reduced_input_available=reduced_input_available,
                     )
                 ),
@@ -353,11 +352,10 @@ class FrameRuntimeMixin:
         intent = self._montage_render_intent(session)
         scope = self._lod_admission_scope(session, intent)
         pipeline = self._frame_pipeline_for_session(session)
-        submitted = pipeline.effects.submit_shared_transform_floor(scope)
         if montage_commit.complete_deferred_stage_fan_in(self, session):
-            return submitted
+            return 0
         montage_commit.rearm_ready_stage_dependents(session)
-        submitted += pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
+        submitted = pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
         ladder_policy = getattr(getattr(pipeline, "ladder", None), "policy", None)
         emit_trace(
             "pipeline_plan",
@@ -369,7 +367,6 @@ class FrameRuntimeMixin:
             # rungs are absent when they are.  Without these a plan of pure
             # rung=2 steps names no cause for its own missing preview.
             policy_floor_level=int(getattr(ladder_policy, "floor_level", -1)),
-            policy_preview_level=int(getattr(ladder_policy, "preview_level", -1)),
             policy_reduced_input=bool(getattr(ladder_policy, "reduced_input_available", False)),
             demand_level=int(getattr(session.lod_policy_decision.demand, "desired_level", -1)),
             # Whether this plan believed an interaction was in flight. Expensive

@@ -200,19 +200,19 @@ def demand(level: int) -> LodDemand:
 def test_retarget_submits_ladder_work_and_commits_batches():
     kernel, effects, pipeline = make_pipeline(tiles=2)
     submitted = pipeline.retarget(intent(), demand(1), scope(0, 1, missing=2))
-    assert submitted == 4  # 2 tiles x (floor, preview); desired waits for first pixels
+    assert submitted == 2  # one coarse rung per tile; desired waits for first pixels
     drain(kernel)
-    assert len(effects.evaluated) == 4
-    # Floor-first across tiles: both floors evaluated before any preview.
+    assert len(effects.evaluated) == 2
+    # Floor-first across tiles.
     assert [entry[1] for entry in effects.evaluated[:2]] == [0, 0]
     assert effects.batches, "ready results must flush as commit batches"
     total_upserts = sum(len(batch.upserts) for batch in effects.batches)
-    assert total_upserts == 4
+    assert total_upserts == 2
     assert all(len(batch.upserts) <= batch.max_items for batch in effects.batches)
     assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
 
-def test_any_missing_preview_defers_quality_for_already_previewed_tiles():
+def test_any_missing_preview_allows_per_tile_coarse_successor():
     kernel, effects, pipeline = make_pipeline(tiles=2)
     effects.states[0] = TileLodState(
         tile_number=0,
@@ -227,7 +227,7 @@ def test_any_missing_preview_defers_quality_for_already_previewed_tiles():
     assert submitted == 2
     assert [(tile, rung) for tile, rung, _level in effects.evaluated] == [
         (1, int(Rung.FLOOR)),
-        (1, int(Rung.PREVIEW)),
+        (0, int(Rung.DESIRED)),
     ]
     assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
@@ -316,19 +316,19 @@ def test_demand_level_change_supersedes_stale_rung_targets():
     committed = sorted(
         step.level for batch in effects.batches for (step, _payload) in batch.upserts
     )
-    assert committed == [1, 2]
+    assert committed == [1]
     assert (0, 2, 2) in effects.dropped
 
 
 def test_interactive_native_demand_defers_cold_native_until_noninteractive_replan():
     kernel, effects, pipeline = make_pipeline(tiles=1)
 
-    assert pipeline.retarget(intent(interactive=True), demand(0), scope(0, missing=1)) == 2
+    assert pipeline.retarget(intent(interactive=True), demand(0), scope(0, missing=1)) == 1
     drain(kernel)
 
-    # Native demand plans FLOOR, PREVIEW, DESIRED(0); DESIRED waits until the
-    # first-pixel rungs have had a chance to present.
-    assert effects.evaluated == [(0, 0, 4), (0, 1, 2)]
+    # Native demand plans FLOOR then DESIRED(0); DESIRED waits until the
+    # first-pixel rung has had a chance to present.
+    assert effects.evaluated == [(0, 0, 4)]
     assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
     effects.states[0] = TileLodState(
@@ -491,7 +491,7 @@ def test_dropped_queued_rung_releases_prepared_state():
 
     # Supersede the queued desired-level rung before it can run.  The effects
     # already prepared lifecycle ownership; the drop callback must release it.
-    assert pipeline.retarget(intent(viewport="vp-2"), demand(1), scope(0)) == 2
+    assert pipeline.retarget(intent(viewport="vp-2"), demand(1), scope(0)) == 1
     drain(kernel)
 
     assert (0, 2, 2) in effects.dropped
@@ -504,7 +504,7 @@ def test_counters_track_pipeline_activity():
     drain(kernel)
     counts = pipeline.counters.as_dict()
     assert counts["intents"] == 1
-    assert counts["tasks_submitted"] >= 2
+    assert counts["tasks_submitted"] >= 1
     assert counts["commit_batches"] >= 1
 
 
@@ -512,14 +512,14 @@ def test_rung_dependencies_park_tasks_until_stage_key_completes():
     kernel, effects, pipeline = make_pipeline(tiles=1)
     effects.deps[0] = ("stage-key",)
 
-    assert pipeline.retarget(intent(), demand(1), scope(0)) == 2
+    assert pipeline.retarget(intent(), demand(1), scope(0)) == 1
     assert effects.evaluated == []
-    assert kernel.diagnostics().parked_deps == 2
+    assert kernel.diagnostics().parked_deps == 1
 
     kernel.submit(TaskSpec(key="stage-key", fn=lambda: "stage", lane=Lane.STAGE_MATERIALIZATION))
     drain(kernel)
 
-    assert len(effects.evaluated) == 2
+    assert len(effects.evaluated) == 1
 
 
 def test_pipeline_never_expresses_rung_ordering_through_deps():
@@ -531,7 +531,7 @@ def test_pipeline_never_expresses_rung_ordering_through_deps():
     effects = StubEffects(tiles=2)
     pipeline = FramePipeline(kernel, effects, LodLadder())
 
-    assert pipeline.retarget(intent(), demand(1), scope(0, 1, missing=2)) == 4
+    assert pipeline.retarget(intent(), demand(1), scope(0, 1, missing=2)) == 2
 
     assert all(spec.deps == () for spec in kernel.specs)
     # Coarse rungs are submitted before fine rungs across all tiles.
@@ -552,7 +552,7 @@ def test_retarget_plans_visible_scope_only_not_coverage_or_near_tiles():
         visible_missing_count=2,
     )
 
-    assert pipeline.retarget(intent(), demand(1), admission_scope) == 4
+    assert pipeline.retarget(intent(), demand(1), admission_scope) == 2
 
     submitted_tiles = {int(spec.key.tile_number) for spec in kernel.specs}
     assert submitted_tiles == {2, 4}
@@ -569,14 +569,14 @@ def test_large_visible_plan_admission_is_chunked_and_completion_driven():
 
     assert submitted == pipeline.ADMISSION_CHUNK
     assert pipeline.counters.tasks_submitted == pipeline.ADMISSION_CHUNK
-    assert len(pipeline._pending_admissions) == 80 - pipeline.ADMISSION_CHUNK
+    assert len(pipeline._pending_admissions) == 40 - pipeline.ADMISSION_CHUNK
 
     while backend.run_next():
         drain(kernel)
     drain(kernel)
 
-    assert pipeline.counters.tasks_submitted == 80
-    assert len(effects.evaluated) == 80
+    assert pipeline.counters.tasks_submitted == 40
+    assert len(effects.evaluated) == 40
     assert not pipeline._pending_admissions
     assert not pipeline._admission_continuation_armed
 
@@ -637,7 +637,7 @@ def test_failed_rung_evaluation_still_reports_the_work_it_burned():
     pipeline.retarget(intent(), demand(1), scope(0, missing=1))
     drain(kernel)
 
-    assert sum(int(row["calls"]) for row in pipeline.rung_timings.rows()) == 2
+    assert sum(int(row["calls"]) for row in pipeline.rung_timings.rows()) == 1
 
 
 def test_superseded_rung_evaluation_is_counted_as_discarded_work():
@@ -650,7 +650,7 @@ def test_superseded_rung_evaluation_is_counted_as_discarded_work():
     drain(kernel)
 
     rows = {(int(r["rung"]), int(r["level"])): r for r in pipeline.rung_timings.rows()}
-    assert sum(int(r["discarded"]) for r in rows.values()) >= 2
+    assert sum(int(r["discarded"]) for r in rows.values()) >= 1
     assert all(int(r["discarded"]) <= int(r["calls"]) for r in rows.values())
 
 
@@ -669,7 +669,7 @@ def test_plan_reports_why_tiles_got_no_coarse_rung():
     from arrayscope.render import ladder as ladder_module
 
     _kernel, _effects, pipeline = make_pipeline(
-        tiles=2, floor_level=4, preview_level=4, reduced_input_available=False
+        tiles=2, floor_level=4, reduced_input_available=False
     )
     pipeline.retarget(intent(), demand(2), scope(0, 1, missing=2))
 
@@ -740,7 +740,7 @@ def test_coarse_rung_gate_history_survives_the_plan_that_converges():
     from arrayscope.render import ladder as ladder_module
 
     _kernel, _effects, pipeline = make_pipeline(
-        tiles=1, floor_level=4, preview_level=4, reduced_input_available=False
+        tiles=1, floor_level=4, reduced_input_available=False
     )
     pipeline.retarget(intent(), demand(2), scope(0, missing=1))
     cold = dict(pipeline.coarse_rung_refusals())
@@ -772,7 +772,7 @@ def test_interactive_native_deferral_covers_every_step_without_reduced_input():
     """
 
     _kernel, effects, pipeline = make_pipeline(
-        tiles=3, floor_level=4, preview_level=4, reduced_input_available=False
+        tiles=3, floor_level=4, reduced_input_available=False
     )
 
     submitted = pipeline.retarget(intent(interactive=True), demand(2), scope(0, 1, 2, missing=3))
@@ -786,9 +786,7 @@ def test_interactive_native_deferral_covers_every_step_without_reduced_input():
 def test_same_plan_admits_everything_once_the_interaction_ends():
     """The deferral is a pause, not a drop: the identical plan then submits."""
 
-    kernel, effects, pipeline = make_pipeline(
-        tiles=3, floor_level=4, preview_level=4, reduced_input_available=False
-    )
+    kernel, effects, pipeline = make_pipeline(tiles=3, floor_level=4, reduced_input_available=False)
     pipeline.retarget(intent(interactive=True), demand(2), scope(0, 1, 2, missing=3))
 
     submitted = pipeline.retarget(intent(interactive=False), demand(2), scope(0, 1, 2, missing=3))

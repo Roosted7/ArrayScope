@@ -29,17 +29,17 @@ def rungs(steps):
     return [(step.rung, step.level) for step in steps]
 
 
-def test_cold_tile_climbs_floor_preview_desired():
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+def test_cold_tile_climbs_coarse_then_desired():
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     steps = ladder.plan_tile(TileLodState(tile_number=3), demand(1))
-    assert rungs(steps) == [(Rung.FLOOR, 4), (Rung.PREVIEW, 2), (Rung.DESIRED, 1)]
+    assert rungs(steps) == [(Rung.FLOOR, 4), (Rung.DESIRED, 1)]
     assert steps[0].priority == Priority.INTERACTIVE
     assert steps[0].lane == Lane.DISPLAY_PREVIEW
-    assert steps[2].lane == Lane.DISPLAY_PREPARATION
+    assert steps[1].lane == Lane.DISPLAY_PREPARATION
 
 
 def test_preview_disabled_goes_directly_to_desired_target():
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+    ladder = LodLadder(LadderPolicy(floor_level=4))
 
     steps = ladder.plan_tile(
         TileLodState(tile_number=3, allow_preview=False),
@@ -50,24 +50,22 @@ def test_preview_disabled_goes_directly_to_desired_target():
     assert steps[0].lane == Lane.DISPLAY_PREVIEW
 
 
-def test_coarse_demand_skips_redundant_preview_rung():
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+def test_coarse_demand_still_gets_retention_floor_before_target():
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     steps = ladder.plan_tile(TileLodState(tile_number=0), demand(3))
-    # The demanded target is already coarser than the preview rung, so the
-    # first display work is the target pass itself.
-    assert rungs(steps) == [(Rung.DESIRED, 3)]
+    assert rungs(steps) == [(Rung.FLOOR, 4), (Rung.DESIRED, 3)]
     assert steps[0].lane == Lane.DISPLAY_PREVIEW
 
 
-def test_preview_target_skips_floor_and_preview_rungs():
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+def test_target_finer_than_retention_floor_gets_one_coarse_rung():
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     steps = ladder.plan_tile(TileLodState(tile_number=0), demand(2))
-    assert rungs(steps) == [(Rung.DESIRED, 2)]
+    assert rungs(steps) == [(Rung.FLOOR, 4), (Rung.DESIRED, 2)]
     assert steps[0].lane == Lane.DISPLAY_PREVIEW
 
 
 def test_desired_refinement_after_presented_preview_stays_preparation():
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     steps = ladder.plan_tile(
         TileLodState(
             tile_number=0,
@@ -89,15 +87,9 @@ def test_converged_tile_plans_nothing():
 
 
 def test_ready_unacknowledged_preview_is_not_recomputed_during_commit_gap():
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     floor_ready = TileLodState(tile_number=0, ready_level=4, ready_quality="fallback")
-    preview_ready = TileLodState(tile_number=0, ready_level=2, ready_quality="fallback")
-
-    assert rungs(ladder.plan_tile(floor_ready, demand(1))) == [
-        (Rung.PREVIEW, 2),
-        (Rung.DESIRED, 1),
-    ]
-    assert rungs(ladder.plan_tile(preview_ready, demand(1))) == [(Rung.DESIRED, 1)]
+    assert rungs(ladder.plan_tile(floor_ready, demand(1))) == [(Rung.DESIRED, 1)]
 
 
 def test_ready_unacknowledged_target_is_converged_for_admission():
@@ -108,13 +100,12 @@ def test_ready_unacknowledged_target_is_converged_for_admission():
 
 
 def test_zoom_in_refines_progressively():
-    ladder = LodLadder(LadderPolicy(preview_level=2))
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     state = TileLodState(tile_number=0, presented_level=4, resident_levels=(4,))
     steps = ladder.plan_tile(state, demand(1, acceptable=(0, 1, 2)))
-    # Presented 4 is outside the acceptable window: preview gives fast
-    # improvement, desired completes it; the floor never reruns.
-    assert rungs(steps) == [(Rung.PREVIEW, 2), (Rung.DESIRED, 1)]
-    assert steps[1].priority == Priority.VISIBLE_IMAGE  # visibly wrong level
+    # The retained coarse rung never reruns; desired completes the refinement.
+    assert rungs(steps) == [(Rung.DESIRED, 1)]
+    assert steps[0].priority == Priority.VISIBLE_IMAGE  # visibly wrong level
 
 
 def test_unpresented_native_source_still_plans_demanded_display_level():
@@ -127,16 +118,16 @@ def test_unpresented_native_source_still_plans_demanded_display_level():
 
 
 def test_zoom_out_keeps_presented_finer_level():
-    ladder = LodLadder(LadderPolicy(preview_level=2))
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     state = TileLodState(tile_number=0, presented_level=0, resident_levels=(0,))
     steps = ladder.plan_tile(state, demand(3, acceptable=(2, 3, 4)))
     assert steps == ()
 
 
 def test_native_demand_ends_exact_without_duplicate_step():
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     steps = ladder.plan_tile(TileLodState(tile_number=0), demand(0, acceptable=(0, 1)))
-    assert rungs(steps) == [(Rung.FLOOR, 4), (Rung.PREVIEW, 2), (Rung.DESIRED, 0)]
+    assert rungs(steps) == [(Rung.FLOOR, 4), (Rung.DESIRED, 0)]
     assert all(step.rung != Rung.EXACT for step in steps)  # DESIRED==native
 
 
@@ -164,21 +155,19 @@ def test_without_reduced_input_pre_native_rungs_reduce_from_native():
 
 
 def test_cross_tile_floor_first_fill_ordering():
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     states = (TileLodState(tile_number=0), TileLodState(tile_number=1))
     steps = ladder.plan(states, demand(1))
     assert [(step.rung, step.tile_number) for step in steps] == [
         (Rung.FLOOR, 0),
         (Rung.FLOOR, 1),
-        (Rung.PREVIEW, 0),
-        (Rung.PREVIEW, 1),
         (Rung.DESIRED, 0),
         (Rung.DESIRED, 1),
     ]
 
 
 def test_ladder_carries_canonical_tile_rank_across_every_rung():
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=2))
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     steps = ladder.plan_tile(
         TileLodState(tile_number=7, scheduling_rank=3),
         demand(1),
@@ -199,37 +188,37 @@ _REFUSAL_CASES = (
     ("native_only", LadderPolicy(mode="native-only"), TileLodState(tile_number=0), 2),
     (
         "preview_not_allowed",
-        LadderPolicy(floor_level=4, preview_level=4),
+        LadderPolicy(floor_level=4),
         TileLodState(tile_number=0, allow_preview=False),
         2,
     ),
     (
         "level_not_coarser",
-        LadderPolicy(floor_level=4, preview_level=2),
+        LadderPolicy(floor_level=2),
         TileLodState(tile_number=0),
         2,
     ),
     (
         "no_reduced_input",
-        LadderPolicy(floor_level=4, preview_level=4, reduced_input_available=False),
+        LadderPolicy(floor_level=4, reduced_input_available=False),
         TileLodState(tile_number=0, floor_available=False),
         2,
     ),
     (
-        "floor_covers_level",
-        LadderPolicy(floor_level=4, preview_level=4),
+        "already_covered",
+        LadderPolicy(floor_level=4),
         TileLodState(tile_number=0, resident_levels=(4,), presented_level=4),
         2,
     ),
     (
         "cold_tile_gets_one",
-        LadderPolicy(floor_level=4, preview_level=4),
+        LadderPolicy(floor_level=4),
         TileLodState(tile_number=0),
         2,
     ),
     (
         "retained_floor_without_reduced_input",
-        LadderPolicy(floor_level=4, preview_level=4, reduced_input_available=False),
+        LadderPolicy(floor_level=4, reduced_input_available=False),
         TileLodState(tile_number=0, floor_available=True),
         2,
     ),
@@ -242,7 +231,7 @@ def test_coarse_rung_refusal_agrees_with_what_plan_tile_does():
     for name, policy, state, level in _REFUSAL_CASES:
         ladder = LodLadder(policy)
         steps = ladder.plan_tile(state, demand(level))
-        planned = any(step.rung in (Rung.FLOOR, Rung.PREVIEW) for step in steps)
+        planned = any(step.rung == Rung.FLOOR for step in steps)
         reason = ladder.coarse_rung_refusal(state, demand(level))
         assert planned == (reason == ""), (
             f"{name}: planned={planned} but reason={reason!r} "
@@ -263,7 +252,7 @@ def test_coarse_rung_refusal_names_the_gate_that_actually_fired():
     assert reason_for("preview_not_allowed") == ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED
     assert reason_for("level_not_coarser") == ladder_module.COARSE_RUNG_LEVEL_NOT_COARSER
     assert reason_for("no_reduced_input") == ladder_module.COARSE_RUNG_NO_REDUCED_INPUT
-    assert reason_for("floor_covers_level") == ladder_module.COARSE_RUNG_FLOOR_COVERS_LEVEL
+    assert reason_for("already_covered") == ladder_module.COARSE_RUNG_ALREADY_COVERED
     assert reason_for("cold_tile_gets_one") == ladder_module.COARSE_RUNG_PLANNED
     # A retained floor still earns a coarse rung with no reduced input at all.
     assert reason_for("retained_floor_without_reduced_input") == ladder_module.COARSE_RUNG_PLANNED
@@ -279,7 +268,7 @@ def test_measured_fft_state_is_refused_for_no_reduced_input_not_allow_preview():
     downstream of this one, which is why the plan carries no `rung=0` either.
     """
 
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=4, reduced_input_available=False))
+    ladder = LodLadder(LadderPolicy(floor_level=4, reduced_input_available=False))
     state = TileLodState(tile_number=0, allow_preview=True, floor_available=False)
 
     from arrayscope.render import ladder as ladder_module
@@ -291,18 +280,12 @@ def test_measured_fft_state_is_refused_for_no_reduced_input_not_allow_preview():
     )
 
 
-def test_raw_montage_preview_is_refused_by_the_floor_it_just_planned():
-    """§2's FLOOR/PREVIEW collapse, named by the counter instead of inferred.
-
-    Both levels come from one session value, so a tile that took FLOOR at
-    level 4 then fails PREVIEW's `4 < 4` guard. The refusal only reports this
-    once the floor is resident — while both are planned in one pass the tile
-    does have a coarse rung, which is what makes the collapse invisible.
-    """
+def test_raw_montage_has_one_coarse_rung_then_refines():
+    """ADR 0059 removes the FLOOR/PREVIEW self-shadowing state."""
 
     from arrayscope.render import ladder as ladder_module
 
-    ladder = LodLadder(LadderPolicy(floor_level=4, preview_level=4))
+    ladder = LodLadder(LadderPolicy(floor_level=4))
     cold = TileLodState(tile_number=0)
     assert [step.rung for step in ladder.plan_tile(cold, demand(2))] == [
         Rung.FLOOR,
@@ -310,8 +293,7 @@ def test_raw_montage_preview_is_refused_by_the_floor_it_just_planned():
     ]
 
     floored = TileLodState(tile_number=0, resident_levels=(4,), presented_level=4)
-    assert Rung.PREVIEW not in [step.rung for step in ladder.plan_tile(floored, demand(2))]
+    assert [step.rung for step in ladder.plan_tile(floored, demand(2))] == [Rung.DESIRED]
     assert (
-        ladder.coarse_rung_refusal(floored, demand(2))
-        == ladder_module.COARSE_RUNG_FLOOR_COVERS_LEVEL
+        ladder.coarse_rung_refusal(floored, demand(2)) == ladder_module.COARSE_RUNG_ALREADY_COVERED
     )

@@ -31,7 +31,7 @@ from arrayscope.display.model.tile_identity import (
     acknowledged_identity_satisfies_target,
     tile_ack_identity,
 )
-from arrayscope.display.model.tile_priority import prioritize_tile_numbers, prioritize_tiles
+from arrayscope.display.model.tile_priority import prioritize_tile_numbers
 from arrayscope.display.montage import montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
 from arrayscope.display.pyramid import materialize_lod_page
@@ -288,7 +288,7 @@ class FramePipelineEffects:
         if self._step_produces_page_payload(step, tile) and not (
             step.rung == Rung.DESIRED and bool(step.reduce_from_native)
         ):
-            # FLOOR/PREVIEW are degraded first-pixel rungs: whenever the tile
+            # FLOOR is the degraded first-pixel rung: whenever the tile
             # has nothing presentable yet, they must hand back their coarse
             # level so it is not left black — even at native scale (desired 0).
             # ingest_lod_demand() withholds a demand at native scale only to
@@ -319,6 +319,8 @@ class FramePipelineEffects:
                     evaluation_context=self.renderer.win._evaluation_context(
                         ComputeLane.MONTAGE_TILE, token
                     ),
+                    stage_cache=self.renderer.win.operation_evaluator.stage_cache,
+                    stage_materializer=self.renderer.win.operation_evaluator.stage_materializer,
                     warm_canonical_plane=warm_canonical_plane,
                 )
 
@@ -395,31 +397,6 @@ class FramePipelineEffects:
         self._release_inactive_evaluation_claims(getattr(scope, "visible_tile_numbers", ()))
         self._seed_resident_crop_rebinds(scope)
         states = render_effects.tile_lod_states(self.session, demand, scope=scope)
-        plan_tiles = {
-            int(tile.montage_index): tile
-            for tile in tuple(getattr(getattr(self.session, "plan", None), "tiles", ()) or ())
-        }
-        first_state = next(iter(states), None)
-        first_tile = None if first_state is None else plan_tiles.get(int(first_state.tile_number))
-        shared_owned = (
-            {int(state.tile_number) for state in states}
-            if first_tile is not None
-            and self._shared_transform_owns_tile_display_target(first_tile)
-            else set()
-        )
-        if shared_owned:
-            # Non-commuting pipelines (FFT across the montage axis) have one
-            # shared reduced-volume owner. Planning ordinary per-tile preview
-            # rungs as well reduced every source plane independently while the
-            # shared transform computed the same visible target — 60-100
-            # memory-bandwidth-heavy tasks per scroll frame. The shared owner
-            # supplies both first pixels and the demanded reduced target.
-            states = tuple(
-                replace(state, allow_preview=False)
-                if int(state.tile_number) in shared_owned
-                else state
-                for state in states
-            )
         if (
             not bool(getattr(self.session, "shader_display", False))
             and bool(getattr(self.session, "atomic_successor_pending", False))
@@ -731,11 +708,10 @@ class FramePipelineEffects:
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
         if self._step_produces_page_payload(step, tile):
-            if step.rung == Rung.DESIRED:
-                if self._shared_transform_owns_display_target(tile, step):
-                    return False
-                if self._display_payload_covers_display_target(tile_number, tile, step):
-                    return False
+            if step.rung == Rung.DESIRED and self._display_payload_covers_display_target(
+                tile_number, tile, step
+            ):
+                return False
             if self.session.lifecycle.preview_claim_matches(
                 tile_number,
                 int(step.rung),
@@ -745,7 +721,7 @@ class FramePipelineEffects:
                 return False
             if step.rung == Rung.DESIRED and self.session.lifecycle.preview_claim_matches(
                 tile_number,
-                int(Rung.PREVIEW),
+                int(Rung.FLOOR),
                 int(step.level),
                 semantic_key,
             ):
@@ -792,8 +768,6 @@ class FramePipelineEffects:
             self.session.pending_rung_materializations.mark_started(request)
             return True
         if step.rung in (Rung.DESIRED, Rung.EXACT):
-            if self._shared_preview_claim_covers_cold_tile(tile_number):
-                return False
             if (
                 tile_number in self.session.rendered_tiles
                 or tile_number in self.session.skipped_tiles
@@ -818,6 +792,14 @@ class FramePipelineEffects:
             return
         tile_number = int(tile.montage_index)
         if self._step_produces_page_payload(step, tile):
+            if step.rung == Rung.FLOOR and render_effects.can_evaluate_reduced_preview(
+                self.session, tile
+            ):
+                renderer = self.renderer
+                renderer._montage_preview_reduced_scheduled = (
+                    int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) + 1
+                )
+                renderer._montage_preview_reduced_last_gate = "submitted by per-tile coarse ladder"
             return
         if (
             step.rung in (Rung.DESIRED, Rung.EXACT)
@@ -847,7 +829,7 @@ class FramePipelineEffects:
         were derived from a retained reduction or directly from native data.
         """
 
-        if step.rung in (Rung.FLOOR, Rung.PREVIEW):
+        if step.rung == Rung.FLOOR:
             return True
         tile_number = int(getattr(tile, "montage_index", getattr(step, "tile_number", -1)))
         if tile_number in getattr(self.session, "rendered_tiles", {}):
@@ -887,57 +869,6 @@ class FramePipelineEffects:
         if payload_source_id != semantic_id and _base_source_id(payload_source_id) != semantic_id:
             return False
         return int(tile_number) in set(getattr(self.session.lifecycle, "presented_tiles", ()) or ())
-
-    def _shared_transform_owns_display_target(self, tile, step) -> bool:
-        if not self._shared_transform_owns_tile_display_target(tile):
-            return False
-        return int(getattr(step, "level", 0) or 0) > 0
-
-    def _shared_transform_owns_tile_display_target(self, tile) -> bool:
-        demand = getattr(getattr(self.session, "lod_policy_decision", None), "demand", None)
-        if demand is None:
-            return False
-        desired_level = int(getattr(demand, "desired_level", 0) or 0)
-        if desired_level <= 0:
-            return False
-        # Shared-transform ownership depends on the document pipeline, display
-        # axes, session generation and demanded level—not on the scalar source
-        # index of each montage tile. Capability/slab planning here used to run
-        # ~60 times for every pan event (9k calls in one R8 zoom stress).
-        view_state = getattr(tile, "view_state", None)
-        cache_key = (
-            int(getattr(self.session, "session_id", 0) or 0),
-            getattr(self.session, "key", None),
-            desired_level,
-            tuple(getattr(view_state, "image_axes", ()) or ()),
-        )
-        cached = getattr(self.session, "_shared_transform_ownership_cache", None)
-        if cached is not None and cached[0] == cache_key:
-            return bool(cached[1])
-        owns = bool(
-            not render_effects.preview_pipeline_is_tile_local(self.session, tile)
-            and render_effects.shared_preview_is_useful(
-                self.session,
-                tile,
-                demand,
-                upload_preview_useful=True,
-            )
-        )
-        self.session._shared_transform_ownership_cache = (cache_key, owns)
-        return owns
-
-    def _shared_preview_claim_covers_cold_tile(self, tile_number: int) -> bool:
-        if int(tile_number) in self.session.rendered_tiles:
-            return False
-        if self.session.display_tile_payloads.get(int(tile_number)) is not None:
-            return False
-        tile = self._tile_for_number(tile_number)
-        if tile is None:
-            return False
-        return self.session.lifecycle.preview_claim_active(
-            int(tile_number),
-            self._preview_claim_identity(None, tile),
-        )
 
     def rung_deps(self, intent, step) -> tuple[object, ...]:
         if not self._session_is_current(intent):
@@ -1017,7 +948,7 @@ class FramePipelineEffects:
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
         reduced_display_step = self._step_produces_page_payload(step, tile)
-        if step.rung in (Rung.FLOOR, Rung.PREVIEW):
+        if step.rung == Rung.FLOOR:
             self.session.lifecycle.preview_released(
                 tile_number,
                 int(step.rung),
@@ -1161,7 +1092,7 @@ class FramePipelineEffects:
             # A reduced rung can complete after a newer viewport demand has
             # made its payload inadmissible. Releasing its lifecycle claim is
             # necessary, but it also removes the only producer that caused a
-            # later replan to skip this tile. An admitted FLOOR/PREVIEW also
+            # later replan to skip this tile. An admitted FLOOR also
             # unlocks the finer rung which was deliberately held behind first
             # pixels. Both transitions therefore own an explicit replan
             # wakeup; a presentation wake alone can strand the visible tile at
@@ -1274,316 +1205,6 @@ class FramePipelineEffects:
         """
 
         return self._admit_evaluation_result(tile, result)
-
-    def submit_shared_transform_floor(self, scope: LodAdmissionScope | None = None) -> int:
-        """Shared display-target pass for reduced-input pipelines.
-
-        FFT-over-montage-axis and similar pipelines can evaluate one reduced
-        display volume and fan it out to every montage tile. That is both the
-        first-pixel floor and the demanded target pass; per-tile native output
-        is reserved for true level-0 semantic targets.
-        """
-
-        session = self.session
-        demand = session.ingest_lod_demand()
-        if demand is None or not self._session_is_current():
-            return self._preview_reduced_blocked("no demand" if demand is None else "stale session")
-        visible_scope = (
-            None
-            if scope is None
-            else frozenset(
-                int(value) for value in tuple(getattr(scope, "visible_tile_numbers", ()) or ())
-            )
-        )
-        plan_tiles = tuple(
-            tile
-            for tile in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-            if visible_scope is None or int(tile.montage_index) in visible_scope
-        )
-        if not plan_tiles:
-            return self._preview_reduced_blocked("no planned tiles")
-        seed = plan_tiles[0]
-        if render_effects.preview_pipeline_is_tile_local(session, seed):
-            # Tile-local pipelines get per-tile FLOOR/DESIRED rungs. Not a
-            # refusal of reduced-input preview — a different owner for it,
-            # measured by the ladder's own per-(rung, level) timings.
-            #
-            # This asks tile-locality, not commuting, because the ladder's
-            # `reduced_input_available` does: asking the commuting question
-            # here disowned every montage-axis FFT to a per-tile owner that
-            # plans no rung for it, so neither side produced. A pipeline that
-            # commutes without being tile-local therefore falls through to the
-            # shared route below and is reported by the gate that actually
-            # declines it, rather than being counted as owned here.
-            self._preview_reduced_gate("per-tile rungs own reduced input")
-            return 0
-        if not render_effects.shared_preview_is_useful(session, seed, demand):
-            return self._preview_reduced_blocked(self._shared_preview_refusal(seed, demand))
-        desired = int(getattr(demand, "desired_level", 0) or 0)
-        preview_level = int(render_effects.preview_evaluation_level(session, demand))
-        submitted = 0
-        if preview_level > desired:
-            preview_tiles = tuple(
-                render_effects.shared_transform_candidate_tiles(
-                    session,
-                    level=preview_level,
-                    tile_numbers=visible_scope,
-                    include_missing=True,
-                    require_presented_preview=False,
-                )
-            )
-            submitted += self._submit_shared_transform_target(
-                demand=demand,
-                level=preview_level,
-                tiles=preview_tiles,
-                priority=Priority.INTERACTIVE,
-                lane=WorkLane.DISPLAY_PREVIEW,
-            )
-            # Materialized/admitted preview rows are not a completed first
-            # pass.  Wait until every required row is backend-acknowledged
-            # (and shader levels are published) before admitting the shared
-            # target.  The former per-tile candidate gate let the center
-            # refine while the outer preview was still black, then stranded
-            # retained finer fallbacks after a scroll/LOD retarget.
-            if (
-                desired > 0
-                and not preview_tiles
-                and self.scheduling_verdict().admits_lane(WorkLane.DISPLAY_PREPARATION)
-            ):
-                target_tiles = tuple(
-                    render_effects.shared_transform_candidate_tiles(
-                        session,
-                        level=desired,
-                        tile_numbers=visible_scope,
-                        include_missing=False,
-                        require_presented_preview=True,
-                    )
-                )
-                submitted += self._submit_shared_transform_target(
-                    demand=demand,
-                    level=desired,
-                    tiles=target_tiles,
-                    priority=Priority.VISIBLE_IMAGE,
-                    lane=WorkLane.DISPLAY_PREPARATION,
-                )
-            return submitted
-        tiles = tuple(
-            render_effects.shared_transform_candidate_tiles(
-                session,
-                level=desired,
-                tile_numbers=visible_scope,
-                include_missing=True,
-                require_presented_preview=False,
-                exact_pass=True,
-            )
-        )
-        return self._submit_shared_transform_target(
-            demand=demand,
-            level=desired,
-            tiles=tiles,
-            priority=Priority.VISIBLE_IMAGE,
-            lane=WorkLane.DISPLAY_PREPARATION,
-        )
-
-    # -- reduced-input preview accounting ---------------------------------
-    #
-    # These three counters plus the gate string are the answer to "did the
-    # reduced-input preview path run, and if not, what stopped it".  They read
-    # 0/0/0 for a long time by design: the montage default mode refuses every
-    # call (see `_shared_preview_refusal`), which is a finding, not a silence.
-    # A zero with no gate string means the path was never even asked.
-
-    def _preview_reduced_gate(self, reason: str) -> None:
-        """Record the last gate verdict without counting a refusal."""
-
-        self.renderer._montage_preview_reduced_last_gate = str(reason)
-
-    def _preview_reduced_blocked(self, reason: str) -> int:
-        """Count one refused reduced-input preview call; return 0 submissions."""
-
-        renderer = self.renderer
-        renderer._montage_preview_reduced_blocked = (
-            int(getattr(renderer, "_montage_preview_reduced_blocked", 0) or 0) + 1
-        )
-        renderer._montage_preview_reduced_last_gate = str(reason)
-        return 0
-
-    def _shared_preview_refusal(self, seed, demand) -> str:
-        """Which `shared_preview_is_useful` clause refused, in its own order."""
-
-        session = self.session
-        if str(getattr(session, "lod_policy_mode", "")) == "resident":
-            # Named for the measured reason, not the mode: dossier 6c.
-            return "resident policy keeps the parallel per-tile target"
-        if not render_effects.can_evaluate_reduced_preview(session, seed):
-            return "pipeline does not support reduced display lod"
-        preview_level = int(render_effects.preview_evaluation_level(session, demand))
-        if preview_level < int(getattr(demand, "desired_level", 0) or 0):
-            return "preview level finer than demand"
-        return "shared transform preview disabled"
-
-    def _submit_shared_transform_target(self, *, demand, level: int, tiles, priority, lane) -> int:
-        session = self.session
-        renderer = self.renderer
-        level = int(level)
-        # A shared evaluation coarser than the demand is the reduced-input
-        # *preview*; at the demanded level it is the target computed through
-        # the same path, and must not be counted as a preview.
-        reduced_preview = level > int(getattr(demand, "desired_level", 0) or 0)
-        tiles = prioritize_tiles(
-            tuple(tiles or ()),
-            context=session.tile_priority_context(),
-        )
-        if not tiles:
-            return 0
-        shader_display = bool(getattr(session, "shader_display", False))
-        marker = _shared_transform_marker(
-            session,
-            demand=demand,
-            level=level,
-            tiles=tiles,
-            shader_display=shader_display,
-        )
-        semantic_key = session.key
-        if not self._claim_shared_transform_target(
-            tiles,
-            level=level,
-            lane=lane,
-            semantic_key=semantic_key,
-        ):
-            return 0
-
-        def evaluate(token=None, tiles=tiles, level=level):
-            return render_effects.evaluate_shared_preview(
-                session,
-                tiles[0],
-                tiles,
-                demand=demand,
-                level=level,
-                cancellation_token=token,
-                shader_display=shader_display,
-                evaluation_context=renderer.win._evaluation_context(
-                    ComputeLane.MONTAGE_TILE, token
-                ),
-                upload_preview_useful=True,
-            )
-
-        def done(rows):
-            if not rows or not self._session_is_current():
-                self._release_shared_transform_claims(
-                    tiles,
-                    level=level,
-                    lane=lane,
-                    semantic_key=semantic_key,
-                )
-                return
-            desired = int(getattr(demand, "desired_level", 0) or 0)
-            quality = "exact" if int(level) <= desired else "preview"
-            pending_rows = {int(row[0]): row for row in tuple(rows)}
-
-            def admit_next() -> None:
-                if not self._session_is_current():
-                    self._release_shared_transform_claims(
-                        tiles,
-                        level=level,
-                        lane=lane,
-                        semantic_key=semantic_key,
-                    )
-                    return
-                # Shared-transform pixels are independent of montage layout,
-                # but their presentation order is not.  The window may have
-                # settled from (for example) 24 to 22 columns while the one
-                # whole-volume job was running.  Re-rank every bounded
-                # fan-out slice from the session's current canonical context;
-                # retaining the submission-time row order visibly filled two
-                # remote regions of the successor grid.
-                ordered_rows = _prioritize_shared_preview_rows(
-                    session,
-                    tuple(pending_rows.values()),
-                )
-                batch = tuple(ordered_rows[:8])
-                for row in batch:
-                    pending_rows.pop(int(row[0]), None)
-                context = session.tile_priority_context()
-                emit_trace(
-                    "shared_fanout_batch",
-                    level=int(level),
-                    quality=quality,
-                    columns=int(getattr(getattr(session, "plan", None), "columns", 0) or 0),
-                    focus=getattr(context, "focus", None),
-                    tiles=tuple(int(row[0]) for row in batch),
-                )
-                admitted = bool(
-                    batch
-                    and self._admit_reduced_display_payload(
-                        None,
-                        int(batch[0][0]),
-                        batch,
-                        quality=quality,
-                    )
-                )
-                if admitted:
-                    self.request_presentation()
-                if pending_rows:
-                    _post_low_priority_callback(renderer, admit_next)
-                    return
-                self._release_shared_transform_claims(
-                    tiles,
-                    level=level,
-                    lane=lane,
-                    semantic_key=semantic_key,
-                )
-                renderer.request_montage_replan(session)
-
-            _post_low_priority_callback(renderer, admit_next)
-
-        def dropped():
-            self._release_shared_transform_claims(
-                tiles,
-                level=level,
-                lane=lane,
-                semantic_key=semantic_key,
-            )
-
-        handle = renderer.win.kernel.submit(
-            TaskSpec(
-                key=("shared-target", marker),
-                fn=evaluate,
-                lane=lane,
-                priority=priority,
-                scope=f"montage:{session.key!r}",
-                supersession=Supersession(("shared-target", session.key, level), marker),
-                reusable=True,
-                pass_token=True,
-                presentation_phase=(2 if lane == WorkLane.DISPLAY_PREPARATION else 1),
-                coverage_pass_open=bool(self.scheduling_verdict().coverage_open),
-                session_id=int(getattr(session, "session_id", 0) or 0),
-            ),
-            on_done=done,
-            on_stale=dropped,
-            on_error=lambda exc: (
-                self._preview_reduced_failed(reduced_preview),
-                dropped(),
-                handle_ui_exception("shared transform target", exc),
-            ),
-        )
-        if handle is None:
-            dropped()
-            return self._preview_reduced_blocked("kernel declined submission")
-        if reduced_preview:
-            renderer._montage_preview_reduced_scheduled = (
-                int(getattr(renderer, "_montage_preview_reduced_scheduled", 0) or 0) + 1
-            )
-            self._preview_reduced_gate("submitted")
-        return 1
-
-    def _preview_reduced_failed(self, reduced_preview: bool) -> None:
-        if not reduced_preview:
-            return
-        renderer = self.renderer
-        renderer._montage_preview_reduced_failures = (
-            int(getattr(renderer, "_montage_preview_reduced_failures", 0) or 0) + 1
-        )
 
     def commit_pending_session(self) -> None:
         if not self._session_is_current():
@@ -1785,7 +1406,7 @@ class FramePipelineEffects:
                 claim_identity,
             )
             admitted = self._admit_reduced_display_payload(step, int(step.tile_number), payload)
-            if not admitted or step.rung in (Rung.FLOOR, Rung.PREVIEW):
+            if not admitted or step.rung == Rung.FLOOR:
                 replan_needed = True
         return bool(replan_needed)
 
@@ -3582,48 +3203,6 @@ class FramePipelineEffects:
         demand = self.session.lod_policy_decision.demand
         return self.session._lod_page_set_key_for(rendered, demand=demand, level=int(step.level))
 
-    def _shared_claim_rung(self, *, level: int, lane) -> int:
-        if WorkLane(str(lane)) == WorkLane.DISPLAY_PREVIEW:
-            return int(Rung.PREVIEW)
-        return int(Rung.DESIRED)
-
-    def _claim_shared_transform_target(self, tiles, *, level: int, lane, semantic_key=None) -> bool:
-        rung = self._shared_claim_rung(level=level, lane=lane)
-        semantic_key = self.session.key if semantic_key is None else semantic_key
-        changed = False
-        for tile in tuple(tiles or ()):
-            claim_identity = (
-                semantic_key,
-                self.session.tile_semantic_source_id(int(tile.source_index)),
-            )
-            changed = (
-                self.session.lifecycle.preview_claimed(
-                    int(tile.montage_index),
-                    rung,
-                    int(level),
-                    claim_identity,
-                )
-                or changed
-            )
-        return bool(changed)
-
-    def _release_shared_transform_claims(
-        self, tiles, *, level: int, lane, semantic_key=None
-    ) -> None:
-        rung = self._shared_claim_rung(level=level, lane=lane)
-        semantic_key = self.session.key if semantic_key is None else semantic_key
-        for tile in tuple(tiles or ()):
-            claim_identity = (
-                semantic_key,
-                self.session.tile_semantic_source_id(int(tile.source_index)),
-            )
-            self.session.lifecycle.preview_released(
-                int(tile.montage_index),
-                rung,
-                int(level),
-                claim_identity,
-            )
-
     def _intent_matches_session(self, intent) -> bool:
         return intent is None or getattr(
             intent, "semantic_key", getattr(self.session, "key", None)
@@ -3636,54 +3215,6 @@ class FramePipelineEffects:
         if callable(predicate):
             return bool(predicate(self.session))
         return True
-
-
-def _shared_transform_marker(session, *, demand, level: int, tiles, shader_display: bool) -> tuple:
-    """Identity of one shared reduced-display batch.
-
-    Montage slot numbers alone are not stable content: index-window retargets
-    intentionally reuse slots for different source indices.  The marker must
-    therefore include the current semantic source for each covered tile, plus
-    the demand fields that affect the pyramid key.
-    """
-
-    desired_level = int(getattr(demand, "desired_level", 0) or 0)
-    desired_factor_xy = tuple(
-        int(value) for value in tuple(getattr(demand, "desired_factor_xy", ()) or ())
-    )
-    acceptable_levels = tuple(
-        int(value) for value in tuple(getattr(demand, "acceptable_levels", ()) or ())
-    )
-    tile_identity = tuple(
-        (
-            int(tile.montage_index),
-            int(tile.source_index),
-            session.tile_semantic_source_id(tile.source_index),
-        )
-        for tile in tuple(tiles or ())
-    )
-    return (
-        "shared-transform",
-        getattr(session, "semantic_key", None),
-        int(level),
-        desired_level,
-        desired_factor_xy,
-        acceptable_levels,
-        bool(shader_display),
-        tile_identity,
-    )
-
-
-def _prioritize_shared_preview_rows(session, rows) -> tuple:
-    """Project current session priority onto materialized shared rows."""
-
-    rows_by_tile = {int(row[0]): row for row in tuple(rows or ())}
-    ordered = prioritize_tile_numbers(
-        tuple(rows_by_tile),
-        plan_tiles=tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()),
-        context=session.tile_priority_context(),
-    )
-    return tuple(rows_by_tile[int(tile)] for tile in ordered if int(tile) in rows_by_tile)
 
 
 def _priority_ordered_tile_delta(session, tile_delta):

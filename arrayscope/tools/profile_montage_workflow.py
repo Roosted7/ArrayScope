@@ -6494,9 +6494,6 @@ def _phase_record(
         "montage_quality_ladder_floor_level": int(
             getattr(montage, "tile_lod_ladder_floor_level", -1)
         ),
-        "montage_quality_ladder_preview_level": int(
-            getattr(montage, "tile_lod_ladder_preview_level", -1)
-        ),
         "montage_quality_ladder_reduced_input": bool(
             getattr(montage, "tile_lod_ladder_reduced_input", False)
         ),

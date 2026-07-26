@@ -1,6 +1,6 @@
 # ADR 0059: One coarse rung, fed by a shared reduced-input stage
 
-- **Status:** Proposed (2026-07-26). Supersedes the scheduling half of ADR
+- **Status:** Accepted and implemented (2026-07-26). Supersedes the scheduling half of ADR
   0050's "reduce-before-ops and preview-then-refine" section: the two routes it
   designed still exist as *evaluation* capabilities, but this ADR replaces the
   shared-transform *scheduling* path with the stage cache the native path
@@ -260,6 +260,41 @@ Expected, and each one is a gate below rather than a claim:
 5. `montage_quality_rung_evaluations` shows the coarse rung's cost, and the
    ladder gate counters no longer report `floor already covers this level` as
    the dominant refusal on the raw stage.
+
+### Implementation evidence
+
+Implemented on local `main` at `6ad55232`.
+
+- The reduced-input branch has a direct test, and the 272-tile FFT gate reports
+  one stage materialization (`scheduled=1`, `completed=1`) with the other 271
+  requests accounted for by stage attach/hit diagnostics. The stored
+  `StageValue` is also checked against its subsampled real-document region, so
+  a synthetic-document key cannot pass the gate.
+- In five WGPU single-run FFT passes, every one of the 272 operation-bearing
+  level-4 `quality="preview"` acknowledgements preceded that tile's
+  operation-bearing level-2 exact acknowledgement.
+- Gate 4 used five passes per arm in the order-balanced sequence
+  `baseline, branch, branch, baseline, baseline, branch, baseline, branch,
+  branch, baseline`. Full-refined medians were **5388.3 ms baseline** and
+  **5332.1 ms branch** (−56.2 ms). These are single-run FFT stages; `--repeat`
+  was not used.
+- The branch's WGPU counter gained
+  `{level: 4, representation: complex_rg32f, uploads: 272}`. That is the first
+  reduced operation page population; it proves the exact native-plane warm
+  declined rather than substituting a full native FFT plane. The physical page
+  allocation is still 256×256 per 21×21 logical tile, as expected.
+- The same five-pass branch cohort's median complete coarse-floor fill was
+  **5321.4 ms**, only 10.7 ms before the full-refined median. This is not a
+  first-pixel speedup claim: admission remains dominant, and the 21×21 source
+  is visibly blocky when drawn at roughly 57 px. The now-default minification
+  filter correctly does not engage while that source is magnified.
+- A three-pass in-process raw run (`--repeat 3`) reported only
+  `tile already has committable coverage` and `allow_preview false` as coarse
+  refusal reasons; `floor already covers this level` is gone.
+
+All baseline and branch WGPU passes still failed the pre-existing
+`gui_callbacks_below_50ms` performance oracle. That is not reclassified as
+green by this ADR.
 
 ## Alternatives rejected
 

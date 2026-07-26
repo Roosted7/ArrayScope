@@ -222,9 +222,7 @@ class FramePipeline:
         # rung=0/rung=1 step says nothing about why on its own, and reading the
         # code to guess got the FFT answer wrong once already.  One Counter bump
         # per coarse-less tile, and only for tiles that actually lack one.
-        coarse_tiles = {
-            int(step.tile_number) for step in steps if step.rung in (Rung.FLOOR, Rung.PREVIEW)
-        }
+        coarse_tiles = {int(step.tile_number) for step in steps if step.rung == Rung.FLOOR}
         refusals: Counter[str] = Counter()
         for state in states:
             if int(state.tile_number) in coarse_tiles:

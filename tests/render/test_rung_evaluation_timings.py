@@ -61,10 +61,10 @@ def test_same_rung_at_different_levels_stays_separate():
 
 def test_rows_are_ordered_coarse_rung_first():
     timings = RungEvaluationTimings()
-    for rung in (Rung.EXACT, Rung.DESIRED, Rung.PREVIEW, Rung.FLOOR):
+    for rung in (Rung.EXACT, Rung.DESIRED, Rung.FLOOR):
         timings.record(rung, 1, 1)
 
-    assert [int(row["rung"]) for row in timings.rows()] == [0, 1, 2, 3]
+    assert [int(row["rung"]) for row in timings.rows()] == [0, 2, 3]
 
 
 def test_unknown_rung_value_degrades_to_its_number_instead_of_raising():
@@ -135,8 +135,8 @@ def test_a_discard_with_no_timed_call_still_reports_a_row():
     """A discard must never be silently dropped for lack of a timing partner."""
 
     timings = RungEvaluationTimings()
-    timings.record_discarded(Rung.PREVIEW, 4)
+    timings.record_discarded(Rung.FLOOR, 4)
 
     (row,) = timings.rows()
-    assert (row["rung"], row["level"], row["calls"], row["discarded"]) == (1, 4, 0, 1)
+    assert (row["rung"], row["level"], row["calls"], row["discarded"]) == (0, 4, 0, 1)
     assert row["total_ms"] == 0.0

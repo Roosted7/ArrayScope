@@ -13,12 +13,10 @@ holds no collections, performs no I/O, and never mutates lifecycle state —
 `TileLifecycle` remains the single owner of tile state; the pipeline turns
 steps into kernel tasks and lifecycle claims.
 
-Rungs (roadmap "unified LOD ladder", ADR 0050/0052 lineage):
+Rungs (roadmap "unified LOD ladder", ADR 0050/0052/0059 lineage):
 
-    FLOOR    retained coarse preview — cheapest first pixels, survives
-             retargets; never blocks on exact work.
-    PREVIEW  first display rung at reduced input; operations run once per
-             rung — commuting ops evaluate on reduced input directly.
+    FLOOR    the one coarse preview rung. Its level is chosen for retention;
+             it evaluates reduced display input when that route is available.
     DESIRED  refinement to the demanded display level.
     EXACT    native resolution. Exact inspection values are ALWAYS computed
              from native data regardless of displayed rung (policy
@@ -48,7 +46,6 @@ from arrayscope.render.progressive_scheduling import SchedulingVerdict
 
 class Rung(IntEnum):
     FLOOR = 0
-    PREVIEW = 1
     DESIRED = 2
     EXACT = 3
 
@@ -98,19 +95,18 @@ class RungStep:
 class LadderPolicy:
     """Tunable ladder policy. Defaults follow ADR 0050 + Plan 04/05 landings.
 
-    TODO(redesign R3): re-derive `preview_level` bounds and the DESIRED
+    TODO(redesign R3): re-derive coarse-level bounds and the DESIRED
     priority from fresh A/B evidence (roadmap X5 queue item 2) before
     changing defaults; ADR 0046 forbids theory-driven tuning.
     """
 
     mode: str = "resident"  # "resident" | "native-only"
     floor_level: int = 4
-    preview_level: int = 2
     reduced_input_available: bool = True
-    levels_authoritative_rung: Rung = Rung.PREVIEW
+    levels_authoritative_rung: Rung = Rung.FLOOR
 
 
-#: Why a tile got no coarse (FLOOR/PREVIEW) rung, in the order `plan_tile`
+#: Why a tile got no coarse FLOOR rung, in the order `plan_tile`
 #: decides it.  Interned constants, not f-strings: the refusal is asked once per
 #: tile per replan (272 tiles x ~25 replans on a cold montage fill), so the
 #: answer must cost a few comparisons and no allocation.  The numbers that go
@@ -120,7 +116,6 @@ COARSE_RUNG_PREVIEW_NOT_ALLOWED = "allow_preview false: tile is covered or too f
 COARSE_RUNG_LEVEL_NOT_COARSER = "preview level not coarser than the demand"
 COARSE_RUNG_NO_REDUCED_INPUT = "no reduced input and no retained floor"
 COARSE_RUNG_ALREADY_COVERED = "tile already has committable coverage"
-COARSE_RUNG_FLOOR_COVERS_LEVEL = "floor already covers this level"
 COARSE_RUNG_LANE_NOT_ADMITTED = "scheduling verdict does not admit the coarse lane"
 COARSE_RUNG_PLANNED = ""
 
@@ -139,7 +134,7 @@ class LodLadder:
         demand: LodDemand,
         verdict: SchedulingVerdict | None = None,
     ) -> str:
-        """Why this tile gets no FLOOR/PREVIEW step, or `""` if it gets one.
+        """Why this tile gets no FLOOR step, or `""` if it gets one.
 
         "The ladder planned no coarse rung" is otherwise an absence, and an
         absence names no cause: the 2026-07-26 preview-LOD work attributed a
@@ -154,12 +149,10 @@ class LodLadder:
         if not bool(state.allow_preview):
             return COARSE_RUNG_PREVIEW_NOT_ALLOWED
         desired = max(0, int(demand.desired_level))
-        if desired >= max(0, int(policy.preview_level)):
+        if desired >= max(0, int(policy.floor_level)):
             return COARSE_RUNG_LEVEL_NOT_COARSER
         if not (policy.reduced_input_available or state.floor_available):
             return COARSE_RUNG_NO_REDUCED_INPUT
-        # Past the shared gate: whichever coarse rung survives its own guard is
-        # the one that would be planned.
         blank = (
             state.presented_level is None
             and state.ready_level is None
@@ -170,22 +163,7 @@ class LodLadder:
             if verdict is not None and not verdict.admits_lane(lane):
                 return COARSE_RUNG_LANE_NOT_ADMITTED
             return COARSE_RUNG_PLANNED
-        if not policy.reduced_input_available:
-            return COARSE_RUNG_ALREADY_COVERED
-        preview_level = max(int(policy.preview_level), desired)
-        finest = min(
-            [float(level) for level in state.resident_levels]
-            + [
-                float(value)
-                for value in (state.presented_level, state.ready_level)
-                if value is not None
-            ]
-        )
-        if preview_level >= finest:
-            return COARSE_RUNG_FLOOR_COVERS_LEVEL
-        if verdict is not None and not verdict.admits_lane(Lane.DISPLAY_PREVIEW):
-            return COARSE_RUNG_LANE_NOT_ADMITTED
-        return COARSE_RUNG_PLANNED
+        return COARSE_RUNG_ALREADY_COVERED
 
     # ------------------------------------------------------------ planning
 
@@ -236,17 +214,23 @@ class LodLadder:
         # Pre-native rungs are planned only when admission says they are useful
         # for first pixels.  Target-ready, caught-up tiles skip the preview
         # detour and go straight to DESIRED/EXACT.
-        # Per-tile reduced input is valid only for display-LOD-commuting
-        # pipelines; non-commuting but reduced-input-suitable transforms use
-        # the shared transform-preview path outside this ladder.
-        preview_target_has_finer_followup = desired < max(0, int(policy.preview_level))
+        # The admission predicate permits genuinely tile-local pipelines and
+        # montage-axis expansions whose identical reduced region is backed by
+        # one cacheable real-document stage.
+        preview_target_has_finer_followup = desired < max(0, int(policy.floor_level))
         cheap_pre_native = (
             bool(state.allow_preview)
             and preview_target_has_finer_followup
             and (policy.reduced_input_available or state.floor_available)
         )
+        per_tile_coarse_successor = bool(
+            verdict is not None
+            and verdict.coverage_open
+            and presented_preview
+            and policy.reduced_input_available
+        )
 
-        # 1) FLOOR — only while the tile has nothing committable at all.
+        # 1) FLOOR — the one coarse rung, only while the tile is blank.
         if presented is None and ready is None and not resident and cheap_pre_native:
             floor_level = max(policy.floor_level, desired)
             steps.append(
@@ -264,29 +248,7 @@ class LodLadder:
                 )
             )
 
-        # 2) PREVIEW — the first *display-quality* rung; skipped when
-        # something at least as fine already exists or DESIRED covers it.
-        preview_level = max(policy.preview_level, desired)
-        if (
-            cheap_pre_native
-            and policy.reduced_input_available
-            and preview_level < finest_available()
-            and preview_level != desired
-        ):
-            steps.append(
-                RungStep(
-                    tile_number=state.tile_number,
-                    rung=Rung.PREVIEW,
-                    level=preview_level,
-                    reduce_from_native=False,
-                    lane=Lane.DISPLAY_PREVIEW,
-                    priority=Priority.VISIBLE_IMAGE,
-                    reason="preview rung (reduced-input display)",
-                    scheduling_rank=int(state.scheduling_rank),
-                )
-            )
-
-        # 3) DESIRED — fill or refine only when the displayed tile is below
+        # 2) DESIRED — fill or refine only when the displayed tile is below
         # the demand. A coarser demand is a minimum acceptable quality, not a
         # command to replace already-presented finer data. Demotion belongs to
         # memory/eviction policy; the ladder must keep camera-only zooms from
@@ -313,7 +275,7 @@ class LodLadder:
                 presented is not None
                 or ready is not None
                 or resident
-                or any(step.rung in (Rung.FLOOR, Rung.PREVIEW) for step in steps)
+                or any(step.rung == Rung.FLOOR for step in steps)
             )
             steps.append(
                 RungStep(
@@ -321,7 +283,16 @@ class LodLadder:
                     rung=Rung.DESIRED,
                     level=desired,
                     reduce_from_native=not policy.reduced_input_available,
-                    lane=(Lane.DISPLAY_PREPARATION if has_first_pixel else Lane.DISPLAY_PREVIEW),
+                    # ADR 0059 retires the shared route's acknowledge-ALL
+                    # barrier. Once this tile's reduced coarse rung is
+                    # acknowledged, its target may overlap the remaining
+                    # coarse fan-out through the coverage lane. FLOOR keeps
+                    # INTERACTIVE priority, so blank tiles still win workers.
+                    lane=(
+                        Lane.DISPLAY_PREVIEW
+                        if per_tile_coarse_successor or not has_first_pixel
+                        else Lane.DISPLAY_PREPARATION
+                    ),
                     priority=(
                         Priority.VISIBLE_IMAGE
                         if presented is None or presented not in acceptable
@@ -332,7 +303,7 @@ class LodLadder:
                 )
             )
 
-        # 4) EXACT — only on explicit request (inspection) or when the
+        # 3) EXACT — only on explicit request (inspection) or when the
         # demand itself is native, and nothing native exists yet.
         if (state.exact_requested or desired == 0) and finest_available() > 0:
             steps.append(
@@ -361,7 +332,7 @@ class LodLadder:
         """Plan every tile, coarse rungs across tiles before fine rungs.
 
         Cross-tile ordering matters for perceived progress: every visible
-        tile should reach FLOOR/PREVIEW before any tile spends budget on
+        tile should reach FLOOR before any tile spends budget on
         DESIRED/EXACT (Plan 05 floor-first-fill, generalized).
         """
 
@@ -397,7 +368,6 @@ class LodLadder:
 
 __all__ = [
     "COARSE_RUNG_ALREADY_COVERED",
-    "COARSE_RUNG_FLOOR_COVERS_LEVEL",
     "COARSE_RUNG_LANE_NOT_ADMITTED",
     "COARSE_RUNG_LEVEL_NOT_COARSER",
     "COARSE_RUNG_NATIVE_ONLY",

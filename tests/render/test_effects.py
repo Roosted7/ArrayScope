@@ -29,6 +29,7 @@ from arrayscope.operations.pipeline import (
 from arrayscope.operations.pipeline import (
     evaluate as evaluate_pipeline,
 )
+from arrayscope.operations.regions import region_shape
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import ClaimOwner, TileLifecycle, TileTarget
 from arrayscope.render import effects
@@ -434,44 +435,10 @@ def test_evaluate_shared_preview_fans_out_display_only_payloads():
         assert texture_kind is not None
         assert level_data is not None
         assert level_stats is None
-
-
-def test_shared_preview_candidates_are_limited_to_visible_scope():
-    session = _session()
-    preview_payload = DisplayTilePayload(
-        1,
-        1,
-        np.ones((2, 3), dtype=np.float32),
-        None,
-        ("preview", 1),
-        lod=LodInfo(level=2, factor=4, source_shape=(4, 6), texture_shape=(2, 3)),
-        quality="preview",
-    )
-    session.display_tile_payloads[1] = preview_payload
-    session.tile_presentation_state = SimpleNamespace(payloads={1: preview_payload})
-    session.lifecycle.presentation_confirmed((1,))
-
-    first_pixel = tuple(
-        effects.shared_transform_candidate_tiles(
-            session,
-            level=1,
-            tile_numbers=(0, 1),
-            include_missing=True,
-            require_presented_preview=False,
+        np.testing.assert_array_equal(
+            _stored_preview_values(pages),
+            np.asarray(session.document.base_data)[::2, ::2, int(tile_number)],
         )
-    )
-    upgrade = tuple(
-        effects.shared_transform_candidate_tiles(
-            session,
-            level=1,
-            tile_numbers=(0, 1),
-            include_missing=False,
-            require_presented_preview=True,
-        )
-    )
-
-    assert [int(tile.montage_index) for tile in first_pixel] == [0, 1]
-    assert [int(tile.montage_index) for tile in upgrade] == [1]
 
 
 def test_shared_preview_runs_at_demanded_display_lod():
@@ -513,57 +480,40 @@ def test_reduced_preview_base_samples_display_axes_before_operation_input():
     assert preview_state.shape == reduced.shape
 
 
-def test_montage_axis_fft_commutes_for_display_lod_but_does_not_tile_independently():
-    # Replaces test_fft_preview_is_shared_reduced_input_not_per_tile_ladder_input,
-    # which pinned the axis-blind answer this predicate no longer gives: it
-    # asserted an FFT never takes reduced display input.  An FFT along the
-    # montage axis (2) with display axes (0, 1) commutes exactly, so the
-    # reduce-before-ops licence is real -- but the planes stay coupled, and
-    # only the second predicate may narrow the montage axis.
+def test_montage_axis_fft_is_admitted_only_through_cacheable_shared_stage():
     session = _session()
     session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=2),))
     tile = session.plan.tiles[0]
 
     assert effects.can_evaluate_reduced_preview(session, tile) is True
     assert effects.preview_pipeline_commutes_for_display_lod(session, tile) is True
-    assert effects.preview_montage_planes_are_independent(session, tile) is False
-    assert effects.shared_preview_is_useful(session, tile, _demand(1)) is True
-    # And it must NOT reach the per-tile ladder: measured at 272 tiles, a
-    # per-tile rung re-runs the whole montage-axis transform once per tile
-    # (3.5 s -> 65.5 s of worker time).
-    assert effects.preview_pipeline_is_tile_local(session, tile) is False
+    # The ladder admits it only because the expanded montage-axis stage is
+    # cacheable and the tile requests prove they share one real-document
+    # reduced region. This is stricter than merely asking whether it commutes.
+    assert effects.preview_pipeline_is_tile_local(session, tile) is True
 
 
-def test_display_axis_fft_neither_commutes_nor_narrows_the_montage_axis():
-    # The negative twin: move the same FFT onto a display axis and the
-    # reduce-before-ops licence goes away, while plane independence -- which
-    # would now hold on its own -- is gated behind it.
+def test_display_axis_fft_is_not_admitted_to_the_coarse_ladder():
     session = _session()
     session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=0),))
     tile = session.plan.tiles[0]
 
     assert effects.preview_pipeline_commutes_for_display_lod(session, tile) is False
-    assert effects.preview_montage_planes_are_independent(session, tile) is False
     assert effects.preview_pipeline_is_tile_local(session, tile) is False
 
 
-def test_raw_and_pointwise_pipelines_stay_per_tile_and_montage_independent():
-    # Regression guard on the split: exactly the cases that were per-tile
-    # before the predicate became axis-aware are still per-tile.  Nothing may
-    # newly reach the per-tile ladder from the axis-aware relaxation.
+def test_raw_and_pointwise_pipelines_stay_coarse_ladder_admissible():
     session = _session()
     tile = session.plan.tiles[0]
 
     for operations in ((), (Conjugate(),)):
         session.document = ArrayDocument(session.document.base_data, operations=operations)
-        assert effects.preview_montage_planes_are_independent(session, tile) is True, operations
         assert effects.preview_pipeline_is_tile_local(session, tile) is True, operations
 
     # A transform on the scrub/montage axis is not tile-local even where there
     # is no montage axis to narrow: one tile still needs the whole volume.
     session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=2),))
     session.montage_axis = None
-    assert effects.preview_montage_planes_are_independent(session, tile) is True
     assert effects.preview_pipeline_is_tile_local(session, tile) is False
 
 
@@ -657,6 +607,69 @@ def test_shared_fft_shift_ifft_preview_matches_sampled_exact_complex_output():
             rtol=1e-5,
             atol=1e-5,
         )
+
+
+def test_fft_coarse_rung_materializes_one_reduced_stage_for_272_tiles():
+    """Gate 2: sharing is a counter assertion, never a timing inference."""
+
+    data = np.arange(16 * 16 * 272, dtype=np.float32).reshape(16, 16, 272)
+    session = _session(data)
+    operations = (
+        CenteredFFT(axis=2),
+        FFTShift(axis=2),
+        CenteredIFFT(axis=2),
+    )
+    session.document = ArrayDocument(data, operations=operations)
+    session.view_state = (
+        ViewState.from_shape(data.shape)
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=17, indices=tuple(range(272)), text=":")
+    )
+    session.plan = make_montage_plan(
+        session.view_state,
+        axis=2,
+        indices=tuple(range(272)),
+        tile_shape=(16, 16),
+        columns=17,
+        viewport_shape=(1000, 1000),
+    )
+    session.lod_preview_level = 4
+    session.shader_display = True
+    evaluator = OperationEvaluator(session.document)
+    demand = _demand(0)
+
+    rows = [
+        effects.evaluate_preview_tile(
+            session,
+            tile,
+            demand=demand,
+            semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+            level=4,
+            cancellation_token=None,
+            shader_display=True,
+            evaluation_context=None,
+            stage_cache=evaluator.stage_cache,
+            stage_materializer=evaluator.stage_materializer,
+            # A reduced page must never trigger the exact native-plane warm.
+            warm_canonical_plane=True,
+        )
+        for tile in session.plan.tiles
+    ]
+
+    stage = evaluator.stage_materialization_diagnostics()
+    cache = evaluator.stage_cache_diagnostics()
+    assert stage.scheduled == 1
+    assert stage.completed == 1
+    assert stage.hits + stage.attached == 271
+    assert cache.compute_claims == 1
+    assert cache.stores == 1
+    [(stage_key, stage_value)] = evaluator.stage_cache._resident_snapshot
+    assert region_shape(stage_key.shape, stage_value.region) == stage_value.data.shape
+    assert tuple(stage_value.region.axes[0].value) == (0, 16, 16)
+    assert tuple(stage_value.region.axes[1].value) == (0, 16, 16)
+    assert len(rows) == 272
+    assert all(row[0].level_xy == (4, 4) for row in rows)
+    assert all(row[-1] is None for row in rows), "coarse pages carry no native warm plane"
 
 
 def test_shared_fft_preview_maps_shifted_flipped_window_by_source_index():

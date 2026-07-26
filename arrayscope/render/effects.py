@@ -53,13 +53,22 @@ from arrayscope.operations.capabilities import (
 from arrayscope.operations.evaluator import evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.pipeline import evaluate as evaluate_pipeline
-from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec, region_contains
+from arrayscope.operations.planner import final_region_for_request
+from arrayscope.operations.regions import (
+    AxisRegion,
+    AxisRegionKind,
+    RegionSpec,
+    StageCacheCandidate,
+    apply_region,
+    region_contains,
+)
 from arrayscope.operations.slabs import (
     evaluate_slab_from_stage,
     plan_slab,
     request_for_image,
 )
 from arrayscope.operations.source_read import read_base_region
+from arrayscope.operations.stage_cache import StageValue
 from arrayscope.presentation import LevelPhase
 from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import TileLodState
@@ -441,12 +450,29 @@ def evaluate_preview_tile(
 ):
     """Evaluate a display-only payload for a cold tile."""
 
+    _check_render_cancelled(cancellation_token)
+    if not can_evaluate_preview(session, tile):
+        return None
+    level = preview_evaluation_level(session, demand) if level is None else int(level)
+    if can_evaluate_reduced_preview(session, tile):
+        return _evaluate_tile_reduced_input_preview(
+            session,
+            tile,
+            demand=demand,
+            semantic_source_id=semantic_source_id,
+            level=level,
+            cancellation_token=cancellation_token,
+            shader_display=shader_display,
+            evaluation_context=evaluation_context,
+            stage_cache=stage_cache,
+            stage_materializer=stage_materializer,
+        )
     return _evaluate_tile_native_output_preview(
         session,
         tile,
         demand=demand,
         semantic_source_id=semantic_source_id,
-        level=level,
+        level=int(level),
         cancellation_token=cancellation_token,
         shader_display=shader_display,
         evaluation_context=evaluation_context,
@@ -466,28 +492,24 @@ def evaluate_shared_preview(
     cancellation_token=None,
     shader_display: bool,
     evaluation_context=None,
-    upload_preview_useful: bool = False,
 ):
-    """Evaluate one reduced display volume and fan it out as preview planes."""
+    """Evaluate one reduced display volume and return value-helper rows.
 
-    if not shared_preview_is_useful(
-        session,
-        seed_tile,
-        demand,
-        upload_preview_useful=upload_preview_useful,
-    ):
+    ADR 0059 retired this function's separate scheduler. It remains useful for
+    direct value tests and tools, but owns no admission, claims, or barrier.
+    """
+
+    if not can_evaluate_reduced_preview(session, seed_tile) or demand is None:
         return ()
     level = preview_evaluation_level(session, demand) if level is None else int(level)
     factor_xy = factor_xy_for_level(demand, level)
-    independent_tiles = preview_montage_planes_are_independent(session, seed_tile)
     axis_overrides = {}
     slice_remaps = {}
-    if independent_tiles:
-        override = _shared_preview_axis_override(session, tiles)
-        if override is not None:
-            axis, values, local_indices = override
-            axis_overrides[int(axis)] = values
-            slice_remaps[int(axis)] = local_indices
+    override = _shared_evaluation_axis_override(session, tiles)
+    if override is not None:
+        axis, values, local_indices = override
+        axis_overrides[int(axis)] = values
+        slice_remaps[int(axis)] = local_indices
     reduced_base, _preview_state = read_reduced_preview_base_and_state(
         session.document,
         seed_tile.view_state,
@@ -515,7 +537,11 @@ def evaluate_shared_preview(
             tile.view_state,
             np.shape(transformed),
             factor_xy=factor_xy,
-            slice_remap=_shared_preview_slice_remap(session, tile, slice_remaps=slice_remaps),
+            slice_remap=_shared_evaluation_slice_remap(
+                session,
+                tile,
+                slice_remaps=slice_remaps,
+            ),
         )
         canonical_orientation = bool(getattr(session, "canonical_orientation", False))
         if shader_preview:
@@ -962,177 +988,6 @@ def can_evaluate_reduced_preview(session, tile) -> bool:
     )
 
 
-def preview_is_useful(session, tile, demand, *, upload_preview_useful: bool = False) -> bool:
-    if not can_evaluate_preview(session, tile):
-        return False
-    if demand is None:
-        return False
-    if preview_evaluation_level(session, demand) <= int(getattr(demand, "desired_level", 0) or 0):
-        return False
-    return bool(preview_pipeline_commutes_for_display_lod(session, tile) or upload_preview_useful)
-
-
-def shared_preview_is_useful(session, tile, demand, *, upload_preview_useful: bool = False) -> bool:
-    """Whether the shared reduced-volume route should serve this tile.
-
-    The `resident` refusal below is a POLICY decision carrying measurements,
-    not the correctness gate its provenance suggests, and not a silence.
-
-    Provenance: it entered in `fbbb6f64` as two unexplained lines inside a
-    24-file canonical-page migration that, in the same commit, kept
-    `evaluate_shared_preview` alive by porting it to page-set keys.  Nine days
-    earlier `0017361e` had built this route and benchmarked it *in resident
-    mode* -- "FFT preview floor lands for all 272 tiles at 2.6 s (previously
-    no first pass), settled 4.24 s (was 6.08 s)".  No test and no ADR clause
-    pins it, and R3's plan listed the open item as "re-decide shared transform
-    preview on a fresh A/B ... the remaining decision is policy/evidence
-    only".  So it was a provisional default awaiting an A/B.
-
-    That A/B is now run (dossier section 6c, four arms).  Opening this route on
-    the 272-tile FFT montage delivers the first pixel 2.5x earlier (3596 ->
-    1433 ms), 272 preview presentations from 4 submissions, and a 2.4x calmer
-    GUI (event-loop max 1403 -> 593 ms) -- and pushes full refinement from
-    5196 ms to 11145 ms, past ground rule 3's 5 s hard limit.  So it stays
-    shut, now for a stated reason.
-
-    The reason is structural, and it is NOT the duplicate per-tile work ADR
-    0050 feared.  `CenteredFFT` declares `cache_stage=True`, so the per-tile
-    route already evaluates ONE native FFT stage (baseline's single 921 ms
-    task) and fans out 272 parallel ~2.6 ms slices: the duplication was
-    removed by the stage cache years before this route could remove it.  What
-    the shared route does instead is replace 466 parallel tasks with 5 serial
-    ones (2.63 s of work in 514 ms median batches), and for a montage-axis
-    transform it cannot be split into more batches without each batch
-    re-reading every montage plane -- batching IS duplication here.  It trades
-    away parallelism to remove work that is already gone.
-
-    Handing only the preview to this route and leaving the target per-tile was
-    also measured, and is worse than either: the per-tile rungs outrun the
-    shared preview, which then presents 0 of 272 tiles while still costing its
-    full evaluation.  The barrier this function's caller keeps -- every preview
-    row acknowledged before the shared target is admitted -- is what makes the
-    route coherent, and it is also what serializes it.
-
-    Unblocking it needs a parallel shared form (or an overlap of that
-    barrier), not a change here.  Until then the honest gate is this one.
-    """
-
-    if str(getattr(session, "lod_policy_mode", "")) == "resident":
-        return False
-    if not can_evaluate_reduced_preview(session, tile):
-        return False
-    if demand is None:
-        return False
-    if preview_evaluation_level(session, demand) < int(getattr(demand, "desired_level", 0) or 0):
-        return False
-    if preview_pipeline_commutes_for_display_lod(session, tile):
-        return True
-    return _shared_transform_preview_enabled()
-
-
-def shared_transform_target_level(session, demand) -> int:
-    """Next shared reduced-volume target level.
-
-    Higher-quality shared work is allowed only after the first shared preview
-    floor is actually presented. Desired payloads waiting for backend ack are
-    not enough; otherwise a target pass can supersede the first fill before it
-    reaches the screen.
-    """
-
-    desired = int(getattr(demand, "desired_level", 0) or 0)
-    preview = int(preview_evaluation_level(session, demand))
-    if desired <= 0:
-        return preview
-    planned = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-    if not planned:
-        return preview
-    for tile in planned:
-        tile_number = int(tile.montage_index)
-        if tile_number in getattr(session, "rendered_tiles", {}):
-            continue
-        payload = presented_preview_payload(session, tile_number)
-        if payload is None:
-            return preview
-        level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-        if level <= desired:
-            return preview
-    return desired
-
-
-def shared_transform_candidate_tiles(
-    session,
-    *,
-    level: int,
-    tile_numbers=None,
-    include_missing: bool = True,
-    require_presented_preview: bool = False,
-    exact_pass: bool = False,
-):
-    """Tiles whose shared reduced-volume target would improve presentation.
-
-    ``include_missing`` is the first-pixel path: blank planned tiles should get
-    the cheap shared preview even while finer work is also possible elsewhere.
-    ``require_presented_preview`` is the quality path: only upgrade tiles whose
-    current preview is acknowledged on screen, so finer shared work cannot race
-    ahead of the first visible fill and leave black/pending slots behind.  The
-    caller owns the plan-wide barrier; once it opens every acknowledged preview
-    remains a target candidate, including a retained preview finer than a newly
-    coarsened demand.  Quality is a semantic target fact, not just an LOD number.
-    """
-
-    target_level = int(level)
-    allowed = None if tile_numbers is None else {int(tile) for tile in tuple(tile_numbers or ())}
-    for candidate in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()):
-        tile_number = int(candidate.montage_index)
-        if allowed is not None and tile_number not in allowed:
-            continue
-        if require_presented_preview:
-            payload = presented_first_pixel_payload(session, tile_number)
-            lifecycle = getattr(session, "lifecycle", None)
-            if (
-                payload is None
-                or lifecycle is None
-                or not lifecycle.target_unsettled_tiles((tile_number,))
-            ):
-                continue
-            yield candidate
-            continue
-        if tile_number in getattr(session, "rendered_tiles", {}):
-            continue
-        payload = getattr(session, "display_tile_payloads", {}).get(tile_number)
-        if payload is None:
-            if include_missing:
-                yield candidate
-            continue
-        if include_missing and payload_identity_dead(session, tile_number, payload):
-            # A payload the backend can never acknowledge (its typed identity
-            # cannot satisfy the tile's current target) is not coverage — it
-            # is a stale wrapper that every commit silently rejects. Counting
-            # it as resident starved the tile of any producer while the
-            # first-pixel barrier waited on exactly this acknowledgement
-            # (field stall 2026-07-16, session 148). Regenerate it fresh.
-            yield candidate
-            continue
-        quality = str(getattr(payload, "quality", "exact"))
-        payload_level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
-        if quality == "preview" and payload_level > target_level:
-            yield candidate
-            continue
-        if exact_pass and quality != "exact":
-            # This pass produces quality="exact" payloads at ``level``. A
-            # non-exact payload — a retained FALLBACK floor, or a preview at
-            # (or finer than) the target level from a finer-demand
-            # generation — can never settle the tile's exact target, however
-            # correct its pixels look. Candidacy on this pass is therefore
-            # the target fact, not a level comparison: churn 2026-07-16
-            # parked 38 fallback-at-desired-level tiles with open targets
-            # and no producer, immune to retargets (dossier
-            # stale-empty-tiles-2026-07-16.md, member 5).
-            lifecycle = getattr(session, "lifecycle", None)
-            if lifecycle is not None and lifecycle.target_unsettled_tiles((tile_number,)):
-                yield candidate
-
-
 def payload_identity_dead(session, tile_number: int, payload) -> bool:
     """Whether the backend can never acknowledge this payload for its target.
 
@@ -1230,49 +1085,57 @@ def _preview_narrowable_axes(session, axes) -> frozenset[int]:
     )
 
 
-def preview_montage_planes_are_independent(session, tile) -> bool:
-    """Whether a shared preview may narrow the montage axis to its own tiles.
-
-    A different question from `preview_pipeline_commutes_for_display_lod`, and
-    the two came apart when the latter became axis-aware: an FFT along the
-    montage axis commutes *exactly* with a box mean of the display axes, and
-    at the same time couples every plane to every other.  Reducing the display
-    axes is therefore legal while reading only the requested planes is not --
-    doing both returns the spectrum of three planes where 272 were meant.
-
-    Commuting is still required: the caller reduces before it evaluates.
-    """
-
-    if not preview_pipeline_commutes_for_display_lod(session, tile):
-        return False
-    montage_axis = getattr(session, "montage_axis", None)
-    if montage_axis is None:
-        return True  # no montage axis to narrow
-    return int(montage_axis) in _preview_narrowable_axes(session, (int(montage_axis),))
-
-
 def preview_pipeline_is_tile_local(session, tile) -> bool:
-    """Whether a PER-TILE reduced-input rung costs one tile's worth of work.
+    """Whether the ladder can evaluate reduced input without repeated bulk work.
 
-    The ladder's `reduced_input_available` wants this, not commuting: a
-    per-tile rung is only cheap when evaluating one tile needs nothing outside
-    that tile's own region, so its cost does not scale with the rest of the
-    volume.  Any stage that expands a request axis breaks that, whether the
-    axis is displayed or not -- a montage-axis FFT re-runs the whole transform
-    once per tile, and a scrub-axis FFT re-reads every slice.
-
-    Measured on the 272-tile FFT montage: routing that pipeline to per-tile
-    rungs (which asking the commuting question here does, now that it is
-    axis-aware) took tile worker time from 3.5 s to 65.5 s and left every tile
-    on a level-4 preview that never refined.  The reduced-input FFT preview
-    belongs to the shared transform route, which evaluates it once.
+    Truly tile-local pipelines pass directly. A montage-axis expansion may
+    also pass, but only when every expanding stage is cacheable and two tile
+    requests prove they resolve to the same real-document reduced region.
+    That is deliberately stricter than the commuting question: it admits the
+    shared-stage FFT case without reopening the measured 272 cold native
+    evaluations that made the old per-tile experiment catastrophic.
     """
 
     if not preview_pipeline_commutes_for_display_lod(session, tile):
         return False
-    base_shape = np.shape(getattr(getattr(session, "document", None), "base_data", ()))
+    document = getattr(session, "document", None)
+    base_shape = np.shape(getattr(document, "base_data", ()))
     every_axis = frozenset(range(len(base_shape)))
-    return _preview_narrowable_axes(session, sorted(every_axis)) == every_axis
+    narrowable = _preview_narrowable_axes(session, sorted(every_axis))
+    if narrowable == every_axis:
+        return True
+    montage_axis = getattr(session, "montage_axis", None)
+    if montage_axis is None or every_axis - narrowable != {int(montage_axis)}:
+        return False
+    shape = tuple(int(size) for size in base_shape)
+    dtype = getattr(getattr(document, "base_data", None), "dtype", None)
+    expanded_stage_found = False
+    for operation in tuple(getattr(document, "enabled_operations", ()) or ()):
+        capabilities = operation.capabilities(shape, dtype)
+        if int(montage_axis) in tuple(capabilities.expands_request_axes):
+            if not bool(capabilities.cache_stage):
+                return False
+            expanded_stage_found = True
+        shape = tuple(int(size) for size in operation.output_shape(shape))
+        dtype = operation.output_dtype(dtype)
+    if not expanded_stage_found:
+        return False
+    tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
+    if len(tiles) < 2:
+        return True
+    level = max(1, int(getattr(session, "lod_preview_level", 0) or 0))
+    factor_xy = (2**level, 2**level)
+    first = _reduced_preview_read_spec(
+        document,
+        tiles[0].view_state,
+        factor_xy=factor_xy,
+    )
+    second = _reduced_preview_read_spec(
+        document,
+        tiles[1].view_state,
+        factor_xy=factor_xy,
+    )
+    return first.region == second.region
 
 
 def preview_evaluation_level(session, demand) -> int:
@@ -1291,6 +1154,47 @@ def read_reduced_preview_base_and_state(
     axis_region_overrides=None,
     sample_display_axes: bool = False,
 ) -> tuple[np.ndarray, object]:
+    read_spec = _reduced_preview_read_spec(
+        document,
+        view_state,
+        factor_xy=factor_xy,
+        axis_region_overrides=axis_region_overrides,
+        sample_display_axes=sample_display_axes,
+    )
+    base = read_base_region(
+        document.base_data,
+        read_spec.input_region,
+        cancellation_token=cancellation_token,
+        evaluation_context=evaluation_context,
+    )
+    reduced = (
+        np.asarray(base)
+        if sample_display_axes
+        else reduce_array_display_axes(
+            base,
+            tuple(int(axis) for axis in view_state.image_axes),
+            factor_xy,
+        )
+    )
+    preview_state = reduced_preview_view_state(
+        view_state,
+        np.shape(reduced),
+        factor_xy=factor_xy,
+        slice_remap=read_spec.slice_remap,
+    )
+    return reduced, preview_state
+
+
+def _reduced_preview_read_spec(
+    document,
+    view_state,
+    *,
+    factor_xy: tuple[int, int],
+    axis_region_overrides=None,
+    sample_display_axes: bool = False,
+):
+    """Plan the real-document region that feeds one reduced preview stage."""
+
     axis_region_overrides = {
         int(axis): tuple(int(value) for value in tuple(values or ()))
         for axis, values in dict(axis_region_overrides or {}).items()
@@ -1366,24 +1270,28 @@ def read_reduced_preview_base_and_state(
         )
         read_axes.append(read_axis)
         slice_remap[axis] = local_index
-    base = read_base_region(
-        document.base_data,
-        RegionSpec(tuple(read_axes)),
-        cancellation_token=cancellation_token,
-        evaluation_context=evaluation_context,
+    stage_axes = list(read_axes)
+    if not sample_display_axes:
+        stage_axes[image_axes[0]] = _sample_preview_axis_region(
+            read_axes[image_axes[0]],
+            base_shape[image_axes[0]],
+            max(1, int(factor_xy[1])),
+        )
+        stage_axes[image_axes[1]] = _sample_preview_axis_region(
+            read_axes[image_axes[1]],
+            base_shape[image_axes[1]],
+            max(1, int(factor_xy[0])),
+        )
+    read_shape = [
+        _axis_region_length(axis_region, base_shape[axis])
+        for axis, axis_region in enumerate(stage_axes)
+    ]
+    return SimpleNamespace(
+        input_region=RegionSpec(tuple(read_axes)),
+        region=RegionSpec(tuple(stage_axes)),
+        reduced_shape=tuple(int(size) for size in read_shape),
+        slice_remap=dict(slice_remap),
     )
-    reduced = (
-        np.asarray(base)
-        if sample_display_axes
-        else reduce_array_display_axes(base, image_axes, factor_xy)
-    )
-    preview_state = reduced_preview_view_state(
-        view_state,
-        np.shape(reduced),
-        factor_xy=factor_xy,
-        slice_remap=slice_remap,
-    )
-    return reduced, preview_state
 
 
 def _sample_preview_axis_region(axis_region: AxisRegion, size: int, factor: int) -> AxisRegion:
@@ -1679,6 +1587,254 @@ def preview_claim_key(session, tile, *, demand, semantic_source_id, shader_displ
     return None
 
 
+def _evaluate_tile_reduced_input_preview(
+    session,
+    tile,
+    *,
+    demand,
+    semantic_source_id,
+    level: int,
+    cancellation_token,
+    shader_display: bool,
+    evaluation_context,
+    stage_cache,
+    stage_materializer,
+):
+    """Evaluate one coarse tile from a real-document reduced stage.
+
+    The stage identity is the real document plus its source region and
+    reduction.  A montage-axis transform expands every tile request to the
+    same region, so the stage cache computes the reduced volume once and the
+    per-tile ladder workers only slice and page it.
+    """
+
+    factor_xy = factor_xy_for_level(demand, int(level))
+    read_spec = _reduced_preview_read_spec(
+        session.document,
+        tile.view_state,
+        factor_xy=factor_xy,
+    )
+    candidate = _reduced_preview_stage_candidate(
+        session.document,
+        read_spec,
+        factor_xy=factor_xy,
+    )
+
+    def compute():
+        reduced_base, _preview_state = read_reduced_preview_base_and_state(
+            session.document,
+            tile.view_state,
+            factor_xy=factor_xy,
+            cancellation_token=cancellation_token,
+            evaluation_context=evaluation_context,
+        )
+        transformed = _evaluate_reduced_preview_volume(
+            session.document,
+            reduced_base,
+            cancellation_token=cancellation_token,
+        )
+        values = np.asarray(transformed)
+        return StageValue(
+            data=values,
+            region=candidate.region,
+            stage_index=int(candidate.stage_index),
+            nbytes=int(getattr(values, "nbytes", 0) or 0),
+            priority=str(candidate.priority),
+            recompute_cost=float(getattr(candidate, "estimated_recompute_cost", 0.0) or 0.0),
+            visible_reuse=True,
+        )
+
+    stage_value = None
+    if stage_cache is not None and stage_materializer is not None:
+        stage_value = stage_materializer.materialize_singleflight(
+            stage_document_key(session.document),
+            candidate,
+            compute,
+            should_abort=(
+                None
+                if cancellation_token is None
+                else lambda: bool(getattr(cancellation_token, "cancelled", False))
+            ),
+        )
+        if stage_value is None:
+            return None
+    else:
+        stage_value = compute()
+    _check_render_cancelled(cancellation_token)
+
+    transformed = np.asarray(stage_value.data)
+    preview_state = reduced_preview_view_state(
+        tile.view_state,
+        transformed.shape,
+        factor_xy=factor_xy,
+        slice_remap=read_spec.slice_remap,
+    )
+    request = request_for_image(preview_state)
+    slab = apply_region(
+        transformed,
+        final_region_for_request(transformed.shape, request),
+    )
+    canonical_orientation = bool(getattr(session, "canonical_orientation", False))
+    if bool(shader_display):
+        value = make_shader_image_from_slab(
+            slab,
+            request,
+            colormap_lut=session.colormap_lut,
+            provisional_histogram=True,
+            canonical_orientation=canonical_orientation,
+        )
+    else:
+        value = make_image_from_slab(
+            slab,
+            request,
+            colormap_lut=session.colormap_lut,
+            canonical_orientation=canonical_orientation,
+        )
+    value = replace(
+        value,
+        semantic_data=None,
+        level_data=getattr(value, "level_data", None),
+        level_stats=getattr(value, "level_stats", None),
+        lod=LodInfo(
+            level=int(level),
+            factor=max(int(factor_xy[0]), int(factor_xy[1])),
+            source_shape=tuple(
+                int(size) for size in render_lod.canonical_source_tile_shape(session)[:2]
+            ),
+            texture_shape=tuple(int(size) for size in np.shape(value.data)[:2]),
+            gutter=0,
+        ),
+    )
+    rendered = RenderedTile(
+        tile=tile,
+        image=value.data,
+        histogram_data=value.histogram_data,
+        eval_ms=0.0,
+        slab_shape=tuple(np.shape(value.data)),
+        slab_nbytes=int(getattr(np.asarray(value.data), "nbytes", 0) or 0),
+        shader_mapping=getattr(value, "shader_mapping", None),
+        texture_kind=getattr(value, "texture_kind", None),
+        semantic_data=None,
+        semantic_histogram_data=None,
+        lod=getattr(value, "lod", None),
+        level_data=getattr(value, "level_data", None),
+        level_stats=getattr(value, "level_stats", None),
+        quality="preview",
+    )
+    format_key = render_lod.page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=int(level),
+        semantic_source_id=semantic_source_id,
+        shader_display=bool(shader_display),
+    )
+    source, _histogram, texture_kind = render_lod.texture_source_for_rendered(
+        rendered,
+        shader_display=bool(shader_display),
+    )
+    template_plan = format_key.plans[0]
+    native_shape = tuple(int(size) for size in render_lod.canonical_source_tile_shape(session)[:2])
+    anchor_fn = getattr(session, "payload_source_anchor_for_rendered", None)
+    if callable(anchor_fn):
+        source_anchor = anchor_fn(rendered, native_shape)
+    else:
+        anchor_fn = getattr(session, "_payload_source_anchor", None)
+        if callable(anchor_fn):
+            try:
+                source_anchor = anchor_fn(
+                    native_shape,
+                    source_index=int(tile.source_index),
+                )
+            except TypeError:
+                source_anchor = anchor_fn(native_shape)
+        else:
+            source_anchor = None
+    valid_source_rect_yx = (
+        (0, native_shape[0], 0, native_shape[1])
+        if source_anchor is None
+        else tuple(int(value) for value in source_anchor.source_rect)
+    )
+    plans = plan_source_grid_pages(
+        content_key=(
+            "src-anchored",
+            semantic_source_id,
+            ("display-plane", _reduced_preview_route(factor_xy)),
+        ),
+        valid_source_rect_yx=valid_source_rect_yx,
+        reduction_yx=template_plan.reduction_yx,
+        stored_page_shape=template_plan.stored_page_shape,
+        dtype=template_plan.key.dtype,
+        representation=template_plan.key.representation,
+        reducer=template_plan.reducer,
+    )
+    key = render_lod.LodPageSetKey(
+        source_id=semantic_source_id,
+        tile_id=int(tile.source_index),
+        level_xy=format_key.level_xy,
+        reducer=format_key.reducer,
+        plans=plans,
+    )
+    pages = _materialize_shared_preview_pages(source, plans=plans)
+    histogram = _preview_display_histogram(
+        rendered,
+        source,
+        texture_kind,
+        getattr(value, "histogram_data", None),
+    )
+    rough_level_stats = chunk_level_stats_for_pages(
+        pages,
+        source_index=int(tile.source_index),
+        mapping=getattr(value, "shader_mapping", None),
+    )
+    _check_render_cancelled(cancellation_token)
+    return (
+        key,
+        pages,
+        None if histogram is None else np.asarray(histogram),
+        getattr(value, "shader_mapping", None),
+        texture_kind,
+        getattr(value, "level_data", None),
+        rough_level_stats,
+        None,
+    )
+
+
+def _reduced_preview_route(factor_xy) -> tuple:
+    return (
+        "reduced-input-preview",
+        1,
+        tuple(int(value) for value in factor_xy),
+        "box-mean-display-axes-before-operations",
+    )
+
+
+def _reduced_preview_stage_candidate(document, read_spec, *, factor_xy):
+    output_shape = tuple(int(size) for size in read_spec.reduced_shape)
+    output_dtype = getattr(document.base_data, "dtype", np.float32)
+    for operation in tuple(getattr(document, "enabled_operations", ()) or ()):
+        output_shape = tuple(int(size) for size in operation.output_shape(output_shape))
+        output_dtype = operation.output_dtype(output_dtype)
+    output_dtype = np.dtype(np.float32 if output_dtype is None else output_dtype)
+    estimated = int(np.prod(output_shape, dtype=np.int64)) * output_dtype.itemsize
+    return StageCacheCandidate(
+        stage_index=len(tuple(getattr(document, "enabled_operations", ()) or ())),
+        operation_prefix=(
+            _reduced_preview_route(factor_xy),
+            *tuple(getattr(document, "enabled_operations", ()) or ()),
+        ),
+        region=read_spec.region,
+        # Containment is expressed in the real document's coordinate space.
+        shape=tuple(int(size) for size in np.shape(document.base_data)),
+        dtype=str(output_dtype),
+        estimated_nbytes=estimated,
+        priority="highest",
+        reason="reduced-input coarse rung on real document region",
+        retain=True,
+        retain_reason="shared reduced-input montage stage",
+        visible_reuse=True,
+    )
+
+
 def _evaluate_tile_native_output_preview(
     session,
     tile,
@@ -1812,15 +1968,18 @@ def _display_axis_region_for_preview(view_state, axis: int, size: int) -> AxisRe
     return AxisRegion(AxisRegionKind.INDICES, values)
 
 
-def _shared_transform_preview_enabled() -> bool:
-    """Shared transform preview is an R3 pipeline path, not a runtime fork."""
+def _evaluate_reduced_preview_volume(document, reduced_base, *, cancellation_token):
+    _check_preview_cancelled(cancellation_token)
+    data = evaluate_pipeline(reduced_base, getattr(document, "enabled_operations", ()))
+    _check_preview_cancelled(cancellation_token)
+    return data
 
-    return True
 
+def _shared_evaluation_axis_override(session, tiles):
+    """Narrow only axes proven independent for the retained value helper."""
 
-def _shared_preview_axis_override(session, tiles):
     axis = getattr(session, "montage_axis", None)
-    if axis is None:
+    if axis is None or int(axis) not in _preview_narrowable_axes(session, (int(axis),)):
         return None
     values = tuple(
         dict.fromkeys(int(getattr(tile, "source_index", 0)) for tile in tuple(tiles or ()))
@@ -1831,14 +1990,7 @@ def _shared_preview_axis_override(session, tiles):
     return int(axis), values, local_indices
 
 
-def _evaluate_reduced_preview_volume(document, reduced_base, *, cancellation_token):
-    _check_preview_cancelled(cancellation_token)
-    data = evaluate_pipeline(reduced_base, getattr(document, "enabled_operations", ()))
-    _check_preview_cancelled(cancellation_token)
-    return data
-
-
-def _shared_preview_slice_remap(session, tile, *, slice_remaps=None) -> dict[int, int]:
+def _shared_evaluation_slice_remap(session, tile, *, slice_remaps=None) -> dict[int, int]:
     axis = getattr(session, "montage_axis", None)
     if axis is None:
         return {}
@@ -1874,8 +2026,6 @@ __all__ = [
     "montage_refined_level_values",
     "preview_claim_key",
     "preview_evaluation_level",
-    "preview_is_useful",
-    "preview_montage_planes_are_independent",
     "preview_pipeline_commutes_for_display_lod",
     "preview_pipeline_is_tile_local",
     "read_reduced_preview_base_and_state",
@@ -1884,8 +2034,5 @@ __all__ = [
     "reduce_nd_axis_mean",
     "reduced_preview_view_state",
     "rendered_tile_from_evaluation_result",
-    "shared_preview_is_useful",
-    "shared_transform_candidate_tiles",
-    "shared_transform_target_level",
     "tile_lod_states",
 ]

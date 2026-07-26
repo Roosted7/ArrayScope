@@ -251,7 +251,6 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_lod_coarse_rung_gates=_coarse_rung_gate_rows(session),
         tile_lod_pipeline_counters=_pipeline_counter_row(session),
         tile_lod_ladder_floor_level=int(getattr(_ladder_policy(session), "floor_level", -1)),
-        tile_lod_ladder_preview_level=int(getattr(_ladder_policy(session), "preview_level", -1)),
         tile_lod_ladder_reduced_input=bool(
             getattr(_ladder_policy(session), "reduced_input_available", False)
         ),
