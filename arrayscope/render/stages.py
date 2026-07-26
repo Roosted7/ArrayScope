@@ -205,13 +205,23 @@ class RungEvaluationTimings:
                 self._max_ns[bucket] = elapsed_ns
 
     def record_discarded(self, rung: int, level: int) -> None:
-        """Account one evaluation whose result was never committed.
+        """Account one evaluation whose *display payload* was never committed.
 
         Counted, not timed: the discard is learned on the GUI thread when the
         result arrives too late to commit, by which point the worker's own
         elapsed reading is gone.  Price it as ``discarded * total_ms / calls``
         from the same row — on the 272-tile FFT montage that reads 8 discarded
-        level-1 evaluations against a 1041 ms mean, i.e. ~8 s of a 5.5 s stage.
+        level-1 evaluations against a ~950 ms mean, i.e. ~7.6 s of a 3.9 s
+        stage.
+
+        **A discard is not proof of waste, and this counter must not be read as
+        one.** It says a payload did not reach the screen; it says nothing about
+        whether the evaluation was on the critical path or whether removing it
+        would make anything faster.  Measured on exactly that FFT montage: a
+        configuration doing 9.7 s *less* total evaluation (15.5 s -> 5.9 s) with
+        zero discards finished **1.35 s slower**, because this pipeline is
+        serialization-bound on the presentation path, not worker-bound.  See
+        `docs/redesign/discarded-rung-evaluation-2026-07-26.md` §6.
         """
 
         bucket = (int(rung), int(level))

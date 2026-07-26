@@ -759,3 +759,40 @@ def test_coarse_rung_gate_history_survives_the_plan_that_converges():
     history = dict(pipeline.coarse_rung_refusals())
     assert history[ladder_module.COARSE_RUNG_NO_REDUCED_INPUT] == 1
     assert history[ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED] == 1
+
+
+def test_interactive_native_deferral_covers_every_step_without_reduced_input():
+    """The whole fill is inside the deferred class when reduced input is absent.
+
+    `reduce_from_native` is `not reduced_input_available`, so on an
+    FFT-shaped montage every DESIRED step qualifies for the interaction
+    deferral — which is why "treat montage entry as unsettled" would pause the
+    fill rather than trim its expensive tail. Measured on the real stage:
+    interactive_native_deferred = 3808 in one run.
+    """
+
+    _kernel, effects, pipeline = make_pipeline(
+        tiles=3, floor_level=4, preview_level=4, reduced_input_available=False
+    )
+
+    submitted = pipeline.retarget(intent(interactive=True), demand(2), scope(0, 1, 2, missing=3))
+
+    assert submitted == 0
+    assert pipeline.counters.interactive_native_deferred == 3
+    assert effects.evaluated == []
+    assert pipeline.counters.as_dict()["interactive_native_deferred"] == 3
+
+
+def test_same_plan_admits_everything_once_the_interaction_ends():
+    """The deferral is a pause, not a drop: the identical plan then submits."""
+
+    kernel, effects, pipeline = make_pipeline(
+        tiles=3, floor_level=4, preview_level=4, reduced_input_available=False
+    )
+    pipeline.retarget(intent(interactive=True), demand(2), scope(0, 1, 2, missing=3))
+
+    submitted = pipeline.retarget(intent(interactive=False), demand(2), scope(0, 1, 2, missing=3))
+    drain(kernel)
+
+    assert submitted == 3
+    assert len(effects.evaluated) == 3

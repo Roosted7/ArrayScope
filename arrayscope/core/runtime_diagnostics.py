@@ -168,6 +168,14 @@ class MontageRuntimeDiagnostics:
     tile_lod_ladder_floor_level: int = -1
     tile_lod_ladder_preview_level: int = -1
     tile_lod_ladder_reduced_input: bool = False
+    # `PipelineCounters.as_dict()`: intents, ladder_plans, tasks_submitted,
+    # interactive_native_deferred, commit_batches, acks_confirmed,
+    # acks_rejected_stale.  `interactive_native_deferred` in particular was
+    # incremented and never surfaced, and it is the direct evidence for why a
+    # plan submitted nothing: every FFT DESIRED step carries
+    # `reduce_from_native=True`, so an interaction defers the whole fill, not
+    # just the expensive tail.
+    tile_lod_pipeline_counters: dict[str, int] = field(default_factory=dict)
     # ADR 0050 zero-redundant-work counters: histogram/level recomputes caused
     # by display-LOD level swaps must stay 0; the reuse counters make the
     # avoided work observable in JSONL A/B traces.
@@ -1005,6 +1013,7 @@ _MONTAGE_COVERED = frozenset(
         "tile_lod_ladder_floor_level",
         "tile_lod_ladder_preview_level",
         "tile_lod_ladder_reduced_input",
+        "tile_lod_pipeline_counters",
         "tile_lod_stats_cross_level_reuses",
         "tile_lod_stats_recomputes",
         "tile_lod_cross_level_reductions",
@@ -1159,7 +1168,9 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
                 "Coarse rung: "
                 f"floor=L{montage.tile_lod_ladder_floor_level} "
                 f"preview=L{montage.tile_lod_ladder_preview_level} "
-                f"reduced_input={_bool_text(montage.tile_lod_ladder_reduced_input)}"
+                f"reduced_input={_bool_text(montage.tile_lod_ladder_reduced_input)} "
+                f"native_deferred="
+                f"{int(montage.tile_lod_pipeline_counters.get('interactive_native_deferred', 0))}"
             ),
             *(
                 (

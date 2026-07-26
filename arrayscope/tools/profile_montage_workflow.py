@@ -6501,6 +6501,7 @@ def _phase_record(
         "montage_quality_ladder_reduced_input": bool(
             getattr(montage, "tile_lod_ladder_reduced_input", False)
         ),
+        "montage_pipeline_counters": dict(getattr(montage, "tile_lod_pipeline_counters", {}) or {}),
         "montage_quality_preview_presentations": int(
             getattr(montage, "tile_lod_preview_presentations", 0) or 0
         ),

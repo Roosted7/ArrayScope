@@ -372,6 +372,11 @@ class FrameRuntimeMixin:
             policy_preview_level=int(getattr(ladder_policy, "preview_level", -1)),
             policy_reduced_input=bool(getattr(ladder_policy, "reduced_input_available", False)),
             demand_level=int(getattr(session.lod_policy_decision.demand, "desired_level", -1)),
+            # Whether this plan believed an interaction was in flight. Expensive
+            # native rungs are deferred only when it is True, so a camera change
+            # that lands *after* a cold plan gets the worst of both: the plan
+            # admits ~1 s uncancellable work, and the change then discards it.
+            interactive=bool(getattr(intent, "interactive", False)),
             coarse_rung_refusals=tuple(getattr(pipeline, "last_coarse_rung_refusals", ()) or ()),
             first_pixels_presented=bool(session.visible_first_pixels_presented()),
             required_tile_count=len(session.required_tile_numbers()),

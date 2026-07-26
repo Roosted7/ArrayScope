@@ -142,6 +142,7 @@ def test_live_montage_commit_throw_is_named_not_silently_stranded(qtbot, monkeyp
     from tests.ui.helpers import clear_arrayscope_settings
 
     clear_arrayscope_settings()
+    from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
     from arrayscope.window import ArrayScopeWindow
 
     injected = []
@@ -167,7 +168,7 @@ def test_live_montage_commit_throw_is_named_not_silently_stranded(qtbot, monkeyp
         win.render(reason="test-commit-throw")
         qtbot.waitUntil(
             lambda: getattr(win.renderer, "_last_montage_commit_exception", None) is not None,
-            timeout=10_000,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
         recorded = win.renderer._last_montage_commit_exception

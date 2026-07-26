@@ -252,6 +252,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         ),
         tile_lod_rung_evaluations=_rung_evaluation_rows(session),
         tile_lod_coarse_rung_gates=_coarse_rung_gate_rows(session),
+        tile_lod_pipeline_counters=_pipeline_counter_row(session),
         tile_lod_ladder_floor_level=int(getattr(_ladder_policy(session), "floor_level", -1)),
         tile_lod_ladder_preview_level=int(getattr(_ladder_policy(session), "preview_level", -1)),
         tile_lod_ladder_reduced_input=bool(
@@ -918,6 +919,17 @@ def _montage_payload_level_counts(session) -> tuple[tuple[int, int], ...]:
         level = int(getattr(getattr(payload, "lod", None), "level", 0) or 0)
         counts[level] = counts.get(level, 0) + 1
     return tuple(sorted(counts.items()))
+
+
+def _pipeline_counter_row(session) -> dict[str, int]:
+    """The frame pipeline's own counters, which nothing surfaced before."""
+
+    as_dict = getattr(
+        getattr(getattr(session, "pipeline", None), "counters", None), "as_dict", None
+    )
+    if not callable(as_dict):
+        return {}
+    return {str(name): int(value) for name, value in as_dict().items()}
 
 
 def _coarse_rung_gate_rows(session) -> tuple[tuple[str, int], ...]:
