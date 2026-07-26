@@ -175,6 +175,76 @@ def test_wgpu_scalar_scroll_back_settles_retained_fallbacks_to_exact(qtbot):
         restore_default_backend(settings)
 
 
+def test_wgpu_preview_target_warms_native_pages_for_crop_rebind(qtbot):
+    """Preview stays reduced; target refinement establishes warm native pages."""
+
+    settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
+    yy = np.arange(336, dtype=np.float32)[:, None, None]
+    xx = np.arange(336, dtype=np.float32)[None, :, None]
+    zz = np.arange(80, dtype=np.float32)[None, None, :]
+    data = np.ascontiguousarray(yy * 1000.0 + xx * 2.0 + zz * 17.0)
+    montage_indices = tuple(range(15, 65))
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
+    # Commit 21959940 kept the preview mechanism behind this profiling arm.
+    # Pin it on here so the regression remains red on that exact base; the
+    # product branch makes the same mechanism the explicit default.
+    win.renderer._profile_enable_coarse_rung = True
+    win.resize(1200, 900)
+    try:
+        win.show()
+        state = (
+            win.view_state.with_image_axes(1, 0)
+            .with_axis_flipped(1, True)
+            .with_montage_axis(2, columns=10, indices=montage_indices, text=":")
+        )
+        win._set_view_state(state)
+        win.update_image_view()
+        qtbot.waitUntil(
+            lambda: _window_settled(win, montage_indices),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+
+        initial_diagnostics = win.img_view.wgpuPresentationDiagnostics()
+        uploads_after_target = int(initial_diagnostics["wgpu_uploads_total"])
+        resident_l0 = sum(
+            key.document_generation[0] == "wgpu-source-plane" and int(key.lod.level) == 0
+            for key in win.img_view._wgpu_executor.page_table.resident_keys()
+        )
+        assert resident_l0 == 4 * len(montage_indices)
+        assert uploads_after_target == resident_l0 + len(montage_indices), (
+            "the preview may upload one reduced page per tile; only the later "
+            "target pass may establish the four canonical native pages"
+        )
+
+        previous_session_id = int(win.renderer._frame_session.session_id)
+        win._apply_slice_state(
+            0,
+            win.view_state.with_axis_range(
+                0,
+                indices=tuple(range(97, 197)),
+                text="97:197",
+            ),
+            reason="slice-range",
+            interactive=True,
+            immediate_axis_only=False,
+        )
+        qtbot.waitUntil(
+            lambda: (
+                int(win.renderer._frame_session.session_id) != previous_session_id
+                and _window_settled(win, montage_indices)
+            ),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+        assert (
+            int(win.img_view.wgpuPresentationDiagnostics()["wgpu_uploads_total"])
+            == uploads_after_target
+        )
+        assert_wgpu_frame_matches_cpu_reference(win)
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
 @pytest.mark.parametrize("backend", ["wgpu", "pyqtgraph"])
 def test_cropped_display_axis_scroll_keeps_complete_montage(qtbot, backend):
     """A rapid displayed-axis crop retarget must retain all 50 montage tiles."""

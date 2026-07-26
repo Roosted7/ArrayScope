@@ -419,6 +419,35 @@ def evaluate_target_tile(
             stage_cache=stage_cache,
             stage_materializer=stage_materializer,
         )
+    if warm_canonical_plane:
+        # A reduced-input FLOOR must stay genuinely cheap: it neither
+        # evaluates nor uploads the native source plane.  The DESIRED rung is
+        # different.  Once coverage has closed, resident-crop rebind asks the
+        # target pass to establish the canonical native pages that later
+        # source-window shifts can rebind without producers or uploads.
+        #
+        # Routing this target through the native-output reducer gives one
+        # evaluation both jobs: its reduced pages are the requested display
+        # target, while its exact source becomes ``native_residency_data``.
+        # Sending it through ``evaluate_preview_tile`` would select the
+        # reduced-input route and discard that exact source, leaving only L1+
+        # pages despite an exact-quality target payload.
+        if not can_evaluate_preview(session, tile):
+            return None
+        return _evaluate_tile_native_output_preview(
+            session,
+            tile,
+            demand=demand,
+            semantic_source_id=semantic_source_id,
+            level=int(level),
+            cancellation_token=cancellation_token,
+            shader_display=shader_display,
+            evaluation_context=evaluation_context,
+            stage_cache=stage_cache,
+            stage_materializer=stage_materializer,
+            warm_canonical_plane=True,
+            carry_full_native_residency=True,
+        )
     return evaluate_preview_tile(
         session,
         tile,
@@ -1965,6 +1994,7 @@ def _evaluate_tile_native_output_preview(
     stage_cache=None,
     stage_materializer=None,
     warm_canonical_plane: bool = False,
+    carry_full_native_residency: bool = False,
 ):
     level = preview_evaluation_level(session, demand) if level is None else int(level)
     result = _evaluate_native_tile_result(
@@ -2009,7 +2039,10 @@ def _evaluate_tile_native_output_preview(
         mapping=mapping,
     )
     _check_render_cancelled(cancellation_token)
-    residency_source = source if getattr(session, "source_anchoring", None) is not None else None
+    source_anchoring = getattr(session, "source_anchoring", None)
+    residency_source = (
+        source if source_anchoring is not None or bool(carry_full_native_residency) else None
+    )
     if warm_canonical_plane and residency_source is not None:
         # ``source`` is the WINDOW's plane. On an uncropped view that already is
         # the canonical plane and warms the window-invariant pages; on a cropped

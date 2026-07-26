@@ -302,6 +302,38 @@ def test_evaluate_target_tile_non_native_returns_display_payload_not_native_resu
     assert pages[0].values.shape == (2, 3)
 
 
+def test_reduced_target_warm_carries_native_plane_after_preview():
+    """Target refinement, not the coarse FLOOR, establishes warm L0 pages."""
+
+    session = _session()
+    session.source_anchoring = object()
+    tile = session.plan.tiles[1]
+    evaluator = OperationEvaluator(session.document)
+    demand = _demand(1)
+
+    payload = effects.evaluate_target_tile(
+        session,
+        tile,
+        level=1,
+        demand=demand,
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        stage_cache=evaluator.stage_cache,
+        stage_materializer=evaluator.stage_materializer,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+        warm_canonical_plane=True,
+    )
+
+    key, pages, *_metadata, native_source = payload
+    assert key.level_xy == (1, 1)
+    assert pages[0].values.shape == (2, 3)
+    np.testing.assert_array_equal(
+        native_source,
+        np.arange(1, 4 * 6 * 3, 3, dtype=np.float32).reshape(4, 6),
+    )
+
+
 def test_evaluate_preview_tile_returns_display_only_payload():
     session = _session()
     tile = session.plan.tiles[2]

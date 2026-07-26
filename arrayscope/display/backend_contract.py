@@ -19,6 +19,11 @@ class ImageViewBackendCapabilities:
     tile_residency_kind: str = "none"
     shader_windowing: bool = False
     native_pointer_interaction: bool = True
+    # Whether a reduced display payload can carry a complete exact source
+    # plane as separately keyed physical residency. This is stronger than
+    # generic persistent residency: the backend must bind later source-window
+    # shifts by origin against those canonical pages.
+    canonical_source_plane_residency: bool = False
     # Whether the backend can bind a page whose per-axis reduction differs
     # (for example y/64 with x/128 from an anisotropic viewport aspect).
     # A backend that keys its ladder as one isotropic mip chain cannot, so
@@ -54,6 +59,7 @@ WGPU_CAPABILITIES = ImageViewBackendCapabilities(
     tile_residency_kind="gpu_atlas",
     shader_windowing=True,
     native_pointer_interaction=False,
+    canonical_source_plane_residency=True,
     # ``plane_chunk_key`` keys every page as ``reduction=(level, level)`` and
     # the executor addresses one isotropic mip span per plane, so an
     # anisotropic page has no representable identity on this backend.
@@ -87,6 +93,9 @@ def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
             shader_windowing=bool(getattr(capabilities, "shader_windowing", False)),
             native_pointer_interaction=bool(
                 getattr(capabilities, "native_pointer_interaction", True)
+            ),
+            canonical_source_plane_residency=bool(
+                getattr(capabilities, "canonical_source_plane_residency", False)
             ),
             anisotropic_lod_pages=bool(getattr(capabilities, "anisotropic_lod_pages", True)),
             display_axis_transpose=bool(getattr(capabilities, "display_axis_transpose", False)),

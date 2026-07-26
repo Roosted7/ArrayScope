@@ -27,3 +27,4 @@ def test_wgpu_declares_its_live_persistent_tiled_residency_contract():
     assert WGPU_CAPABILITIES.persistent_tile_residency is True
     assert WGPU_CAPABILITIES.tile_residency_kind == "gpu_atlas"
     assert WGPU_CAPABILITIES.shader_windowing is True
+    assert WGPU_CAPABILITIES.canonical_source_plane_residency is True

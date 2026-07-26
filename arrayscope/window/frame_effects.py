@@ -303,11 +303,35 @@ class FramePipelineEffects:
                 session.tile_semantic_source_id(tile.source_index) if demand is not None else None
             )
 
-            warm_canonical_plane = self._resident_crop_rebind_enabled()
+            warm_canonical_plane = self._canonical_plane_warm_enabled()
 
             def evaluate_preview(token=None):
                 if demand is None or semantic_source_id is None:
                     return None
+                if step.rung == Rung.DESIRED:
+                    # DESIRED is the target-quality owner even when it returns
+                    # the same page-backed tuple shape as FLOOR.  Keeping both
+                    # rungs on ``evaluate_preview_tile`` made the target lose
+                    # resident-crop's native-plane sidecar: preview-first
+                    # therefore committed L4 then L1 pages, but never the
+                    # canonical L0 pages later crop/axis retargets rebind.
+                    return render_effects.evaluate_target_tile(
+                        session,
+                        tile,
+                        level=int(step.level),
+                        demand=demand,
+                        semantic_source_id=semantic_source_id,
+                        cancellation_token=token,
+                        shader_display=bool(getattr(session, "shader_display", False)),
+                        evaluation_context=self.renderer.win._evaluation_context(
+                            ComputeLane.MONTAGE_TILE, token
+                        ),
+                        stage_cache=self.renderer.win.operation_evaluator.stage_cache,
+                        stage_materializer=(
+                            self.renderer.win.operation_evaluator.stage_materializer
+                        ),
+                        warm_canonical_plane=warm_canonical_plane,
+                    )
                 return render_effects.evaluate_preview_tile(
                     session,
                     tile,
@@ -369,7 +393,7 @@ class FramePipelineEffects:
             return evaluate_materialization
 
         semantic_source_id = session.tile_semantic_source_id(tile.source_index)
-        warm_canonical_plane = self._resident_crop_rebind_enabled()
+        warm_canonical_plane = self._canonical_plane_warm_enabled()
 
         def evaluate_target(token=None, semantic_source_id=semantic_source_id):
             demand = session.lod_policy_decision.demand
@@ -487,6 +511,14 @@ class FramePipelineEffects:
             enabled = bool(getattr(app_settings, "resident_crop_rebind", False))
         self._resident_crop_rebind_flag = bool(enabled)
         return bool(enabled)
+
+    def _canonical_plane_warm_enabled(self) -> bool:
+        """Whether target work may establish a backend's canonical pages."""
+
+        capabilities = image_view_backend_capabilities(self.renderer.win.img_view)
+        return bool(
+            self._resident_crop_rebind_enabled() and capabilities.canonical_source_plane_residency
+        )
 
     def invalidate_resident_crop_rebind_flag(self) -> None:
         """Drop the per-session resident-crop-rebind capability snapshot.

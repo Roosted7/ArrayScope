@@ -99,6 +99,15 @@ Widening is declined when one montage of such planes would exceed its share of
 the tile-residency byte policy; those views keep their crop-local upload, and
 the rebind stays inert for them by design.
 
+Preview-first does not move that native work into the coverage pass. A reduced
+FLOOR carries only its coarse page. After coverage closes, the DESIRED target
+on a backend declaring `canonical_source_plane_residency` reduces from the
+native output and carries that same exact plane as residency data. WGPU then
+replaces the target's redundant reduced upload with canonical L0 pages, so a
+later crop or displayed-axis swap is an origin rebind with no producer or
+upload. Backends without that capability retain their ordinary reduced-input
+target route.
+
 Physical residency is only half of a rebind. A reduced payload is page-backed
 and owns no exact CPU plane, so shifting its anchor is the whole operation; an
 EXACT payload also carries semantics that `TiledValueSource` indexes
