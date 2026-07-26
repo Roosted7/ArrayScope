@@ -63,32 +63,28 @@ contract).
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
-- **ADR 0059 coarse-rung utility policy — OPEN; phase-only shape refuted.**
-  The landed per-tile successor lets exact ACKs overlap the remaining coarse
-  pass by 2.5–3.2 s. Reclassifying `DESIRED` onto `DISPLAY_PREPARATION`
-  enforced global order but regressed the order-balanced whole-fill median
-  5400.0→6651.4 ms (+23.2%) and was reverted; do not revisit that shape. The
-  policy question is now whether to run the rung at all. Nine order-balanced
-  raw-stage passes per arm price current main at 6104.0 ms versus 5102.7 ms on
-  `feeea32a` (+1001.3 ms / +19.6%), while three WGPU FFT traces show exact
-  starting 2547–3159 ms before coarse completes despite a cheaper FLOOR worker
-  total. "Expensive operation" is therefore not the predicate
+- **ADR 0059 coarse-rung utility policy — DONE 2026-07-26; product skips.**
+  Root cause was the successor rule itself: a FLOOR-backed `DESIRED` task still
+  used `DISPLAY_PREVIEW`, so phase-only experiments delayed ACK while target
+  evaluation consumed coverage workers. Target work now stays on
+  `DISPLAY_PREPARATION`, coverage closes on backend-acknowledged first-pass
+  identities, and the profile hard-fails both ACK order and worker execution
+  order per scheduling generation. The corrected three-pass T1/T2/B A/B found
+  no qualifying signature: WGPU raw 2139/5585/2723 ms, WGPU FFT
+  3041/>5000/3451 ms; PyQtGraph raw reached no T2 in 3/3 A passes, and complex
+  has no reduced RGB format. Product therefore defaults to target-only;
+  `--enable-coarse-rung` retains the measurable mechanism. Future signatures
+  require new order-balanced T1/T2/B evidence
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
-  Exit gate: an empirical pipeline/backend/display signature admits coarse
-  only when prior evidence shows complete coarse ACK coverage before exact and
-  whole-fill within the ±10% bar; unknown signatures skip. Validate both
-  backends and do not restore the shared scheduler or multiply bounded
-  presentation cohorts.
 - **PyQtGraph full complex montage presentation is broken — OPEN.** Short
-  prefixes are sufficient; do not hide it behind a long watchdog. Current main
-  reached 251/272 operation tiles in 102.8 s while 118 commits spent 84.87 s
-  repeatedly CPU-mapping the growing presented set. `feeea32a` reached 163/272
-  exact tiles in 27.8 s with 21.88 s in 39 commits, so the pre-ADR exact-only
-  path was already broken and ADR 0059's duplicate preview stream made it much
-  worse. Reduced-rung admission now hard-refuses CPU-composited RGB, but a
-  same-tip exact-only prefix was still far outside the few-second product bar.
-  Fix the whole-set republication/mapping owner; gate on bounded commit and ACK
-  counters plus a full 272-tile completion within 5 s, never a widened timeout.
+  prefixes are sufficient; do not hide it behind a long watchdog. The
+  target-only full FFT action failed to return before an 8 s process guard and
+  emitted no phase row; an immediately preceding bounded run reached only
+  62/272 exact ACKs by its five-second failure. Reduced-rung admission correctly
+  refuses CPU-composited RGB, so this is the exact path's growing-set
+  republication/mapping cost, not a preview retry. Fix the whole-set
+  republication/mapping owner; gate on bounded commit and ACK counters plus a
+  full 272-tile completion within 5 s, never a widened timeout.
 - **A ladder rung exception retries without bound — OPEN, separate from ADR
   0059 ordering.** The PyQtGraph RGB-format failure admitted 18,314 preview
   tasks and raised 17,538 times because `_on_rung_error` replanned the same

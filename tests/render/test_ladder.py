@@ -50,6 +50,22 @@ def test_preview_disabled_goes_directly_to_desired_target():
     assert steps[0].lane == Lane.DISPLAY_PREVIEW
 
 
+def test_explicit_target_only_arm_omits_floor_without_changing_target_evaluation():
+    ladder = LodLadder(
+        LadderPolicy(
+            floor_level=4,
+            reduced_input_available=True,
+            coarse_rung_enabled=False,
+        )
+    )
+
+    steps = ladder.plan_tile(TileLodState(tile_number=3), demand(1))
+
+    assert rungs(steps) == [(Rung.DESIRED, 1)]
+    assert steps[0].lane == Lane.DISPLAY_PREVIEW
+    assert steps[0].reduce_from_native is False
+
+
 def test_coarse_demand_still_gets_retention_floor_before_target():
     ladder = LodLadder(LadderPolicy(floor_level=4))
     steps = ladder.plan_tile(TileLodState(tile_number=0), demand(3))

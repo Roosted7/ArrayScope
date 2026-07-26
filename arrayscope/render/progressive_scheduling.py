@@ -140,17 +140,22 @@ class ProgressiveSchedulingPolicy:
 
     def observe(
         self,
-        lifecycle,
+        coverage_owner,
         *,
         on_refinement_replan: Callable[[], None] | None = None,
     ) -> bool:
-        """Advance on lifecycle first-pixel truth and own the close wakeup."""
+        """Advance on acknowledged first-pass truth and own the close wakeup."""
 
         if self._phase is not SchedulingPhase.COVERAGE:
             return False
         if self._coverage_evidence_pending:
             return False
-        if not bool(lifecycle.first_pixels_presented(self._required_tiles)):
+        first_pass_presented = getattr(coverage_owner, "first_pass_pixels_presented", None)
+        if callable(first_pass_presented):
+            coverage_complete = bool(first_pass_presented())
+        else:
+            coverage_complete = bool(coverage_owner.first_pixels_presented(self._required_tiles))
+        if not coverage_complete:
             return False
         self._phase = SchedulingPhase.REFINE
         emit_trace(

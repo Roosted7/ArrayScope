@@ -319,12 +319,14 @@ class FramePipeline:
         if not self.effects.prepare_rung(intent, step):
             return False
         session = getattr(self.effects, "session", None)
-        coverage_pass_open = bool(self.effects.scheduling_verdict().coverage_open)
+        scheduling_verdict = self.effects.scheduling_verdict()
+        coverage_pass_open = bool(scheduling_verdict.coverage_open)
         # Phase follows the work's role, not its historical rung name.
-        # DESIRED on a blank tile runs in DISPLAY_PREVIEW and is phase-1
-        # coverage; the same rung on an already-covered tile runs in
-        # DISPLAY_PREPARATION and is phase-2 refinement. Exact work admitted
-        # while another tile still lacks first pixels is refinement too.
+        # DESIRED runs in DISPLAY_PREVIEW only when it is the pipeline's
+        # first-and-only presentable rung. A target behind FLOOR is always
+        # DISPLAY_PREPARATION and therefore cannot be submitted while
+        # required-set coverage is open. Exact work admitted while another
+        # tile still lacks first pixels is refinement too.
         presentation_phase = (
             2
             if step.lane == Lane.DISPLAY_PREPARATION
@@ -350,6 +352,7 @@ class FramePipeline:
             coverage_pass_open=coverage_pass_open,
             session_id=int(getattr(session, "session_id", 0) or 0),
             tile_number=int(step.tile_number),
+            scheduling_generation=int(scheduling_verdict.generation),
             # Ladder provenance for the trace only; identity stays `step_key`.
             rung=int(step.rung),
             level=int(step.level),

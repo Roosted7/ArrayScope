@@ -212,7 +212,7 @@ def test_retarget_submits_ladder_work_and_commits_batches():
     assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
 
-def test_any_missing_preview_allows_per_tile_coarse_successor():
+def test_any_missing_preview_blocks_every_target_rung_until_coverage_closes():
     kernel, effects, pipeline = make_pipeline(tiles=2)
     effects.states[0] = TileLodState(
         tile_number=0,
@@ -224,12 +224,25 @@ def test_any_missing_preview_allows_per_tile_coarse_successor():
     submitted = pipeline.retarget(intent(), demand(1), scope(0, 1, missing=1))
     drain(kernel)
 
-    assert submitted == 2
-    assert [(tile, rung) for tile, rung, _level in effects.evaluated] == [
-        (1, int(Rung.FLOOR)),
-        (0, int(Rung.DESIRED)),
-    ]
+    assert submitted == 1
+    assert effects.evaluated == [(1, int(Rung.FLOOR), 4)]
     assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
+
+    effects.states[1] = TileLodState(
+        tile_number=1,
+        presented_level=4,
+        presented_quality="preview",
+        resident_levels=(4,),
+    )
+    effects.phase = SchedulingPhase.REFINE
+    submitted = pipeline.retarget(intent(viewport="coverage-closed"), demand(1), scope(0, 1))
+    drain(kernel)
+
+    assert submitted == 2
+    assert [(tile, rung) for tile, rung, _level in effects.evaluated[1:]] == [
+        (0, int(Rung.DESIRED)),
+        (1, int(Rung.DESIRED)),
+    ]
 
 
 def test_converged_retarget_submits_nothing():

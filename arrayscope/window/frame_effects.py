@@ -726,12 +726,22 @@ class FramePipelineEffects:
                 semantic_key,
             ):
                 return False
-            return self.session.lifecycle.preview_claimed(
+            claimed = self.session.lifecycle.preview_claimed(
                 tile_number,
                 int(step.rung),
                 int(step.level),
                 semantic_key,
             )
+            if claimed and step.rung == Rung.FLOOR:
+                # The phase owner must wait for acknowledged preview coverage,
+                # not generic first pixels that may be retained from an exact
+                # predecessor. CPU-composited backends do not seed first-pass
+                # histogram evidence, so the FLOOR claim is their canonical
+                # declaration that this scope has a preview pass.
+                note_quality = getattr(self.session, "note_first_pass_quality", None)
+                if callable(note_quality):
+                    note_quality("preview")
+            return claimed
         if (
             step.rung == Rung.DESIRED
             and int(step.level) > 0
@@ -2663,7 +2673,7 @@ class FramePipelineEffects:
             session.flush_pending = True
             session.final_commit_pending = True
         phase_closed = session.scheduling_policy.observe(
-            session.lifecycle,
+            session,
             on_refinement_replan=lambda: renderer.request_montage_replan(session),
         )
         session.display_committed = bool(session.lifecycle.presented_tiles)

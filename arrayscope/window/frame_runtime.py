@@ -288,6 +288,15 @@ class FrameRuntimeMixin:
                         # passes only when its identical real-document region
                         # is backed by one cacheable shared stage.
                         reduced_input_available=reduced_input_available,
+                        # ADR 0059's ordered A/B found no qualifying current
+                        # workload: WGPU T2 more than doubled and PyQtGraph raw
+                        # never reached T2 inside the interaction budget.
+                        # Keep the mechanism directly measurable, but make the
+                        # measured target-only arm the product default.
+                        coarse_rung_enabled=bool(
+                            getattr(self, "_profile_enable_coarse_rung", False)
+                        )
+                        and not bool(getattr(self, "_profile_disable_coarse_rung", False)),
                     )
                 ),
                 commit_max_items=8,

@@ -126,6 +126,7 @@ class TaskSpec:
     coverage_pass_open: bool = False
     session_id: int = 0
     tile_number: int = -1
+    scheduling_generation: int = 0
     # Ladder provenance, carried purely so the trace can attribute a task's
     # duration to the rung and LOD level that asked for it (-1 = not rung
     # work).  The scheduler never reads these for a decision; `_RungKey`
@@ -153,6 +154,9 @@ class TaskSpec:
         object.__setattr__(self, "coverage_pass_open", bool(self.coverage_pass_open))
         object.__setattr__(self, "session_id", max(0, int(self.session_id or 0)))
         object.__setattr__(self, "tile_number", int(self.tile_number))
+        object.__setattr__(
+            self, "scheduling_generation", max(0, int(self.scheduling_generation or 0))
+        )
         object.__setattr__(self, "rung", int(self.rung))
         object.__setattr__(self, "level", int(self.level))
 

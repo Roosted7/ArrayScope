@@ -3316,13 +3316,12 @@ def test_cold_preview_floor_uploads_obey_item_cap():
     assert set(session.pending_payload_upserts) == {0, 1, 2, 3}
 
 
-def test_coverage_pass_uses_per_tile_barrier_for_shared_reduced_stage():
-    """ADR 0059: a tile may refine after its own reduced coarse ack.
+def test_coverage_pass_blocks_targets_until_required_preview_coverage_closes():
+    """ADR 0059: no target work executes before required-set preview coverage.
 
-    A blank tile still plans FLOOR without DESIRED in the same wave. Once
-    that tile is physically presented at preview quality, its shared-stage
-    target may overlap the remaining coverage fan-out; no plan-wide
-    acknowledge-all barrier survives the retired shared scheduler.
+    The retired shared scheduler's acknowledge-all task does not return.
+    Lifecycle first-pixel truth closes the ordinary scheduling phase, and the
+    ladder keeps every target rung on the gated preparation lane until then.
     """
 
     from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, TileLodState
@@ -3348,8 +3347,10 @@ def test_coverage_pass_uses_per_tile_barrier_for_shared_reduced_stage():
         presented_quality="preview",
     )
     covered_steps = ladder.plan_tile(covered, demand, coverage)
-    [successor] = [step for step in covered_steps if step.rung is Rung.DESIRED]
-    assert successor.lane is Lane.DISPLAY_PREVIEW
+    assert not any(step.rung is Rung.DESIRED for step in covered_steps), (
+        "one tile's preview acknowledgement must not admit its target while "
+        "another required tile is blank"
+    )
 
     blank_with_preview_path = TileLodState(
         tile_number=1,

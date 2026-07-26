@@ -209,68 +209,51 @@ cannot simply be removed while the old route remains: per-tile targets win the
 race and the shared preview presents **0 of 272** tiles while still paying its
 full evaluation.
 
-The initial implementation replaced that global order with the ladder's
-per-tile order: each tile acknowledged coarse before exact, but already-covered
-tiles could refine while other required tiles were still blank. That is a
-weaker guarantee, but it is **not product-equivalent**. On the WGPU FFT montage
-the first exact ACK arrived at 5169 ms while the last coarse ACK arrived at
-7286 ms; dogfooding showed sharp tiles replacing blocky tiles before the
-coarse pass completed. A useful coarse pass promises all required data first,
-then quality.
+The initial implementation also put a coarse successor's `DESIRED` step on
+`DISPLAY_PREVIEW`. The comment explicitly permitted that target to overlap the
+remaining coarse fan-out. That made every phase-only experiment incapable of
+enforcing the promise: target evaluation consumed preview workers while only
+its acknowledgement was delayed. This is why an ACK-only trace could pass
+while dogfooding still showed sharp tiles replacing blocky ones mid-pass.
 
-The existing `COVERAGE` → `REFINE` owner cannot be used as a flag flip to repair
-this. A follow-up routed covered tiles' `DESIRED` work back to
-`DISPLAY_PREPARATION`, so `SchedulingVerdict.admits_lane` held it until
-coverage closed from lifecycle first-pixel truth. That passed the ordering
-counter in all three measured passes, but serialized enough work to regress the
-order-balanced WGPU whole-fill median from **5400.0 ms to 6651.4 ms**
-(**+1251.4 ms / +23.2%**). It was reverted. This refutes the proposed mechanism,
-not the product order: a future implementation must preserve incremental
-bounded coarse presentation, admit no `DESIRED` while a required tile is still
-blank, and stay within the whole-fill bar without restoring the retired shared
-scheduler.
+The implemented invariant is stronger: when a FLOOR exists, `DESIRED` is
+always `DISPLAY_PREPARATION`, and `COVERAGE` does not close on generic
+first-pixel state. It closes only when the current required set owns
+backend-acknowledged first-pass payload identities. Thus no target-rung worker
+starts before the final preview task finishes or before T1. The profiler tags
+kernel work with the scheduling generation so transient automatic-layout
+scopes are not mixed with the final required set. This uses the existing
+one-way phase owner and bounded presentation cohorts; it does not restore the
+retired acknowledge-all scheduler.
 
-### Follow-up: schedule by measured delivery utility, not operation cost
+### Follow-up: schedule only when T1/T2/B proves delivery utility
 
-The stronger ordering failure exposed a more basic policy error: the coarse
-rung is not uniformly useful. On the WGPU raw montage, an order-balanced
-`feeea32a`/current-main A/B used three processes per arm and `--repeat 3` in
-each process (nine stage passes per arm, process order `baseline, main, main,
-baseline, baseline, main`). The raw-stage median moved from **5102.7 ms to
-6104.0 ms**: **+1001.3 ms / +19.6%**. This is the price of making the reduced
-rung actually run on a path whose exact result already arrives quickly.
+The relevant quantities are T1 (every required tile has preview quality), T2
+(every required tile has target quality), and B (T2 with FLOOR disabled). A
+preview is useful only when T1 is far below B and T2 remains close to B.
+Worker totals and `operations/cost.py` cannot answer that delivery question.
 
-Nor does "the operation pipeline is expensive" select the useful arm. Three
-current-main WGPU FFT single runs had a **5820.5 ms** whole-fill median. Their
-exact ACKs began **2547–3159 ms before the last coarse ACK**, even though the
-rung counters priced `DESIRED` at 4.26–4.44 s of aggregate worker time and
-`FLOOR` at only 1.56–1.78 s. A same-tip diagnostic with coarse admission
-disabled had a **3419.3 ms** median over three single runs and completed all
-exact ACKs in 3.09–3.84 s. That diagnostic was not order-balanced and is
-therefore directional, not a release timing claim; it is nevertheless enough
-to reject worker-time ratio as the predicate. The supposedly cheap rung
-delivers isolated early pixels, then occupies the presentation path long
-enough to delay complete coverage.
+With the execution invariant actually enforced, three order-balanced
+single-process passes per arm gave:
 
-The policy answer is therefore **conditional, but not conditional on
-"expensive pipeline."** A pipeline/backend/display signature may admit the
-rung only after measured evidence for that signature shows both:
+| backend / pipeline | median T1 | median T2 | median B | verdict |
+|---|---:|---:|---:|---|
+| WGPU raw | 2139 ms | 5585 ms | 2723 ms | reject: T2 +105%; A missed the 5 s gate 3/3 |
+| WGPU FFT | 3041 ms | >5000 ms | 3451 ms | reject: only 410 ms earlier coverage; A missed 3/3 |
+| PyQtGraph raw | ≥4710 ms | >5000 ms | ≥5000 ms (one 3861 ms completion) | reject: A reached no T2 in 3/3 |
+| PyQtGraph FFT | N/A | >5000 ms | >5000 ms | no reduced RGB format; target path independently broken |
 
-1. the backend can represent the genuinely reduced payload, and
-2. the complete coarse ACK pass naturally precedes the first exact ACK, while
-   whole-fill cost remains inside the performance bar.
+The WGPU FFT rows are single runs, never `--repeat`; process order was balanced
+`A, B, A, B, B, A`. PyQtGraph is bistable: the bounded passes report the
+incomplete ACK count instead of waiting longer. The complex run can also block
+inside the synchronous CPU-composition action, in which case the 8 s process
+guard produces no phase record; that is a broken action, not a censored timing.
 
-`operations/cost.py` cannot answer either question: it estimates shapes,
-dtypes, and bytes, not elapsed evaluation or admission. The new
-`montage_quality_rung_evaluations` counter prices completed worker work, but it
-also cannot predict first-use delivery order. Any adaptive implementation
-therefore needs an empirical key that includes the operation pipeline, source
-shape/dtype and reduced region, backend, and display-mapping class. An unknown
-key must skip the rung in the product; profiling may explicitly sample both
-arms and record the result. No measured workload in this follow-up qualifies:
-raw WGPU regresses, FFT WGPU overlaps and delays coverage, and CPU-composited
-complex PyQtGraph cannot represent the reduced page at all. No speculative
-runtime cost predicate is landed by this change.
+No current signature qualifies, so the product defaults to target-only.
+`--enable-coarse-rung` remains a profiling arm, not a product heuristic.
+Future admission requires new order-balanced T1/T2/B evidence for the complete
+backend/pipeline/display signature. Unknown signatures skip; no speculative
+runtime cost predicate is landed.
 
 ## Consequences
 
@@ -315,7 +298,10 @@ claim:
    attach/hit diagnostics), not 272.
 3. If the policy schedules a coarse rung, its ACKs carry the operation key at
    `quality="preview"` and, across the required scope,
-   `max(coarse ACK) < min(exact ACK)`. Per-tile order is insufficient.
+   `max(coarse ACK) < min(exact ACK)`. Per-tile order is insufficient. In
+   addition, no target-rung `kernel_start` may precede the final preview-rung
+   `kernel_finish`; this is the clause that catches delayed ACK with concurrent
+   target execution.
 4. For each admitted signature, full refined stays at or under baseline. Quote
    a **median over at least three order-balanced passes** and say how many: the
    per-commit dossier found the refinement is bistable — one unmodified
@@ -357,36 +343,32 @@ Implemented on local `main` at `6ad55232`.
   source is visibly blocky when drawn at roughly 57 px, and the now-default
   minification filter correctly does not engage while that source is
   magnified.
-- The rejected phase-gated follow-up used three passes per arm in the
-  order-balanced sequence `branch, main, main, branch, branch, main`. All
-  branch traces satisfied the stronger global ordering gate; the separation
-  from last coarse ACK to first exact ACK was 1966–2466 ms. Whole-fill values
-  were 5400.0/5329.4/5774.3 ms on main and
-  6325.6/6651.4/7357.9 ms on the branch, giving medians of 5400.0 and
-  6651.4 ms. The code was reverted.
-- The maintained-backend check was run this time, and a long watchdog is not
-  used as a substitute for diagnosis. On current main, a **102.8 s trace
-  prefix** reached only 251/272 operation tiles: 251 level-4 preview ACKs, 251
-  level-2 preview ACKs, and 246 exact ACKs. The 118 operation-session commits
-  spent **84.87 s** in backend presentation. The interrupted GUI-thread stack
-  was repeatedly mapping complex payloads through
-  `_apply_backend_tiled_presentation` → `_map_complex_cpu_payload` →
-  `_sample_lut_rgb`. This is converging, not wedged, but it is broken by the
-  product's few-second standard.
-- `feeea32a` is also broken rather than healthy: its **27.8 s trace prefix**
-  reached 163/272 exact tiles, with 39 operation-session commits spending
-  **21.88 s** in presentation. The difference is material: before ADR 0059 it
-  republishes one growing exact set; current main republishes reduced/native
-  preview and exact sets. Planner admission had used tile locality alone,
-  while `evaluate_preview_tile` later discovered that CPU-composited RGB could
-  not represent a reduced scalar/complex page and silently substituted native
-  output. The ladder now requires `can_evaluate_reduced_preview` at admission
-  too. A bounded 32-tile check then completed exact-only in **2673.0 ms** with
-  no FLOOR evaluation, preview payload, failure, or unsettled target. The WGPU
-  companion still completed in **1140.1 ms** with 32 level-4 FLOOR
-  evaluations and 32 non-zero-level complex uploads. The full PyQtGraph
-  growing-set presentation cost remains a separate red item; declining the
-  duplicate rung does not repair it.
+- Red-first bounded 32-tile traces on the old successor rule failed the worker
+  clause on both maintained backends and both raw/FFT stages: target work began
+  before preview work finished even where the ACK clause passed. After
+  `DESIRED` left the coverage lane and phase closure used acknowledged
+  first-pass identities, the final explicit A-arm check passed both clauses:
+  WGPU raw T1/T2 287/548 ms, WGPU FFT 651/999 ms, and PyQtGraph raw
+  718/1041 ms (32/32 ACKs in every pass). PyQtGraph FFT reports
+  `no-preview-pass`, not a vacuous ordered result, because its CPU-composited
+  RGB payload has no reduced-page format; its 32-tile target-only T2 was
+  2047 ms.
+- Full-grid A-arm traces also exposed a profiler oracle bug: one action can
+  publish transient 66/84-tile automatic-layout generations before its final
+  272-tile generation. Kernel traces now carry `scheduling_generation`, and
+  T1/T2 use each required tile's first qualifying ACK. This prevents an older
+  generation's target start from being compared with the final generation's
+  preview pass.
+- The profiler's five-second cold-fill budget now includes the synchronous
+  action itself. A timeout still closes the trace and writes a structured
+  incomplete record with requested/presented/payload/ACK counts; it does not
+  erase the evidence by raising before JSONL publication.
+- The final three-pass WGPU A/B is the T1/T2/B table above. With product
+  target-only policy, a subsequent full-grid run completed raw in **3261 ms**
+  (`T2=2909 ms`) and FFT in **4205 ms** (`T2=3930 ms`). PyQtGraph raw completed
+  in **4151 ms** (`T2=4111 ms`). PyQtGraph FFT did not return from its
+  synchronous CPU-composition action before an 8 s process guard and emitted
+  only the load row; its growing-set CPU mapping remains a separate queue item.
 - A three-pass in-process raw run (`--repeat 3`) reported only
   `tile already has committable coverage` and `allow_preview false` as coarse
   refusal reasons; `floor already covers this level` is gone.

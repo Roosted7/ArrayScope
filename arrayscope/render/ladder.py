@@ -103,6 +103,7 @@ class LadderPolicy:
     mode: str = "resident"  # "resident" | "native-only"
     floor_level: int = 4
     reduced_input_available: bool = True
+    coarse_rung_enabled: bool = True
     levels_authoritative_rung: Rung = Rung.FLOOR
 
 
@@ -112,6 +113,7 @@ class LadderPolicy:
 #: answer must cost a few comparisons and no allocation.  The numbers that go
 #: with a verdict travel beside it, once per plan, not once per tile.
 COARSE_RUNG_NATIVE_ONLY = "native-only policy: no coarse rung exists"
+COARSE_RUNG_DISABLED = "coarse rung disabled by measured delivery policy"
 COARSE_RUNG_PREVIEW_NOT_ALLOWED = "allow_preview false: tile is covered or too few missing"
 COARSE_RUNG_LEVEL_NOT_COARSER = "preview level not coarser than the demand"
 COARSE_RUNG_NO_REDUCED_INPUT = "no reduced input and no retained floor"
@@ -146,6 +148,8 @@ class LodLadder:
         policy = self.policy
         if policy.mode == "native-only":
             return COARSE_RUNG_NATIVE_ONLY
+        if not policy.coarse_rung_enabled:
+            return COARSE_RUNG_DISABLED
         if not bool(state.allow_preview):
             return COARSE_RUNG_PREVIEW_NOT_ALLOWED
         desired = max(0, int(demand.desired_level))
@@ -229,17 +233,11 @@ class LodLadder:
         # one cacheable real-document stage.
         preview_target_has_finer_followup = desired < max(0, int(policy.floor_level))
         cheap_pre_native = (
-            bool(state.allow_preview)
+            bool(policy.coarse_rung_enabled)
+            and bool(state.allow_preview)
             and preview_target_has_finer_followup
             and (policy.reduced_input_available or state.floor_available)
         )
-        per_tile_coarse_successor = bool(
-            verdict is not None
-            and verdict.coverage_open
-            and presented_preview
-            and policy.reduced_input_available
-        )
-
         # 1) FLOOR — the one coarse rung, only while the tile is blank.
         if presented is None and ready is None and not resident and cheap_pre_native:
             floor_level = max(policy.floor_level, desired)
@@ -293,15 +291,15 @@ class LodLadder:
                     rung=Rung.DESIRED,
                     level=desired,
                     reduce_from_native=not policy.reduced_input_available,
-                    # ADR 0059 retires the shared route's acknowledge-ALL
-                    # barrier. Once this tile's reduced coarse rung is
-                    # acknowledged, its target may overlap the remaining
-                    # coarse fan-out through the coverage lane. FLOOR keeps
-                    # INTERACTIVE priority, so blank tiles still win workers.
+                    # A target rung is phase-2 work whenever this target has a
+                    # FLOOR path or any current first pixel. It must not share
+                    # the coverage lane: doing so lets already-covered tiles
+                    # consume workers while required tiles are still waiting
+                    # for preview. The only DESIRED work on DISPLAY_PREVIEW is
+                    # the first-and-only presentable rung of a pipeline with no
+                    # coarse producer.
                     lane=(
-                        Lane.DISPLAY_PREVIEW
-                        if per_tile_coarse_successor or not has_first_pixel
-                        else Lane.DISPLAY_PREPARATION
+                        Lane.DISPLAY_PREVIEW if not has_first_pixel else Lane.DISPLAY_PREPARATION
                     ),
                     priority=(
                         Priority.VISIBLE_IMAGE
@@ -378,6 +376,7 @@ class LodLadder:
 
 __all__ = [
     "COARSE_RUNG_ALREADY_COVERED",
+    "COARSE_RUNG_DISABLED",
     "COARSE_RUNG_LANE_NOT_ADMITTED",
     "COARSE_RUNG_LEVEL_NOT_COARSER",
     "COARSE_RUNG_NATIVE_ONLY",

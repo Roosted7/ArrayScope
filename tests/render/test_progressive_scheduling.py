@@ -69,6 +69,28 @@ def test_coverage_waits_for_owner_registered_rough_evidence():
     assert policy.verdict.phase is SchedulingPhase.REFINE
 
 
+def test_coverage_owner_can_require_preview_ack_beyond_generic_first_pixels():
+    lifecycle = TileLifecycle()
+    targets = _targets(10, 11)
+    lifecycle.retarget(targets)
+    _present(lifecycle, targets)
+    first_pass_ready = False
+
+    class CoverageOwner:
+        def first_pass_pixels_presented(self):
+            return first_pass_ready
+
+    policy = ProgressiveSchedulingPolicy()
+    policy.retarget(tuple(targets.values()), tuple(targets), progressive=True)
+
+    assert lifecycle.first_pixels_presented(tuple(targets))
+    assert policy.observe(CoverageOwner()) is False
+
+    first_pass_ready = True
+    assert policy.observe(CoverageOwner()) is True
+    assert policy.verdict.phase is SchedulingPhase.REFINE
+
+
 def test_same_slots_with_new_sources_open_a_new_scope_generation():
     lifecycle = TileLifecycle()
     first = _targets(10, 11)

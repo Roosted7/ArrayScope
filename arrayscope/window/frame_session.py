@@ -1043,6 +1043,7 @@ class FrameSession:
         """Whether every required target is acknowledged at the latched quality."""
 
         quality = self.first_pass_quality
+        backend_identities = dict(self.lifecycle.backend_presented_identities)
         plan_tiles = {
             int(getattr(tile, "montage_index", offset)): tile
             for offset, tile in enumerate(tuple(getattr(self.plan, "tiles", ()) or ()))
@@ -1062,6 +1063,7 @@ class FrameSession:
                     str(getattr(payload, "quality", "exact") or "exact")
                 )
                 or tile_number not in self.lifecycle.presented_tiles
+                or backend_identities.get(int(tile_number)) != tile_ack_identity(payload)
             ):
                 return False
         return True
