@@ -14,9 +14,9 @@ FLOOR/PREVIEW merge that follows from both, §8 answers the upload questions,
 §9 records that the levels/histogram merge into the pyramid already exists.
 §10 replaces this dossier's two inferences with counters (both held) and adds
 the per-rung evaluation cost: a 16× input reduction buys only ~2.5× on raw
-data, and on the FFT stage — now that its stall is fixed — the counters find
-8 s of FFT evaluation computed and discarded per run, with the shared
-reduced-input preview refused 23 times.
+data, and on the FFT stage — now that its stall *and* its gate 1 are fixed —
+the counters find that **gate 1 alone still produces no preview**, while 8 s of
+FFT evaluation is computed and discarded every run.
 
 Field report that opened this: *"loading the NIfTI with a full montage over
 the third dimension takes many seconds. It often runs two quality levels, but
@@ -299,7 +299,9 @@ them:** "zero previews" survives unchanged, the first FFT pixel moves to
 2564 ms, and the rung counters find 8 s of FFT evaluation discarded per run
 that a truncated stage could not have shown.
 
-Two independent gates each suffice to cause it:
+Two independent gates each suffice to cause it — **though §10e measures gate 1
+closed and finds the preview still absent, so "each suffice" holds for the
+cause and not for the cure**:
 
 1. **`pipeline_commutes_for_display_lod` is axis-blind.** It asks each op's
    `capabilities(shape, dtype).lod_commuting`, a per-op constant that
@@ -312,9 +314,12 @@ Two independent gates each suffice to cause it:
    and `resident` is the montage default. That path is the one ADR 0050
    designed for exactly this case ("preview-then-refine for expensive
    commuting pipelines"), and `_evaluate_reduced_preview_volume` implements it.
-   §10e measures the refusal: **23 blocked calls per run, last gate
-   `resident lod policy mode`** — this gate is not merely reachable, it fires
-   on every retarget of the stage.
+   §10e measures the refusal: on the pre-gate-1 tip, **23 blocked calls per
+   run, last gate `resident lod policy mode`** — not merely reachable, it fired
+   on every retarget. Once gate 1 closed, `blocked` fell to 0 and this clause
+   stopped being consulted at all: the commuting pipeline now routes to the
+   per-tile ladder instead, so **this gate turned out not to be the binding
+   one**.
 
 Gate 1 is worth spelling out, because the case is stronger than "accept a
 quality compromise". This pipeline's FFT axis is the **montage** axis, not a
@@ -618,31 +623,38 @@ trace carries the same provenance per task: `kernel_start` and `kernel_finish`
 gained `rung` / `level` (−1 for non-ladder work) and `kernel_finish` gained
 `fn_ns`, the function-body duration — no new event kinds.
 
-Five in-process repeats of the raw stage (`--repeat 5`, §10c):
+Three in-process repeats of the raw stage over `ccb951fc` + `51601f50`
+(`--repeat 3`, §10c):
 
-| rung | level | calls | total ms | per call |
-|---|---:|---:|---:|---:|
-| FLOOR | 4 | 272–373 | 2329–3139 | 8.0–8.7 ms |
-| DESIRED | 2 | 272 | 5944–11298 | 21.9–41.5 ms |
+| rung | level | calls | total ms | per call | max |
+|---|---:|---:|---:|---:|---:|
+| FLOOR | 4 | 272 | 1586 / 1615 / 1594 | 5.9 ms | 25.7–27.7 ms |
+| DESIRED | 2 | 272 | 3335 / 3360 / 4587 | 12.3–16.9 ms | 54.6–187.4 ms |
 
 Two rungs, never a `PREVIEW` row — §2's FLOOR/PREVIEW collapse, confirmed from
 the evaluation side rather than from acknowledgements.
 
-**FLOOR/DESIRED total-time ratio: median 0.40, range 0.24–0.50.** A 16× input
-reduction buys a **~2.5×** cheaper evaluation, not 16×. That is the expected
-shape for a raw pipeline — §5 already ruled out the preview level on raw data
-for two other reasons, and this adds a third: the saving the preview rung is
-supposed to bank is not there to bank. §10e takes the same counter to the
-*operation* pipeline §6 is about, where the answer is different again.
+**FLOOR/DESIRED total-time ratio: 0.48 / 0.48 / 0.35.** A 16× input reduction
+buys a **~2×** cheaper evaluation, not 16×. That is the expected shape for a
+raw pipeline — §5 already ruled out the preview level on raw data for two other
+reasons, and this adds a third: the saving the preview rung is supposed to bank
+is not there to bank. §10e takes the same counter to the *operation* pipeline
+§6 is about, where the answer is different again.
 
-Absolute times here are wall time per evaluation under whatever load the
-machine has, not CPU time — the five repeats span 2329–3139 ms for the same
-272-call FLOOR pass. Compare ratios across a batch, not absolutes across
-sessions.
+The FLOOR pass is remarkably stable (1586–1615 ms over three cold repeats,
+±0.9%), which makes it a usable direct work counter; DESIRED is not
+(3335–4587 ms), and its per-call maximum swings 54.6→187.4 ms. These are wall
+times per evaluation under whatever load the machine has, not CPU times, so
+compare within a batch rather than across sessions.
 
-**New, unexplained:** FLOOR ran **272–373** times for 272 tiles. Up to 37% of
-the preview pass is re-evaluating a floor some tile already had. That is
-squarely inside §5.2's territory and is the cheapest lead on this list.
+**Corrected, and interesting.** Five repeats on the *pre*-`ccb951fc` tip had
+FLOOR running **272–373** times for 272 tiles (up to 37% of the preview pass
+re-evaluating a floor some tile already had, recorded here as a finding before
+the rebase). Over the page-pool-layer-leak fix it is **exactly 272, three times
+out of three**. A leaked pool layer means pool pressure means eviction means a
+tile losing residency and having its FLOOR replanned, so the fix plausibly
+removed the churn — but that is a 3-vs-5 comparison across two tips, not an
+A/B, and it is recorded as an observation only.
 
 ### 10c. Variance is now visible instead of assumed
 
@@ -652,9 +664,13 @@ window and session, so montage stages stay genuinely cold (1088 uploads on
 every pass). **`load_data` does not** — its file read is OS-page-cache warm
 from pass 2 (190 ms, then 44–53 ms); read that row as warm.
 
-Five repeats, `raw_full_tiled_montage` elapsed: **3879 / 4167 / 4266 / 4625 /
-4976 ms**, median 4266, spread 1098 ms (26%). The 4.0–4.9 s band this dossier
-warns about is now a measurement, not folklore.
+Five repeats on the pre-fix tip, `raw_full_tiled_montage` elapsed: **3879 /
+4167 / 4266 / 4625 / 4976 ms**, median 4266, spread 1098 ms (26%) — the
+4.0–4.9 s band this dossier warns about, now a measurement rather than
+folklore. Three repeats over `ccb951fc` + `51601f50`: **4108 / 4169 /
+4406 ms**, median 4169, spread 298 ms. The FFT stage is tighter still
+(5506–5803, spread ~300 ms), so it does not need `--repeat` to be trustworthy
+while the raw stage does.
 
 ### 10d. The counters do not perturb what they measure
 
@@ -676,22 +692,36 @@ inside noise in the favourable direction. Cost per upload is two integer dict
 bumps; cost per rung evaluation is one lock and three dict bumps against a
 multi-millisecond evaluation.
 
-### 10e. The FFT stage, re-taken over the stall fix
+### 10e. The FFT stage, re-taken twice: over the stall fix, then over gate 1
 
 `ccb951fc` closed the 271/272 stall, so §6's stage finishes and its numbers can
-be taken from a completed run instead of a truncated one. One run,
-`--stages load_data,fft_full_tiled_montage`, stage elapsed **5595 ms**
-(three repeats: 5632 / 5646 / 5803, spread 170 ms — six times tighter than the
-raw stage's 1098 ms, so this stage does not need `--repeat` to be trustworthy).
+come from a completed run instead of a truncated one; `51601f50` then closed
+§6's **gate 1** by asking the commuting question per axis. Both tips measured,
+`--stages load_data,fft_full_tiled_montage`:
 
-**§6's gate 2 is now a counter, not a code reading.**
-`tile_lod_preview_reduced_*` reports **scheduled 0, blocked 23, failures 0,
-last gate `resident lod policy mode`**. Twenty-three times per run the pipeline
-asked for the shared reduced-input preview and `shared_preview_is_useful`'s
-opening `resident` clause refused it. This is what the three dead counters
-should have been saying all along.
+| | stall fix only | + axis-aware gate 1 |
+|---|---:|---:|
+| stage elapsed | 5595 ms | 5506 ms |
+| first FFT pixel | 2564 ms | 3649 ms |
+| `first_preview_floor_fill_ms` | n/a | n/a |
+| preview_reduced scheduled / blocked | 0 / **23** | 0 / **0** |
+| preview_reduced last gate | `resident lod policy mode` | `per-tile rungs own reduced input` |
+| planned `rung=1` steps | 0 | **0** |
+| uploads | 1088 complex + 240 scalar, all L0 | identical |
 
-**Uploads, all at level 0 again** — and 2.2× the raw stage's bytes:
+**Gate 1 was necessary and is not sufficient.** Closing it does exactly what
+§6 predicted of it — the shared path stops being refused for the wrong reason
+(`blocked` 23 → 0) and ownership moves to the per-tile ladder — and then **no
+preview appears anyway**. The ladder plans `(0,4)=333` (raw tiles from the
+earlier phase), `(2,1)=304`, `(2,2)=6206`, and **not one `rung=1` step**,
+because every FFT tile state arrives with `allow_preview=False`. §6 said its
+two gates "each suffice to cause it"; measured, the causes are not
+interchangeable — clearing the capability gate hands the question to a ladder
+that then declines it, and §2's collapsed FLOOR/PREVIEW rung is what is left to
+fix. That is §7's merge, and it is now the blocking item rather than a tidy-up.
+
+**Uploads, all at level 0 again** — and 2.2× the raw stage's bytes, on both
+tips:
 
 | level | representation | uploads | bytes |
 |---:|---|---:|---:|
@@ -701,38 +731,35 @@ should have been saying all along.
 633 MB of native-plane uploads, no reduced row anywhere. `complex_rg32f` is
 8 B/texel, which is where the factor over §10a's 285 MB comes from.
 
-**Rung evaluation, split by lane and outcome** (from the trace's `rung` /
-`level` / `fn_ns`; the diagnostics rows aggregate the same work):
+**Rung evaluation, split by lane and outcome** (trace `rung` / `level` /
+`fn_ns`; the diagnostics rows aggregate the same work). Gate-1 tip, with the
+stall-fix-only run in brackets where it differs:
 
 | rung | level | lane | outcome | calls | mean | total |
 |---|---:|---|---|---:|---:|---:|
-| FLOOR | 4 | display_preview | completed | 62 | 5.3 ms | 326 ms |
-| DESIRED | 2 | display_preview | completed | 514 | 21.6 ms | 11 098 ms |
-| DESIRED | 1 | display_preparation | completed | 60 | 21.6 ms | 1 293 ms |
-| **DESIRED** | **1** | **display_preview** | **stale** | **8** | **1000.6 ms** | **8 005 ms** |
+| FLOOR | 4 | display_preview | completed | 62 | 4.6 ms | 286 ms |
+| DESIRED | 2 | display_preview | completed | 483 [514] | 21.3 ms | 10 267 ms |
+| DESIRED | 1 | display_preparation | completed | 60 | 16.6 ms | 996 ms |
+| **DESIRED** | **1** | **display_preview** | **stale** | **8** | **1040.9 ms** | **8 327 ms** |
 
-Three things fall out of that table.
+Two more things fall out of that table, and neither moved between the tips.
 
 1. **Eight seconds of FFT evaluation is computed and thrown away, every run.**
-   Eight cold `DESIRED(level=1)` tasks at almost exactly 1 s each, all
-   `stale` — superseded before they could commit. Inside a 5.6 s stage on four
-   workers, that is the single largest lever these counters found, and it is
-   precisely the waste ADR 0050's shared reduced-input preview exists to
-   prevent — the path the counter above shows refused 23 times per run.
+   Eight cold `DESIRED(level=1)` tasks at almost exactly 1 s each, every one
+   `stale` — superseded before it could commit. Inside a 5.5 s stage on four
+   workers, that is the single largest thing these counters found, and it is
+   precisely the waste ADR 0050's preview-then-refine exists to prevent.
 2. **Input size is not what sets evaluation cost here.** The *same*
-   `(DESIRED, level 1)` costs 21.6 ms in one lane and 1000.6 ms in the other, a
-   **46× spread at identical input size**. The cheap ones hit a warm stage
+   `(DESIRED, level 1)` costs 16.6 ms in one lane and 1040.9 ms in the other, a
+   **63× spread at identical input size**. The cheap ones hit a warm stage
    cache; the expensive ones are the cold first-and-only presentable rung for a
    tile with nothing (`has_first_pixel` False routes DESIRED to
-   DISPLAY_PREVIEW). And level 1 carries 4× the texels of level 2 yet costs the
-   same 21.6 ms when warm.
-   So "reduced input is ~16× cheaper" cannot be read off this stage: the
-   reduced-input evaluation never runs, and the term the claim scales — texels
-   in — is not the term that dominates. Cold-vs-warm stage cache is.
-3. **Still zero previews on the FFT pipeline**, over the fix: the only FLOOR
-   rows are 62 level-4 raw tiles inherited from the earlier phase, and the
-   stage reports `first_preview_floor_fill_ms = n/a` with the first FFT pixel at
-   2564 ms. §6's finding survives the stall fix intact.
+   DISPLAY_PREVIEW). Level 1 carries 4× the texels of level 2 and costs *less*
+   when warm.
+   So "reduced input is ~16× cheaper" still cannot be read off this stage: the
+   reduced-input evaluation never runs (item above), and the term the claim
+   scales — texels in — is not the term that dominates. Cold-vs-warm stage
+   cache is, by 63×.
 
 ## Open questions, left open deliberately
 
@@ -741,8 +768,9 @@ Three things fall out of that table.
   (`_idle_backlog_cohort` / `_persistent_tile_upsert_limits`), the item clamp's
   interactive arm, or simply worker arrival pacing forcing a commit per
   completion wave.
-- **Why FLOOR evaluates up to 373 times for 272 tiles** (§10b). New, cheap to
-  chase, and the same pass §5.2 is about.
+- ~~**Why FLOOR evaluates up to 373 times for 272 tiles**~~ — measured at
+  exactly 272 over the page-pool-layer-leak fix (§10b). Probably that leak;
+  reopen if the over-count returns.
 - ~~**The `fft_full_tiled_montage` stall at 271/272**~~ — **CLOSED
   2026-07-26.** A/B'd back to `51b826a` (2026-07-23) and root-caused to a
   page-pool layer leaked at construction, unrelated to LOD or preview policy:
@@ -752,10 +780,12 @@ Three things fall out of that table.
   need re-taking. §10e re-takes them over the fix.
 - ~~**Which page keys the 1088 uploads belong to**~~ — answered by §10a.
 - **Is reduced-input evaluation ~16× cheaper for op pipelines?** Still open, and
-  §10e explains why it cannot be measured here: the reduced-input preview never
-  runs on this stage (23 refused calls per run, all `resident lod policy mode`),
-  so there is no reduced-input evaluation to time. What §10e does refute is the
-  claim's *premise* — input size is not what sets evaluation cost on this
-  pipeline; cold-vs-warm stage cache is, by 46×.
-- **The 8 s of discarded FFT evaluation per FFT stage** (§10e). Newly visible
-  and the largest thing the counters found.
+  §10e explains why it cannot be measured even with gate 1 closed: the ladder
+  plans no `rung=1` step, so there is no reduced-input evaluation to time. What
+  §10e does refute is the claim's *premise* — input size is not what sets
+  evaluation cost on this pipeline; cold-vs-warm stage cache is, by 63×.
+- **Why every FFT tile state carries `allow_preview=False`** even with gate 1
+  closed (§10e). This is now the blocking item for §6's order of magnitude, and
+  it points at §7's FLOOR/PREVIEW merge rather than at the capability gate.
+- **The 8 s of discarded FFT evaluation per FFT stage** (§10e). Newly visible,
+  unchanged across both fixes, and the largest thing the counters found.
