@@ -289,7 +289,7 @@ fake binary in tests; a python op runs in a non-default interpreter; cancellatio
 and timeout are proven for both; no secrets or paths leak into recipes that
 should not travel.
 
-### Phase 4 — Discovered shapes and dtypes
+### Phase 4 — Discovered shapes and dtypes — DONE 2026-07-26
 
 **Goal:** stop asking authors to declare what we can observe, and lift the
 shape-changing restriction.
@@ -318,6 +318,10 @@ it:
 the planner; probe cost is measured and bounded; an edited linked file
 re-probes; a deliberately inconsistent op is caught and downgraded rather than
 corrupting a view.
+
+Landed in `2e2c3a7c`, `9208cf94`, `36a2c8fa`, and `58e7f3aa`; measurements and the
+deliberate whole-array misfit cost are recorded in the
+[characterization cost review](../reviews/2026-07-26-operation-characterization-cost.md).
 
 ### Phase 5 — More than one input
 

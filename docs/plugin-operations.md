@@ -97,18 +97,23 @@ def make_roll():
 | `label` | — | Human-readable menu label. |
 | `fn` | `None` | Pure `fn(ndarray) -> ndarray`. Provide this **or** `build`. |
 | `build` | `None` | `build(axis, params) -> fn` for parametric ops. |
-| `output_shape` | identity | Adapter `output_shape(shape, axis, params) -> shape`. |
-| `output_dtype` | identity | Adapter `output_dtype(input_dtype) -> dtype`. |
+| `output_shape` | identity | Compatibility adapter used only when bounded characterization cannot run. Discovered output is authoritative. |
+| `output_dtype` | identity | Compatibility adapter used only when bounded characterization cannot run. Discovered output is authoritative. |
 | `parameters` | `()` | Tuple of `OperationParameter` (see below). |
 | `requires_axis` | `False` | Whether the op takes an axis. |
 | `changes_shape` | `False` | Whether output shape differs from input. |
 | `group` | `"Other"` | Taxonomy group for menus/palettes (see `DEFAULT_GROUP_ORDER`). |
 | `description` | `""` | One-line summary shown in tooltips / the operation manager. |
 | `icon` | `"data_array"` | Material icon name the UI renders for this op. |
+| `source_identity` | `None` | Hashable value, or callable returning one, that invalidates characterization when code changes. |
 
-The shape/dtype adapter must be honest: if `fn` drops a row, `output_shape`
-must return the reduced shape. ArrayScope predicts the derived-view shape from
-the adapter without running `fn`.
+ArrayScope runs `fn` on bounded representative slabs and discovers shape,
+dtype, and region behavior together. It extrapolates only identity,
+axis-reduction, per-axis rational scaling, fixed-size, per-axis pad/crop, and
+axis permutation rules. A result that does not fit those rules is exact only
+for that input signature and executes as an OPAQUE whole-array cache stage.
+Legacy adapters remain a compatibility fallback; they are not trusted over an
+observed result.
 
 ### Parameter metadata
 
@@ -138,11 +143,12 @@ from the same source of truth.
 ### Non-crash smoke guarantee
 
 `tests/operations/test_all_operations_smoke.py` iterates **every** operation
-`all_operations()` exposes — built-ins and installed packs — builds each from
+`all_operations()` exposes — built-ins, installed packs, and a shape-changing
+user fixture — builds each from
 its parameter form, and round-trips it through `output_shape` / `output_dtype`
 / `capabilities` / `apply` on a real float32 and complex64 array, asserting the
 produced shape and dtype match the predictions. A new op that declares a
-parameter it never handles, whose `apply` crashes, or whose adapter lies about
+parameter it never handles, whose `apply` crashes, or whose discovered contract disagrees with
 the output fails CI here without a hand-written per-op test, and the failure
 message names the offending op id.
 
@@ -419,12 +425,10 @@ effective `PATH` make referencing operations unavailable; they do not defer a
 crash until Apply. `BART_TOOLBOX_PATH` has no special resolver anymore—it is an
 ordinary variable on a named environment.
 
-`changes_shape` is **reserved and must be `false`**. A wrapper cannot supply an
-`output_shape` adapter, so a shape-changing op could not predict its output
-shape — its `evaluate_shape` would diverge from `apply` and lie to the
-evaluator. A wrapper that sets `changes_shape: true` is skipped with a recorded
-problem, and `import_custom_operation(..., changes_shape=True)` raises. A user op
-is therefore shape- and dtype-preserving today.
+`changes_shape` is presentation metadata, not a shape promise. It may be
+`true`: the operation is characterized on first use and the discovered
+shape/dtype contract is cached by operation id, parameters, input shape/dtype,
+and source identity.
 
 ### Import vs. link
 
@@ -433,8 +437,9 @@ is therefore shape- and dtype-preserving today.
   has no effect. This is the safe default for "capture this function".
 - **link** (`mode: "link"`): the wrapper stores the **absolute** path to the
   original `.py`, which is imported live. Editing that file is picked up
-  automatically: the import is cached by `(path, mtime)`, so a saved edit (bumped
-  mtime) triggers a fresh import on the next use. This is the "I'm actively
+  automatically: imports and characterizations are keyed by
+  `(absolute path, mtime_ns)`, so a saved edit triggers a fresh import and probe
+  on the next use. This is the "I'm actively
   iterating on this function" mode.
 
 ### The call contract (how your function is invoked)
@@ -452,10 +457,9 @@ So `f(data)`, `f(data, axis)`, `f(data, **params)` and `f(data, axis, **params)`
 all work without you writing any glue. Parameter `kind` (`int`/`float`) is guessed
 from the annotation, then the default value, falling back to `float`.
 
-A user op is **Tier-1 OPAQUE** (whole-array). It makes no region/windowable
-claim, so it never touches the Tier-2 conformance gate — and its output must be
-shape- and dtype-preserving (a shape-changing op is rejected; see
-`changes_shape` above).
+A user op is **Tier-1 OPAQUE** (whole-array). Its output is still characterized
+by the same adjudicator and cache as Tier-2 region claims, but it makes no
+windowability claim and therefore remains a whole-array `cache_stage`.
 
 ### Managing them (the public API the manager UI builds on)
 
@@ -469,10 +473,9 @@ manager UI drives:
 - `create_empty_user_operation() -> str` — write a deliberately unfinished,
   loud template and return its new `user:<slug>` id for in-manager editing.
 - `duplicate_operation(id) -> str` — write an editable user copy. Native
-  shape-preserving code is copied into a function; pack/entry-point operations
-  get a working adapter that names the dependency; shape-changing operations
-  become an explicit blocked template until discovered shapes land (never a
-  false shape-preserving claim).
+  code, including shape-changing implementations, is copied into a working
+  function; pack/entry-point operations get a working adapter that names the
+  dependency.
 - `update_user_operation_source(id, path, callable, *, link, infer=True)` —
   retarget the existing entry, copy or link its code, and expose AST-inferred
   label/description/axis/parameters through the ordinary editable wrapper

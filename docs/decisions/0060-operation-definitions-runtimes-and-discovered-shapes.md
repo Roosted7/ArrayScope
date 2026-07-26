@@ -1,6 +1,7 @@
 # ADR 0060: One operation definition, pluggable runtimes, discovered shapes
 
-- **Status:** Proposed (2026-07-26). Refines the operation-extensibility model
+- **Status:** Accepted (2026-07-26); Bundles A, B, and D are implemented, while
+  C and E remain queued. Refines the operation-extensibility model
   established by the plugin-ops work (ADR-less, `docs/plugin-operations.md`) and
   the custom-operations program that landed 2026-07-24 (`eaaea1cf`). Supersedes
   that program's decision to *refuse* shape-changing user operations.
@@ -89,7 +90,7 @@ The planner keeps asking for a shape before execution. We answer it from a
 - Probe the operation on small representative slabs, recording
   `(input shape, dtype, parameters) → (output shape, dtype)`.
 - Fit the result against a small set of known **shape rules** (identity,
-  axis-reduced, axis-scaled, fixed-size, per-axis pad/crop). A fit lets us
+  axis-reduced, axis-scaled, fixed-size, per-axis pad/crop, permutation). A fit lets us
   predict; no fit means *unpredictable*, which means whole-array evaluation with
   `cache_stage` — an honest cost class, not a refusal.
 - Cache the verdict keyed by operation id, parameters, input signature, and
