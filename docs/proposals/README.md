@@ -2,6 +2,13 @@
 
 Proposals describe a concrete design that has not yet become an accepted architecture decision or active roadmap commitment.
 
+- [Operations as a platform](operations-as-a-platform.md): the successor to the custom-operations
+  program — a native everyday toolbox (demoting the NumPy-trivial sigpy/BART ops that pay a
+  complex128 promotion or a subprocess for arithmetic), one definition format so any operation can
+  be read and duplicated into an editable copy, the hidden subprocess bridge promoted to a
+  user-editable command runtime with named execution environments, discovered instead of declared
+  shapes, and input slots for ROIs and second arrays. Decisions in
+  [ADR 0060](../decisions/0060-operation-definitions-runtimes-and-discovered-shapes.md).
 - [Axis information](axis-info.md): names, units, coordinates, spacing, and orientation. A first internal `AxisInfo` model exists, but broad IO/UI propagation remains incremental work.
 - [Tensor exploration engine — endpoint architecture](tensor-engine-endpoint.md): the
   deadline-driven engine the G-program converges toward — resource-broker-as-kernel-evolution,
