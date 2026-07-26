@@ -72,6 +72,7 @@ def run_bart(
     argv: Sequence[str],
     array: np.ndarray,
     *,
+    inputs: Mapping[str, np.ndarray] | None = None,
     cancellation_token: object | None = None,
     env: Mapping[str, str] | None = None,
     executable: str | None = None,
@@ -88,9 +89,17 @@ def run_bart(
         raise RuntimeError("bart executable not found in the selected environment")
     if timeout is _USE_CONFIGURED_TIMEOUT:
         timeout = bart_timeout()
+    slot_inputs = dict(inputs or {})
     return command_runtime.run_array_command(
-        [binary, *[str(token) for token in argv], "{in}", "{out}"],
+        [
+            binary,
+            *[str(token) for token in argv],
+            "{in}",
+            *[f"{{slot:{name}}}" for name in slot_inputs],
+            "{out}",
+        ],
         array,
+        inputs=slot_inputs,
         handoff="cfl",
         cancellation_token=cancellation_token,
         env=child_env,
@@ -104,22 +113,74 @@ def run_bart(
 def pack_specs() -> tuple:
     """Readable BART-native examples; shape discovery must unlock execution."""
 
+    from arrayscope.operations.input_slots import (
+        SLOT_DIMENSION_SET,
+        SLOT_OPEN_DOCUMENT,
+        SLOT_SAVED_ARRAY,
+        OperationInputSlot,
+    )
     from arrayscope.operations.plugins import PluginOperationSpec
     from arrayscope.operations.registry import OperationParameter
 
-    blocked = (
-        "BART reconstruction example — duplicate it to edit. "
-        "Execution remains unavailable until Bundle D discovers its output shape."
-    )
+    def availability():
+        return (
+            None
+            if bart_available()
+            else "BART is unavailable because the bart executable was not found."
+        )
 
     def build(argv):
-        def factory(_axis, params):
+        def factory(_axis, params, _slots):
             tokens = [str(token).format_map(dict(params)) for token in argv]
             return lambda data: run_bart(tokens, data)
 
         return factory
 
+    def build_pics(_axis, params, slots):
+        tokens = ["pics", "-i", str(int(params["iterations"]))]
+        return lambda data: run_bart(tokens, data, inputs=slots)
+
     return (
+        PluginOperationSpec(
+            id="bart:pics",
+            label="BART PICS reconstruction",
+            build=build_pics,
+            parameters=(
+                OperationParameter(
+                    "iterations",
+                    "Iterations",
+                    kind="int",
+                    default=30,
+                    minimum=1,
+                    maximum=10_000,
+                    description="Maximum PICS solver iterations.",
+                ),
+            ),
+            input_slots=(
+                OperationInputSlot(
+                    "sensitivities",
+                    "Sensitivity maps",
+                    "Coil sensitivity maps paired with the primary k-space array.",
+                    accepts=(
+                        SLOT_DIMENSION_SET,
+                        SLOT_OPEN_DOCUMENT,
+                        SLOT_SAVED_ARRAY,
+                    ),
+                ),
+            ),
+            group="BART",
+            description="Iterative parallel-imaging reconstruction from k-space and coil maps.",
+            icon="hub",
+            availability=availability,
+            runtime="command",
+            runtime_config={
+                "command_template": ("bart pics -i {iterations} {in} {sensitivities} {out}"),
+                "handoff": "cfl",
+                "timeout_s": _DEFAULT_TIMEOUT_S,
+                "shell": False,
+            },
+            environment_id="bart",
+        ),
         PluginOperationSpec(
             id="bart:ecalib",
             label="BART ESPIRiT calibration",
@@ -137,7 +198,7 @@ def pack_specs() -> tuple:
             group="BART",
             description="Estimate ESPIRiT sensitivity maps from calibration data.",
             icon="hub",
-            unavailable_reason=blocked,
+            availability=availability,
             runtime="command",
             runtime_config={
                 "command_template": "bart ecalib -m {maps} {in} {out}",
@@ -164,7 +225,7 @@ def pack_specs() -> tuple:
             group="BART",
             description="Estimate coil sensitivities with BART's Walsh method.",
             icon="blur_on",
-            unavailable_reason=blocked,
+            availability=availability,
             runtime="command",
             runtime_config={
                 "command_template": "bart walsh -r {radius} {in} {out}",

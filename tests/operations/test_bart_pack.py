@@ -54,7 +54,9 @@ def test_cfl_round_trips_as_complex64(tmp_path, dtype):
 def test_bart_pack_registers_only_genuinely_bart_shaped_examples():
     specs = bart_pack.pack_specs()
 
-    assert {spec.id for spec in specs} == {"bart:ecalib", "bart:walsh"}
+    assert {spec.id for spec in specs} == {"bart:pics", "bart:ecalib", "bart:walsh"}
+    pics = next(spec for spec in specs if spec.id == "bart:pics")
+    assert [slot.name for slot in pics.input_slots] == ["sensitivities"]
     assert all(spec.runtime == "command" for spec in specs)
     assert all(spec.runtime_config["handoff"] == "cfl" for spec in specs)
     registered = []
@@ -102,6 +104,21 @@ def _write_recording_bart(tmp_path, marker) -> str:
     return _make_executable(script)
 
 
+def _write_recording_pics_bart(tmp_path, marker) -> str:
+    script = tmp_path / "recording_pics_bart"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import shutil\n"
+        "import sys\n"
+        f"open({str(marker)!r}, 'w').write('\\n'.join(sys.argv[1:]))\n"
+        "primary, sensitivities, output = sys.argv[-3:]\n"
+        "assert primary != sensitivities\n"
+        "for suffix in ('.hdr', '.cfl'):\n"
+        "    shutil.copyfile(primary + suffix, output + suffix)\n"
+    )
+    return _make_executable(script)
+
+
 def test_run_bart_preserves_exact_argv_composition(tmp_path):
     marker = tmp_path / "argv"
     executable = _write_recording_bart(tmp_path, marker)
@@ -114,6 +131,27 @@ def test_run_bart_preserves_exact_argv_composition(tmp_path):
     )
 
     assert marker.read_text().splitlines() == ["pics", "-R", "W:7:0:0.01", "-i", "50"]
+    np.testing.assert_allclose(result, source.astype(np.complex64))
+
+
+def test_pics_hands_off_primary_and_sensitivity_arrays_in_exact_order(tmp_path):
+    marker = tmp_path / "argv"
+    executable = _write_recording_pics_bart(tmp_path, marker)
+    source = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    sensitivities = np.full((2, 3, 4), 7 + 2j, dtype=np.complex64)
+
+    result = bart_pack.run_bart(
+        ["pics", "-i", "17"],
+        source,
+        inputs={"sensitivities": sensitivities},
+        executable=executable,
+    )
+
+    argv = marker.read_text().splitlines()
+    assert argv[:3] == ["pics", "-i", "17"]
+    assert len(argv) == 6
+    assert argv[-3] != argv[-2]
+    assert os.path.exists(argv[-3] + ".cfl") is False  # scratch was cleaned
     np.testing.assert_allclose(result, source.astype(np.complex64))
 
 

@@ -184,6 +184,7 @@ def run_array_command(
     command: Sequence[str] | str,
     array: np.ndarray,
     *,
+    inputs: Mapping[str, np.ndarray] | None = None,
     handoff: str = "npy",
     shell: bool = False,
     cancellation_token: object | None = None,
@@ -216,21 +217,37 @@ def run_array_command(
         input_path = os.path.join(scratch, format_spec.input_name)
         output_path = os.path.join(scratch, format_spec.output_name)
         format_spec.write(input_path, np.asarray(array))
+        slot_paths: dict[str, str] = {}
+        for name, value in sorted(dict(inputs or {}).items()):
+            safe_name = "".join(
+                character if character.isalnum() or character in "_-" else "_"
+                for character in str(name)
+            )
+            suffix = ".npy" if format_spec.name == "npy" else ""
+            path = os.path.join(scratch, f"input-{safe_name}{suffix}")
+            format_spec.write(path, np.asarray(value))
+            slot_paths[str(name)] = path
         if cancelled():
             raise EvaluationCancelled()
 
         # Callers pass sentinel path tokens so this lower-level function can
         # still own scratch lifetime without reparsing a template.
-        replacements = {"{in}": input_path, "{out}": output_path}
+        replacements = {
+            "{in}": input_path,
+            "{out}": output_path,
+            **{f"{{slot:{name}}}": path for name, path in slot_paths.items()},
+        }
         if isinstance(command, str):
             child_command: str | list[str] = command
             for placeholder, path in replacements.items():
                 child_command = child_command.replace(placeholder, shlex.quote(path))
         else:
-            child_command = [
-                str(token).replace("{in}", input_path).replace("{out}", output_path)
-                for token in command
-            ]
+            child_command = []
+            for token in command:
+                resolved = str(token)
+                for placeholder, path in replacements.items():
+                    resolved = resolved.replace(placeholder, path)
+                child_command.append(resolved)
 
         proc = subprocess.Popen(
             child_command,
@@ -294,6 +311,7 @@ def run_command_template(
     array: np.ndarray,
     *,
     parameters: Mapping[str, object] | None = None,
+    inputs: Mapping[str, np.ndarray] | None = None,
     handoff: str = "npy",
     shell: bool = False,
     prefix: Sequence[str] = (),
@@ -311,11 +329,22 @@ def run_command_template(
     if not {"in", "out"}.issubset(fields):
         raise ValueError("command template must contain both {in} and {out}")
     values = dict(parameters or {})
-    values.update({"in": "{in}", "out": "{out}"})
+    slot_inputs = dict(inputs or {})
+    overlap = sorted(set(slot_inputs) & set(values))
+    if overlap:
+        raise ValueError(f"input slot names overlap parameter names: {', '.join(overlap)}")
+    values.update(
+        {
+            "in": "{in}",
+            "out": "{out}",
+            **{str(name): f"{{slot:{name}}}" for name in slot_inputs},
+        }
+    )
     command = build_command(template, values, shell=shell, prefix=prefix)
     return run_array_command(
         command,
         array,
+        inputs=slot_inputs,
         handoff=handoff,
         shell=shell,
         cancellation_token=cancellation_token,

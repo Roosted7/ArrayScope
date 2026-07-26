@@ -81,6 +81,7 @@ from pathlib import Path
 
 from arrayscope.app import user_dirs
 from arrayscope.operations import command_runtime, environments, registry
+from arrayscope.operations.input_slots import OperationInputSlot
 from arrayscope.operations.plugins import PluginOperationSpec
 from arrayscope.operations.registry import (
     COMMON_OPERATION_IDS,
@@ -490,6 +491,7 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
 
     slug = operation_id[len("user:") :]
     parameters = _parameters_from_payload(payload.get("parameters", ()))
+    input_slots = _input_slots_from_payload(payload.get("input_slots", ()))
     requires_axis = bool(payload.get("requires_axis", False))
     changes_shape = bool(payload.get("changes_shape", False))
 
@@ -533,6 +535,11 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
             )
         if environment_id:
             runtime_config = _runtime_config(payload)
+            if input_slots and not unavailable_reason:
+                unavailable_reason = (
+                    "Out-of-process Python input slots are not implemented; "
+                    "use the in-process Python or command runtime."
+                )
             build = _make_python_environment_build(
                 code_path,
                 callable_name,
@@ -544,7 +551,9 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
             build = _make_user_build(code_path, slug, callable_name)
     else:
         runtime_config = _runtime_config(payload)
-        command_problem = _command_definition_problem(runtime, runtime_config, parameters)
+        command_problem = _command_definition_problem(
+            runtime, runtime_config, parameters, input_slots
+        )
         if command_problem and not unavailable_reason:
             unavailable_reason = command_problem
         build = _make_command_build(
@@ -558,6 +567,7 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
         label=str(payload.get("label") or slug),
         build=build,
         parameters=parameters,
+        input_slots=input_slots,
         requires_axis=requires_axis,
         changes_shape=changes_shape,
         group=str(payload.get("group") or "User"),
@@ -574,7 +584,16 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
         runtime=runtime,
         runtime_config=runtime_config,
         environment_id=environment_id,
-        source_identity=lambda: _python_source_identity(code_path),
+        source_identity=(
+            (lambda: _python_source_identity(code_path))
+            if runtime == "python"
+            else lambda: (
+                runtime,
+                runtime_config.get("command_template"),
+                runtime_config.get("handoff"),
+                runtime_config.get("shell"),
+            )
+        ),
     )
 
 
@@ -601,12 +620,18 @@ def _command_definition_problem(
     runtime: str,
     config: dict[str, object],
     parameters: tuple[OperationParameter, ...],
+    input_slots: tuple[OperationInputSlot, ...],
 ) -> str:
     command_template = str(config.get("command_template") or "")
     if not command_template.strip():
         return "Command template is empty."
     fields = command_runtime.template_fields(command_template)
-    required = {"in", "out", *(parameter.name for parameter in parameters)}
+    required = {
+        "in",
+        "out",
+        *(parameter.name for parameter in parameters),
+        *(slot.name for slot in input_slots),
+    }
     missing = sorted(required - fields)
     if missing:
         return f"Command template is missing placeholders for: {', '.join(missing)}"
@@ -671,7 +696,7 @@ def _make_command_build(
     *,
     environment_id: str,
 ):
-    def build(axis, params):
+    def build(axis, params, slots):
         values = dict(params)
         if axis is not None:
             values["axis"] = axis
@@ -684,6 +709,7 @@ def _make_command_build(
                 str(config["command_template"]),
                 data,
                 parameters=values,
+                inputs=slots,
                 handoff=str(config["handoff"]),
                 shell=bool(config["shell"]),
                 prefix=_runtime_prefix(runtime, resolved),
@@ -707,7 +733,12 @@ def _make_python_environment_build(
 ):
     worker = str(Path(__file__).with_name("python_environment_worker.py"))
 
-    def build(axis, params):
+    def build(axis, params, slots):
+        if slots:
+            raise RuntimeError(
+                "Out-of-process Python input slots are not implemented; "
+                "use the in-process Python or command runtime."
+            )
         parameters_json = json.dumps(dict(params), separators=(",", ":"))
         axis_json = json.dumps(axis)
 
@@ -780,6 +811,25 @@ def _parameters_from_payload(raw) -> tuple[OperationParameter, ...]:
     return tuple(parameters)
 
 
+def _input_slots_from_payload(raw) -> tuple[OperationInputSlot, ...]:
+    slots: list[OperationInputSlot] = []
+    for item in raw or ():
+        if not isinstance(item, dict):
+            raise ValueError("input slot definitions must be objects")
+        name = str(item.get("name") or "")
+        if not name:
+            raise ValueError("input slot name cannot be empty")
+        slots.append(
+            OperationInputSlot(
+                name=name,
+                label=str(item.get("label") or name.replace("_", " ").title()),
+                description=str(item.get("description") or ""),
+                accepts=tuple(item.get("accepts") or ()),
+            )
+        )
+    return tuple(slots)
+
+
 def _load_user_module(path: str, slug: str):
     """Import the user code file, caching by (abspath, mtime) for link-edit pickup."""
 
@@ -835,7 +885,7 @@ def _accepted_args(fn) -> _AcceptedArgs:
 
 
 def _make_user_build(path: str, slug: str, callable_name: str):
-    """Return a ``build(axis, params) -> fn(data)`` that lazily imports the code.
+    """Return a ``build(axis, params, slots) -> fn(data)`` that imports lazily.
 
     Call adaptation (introspected from the live function each import): the array
     is always the first positional arg; ``axis`` is passed only when the function
@@ -845,7 +895,7 @@ def _make_user_build(path: str, slug: str, callable_name: str):
     ``f(data, axis, **params)`` uniformly.
     """
 
-    def build(axis, params):
+    def build(axis, params, slots):
         module = _load_user_module(path, slug)
         fn = getattr(module, callable_name, None)
         if not callable(fn):
@@ -862,6 +912,13 @@ def _make_user_build(path: str, slug: str, callable_name: str):
             }
             if axis is not None and ("axis" in accepted.names or accepted.var_keyword):
                 kwargs["axis"] = axis
+            kwargs.update(
+                {
+                    name: value
+                    for name, value in dict(slots).items()
+                    if name in accepted.names or accepted.var_keyword
+                }
+            )
             return fn(data, **kwargs)
 
         return bound
@@ -1095,6 +1152,7 @@ def create_empty_user_operation() -> str:
         "requires_axis": False,
         "changes_shape": False,
         "parameters": [],
+        "input_slots": [],
         "template": {
             "kind": "empty",
             "message": "Empty template — open the code file and implement it before running.",
@@ -1150,6 +1208,7 @@ def duplicate_operation(operation_id: str) -> str:
                 "environment",
                 "requires_axis",
                 "parameters",
+                "input_slots",
             }
         }
         wrapper.update(
@@ -1223,6 +1282,7 @@ def duplicate_operation(operation_id: str) -> str:
         "requires_axis": bool(definition.get("requires_axis", False)),
         "changes_shape": bool(definition.get("changes_shape", False)),
         "parameters": list(definition.get("parameters") or ()),
+        "input_slots": list(definition.get("input_slots") or ()),
         "template": template,
     }
     _write_wrapper(os.path.join(directory, f"{slug}.json"), wrapper)
@@ -1273,7 +1333,11 @@ def update_user_operation_source(
     payload.pop("template", None)
     if infer:
         payload.update(
-            label=callable_name.replace("_", " ").title(),
+            label=_unique_copy_label(
+                callable_name.replace("_", " ").title(),
+                copy_suffix=False,
+                exclude_id=operation_id,
+            ),
             description=info.doc,
             requires_axis=info.has_axis,
             parameters=[_parameter_payload(parameter) for parameter in info.params],
@@ -1283,10 +1347,17 @@ def update_user_operation_source(
     return True
 
 
-def _unique_copy_label(base: str, *, copy_suffix: bool = True) -> str:
+def _unique_copy_label(
+    base: str,
+    *,
+    copy_suffix: bool = True,
+    exclude_id: str | None = None,
+) -> str:
     root = str(base).rstrip(".").strip()
     candidate = f"{root} copy" if copy_suffix else root
-    labels = {entry.label.casefold() for entry in registry.all_operations()}
+    labels = {
+        entry.label.casefold() for entry in registry.all_operations() if entry.id != exclude_id
+    }
     if candidate.casefold() not in labels:
         return candidate
     suffix = 2
@@ -1337,7 +1408,11 @@ def import_custom_operation(
 
     directory = user_operations_directory()
     os.makedirs(directory, exist_ok=True)
-    base_slug = _safe_slug(label or callable_name)
+    resolved_label = _unique_copy_label(
+        label or callable_name.replace("_", " ").title(),
+        copy_suffix=False,
+    )
+    base_slug = _safe_slug(resolved_label)
     slug = _unique_slug(directory, base_slug)
     operation_id = f"user:{slug}"
 
@@ -1351,7 +1426,7 @@ def import_custom_operation(
         "format": WRAPPER_FORMAT,
         "version": 1,
         "id": operation_id,
-        "label": label or callable_name.replace("_", " ").title(),
+        "label": resolved_label,
         "description": description if description is not None else info.doc,
         "group": group,
         "icon": icon,
@@ -1364,6 +1439,7 @@ def import_custom_operation(
         "requires_axis": info.has_axis,
         "changes_shape": bool(changes_shape),
         "parameters": [_parameter_payload(param) for param in info.params],
+        "input_slots": [],
     }
     _write_wrapper(os.path.join(directory, f"{slug}.json"), wrapper)
 

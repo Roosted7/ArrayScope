@@ -556,7 +556,21 @@ def test_slug_collision_suffixes(tmp_path):
     id1 = library.import_custom_operation(src, "double", label="Boost")
     id2 = library.import_custom_operation(src, "double", label="Boost")
     assert id1 != id2
-    assert {id1, id2} <= {entry.id for entry in registry.all_operations()}
+    entries = {entry.id: entry for entry in registry.all_operations()}
+    assert {id1, id2} <= set(entries)
+    assert (entries[id1].label, entries[id2].label) == ("Boost", "Boost 2")
+
+
+def test_manager_source_retarget_numbers_duplicate_inferred_labels(tmp_path):
+    src = _write_source(tmp_path, "smooth.py", "def smooth(data):\n    return data\n")
+    first = library.create_empty_user_operation()
+    second = library.create_empty_user_operation()
+
+    assert library.update_user_operation_source(first, src, "smooth", link=True, infer=True)
+    assert library.update_user_operation_source(second, src, "smooth", link=True, infer=True)
+
+    entries = {entry.id: entry for entry in registry.all_operations()}
+    assert (entries[first].label, entries[second].label) == ("Smooth", "Smooth 2")
 
 
 # ---------------------------------------------------------------------------

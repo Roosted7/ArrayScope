@@ -20,6 +20,11 @@ import numpy as np
 import pytest
 
 from arrayscope.operations import library, plugins, registry
+from arrayscope.operations.input_slots import (
+    SLOT_DIMENSION_SET,
+    ResolvedSlot,
+    SlotBinding,
+)
 from arrayscope.operations.parameter_forms import build_parameter_form
 
 # Generic context used unless an op overrides it below.
@@ -73,6 +78,29 @@ def shape_changing_user_operation(tmp_path, monkeypatch):
     library.remove_user_operation(operation_id)
 
 
+@pytest.fixture
+def slot_bearing_user_operation(tmp_path, shape_changing_user_operation):
+    del shape_changing_user_operation
+    source = tmp_path / "add_reference.py"
+    source.write_text("def add_reference(data, reference):\n    return data + reference\n")
+    operation_id = library.import_custom_operation(
+        str(source), "add_reference", label="Add reference"
+    )
+    library.update_user_operation(
+        operation_id,
+        parameters=[],
+        input_slots=[
+            {
+                "name": "reference",
+                "label": "Reference",
+                "accepts": [SLOT_DIMENSION_SET],
+            }
+        ],
+    )
+    yield operation_id
+    library.remove_user_operation(operation_id)
+
+
 def _context_for(operation_id: str):
     override = _EXPECTATIONS.get(operation_id, {})
     shape = override.get("shape", _DEFAULT_SHAPE)
@@ -95,14 +123,17 @@ def test_demoted_numpy_wrapper_packs_only_expose_real_bart_examples():
     entries = registry.all_operations()
     assert not any(entry.id.startswith("sigpy:") for entry in entries)
     bart_entries = {entry.id: entry for entry in entries if entry.id.startswith("bart:")}
-    assert set(bart_entries) == {"bart:ecalib", "bart:walsh"}
+    assert set(bart_entries) == {"bart:pics", "bart:ecalib", "bart:walsh"}
     assert all(entry.unavailable_reason for entry in bart_entries.values())
 
 
-def test_every_operation_builds_and_applies_without_crashing(shape_changing_user_operation):
+def test_every_operation_builds_and_applies_without_crashing(
+    shape_changing_user_operation, slot_bearing_user_operation
+):
     entries = registry.all_operations()
     assert entries, "no operations registered"
     assert shape_changing_user_operation in {entry.id for entry in entries}
+    assert slot_bearing_user_operation in {entry.id for entry in entries}
 
     for entry in entries:
         if entry.unavailable_reason:
@@ -110,13 +141,43 @@ def test_every_operation_builds_and_applies_without_crashing(shape_changing_user
         shape, axis, dtypes = _context_for(entry.id)
         op_axis = axis if entry.requires_axis else None
 
-        form = build_parameter_form(entry, shape=shape, axis=op_axis)
+        slot_bindings = {}
+        resolved_slots = {}
+        if entry.input_slots:
+            reference = _sample_array(shape, np.dtype(np.float32))
+            for slot in entry.input_slots:
+                binding = SlotBinding(
+                    SLOT_DIMENSION_SET,
+                    source_id=f"smoke:{slot.name}",
+                    indices=tuple(None for _ in shape),
+                )
+                slot_bindings[slot.name] = binding
+                resolved_slots[slot.name] = ResolvedSlot(
+                    binding=binding,
+                    shape=shape,
+                    dtype=reference.dtype.str,
+                    source_identity=("smoke", slot.name),
+                    source=reference,
+                )
+
+        form = build_parameter_form(
+            entry,
+            shape=shape,
+            axis=op_axis,
+            slot_bindings=slot_bindings,
+        )
         parameters = form.values() if form is not None else {}
         if form is not None:
             assert form.validate() is None, f"{entry.id}: default form failed validation"
 
         try:
-            operation = registry.create_operation(entry.id, axis=op_axis, parameters=parameters)
+            operation = registry.create_operation(
+                entry.id,
+                axis=op_axis,
+                parameters=parameters,
+                slot_bindings=slot_bindings,
+                resolved_slots=resolved_slots,
+            )
         except Exception as exc:  # pragma: no cover - failure path names the op
             raise AssertionError(f"{entry.id}: create_operation crashed: {exc!r}") from exc
 
