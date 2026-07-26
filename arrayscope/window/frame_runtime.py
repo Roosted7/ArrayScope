@@ -252,9 +252,12 @@ class FrameRuntimeMixin:
         pipeline = getattr(session, "pipeline", None)
         if pipeline is None:
             seed_tile = next(iter(tuple(getattr(session.plan, "tiles", ()) or ())), None)
+            # "Independently tileable", as the comment below has always said
+            # -- not "commuting".  Until the commuting predicate became
+            # axis-aware the two happened to agree, and they no longer do.
             reduced_input_available = bool(
                 seed_tile is not None
-                and render_effects.preview_pipeline_commutes_for_display_lod(session, seed_tile)
+                and render_effects.preview_pipeline_is_tile_local(session, seed_tile)
             )
             pipeline = FramePipeline(
                 self.win.kernel,

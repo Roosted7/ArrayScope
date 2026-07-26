@@ -205,6 +205,9 @@ never done, §5.2's is about work done too many times.
    a non-display axis commutes *exactly*), and re-examine
    `shared_preview_is_useful`'s blanket `resident` refusal. This is the only
    item on the list that changes an order of magnitude rather than a constant.
+   **Gate 1 is now built and measured (§6a): necessary, but it moves nothing on
+   its own, and routing the preview per-tile instead of through the shared
+   route costs 18.7× the worker time. Gate 2 is where the prize is.**
 2. **Cut the number of commit transactions the preview pass needs** (18–21 → 2,
    worth ~2.7 s here). This is the queue's standing "per-commit whole-montage
    cost" item, and §4c hands it the lower-variance repro it was waiting for: the
@@ -310,6 +313,72 @@ And where the FFT *is* on a display axis, the field intuition is right and the
 ADR already licensed it: reduced-input FFT is a legitimate *preview*, not a
 result. It stays `quality="preview"`, semantic consumers keep refusing it, and
 exact inspection keeps coming from native — that contract is already enforced.
+
+### 6a. Gate 1, built and measured: necessary, and not sufficient on its own
+
+Gate 1 is closed. `pipeline_commutes_for_display_lod` now takes `display_axes`
+and answers per-axis: a stage passes on `lod_commuting` (the axis-blind
+pointwise licence) or on a new `OperationCapabilities.real_linear` declaration
+when its declared axes are disjoint from the display axes. `CenteredFFT(axis=2)`
+→ `FFTShift(axis=2)` → `CenteredIFFT(axis=2)` under display axes (0, 1) is now
+classified exactly commuting, and a unit test pins that reduce-then-evaluate and
+evaluate-then-reduce agree to float32 round-off through the production box mean.
+(`pipeline_supports_reduced_display_lod`'s unread `display_axes` was removed
+rather than wired up: its permissiveness is axis-independent *by design*, and
+keeping the argument left two apparent owners of the axis question.)
+
+Turning that answer loose on `frame_runtime`'s `reduced_input_available` — the
+literal reading of gate 1 — was then measured on the 272-tile FFT montage
+(wgpu, `fft_full_tiled_montage`, acks split by whether the identity carries the
+operation key; two runs per arm):
+
+| arm | FFT acks | first FFT pixel | fill ends | tile worker time |
+|---|---|---|---|---|
+| baseline | 271 × `exact` L2 | 5477 / 9747 ms | 8.3 / 11.8 s | 3.51 / 4.79 s |
+| naive gate 1 | **271 × `preview` L4, zero exact** | 6427 ms | **84.8 s** | **65.53 s** |
+| shipped | 271 × `exact` L2 | 7206 / 8727 ms | 10.7 / 10.6 s | 3.98 / 3.97 s |
+
+**The naive arm produces the previews and is much worse.** The 18.7× worker
+time is the ADR 0050 warning arriving on schedule: a per-tile rung for a
+montage-axis transform re-runs the whole transform once per tile, so first
+pixels land *later* than the old exact ones and the exact rung never lands at
+all. Previews appearing was never the goal; previews appearing *cheaply* was.
+
+So the per-tile gate is now asked the question it always claimed to ask.
+`frame_runtime`'s comment already said "pipelines whose display-LOD result is
+independently tileable"; the code asked whether the pipeline commutes, and
+until the predicate became axis-aware the two happened to agree. They are now
+separate predicates in `render/effects.py`:
+
+- `preview_pipeline_is_tile_local` — feeds `reduced_input_available`. True when
+  no stage expands any request axis, so one tile's cost does not scale with the
+  volume. Reproduces the pre-change answer on every existing pipeline.
+- `preview_montage_planes_are_independent` — feeds the shared route's
+  montage-axis narrowing. Reducing the display axes is legal for a
+  montage-axis FFT while reading only the requested planes is not; conflating
+  them returned the spectrum of 3 planes where 272 were meant (caught by
+  `tests/render/test_effects.py`).
+
+Measured verdict: **the gate that matters for this montage is gate 2**, the
+`resident` refusal at `effects.py:976`. The shared route computes the reduced
+transform once and fans out planes, which is the only shape in which a
+reduced-input FFT preview is cheap. Gate 1 was the prerequisite — without an
+axis-aware commuting answer the shared route has no licence to reduce first —
+but on its own it moves nothing, which the shipped arm confirms (every metric
+inside baseline run-to-run spread).
+
+Two findings in passing:
+
+- The 4 s stall guard at 271/272 fires in **all five runs**, baseline included,
+  so it is not attributable to anything here. Its character differs by arm:
+  baseline and shipped stall with `target_unsettled=1` (one tile short of its
+  exact target), the naive arm with `target_unsettled=272` and
+  `fallback_shown=271` (every tile stuck on a preview). Still untriaged.
+- Routing FFT pipelines per-tile crashed `summarize_chunk`: a near-constant
+  preview plane bounded `(3.8782985, 3.8782990)` spreads 1.2e-7 of relative
+  width over 64 bins, and consecutive float32 edges collapse.
+  `_histogram_edge_bounds` guarded `high == low` but not "narrower than float32
+  can resolve". Fixed and pinned separately; the defect is latent on main.
 
 ### 6b. How to subsample, and what a crop does to it
 

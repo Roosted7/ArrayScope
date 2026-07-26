@@ -185,9 +185,14 @@ contractual:
 
 ### Reduce-before-ops and preview-then-refine (initial slice implemented 2026-07-06)
 
+`pipeline_commutes_for_display_lod(operations, shape, dtype, display_axes=...)` defines which
+pipelines may take box-mean reduced input for per-tile display evaluation today. It is the one
+axis-aware owner (2026-07-26), and a stage passes it two ways:
 `OperationCapabilities.lod_commuting` (default False; True for pointwise value maps such as
-conjugate) and `pipeline_commutes_for_display_lod()` define which pipelines may take box-mean
-reduced input for per-tile display evaluation today. That predicate schedules a bounded
+conjugate), or `OperationCapabilities.real_linear` (default False; True for the DFT and for
+coordinate permutations) on a stage whose declared axes are disjoint from the display axes — an
+FFT over the montage axis commutes *exactly* with a box mean of x/y, so that case is exact rather
+than a quality compromise. That predicate schedules a bounded
 `quality="preview"` worker after the exact worker is admitted: the preview reads only the tile's
 display-axis range, reduces input to the demanded LOD, evaluates the commuting display pipeline,
 and admits the display-only plane to the existing pyramid floor. Exact semantic planes are
@@ -195,9 +200,11 @@ explicitly absent, so `TiledValueSource.value_at`/`tile_region`, refined level s
 ROI, profile, and export paths continue to wait for the native `"exact"` payload. The exact worker
 still owns refinement and supersedes preview through the ordinary backend-acknowledged lifecycle.
 
-`pipeline_supports_reduced_display_lod()` is the broader axis-aware predicate: transforms that
-touch only non-display axes (for example an FFT over the montage axis while x/y are display axes)
-can be evaluated from display-reduced input. The evaluator has that route, and it also has a
+`pipeline_supports_reduced_display_lod()` is the broader, deliberately axis-*blind* predicate: any
+shape-preserving non-reduction pipeline can be evaluated from display-reduced input as a
+`quality="preview"` presentation, including a transform along a display axis. (It accepted a
+`display_axes` argument until 2026-07-26 and never read it; the axis question belongs to the
+predicate above.) The evaluator has that route, and it also has a
 native-output-reduced opaque fallback for pipelines that cannot take reduced input. The current
 per-tile scheduler deliberately does not launch those broader routes yet. A direct per-tile
 non-display-transform preview duplicates the full transform once per tile and did not present

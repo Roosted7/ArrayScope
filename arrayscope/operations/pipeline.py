@@ -96,7 +96,12 @@ class ReverseAxis:
 
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
         _validate_axis(input_shape, self.axis)
-        return _capabilities(OperationKind.VIEW, ndim=len(input_shape), can_fuse=True)
+        # A reversal is a permutation of samples along its axis, so it is a
+        # linear map; the axis it names keeps it out of any display axis it
+        # would misalign box-mean blocks on.
+        return _capabilities(
+            OperationKind.VIEW, ndim=len(input_shape), can_fuse=True, real_linear=True
+        )
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
         axis = _validate_axis(input_shape, self.axis)
@@ -125,9 +130,16 @@ class Conjugate:
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
         # Pointwise value map: box-mean reduction of the display axes
         # commutes exactly (conjugation is linear), so display payloads may
-        # evaluate it on reduced input (ADR 0050).
+        # evaluate it on reduced input (ADR 0050).  It is antilinear over C but
+        # linear over the real weights a box mean uses, which is what
+        # `real_linear` claims -- so it also stays exact in front of or behind
+        # a transform on a non-display axis.
         return _capabilities(
-            OperationKind.ELEMENTWISE, ndim=len(input_shape), can_fuse=True, lod_commuting=True
+            OperationKind.ELEMENTWISE,
+            ndim=len(input_shape),
+            can_fuse=True,
+            lod_commuting=True,
+            real_linear=True,
         )
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
@@ -345,6 +357,10 @@ class CenteredFFT:
 
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
         axis = _validate_axis(input_shape, self.axis)
+        # The DFT is a linear map of the samples along its axis (the centering
+        # shifts are permutations, also linear), and it touches no other axis.
+        # Box-mean reduction of axes it does not touch therefore commutes with
+        # it exactly -- see `pipeline_commutes_for_display_lod`.
         return _capabilities(
             OperationKind.TRANSFORM,
             ndim=len(input_shape),
@@ -352,6 +368,7 @@ class CenteredFFT:
             expands_request_axes=(axis,),
             temp_multiplier=6.0,
             cache_stage=True,
+            real_linear=True,
         )
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
@@ -392,6 +409,10 @@ class CenteredIFFT:
 
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
         axis = _validate_axis(input_shape, self.axis)
+        # The DFT is a linear map of the samples along its axis (the centering
+        # shifts are permutations, also linear), and it touches no other axis.
+        # Box-mean reduction of axes it does not touch therefore commutes with
+        # it exactly -- see `pipeline_commutes_for_display_lod`.
         return _capabilities(
             OperationKind.TRANSFORM,
             ndim=len(input_shape),
@@ -399,6 +420,7 @@ class CenteredIFFT:
             expands_request_axes=(axis,),
             temp_multiplier=6.0,
             cache_stage=True,
+            real_linear=True,
         )
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
@@ -437,11 +459,16 @@ class FFTShift:
 
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
         _validate_axis(input_shape, self.axis)
+        # A roll by ceil(n/2) along one axis: a permutation, hence linear.  It
+        # declares no blocking or expanding axis, so `_operation_touched_axes`
+        # relies on the axis it names to keep it off the display axes, where
+        # the roll would cut across box-mean block boundaries.
         return _capabilities(
             OperationKind.VIEW,
             ndim=len(input_shape),
             can_fuse=True,
             notes=("Current NumPy fftshift implementation may allocate.",),
+            real_linear=True,
         )
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
@@ -814,6 +841,7 @@ def _capabilities(
     can_fuse: bool = False,
     notes=(),
     lod_commuting: bool = False,
+    real_linear: bool = False,
 ) -> OperationCapabilities:
     chunkable_axes = default_chunkable_axes(kind, ndim=ndim, blocking_axes=blocking_axes)
     return OperationCapabilities(
@@ -826,4 +854,5 @@ def _capabilities(
         can_fuse=bool(can_fuse),
         notes=tuple(notes),
         lod_commuting=bool(lod_commuting),
+        real_linear=bool(real_linear),
     )

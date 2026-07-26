@@ -48,6 +48,7 @@ from arrayscope.gpu.chunk_summary import aggregate_chunk_summaries, summarize_ch
 from arrayscope.operations.capabilities import (
     pipeline_commutes_for_display_lod,
     pipeline_supports_reduced_display_lod,
+    pipeline_windowable_display_axes,
 )
 from arrayscope.operations.evaluator import evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.pipeline import ArrayDocument
@@ -478,7 +479,7 @@ def evaluate_shared_preview(
         return ()
     level = preview_evaluation_level(session, demand) if level is None else int(level)
     factor_xy = factor_xy_for_level(demand, level)
-    independent_tiles = preview_pipeline_commutes_for_display_lod(session, seed_tile)
+    independent_tiles = preview_montage_planes_are_independent(session, seed_tile)
     axis_overrides = {}
     slice_remaps = {}
     if independent_tiles:
@@ -952,14 +953,12 @@ def can_evaluate_reduced_preview(session, tile) -> bool:
     if not can_evaluate_preview(session, tile):
         return False
     document = getattr(session, "document", None)
-    view_state = getattr(tile, "view_state", None)
     base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
     dtype = getattr(getattr(document, "base_data", None), "dtype", None)
     return pipeline_supports_reduced_display_lod(
         getattr(document, "enabled_operations", ()),
         base_shape,
         dtype,
-        display_axes=tuple(int(axis) for axis in view_state.image_axes),
     )
 
 
@@ -1150,11 +1149,86 @@ def presented_first_pixel_payload(session, tile_number: int):
 
 
 def preview_pipeline_commutes_for_display_lod(session, tile) -> bool:
+    """Whether this tile's pipeline may be evaluated on reduced display input.
+
+    The display axes are part of the question, not a detail of the caller: an
+    FFT along the montage axis commutes exactly with a box mean of the display
+    axes, while the same FFT along a display axis does not.  A tile with no
+    `image_axes` leaves them unknown, and the predicate falls back to its
+    axis-blind answer.
+    """
+
     document = getattr(session, "document", None)
     operations = tuple(getattr(document, "enabled_operations", ()) or ())
     base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
     dtype = getattr(getattr(document, "base_data", None), "dtype", None)
-    return pipeline_commutes_for_display_lod(operations, base_shape, dtype)
+    image_axes = getattr(getattr(tile, "view_state", None), "image_axes", None)
+    display_axes = () if image_axes is None else tuple(int(axis) for axis in image_axes)
+    return pipeline_commutes_for_display_lod(
+        operations, base_shape, dtype, display_axes=display_axes
+    )
+
+
+def _preview_narrowable_axes(session, axes) -> frozenset[int]:
+    """Of `axes`, those a preview may narrow without changing its own values.
+
+    Narrowing an axis is a window-shift question, so it is asked of the owner
+    that already answers those (`pipeline_windowable_display_axes`) rather than
+    restated here.
+    """
+
+    document = getattr(session, "document", None)
+    operations = tuple(getattr(document, "enabled_operations", ()) or ())
+    base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
+    dtype = getattr(getattr(document, "base_data", None), "dtype", None)
+    return frozenset(
+        pipeline_windowable_display_axes(operations, base_shape, dtype, display_axes=tuple(axes))
+    )
+
+
+def preview_montage_planes_are_independent(session, tile) -> bool:
+    """Whether a shared preview may narrow the montage axis to its own tiles.
+
+    A different question from `preview_pipeline_commutes_for_display_lod`, and
+    the two came apart when the latter became axis-aware: an FFT along the
+    montage axis commutes *exactly* with a box mean of the display axes, and
+    at the same time couples every plane to every other.  Reducing the display
+    axes is therefore legal while reading only the requested planes is not --
+    doing both returns the spectrum of three planes where 272 were meant.
+
+    Commuting is still required: the caller reduces before it evaluates.
+    """
+
+    if not preview_pipeline_commutes_for_display_lod(session, tile):
+        return False
+    montage_axis = getattr(session, "montage_axis", None)
+    if montage_axis is None:
+        return True  # no montage axis to narrow
+    return int(montage_axis) in _preview_narrowable_axes(session, (int(montage_axis),))
+
+
+def preview_pipeline_is_tile_local(session, tile) -> bool:
+    """Whether a PER-TILE reduced-input rung costs one tile's worth of work.
+
+    The ladder's `reduced_input_available` wants this, not commuting: a
+    per-tile rung is only cheap when evaluating one tile needs nothing outside
+    that tile's own region, so its cost does not scale with the rest of the
+    volume.  Any stage that expands a request axis breaks that, whether the
+    axis is displayed or not -- a montage-axis FFT re-runs the whole transform
+    once per tile, and a scrub-axis FFT re-reads every slice.
+
+    Measured on the 272-tile FFT montage: routing that pipeline to per-tile
+    rungs (which asking the commuting question here does, now that it is
+    axis-aware) took tile worker time from 3.5 s to 65.5 s and left every tile
+    on a level-4 preview that never refined.  The reduced-input FFT preview
+    belongs to the shared transform route, which evaluates it once.
+    """
+
+    if not preview_pipeline_commutes_for_display_lod(session, tile):
+        return False
+    base_shape = np.shape(getattr(getattr(session, "document", None), "base_data", ()))
+    every_axis = frozenset(range(len(base_shape)))
+    return _preview_narrowable_axes(session, sorted(every_axis)) == every_axis
 
 
 def preview_evaluation_level(session, demand) -> int:
@@ -1757,7 +1831,9 @@ __all__ = [
     "preview_claim_key",
     "preview_evaluation_level",
     "preview_is_useful",
+    "preview_montage_planes_are_independent",
     "preview_pipeline_commutes_for_display_lod",
+    "preview_pipeline_is_tile_local",
     "read_reduced_preview_base_and_state",
     "reduce_array_display_axes",
     "reduce_display_payload_axes",

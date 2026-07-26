@@ -53,6 +53,18 @@ class OperationCapabilities:
     # payload derivations may consult this flag; exact consumers always use
     # the native pipeline.
     lod_commuting: bool = False
+    # True when the operation is a linear map of its input samples over REAL
+    # scalars: f(a*x + b*y) == a*f(x) + b*f(y) for real a and b.  Box-mean
+    # reduction is an average with real, non-negative weights, so a real-linear
+    # operation commutes with it EXACTLY (to float error) on every axis the
+    # operation does not touch.  Real rather than complex linearity is the
+    # property that matters here: conjugation is antilinear over C yet still
+    # commutes with a real-weighted average.
+    #
+    # Unlike `lod_commuting` this flag says nothing on its own about display
+    # axes -- it is half of a per-axis question.  `pipeline_commutes_for_
+    # display_lod` combines it with the axes the operation declares.
+    real_linear: bool = False
 
 
 def normalize_capabilities(
@@ -69,6 +81,7 @@ def normalize_capabilities(
         can_fuse=bool(capabilities.can_fuse),
         notes=tuple(str(note) for note in capabilities.notes),
         lod_commuting=bool(capabilities.lod_commuting),
+        real_linear=bool(capabilities.real_linear),
     )
 
 
@@ -88,7 +101,9 @@ def default_chunkable_axes(kind: OperationKind, *, ndim: int, blocking_axes=()) 
     return ()
 
 
-def pipeline_commutes_for_display_lod(operations, base_shape, base_dtype=None) -> bool:
+def pipeline_commutes_for_display_lod(
+    operations, base_shape, base_dtype=None, *, display_axes=()
+) -> bool:
     """True when every operation may take box-mean-reduced display input.
 
     The reduce-before-ops path (ADR 0050) is valid only when the ENTIRE
@@ -97,17 +112,65 @@ def pipeline_commutes_for_display_lod(operations, base_shape, base_dtype=None) -
     display-axis identification below the reduction would no longer match
     the native region plan.  Conservative by construction: unknown or
     capability-less operations return False.
+
+    Commuting is a question about the operation *and* the display axes, so a
+    stage may earn its licence two independent ways:
+
+    - ``lod_commuting`` -- the axis-blind licence for pointwise value maps
+      (conjugate and friends).  A pointwise map cannot care which axes are
+      displayed, so this holds whatever ``display_axes`` says.
+    - real linearity off the display axes -- a stage that declares
+      ``real_linear`` and touches no display axis (through ``blocking_axes``,
+      ``expands_request_axes``, or its own ``axis``/``axes``) acts
+      independently within each display-axis position.  Box-mean reduction
+      averages *across* those positions with real, non-negative weights, so
+      reduce-then-apply and apply-then-reduce are the same array to float
+      error.  ``CenteredFFT(axis=2)`` under display axes (0, 1) -- an FFT
+      along the montage axis -- is the case this exists for, and it is exact,
+      not a quality compromise.
+
+    Linearity is not optional and axis-disjointness alone is not enough: a
+    nonlinear per-line map (a magnitude along the line, say) does not survive
+    an average taken across lines, however disjoint its axis is.  Nor is
+    ``OperationKind.TRANSFORM`` evidence of it -- the kind says the stage is a
+    global transform, not that it is linear.  Only the declared flag counts.
+
+    ``display_axes=()`` means the display axes are not known at the call site;
+    only the axis-blind licence then applies, which is the pre-2026-07 answer.
+    A display axis out of range for ``base_shape`` is a caller mismatch and
+    disqualifies the pipeline.
+
+    A REDUCTION stage disqualifies the pipeline outright.  Reductions are
+    shape-changing here and so already rejected, but the check is explicit
+    because a reduction is the one kind whose result depends on how many
+    samples went into it -- exactly what a display reduction changes.
+
+    The guarantee is only as strong as the weakest licence in the chain: an
+    all-``real_linear`` chain is exact, while mixing in a ``lod_commuting``
+    stage inherits that flag's weaker "acceptable for display" contract.
     """
 
     shape = tuple(int(size) for size in base_shape)
+    display = frozenset(int(axis) for axis in tuple(display_axes or ()))
+    if any(axis < 0 or axis >= len(shape) for axis in display):
+        return False
     dtype = base_dtype
     for operation in tuple(operations or ()):
         capabilities = getattr(operation, "capabilities", None)
-        if not callable(capabilities):
+        output_shape = getattr(operation, "output_shape", None)
+        if not callable(capabilities) or not callable(output_shape):
             return False
-        if tuple(operation.output_shape(shape)) != shape:
+        if tuple(int(size) for size in output_shape(shape)) != shape:
             return False
-        if not bool(getattr(capabilities(shape, dtype), "lod_commuting", False)):
+        caps = normalize_capabilities(capabilities(shape, dtype), ndim=len(shape))
+        if caps.kind is OperationKind.REDUCTION:
+            return False
+        commutes_off_display_axes = bool(
+            display
+            and caps.real_linear
+            and display.isdisjoint(_operation_touched_axes(operation, caps))
+        )
+        if not caps.lod_commuting and not commutes_off_display_axes:
             return False
         output_dtype = getattr(operation, "output_dtype", None)
         if callable(output_dtype):
@@ -115,9 +178,7 @@ def pipeline_commutes_for_display_lod(operations, base_shape, base_dtype=None) -
     return True
 
 
-def pipeline_supports_reduced_display_lod(
-    operations, base_shape, base_dtype=None, *, display_axes=()
-) -> bool:
+def pipeline_supports_reduced_display_lod(operations, base_shape, base_dtype=None) -> bool:
     """True when display axes may be reduced before evaluating this pipeline.
 
     This is broader than ``pipeline_commutes_for_display_lod``.  It answers a
@@ -125,6 +186,14 @@ def pipeline_supports_reduced_display_lod(
     a lower-LOD presentation?  Shape-preserving transforms such as FFT are
     allowed even though they do not mathematically commute with box reduction;
     exact/native consumers still use the native pipeline.
+
+    It takes no ``display_axes``, deliberately.  Its permissiveness is
+    axis-independent by construction -- a transform along a *display* axis is
+    still a legitimate ``quality="preview"`` presentation, which is the whole
+    point of being broader.  It did accept a ``display_axes`` argument and
+    never read it; that left two apparent owners of the axis question, only
+    one of which answered it.  ``pipeline_commutes_for_display_lod`` is now
+    that one owner.
     """
 
     shape = tuple(int(size) for size in base_shape)
@@ -251,6 +320,23 @@ def _normalize_axes(axes, *, ndim: int) -> tuple[int, ...]:
         if axis not in result:
             result.append(axis)
     return tuple(result)
+
+
+def _operation_touched_axes(operation, capabilities: OperationCapabilities) -> frozenset[int]:
+    """Axes an operation may read or write beyond the sample's own position.
+
+    The union of what the capability declares (``blocking_axes``,
+    ``expands_request_axes``) and what the operation names itself
+    (``axis``/``axes``).  The self-named axes matter on their own: a VIEW step
+    such as ``FFTShift`` or ``ReverseAxis`` blocks and expands nothing, yet it
+    permutes coordinates along its axis, and a permutation only commutes with
+    box-mean blocking when the block boundaries line up.
+    """
+
+    axes = set(capabilities.blocking_axes)
+    axes.update(capabilities.expands_request_axes)
+    axes.update(_operation_declared_axes(operation))
+    return frozenset(axes)
 
 
 def _operation_declared_axes(operation) -> tuple[int, ...]:

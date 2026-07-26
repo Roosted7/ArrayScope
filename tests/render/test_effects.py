@@ -23,6 +23,7 @@ from arrayscope.operations.pipeline import (
     ArrayDocument,
     CenteredFFT,
     CenteredIFFT,
+    Conjugate,
     FFTShift,
 )
 from arrayscope.operations.pipeline import (
@@ -512,14 +513,58 @@ def test_reduced_preview_base_samples_display_axes_before_operation_input():
     assert preview_state.shape == reduced.shape
 
 
-def test_fft_preview_is_shared_reduced_input_not_per_tile_ladder_input():
+def test_montage_axis_fft_commutes_for_display_lod_but_does_not_tile_independently():
+    # Replaces test_fft_preview_is_shared_reduced_input_not_per_tile_ladder_input,
+    # which pinned the axis-blind answer this predicate no longer gives: it
+    # asserted an FFT never takes reduced display input.  An FFT along the
+    # montage axis (2) with display axes (0, 1) commutes exactly, so the
+    # reduce-before-ops licence is real -- but the planes stay coupled, and
+    # only the second predicate may narrow the montage axis.
     session = _session()
     session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=2),))
     tile = session.plan.tiles[0]
 
     assert effects.can_evaluate_reduced_preview(session, tile) is True
-    assert effects.preview_pipeline_commutes_for_display_lod(session, tile) is False
+    assert effects.preview_pipeline_commutes_for_display_lod(session, tile) is True
+    assert effects.preview_montage_planes_are_independent(session, tile) is False
     assert effects.shared_preview_is_useful(session, tile, _demand(1)) is True
+    # And it must NOT reach the per-tile ladder: measured at 272 tiles, a
+    # per-tile rung re-runs the whole montage-axis transform once per tile
+    # (3.5 s -> 65.5 s of worker time).
+    assert effects.preview_pipeline_is_tile_local(session, tile) is False
+
+
+def test_display_axis_fft_neither_commutes_nor_narrows_the_montage_axis():
+    # The negative twin: move the same FFT onto a display axis and the
+    # reduce-before-ops licence goes away, while plane independence -- which
+    # would now hold on its own -- is gated behind it.
+    session = _session()
+    session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=0),))
+    tile = session.plan.tiles[0]
+
+    assert effects.preview_pipeline_commutes_for_display_lod(session, tile) is False
+    assert effects.preview_montage_planes_are_independent(session, tile) is False
+    assert effects.preview_pipeline_is_tile_local(session, tile) is False
+
+
+def test_raw_and_pointwise_pipelines_stay_per_tile_and_montage_independent():
+    # Regression guard on the split: exactly the cases that were per-tile
+    # before the predicate became axis-aware are still per-tile.  Nothing may
+    # newly reach the per-tile ladder from the axis-aware relaxation.
+    session = _session()
+    tile = session.plan.tiles[0]
+
+    for operations in ((), (Conjugate(),)):
+        session.document = ArrayDocument(session.document.base_data, operations=operations)
+        assert effects.preview_montage_planes_are_independent(session, tile) is True, operations
+        assert effects.preview_pipeline_is_tile_local(session, tile) is True, operations
+
+    # A transform on the scrub/montage axis is not tile-local even where there
+    # is no montage axis to narrow: one tile still needs the whole volume.
+    session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=2),))
+    session.montage_axis = None
+    assert effects.preview_montage_planes_are_independent(session, tile) is True
+    assert effects.preview_pipeline_is_tile_local(session, tile) is False
 
 
 def test_noncommuting_shared_preview_cannot_alias_direct_exact_pages():

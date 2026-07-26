@@ -1,7 +1,9 @@
+from dataclasses import dataclass
+
 import numpy as np
 import pytest
 
-from arrayscope.operations.capabilities import OperationKind
+from arrayscope.operations.capabilities import OperationCapabilities, OperationKind
 from arrayscope.operations.pipeline import (
     CenteredFFT,
     CenteredIFFT,
@@ -104,6 +106,43 @@ def test_capabilities_validate_axes_through_existing_shape_rules():
 # --- Display-LOD commuting contract (ADR 0050) ---
 
 
+@dataclass(frozen=True)
+class _OpaqueMontageAxisOp:
+    """A shape-preserving transform on one axis that declares no linearity.
+
+    Stands in for the general case the predicate must keep refusing: an
+    operation may touch only the montage axis and still be a nonlinear
+    per-line map, which an average taken across lines does not survive.
+    """
+
+    axis: int
+    real_linear: bool = False
+
+    def apply(self, data):
+        return np.abs(data)
+
+    def output_shape(self, shape):
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        return None if input_dtype is None else np.dtype(input_dtype)
+
+    def capabilities(self, input_shape, input_dtype=None) -> OperationCapabilities:
+        return OperationCapabilities(
+            kind=OperationKind.TRANSFORM,
+            blocking_axes=(int(self.axis),),
+            expands_request_axes=(int(self.axis),),
+            real_linear=bool(self.real_linear),
+        )
+
+
+@dataclass(frozen=True)
+class _LinearMontageAxisOp(_OpaqueMontageAxisOp):
+    """The same op with linearity declared -- the only difference that matters."""
+
+    real_linear: bool = True
+
+
 @pytest.mark.parametrize(
     ("operation", "commutes"),
     [
@@ -162,6 +201,103 @@ def test_pipeline_commutes_for_display_lod_requires_every_stage_to_commute():
     assert pipeline_commutes_for_display_lod((), shape, np.float32) is True
 
 
+def test_fft_off_the_display_axes_commutes_and_on_them_does_not():
+    # The axis is half the question. An FFT along the montage axis is exactly
+    # commuting with a box mean of the display axes; the same FFT along a
+    # display axis is not, and unknown display axes keep the old answer.
+    from arrayscope.operations.capabilities import pipeline_commutes_for_display_lod
+
+    shape = (4, 8, 16)
+    profile_pipeline = (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
+
+    assert (
+        pipeline_commutes_for_display_lod(profile_pipeline, shape, np.float32, display_axes=(0, 1))
+        is True
+    )
+    # Negative: the same chain on a display axis stays non-commuting, one
+    # stage at a time and as a chain.
+    for operation in (CenteredFFT(axis=1), FFTShift(axis=1), CenteredIFFT(axis=1)):
+        assert (
+            pipeline_commutes_for_display_lod((operation,), shape, np.float32, display_axes=(0, 1))
+            is False
+        )
+    assert (
+        pipeline_commutes_for_display_lod(
+            (CenteredFFT(axis=1), CenteredIFFT(axis=2)), shape, np.float32, display_axes=(0, 1)
+        )
+        is False
+    )
+    # Display axes the caller did not supply leave only the axis-blind
+    # licence, which is the pre-2026-07 answer.
+    assert pipeline_commutes_for_display_lod(profile_pipeline, shape, np.float32) is False
+    # A display axis outside the base shape is a caller mismatch.
+    assert (
+        pipeline_commutes_for_display_lod(profile_pipeline, shape, np.float32, display_axes=(0, 7))
+        is False
+    )
+    # Axis-disjointness alone is not enough: a reduction on the montage axis
+    # is linear, but its result depends on how many samples fed it.
+    assert (
+        pipeline_commutes_for_display_lod((Mean(axis=2),), shape, np.float32, display_axes=(0, 1))
+        is False
+    )
+    # And a stage that declares no linearity is out however disjoint it is.
+    assert (
+        pipeline_commutes_for_display_lod(
+            (_OpaqueMontageAxisOp(axis=2),), shape, np.float32, display_axes=(0, 1)
+        )
+        is False
+    )
+    assert (
+        pipeline_commutes_for_display_lod(
+            (_LinearMontageAxisOp(axis=2),), shape, np.float32, display_axes=(0, 1)
+        )
+        is True
+    )
+
+
+def test_montage_axis_fft_on_reduced_display_input_is_numerically_exact():
+    """The reason gate 1 exists: reduce-then-FFT == FFT-then-reduce, exactly.
+
+    Both sides use the production box mean (`reduce_array_display_axes`) and
+    the production pipeline evaluator, so this pins the claim the predicate
+    makes and not an idealised restatement of it.
+    """
+    from arrayscope.operations.pipeline import evaluate as evaluate_pipeline
+    from arrayscope.render.effects import reduce_array_display_axes
+
+    rng = np.random.default_rng(20260726)
+    volume = rng.standard_normal((16, 24, 8)).astype(np.float32)
+    display_axes = (0, 1)
+    factor_xy = (4, 4)
+    operations = (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
+
+    reduce_then_apply = evaluate_pipeline(
+        reduce_array_display_axes(volume, display_axes, factor_xy), operations
+    )
+    apply_then_reduce = reduce_array_display_axes(
+        evaluate_pipeline(volume, operations), display_axes, factor_xy
+    )
+
+    assert reduce_then_apply.shape == apply_then_reduce.shape == (4, 6, 8)
+    # float32/complex64 round-off only; the two arrays are the same array.
+    np.testing.assert_allclose(
+        reduce_then_apply, apply_then_reduce, rtol=1e-5, atol=1e-5 * float(np.abs(volume).max())
+    )
+
+    # Negative control: the same reduction against an FFT along a DISPLAY axis
+    # is a different array, so the predicate's refusal there is load-bearing.
+    display_axis_operations = (CenteredFFT(axis=1),)
+    assert not np.allclose(
+        evaluate_pipeline(
+            reduce_array_display_axes(volume, display_axes, factor_xy), display_axis_operations
+        ),
+        reduce_array_display_axes(
+            evaluate_pipeline(volume, display_axis_operations), display_axes, factor_xy
+        ),
+    )
+
+
 def test_fft_pipeline_is_reduced_input_suitable_without_lod_commuting():
     from arrayscope.operations.capabilities import (
         pipeline_commutes_for_display_lod,
@@ -171,16 +307,13 @@ def test_fft_pipeline_is_reduced_input_suitable_without_lod_commuting():
     shape = (4, 8, 16)
     operations = (CenteredFFT(axis=1),)
 
-    assert pipeline_commutes_for_display_lod(operations, shape, np.float32) is False
     assert (
-        pipeline_supports_reduced_display_lod(
-            operations,
-            shape,
-            np.float32,
-            display_axes=(0, 1),
-        )
-        is True
+        pipeline_commutes_for_display_lod(operations, shape, np.float32, display_axes=(0, 1))
+        is False
     )
+    # Broader by design and deliberately axis-blind: an FFT along a display
+    # axis is still a legitimate preview presentation.
+    assert pipeline_supports_reduced_display_lod(operations, shape, np.float32) is True
 
 
 def test_pipeline_windowable_display_axes_raw_and_elementwise_chains():
