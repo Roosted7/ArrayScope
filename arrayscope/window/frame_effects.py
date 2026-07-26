@@ -55,7 +55,7 @@ from arrayscope.render.ladder import Rung
 from arrayscope.render.stages import CommitBatch, LodAdmissionScope
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.display_presenter import tile_residency_budget_bytes
-from arrayscope.window.frame_session import _base_source_id
+from arrayscope.window.frame_session import _base_source_id, forget_admission_verdict
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches,
     previous_tiled_payloads,
@@ -1999,6 +1999,7 @@ class FramePipelineEffects:
         renderer._next_viewport_policy = ViewportPolicy.PRESERVE
         renderer._montage_presentation_commit_active = True
         _reset_commit_timings(renderer)
+        forget_admission_verdict(session)
         renderer._last_montage_commit_outcome = "started"
         try:
             payload_start = perf_counter()
@@ -3152,6 +3153,13 @@ class FramePipelineEffects:
             unbounded_reason=str(
                 getattr(renderer, "_last_montage_commit_unbounded_reason", "") or ""
             ),
+            # What made this batch this size. `max_upserts` is the cap in
+            # force; `admission_limit` is the cap that BIT — "" means none did,
+            # so the batch carried everything on offer and any smallness is
+            # supply, not pacing. Read it with `admission_candidates`.
+            admission_limit=str(getattr(session, "_last_admission_limit", "") or ""),
+            admission_deferred=int(getattr(session, "_last_admission_deferred", 0) or 0),
+            admission_candidates=int(getattr(session, "_last_admission_candidates", 0) or 0),
             first_display_commit=bool(
                 getattr(renderer, "_last_montage_commit_first_display", False)
             ),

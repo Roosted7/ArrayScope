@@ -249,6 +249,21 @@ def _resident_retarget_upsert_tiles(
     }
 
 
+def forget_admission_verdict(session) -> None:
+    """Clear the last admission verdict so a commit cannot report a stale one.
+
+    Not every commit runs admission — the atomic-successor paths reuse or
+    fast-build their delta — so the verdict must read as *absent*, not as
+    whatever the previous commit left behind.  ``candidates = -1`` says
+    "admission did not run this commit", which is a different statement from
+    "admission ran and nothing was offered".
+    """
+
+    session._last_admission_limit = ""
+    session._last_admission_deferred = 0
+    session._last_admission_candidates = -1
+
+
 def _free_retarget_tiles(
     payloads: dict[int, DisplayTilePayload],
     *,
@@ -3223,6 +3238,7 @@ class FrameSession:
             max_bytes=max_upsert_bytes,
             deadline_ms=cold_deadline_ms,
         )
+        self.note_admission_verdict(admission, candidates=len(admission_candidates))
         upserts = {
             int(tile): payloads[int(tile)] for tile in admission.admitted if int(tile) in payloads
         }
@@ -3905,6 +3921,7 @@ class FrameSession:
             max_bytes=max_upsert_bytes,
             deadline_ms=cold_deadline_ms,
         )
+        self.note_admission_verdict(admission, candidates=len(all_candidate_upserts))
         capped_upserts = {
             int(tile): all_candidate_upserts[int(tile)]
             for tile in admission.admitted
@@ -4768,6 +4785,23 @@ class FrameSession:
             | {int(tile) for tile in tuple(near_tiles or ())}
         )
         return int(self.priority_retargeted_tiles)
+
+    def note_admission_verdict(self, admission, *, candidates: int) -> None:
+        """Record WHY this batch is the size it is, at the only place that knows.
+
+        A small delta with no binding cap is **supply-bound**: nothing was
+        deferred because nothing was offered.  No other traced field says this.
+        ``max_upserts`` reports the cap that was *in force*, not the cap that
+        *bit*, so a starved refinement and a paced one are indistinguishable —
+        which is how a 1-in-16 refinement of 49 batches over 8.0 s (against 2
+        batches over 0.28 s) reads as ordinary run-to-run variance instead of
+        as a defect with a name.  See
+        docs/redesign/per-commit-transaction-count-2026-07-26.md §7.
+        """
+
+        self._last_admission_limit = str(getattr(admission, "limit", "") or "")
+        self._last_admission_deferred = len(getattr(admission, "deferred", ()) or ())
+        self._last_admission_candidates = int(candidates)
 
     def tile_priority_context(self) -> TilePriorityContext:
         """The session's single effective ordering context.
