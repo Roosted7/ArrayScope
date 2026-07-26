@@ -1185,3 +1185,38 @@ def test_present_tile_delta_reports_applied_when_the_presenter_succeeded():
     )
 
     assert applied is True
+
+
+def test_cpu_composited_rgb_display_declines_the_reduced_coarse_rung():
+    """A complex montage on a CPU-mapping backend freezes without this.
+
+    `render.lod._reducer_format_for_rendered` accepts scalar or complex source
+    values; PyQtGraph composites a complex view into an (h, w, 3) display plane,
+    which is neither, so forming a canonical page key for it raises. The rung
+    fails, the pipeline replans it, and it fails again: a real session logged
+    18314 admissions against 773 completions, and one 32-tile profile run
+    raised 2110 times before this guard existed. wgpu keeps the complex values
+    in the payload and maps them in the shader, which is why validating
+    ADR 0059 on wgpu alone could not see it.
+    """
+
+    session = _session()
+    session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=2),))
+    tile = session.plan.tiles[0]
+
+    # Shader-mapped complex (wgpu): the payload stays complex, so the rung is
+    # legal and this is the configuration ADR 0059 measured.
+    session.rgb = True
+    session.shader_display = True
+    assert effects.display_output_is_composited_rgb(session) is False
+    assert effects.can_evaluate_reduced_preview(session, tile) is True
+
+    # CPU-mapped complex (PyQtGraph): the payload is a composited RGB plane.
+    session.shader_display = False
+    assert effects.display_output_is_composited_rgb(session) is True
+    assert effects.can_evaluate_reduced_preview(session, tile) is False
+
+    # Scalar data on the same CPU-mapping backend is unaffected.
+    session.rgb = False
+    assert effects.display_output_is_composited_rgb(session) is False
+    assert effects.can_evaluate_reduced_preview(session, tile) is True

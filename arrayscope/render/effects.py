@@ -975,8 +975,32 @@ def can_evaluate_preview(session, tile) -> bool:
     return len(base_shape) == int(getattr(view_state, "ndim", len(base_shape)))
 
 
+def display_output_is_composited_rgb(session) -> bool:
+    """Whether this session's display payload is a CPU-composited RGB plane.
+
+    A canonical live LOD page carries scalar or complex source values, and
+    ``render.lod._reducer_format_for_rendered`` raises for anything else. A
+    complex view on a CPU-mapping backend (PyQtGraph) composites phase/colour
+    on the CPU and hands the backend an ``(h, w, 3)`` plane, which is neither.
+    wgpu keeps the complex values in the payload and maps them in the shader,
+    which is why this only bites the CPU-mapped backends -- and why an
+    ADR 0059 validation run on wgpu alone could not see it.
+
+    Conservative on purpose: a complex view whose mapping happens to reduce to
+    a scalar magnitude is declined here too, and falls back to the native
+    output rung exactly as it did before ADR 0059. Narrowing that needs the
+    format lookup to report "not expressible" instead of raising.
+    """
+
+    return bool(getattr(session, "rgb", False)) and not bool(
+        getattr(session, "shader_display", False)
+    )
+
+
 def can_evaluate_reduced_preview(session, tile) -> bool:
     if not can_evaluate_preview(session, tile):
+        return False
+    if display_output_is_composited_rgb(session):
         return False
     document = getattr(session, "document", None)
     base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
@@ -2020,6 +2044,7 @@ __all__ = [
     "axis_region_for_preview_indices",
     "can_evaluate_preview",
     "can_evaluate_reduced_preview",
+    "display_output_is_composited_rgb",
     "evaluate_preview_tile",
     "evaluate_shared_preview",
     "evaluate_target_tile",
