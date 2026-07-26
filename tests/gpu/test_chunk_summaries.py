@@ -167,3 +167,33 @@ def test_single_summary_aggregate_reuses_its_existing_bins(monkeypatch):
     assert np.array_equal(aggregate.counts, summary.counts)
     assert np.array_equal(aggregate.bin_edges, summary.bin_edges)
     assert aggregate.source_weight == summary.source_weight
+
+
+def test_summary_survives_a_span_below_float32_edge_resolution():
+    """A near-constant chunk must not collapse its own float32 bin edges.
+
+    Measured on a reduced FFT-preview plane: bounds (3.8782985, 3.8782990)
+    spread 1.2e-7 of relative width over 64 bins, so consecutive edges rounded
+    to the same float32 and `ChunkHistogramSummary` rejected them.  The
+    interval is widened instead; widening only adds empty end bins.
+    """
+
+    values = np.full((8, 8), 3.8782985, dtype=np.float32)
+    values[0, 0] = np.float32(3.8782990)
+
+    summary = summarize_chunk(_key(origin=(0, 0), shape=(8, 8), reduction=(0, 0)), values)
+
+    assert np.all(np.diff(summary.bin_edges) > 0.0)
+    assert summary.bounds == (float(values.min()), float(values.max()))
+    assert np.isclose(np.sum(summary.counts), float(values.size))
+    # Every value still lands inside the widened interval.
+    assert float(summary.bin_edges[0]) <= summary.bounds[0]
+    assert float(summary.bin_edges[-1]) >= summary.bounds[1]
+
+
+def test_summary_survives_a_constant_chunk_at_any_magnitude():
+    for value in (0.0, 1.0, -12345.678, 3.4e30):
+        values = np.full((4, 4), value, dtype=np.float32)
+        summary = summarize_chunk(_key(origin=(0, 0), shape=(4, 4), reduction=(0, 0)), values)
+        assert np.all(np.diff(summary.bin_edges) > 0.0), value
+        assert np.isclose(np.sum(summary.counts), float(values.size)), value

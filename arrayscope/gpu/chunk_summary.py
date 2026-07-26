@@ -119,7 +119,7 @@ def summarize_chunk(
         low = float(np.min(finite_values))
         high = float(np.max(finite_values))
         bounds = (low, high)
-        edge_low, edge_high = _histogram_edge_bounds(low, high)
+        edge_low, edge_high = _histogram_edge_bounds(low, high, bins=bins)
         edges = np.linspace(edge_low, edge_high, bins + 1, dtype=np.float32)
         counts, _unused = np.histogram(
             finite_values,
@@ -254,7 +254,7 @@ def aggregate_chunk_summaries(
             source_weight=source_weight,
             frontier_keys=tuple(item.key for item in frontier),
         )
-    edge_low, edge_high = _histogram_edge_bounds(low, high)
+    edge_low, edge_high = _histogram_edge_bounds(low, high, bins=bins)
     edges = np.linspace(edge_low, edge_high, bins + 1, dtype=np.float32)
     counts = np.zeros(bins, dtype=np.float64)
     for summary in populated:
@@ -283,7 +283,7 @@ def representative_sample_from_histogram(
     if counts.size == 0:
         return np.asarray((), dtype=np.float32)
     low, high = (float(bounds[0]), float(bounds[1]))
-    edge_low, edge_high = _histogram_edge_bounds(low, high)
+    edge_low, edge_high = _histogram_edge_bounds(low, high, bins=int(counts.size))
     edges = np.linspace(edge_low, edge_high, counts.size + 1, dtype=np.float32)
     return _representative_sample(counts, edges, limit=max(1, int(sample_limit)))
 
@@ -304,11 +304,35 @@ def _broadcast_weights(array: np.ndarray, weights) -> np.ndarray:
         ) from exc
 
 
-def _histogram_edge_bounds(low: float, high: float) -> tuple[float, float]:
-    if high > low:
-        return low, high
-    radius = max(abs(low) * 0.03, 0.5)
-    return low - radius, high + radius
+def _histogram_edge_bounds(low: float, high: float, *, bins: int) -> tuple[float, float]:
+    """Bounds whose float32 ``linspace`` over ``bins`` stays strictly increasing.
+
+    Two ways a chunk defeats a naive ``(low, high)``, and both must be widened
+    away before ``ChunkHistogramSummary`` rejects the edges:
+
+    - every value identical, so the interval has no width at all;
+    - values that differ, but by less than float32 can resolve at their own
+      magnitude.  A reduced FFT preview plane bounded ``(3.8782985,
+      3.8782990)`` spreads 1.2e-7 relative width over 64 bins, and
+      consecutive edges round to the same float32.
+
+    Widening only ever adds empty bins at the ends, so a histogram is never
+    made less faithful by it.
+    """
+
+    bins = max(1, int(bins))
+    low = float(low)
+    high = float(high)
+    if high <= low:
+        radius = max(abs(low) * 0.03, 0.5)
+        low, high = low - radius, high + radius
+    # linspace rounds every edge independently, so one float32 step of nominal
+    # separation per bin does not guarantee a strict increase; ask for four.
+    resolution = float(np.spacing(np.float32(max(abs(low), abs(high)))))
+    deficit = 4.0 * bins * resolution - (high - low)
+    if deficit > 0.0:
+        low, high = low - 0.5 * deficit, high + 0.5 * deficit
+    return low, high
 
 
 def _summary_base_family(key: DataChunkKey) -> tuple[object, ...]:
