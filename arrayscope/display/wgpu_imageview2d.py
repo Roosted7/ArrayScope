@@ -19,12 +19,15 @@ the color plane is multiplied by one levels-normalized histogram/luminance
 plane, packed together in one physical RGBA32F page. Complex tiles use
 shader-on-read component modes (magnitude/phase/real/imag), including cyclic
 phase hue modulated by normalized magnitude; scalar and complex mappings
-support linear/log/symlog display scales. Each tile is
-one bound :class:`ContentPlane` whose
-``document_generation`` is the payload's ack identity, so residency is
-content-keyed: re-committing identical content, switching complex modes,
-and moving levels are physical zero-upload operations — the executor report
-is the oracle, and the commit stats are derived from it, never invented.
+support linear/log/symlog display scales. Target-quality tiles bind one
+:class:`ContentPlane` each. A complete large-montage preview may instead pack
+its reduced values into at most two backend-private page planes; every tile
+keeps its own acknowledgement identity and source rectangle, and exact
+refinement binds ordinary planes beside the retained preview pages. Ordinary
+plane ``document_generation`` is the payload's ack identity, so residency is
+content-keyed: re-committing identical content, switching complex modes, and
+moving levels are physical zero-upload operations — the executor report is
+the oracle, and the commit stats are derived from it, never invented.
 Acknowledgement is physical truth per tile: a tile enters
 ``presented_tiles``/``presented_identities`` only when every one of its
 pages is actually resident in the executor page table after the submit.
@@ -139,6 +142,38 @@ class _WgpuPayloadBinding:
 
 
 @dataclass(frozen=True)
+class _WgpuPreviewAtlasSlot:
+    """One tile's immutable sub-rectangle in a backend-private preview page."""
+
+    tile_number: int
+    payload_identity: object
+    binding_identity: object
+    page_index: int
+    source_origin_xy: tuple[float, float]
+    source_size_xy: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class _WgpuPreviewAtlas:
+    """Compact physical backing for a large all-coarse montage pass.
+
+    The atlas is deliberately not a semantic source plane.  Its opaque token
+    exists only for this view lifetime, its pages never feed resident
+    histograms or exact reads, and the per-tile payload identities remain the
+    acknowledgement truth.  Exact refinement binds ordinary source planes
+    beside these pages while untouched tiles keep sampling their atlas slots.
+    """
+
+    token: object
+    representation: str
+    lod_reducer: str
+    pages: tuple[np.ndarray, ...]
+    page_keys: tuple[object, ...]
+    plane_identities: tuple[object, ...]
+    slots: tuple[_WgpuPreviewAtlasSlot, ...]
+
+
+@dataclass(frozen=True)
 class _WgpuTiledBindingSignature:
     """Construction-owned proof of the currently submitted tile binding."""
 
@@ -171,6 +206,13 @@ _WGPU_POOL_TEXEL_BYTES = {
     RGB8: 4,
     RGB_WINDOWED_RGBA32F: 16,
 }
+
+# Packing a small preview cohort would only replace cheap ordinary bindings
+# with atlas construction.  The product case is the complete 272-tile pass;
+# keep this backend optimization large-montage-only and measurable.
+_WGPU_PREVIEW_ATLAS_MIN_TILES = 64
+_WGPU_PREVIEW_ATLAS_MAX_PAGES = 2
+_WGPU_PREVIEW_ATLAS_REPRESENTATIONS = frozenset({SCALAR_R32F, COMPLEX_RG32F})
 
 
 def _wgpu_rgba(color, alpha: float = 1.0):
@@ -1505,18 +1547,60 @@ class WgpuImageView2D(ImageViewShell):
                 tile: self._wgpu_payload_texture(payloads[tile], representation)
                 for tile in payloads
             }
+            planned_count = planned_tile_count(
+                geometry,
+                frame_plan=frame_plan,
+                minimum=len(payloads),
+            )
             lod_geometry = {
                 tile: _wgpu_payload_declared_lod_geometry(payloads[tile], textures[tile])
                 for tile in payloads
             }
+            preview_payloads = _wgpu_preview_payloads(payloads)
+            preview_reducers = {
+                _wgpu_payload_lod_reducer(
+                    payload,
+                    representation=representation,
+                    mapping_mode=mode,
+                )
+                for payload in preview_payloads.values()
+            }
+            preview_atlas = None
+            if representation in _WGPU_PREVIEW_ATLAS_REPRESENTATIONS and len(preview_reducers) == 1:
+                preview_reducer = next(iter(preview_reducers))
+                previous_atlas = (self._wgpu_committed or {}).get("preview_atlas")
+                preview_atlas = _wgpu_reusable_preview_atlas(
+                    previous_atlas,
+                    preview_payloads,
+                    representation=representation,
+                    lod_reducer=preview_reducer,
+                )
+                # Construct only at the complete required-scope boundary.
+                # Progressive sub-cohorts remain on ordinary bindings;
+                # repeatedly rebuilding a growing atlas would add uploads
+                # without advancing whole-montage coverage.
+                if preview_atlas is None and len(preview_payloads) == planned_count:
+                    preview_atlas = _build_wgpu_preview_atlas(
+                        preview_payloads,
+                        textures,
+                        representation=representation,
+                        lod_reducer=preview_reducer,
+                    )
+            atlas_tiles = (
+                frozenset(int(tile) for tile in preview_payloads)
+                if preview_atlas is not None
+                else frozenset()
+            )
+            ordinary_tiles = tuple(tile for tile in payloads if tile not in atlas_tiles)
             # Size the pool for each declared ladder, not merely the payload
             # arriving in this commit.  Otherwise a coarse-first plane can
             # force an executor rebuild when L0 arrives, discarding the very
             # ancestor pages that make refinement never-black.
             pages_preferred = sum(
-                _wgpu_ladder_page_count(source_shape, max_lod=lod_level)
-                for lod_level, source_shape in lod_geometry.values()
+                _wgpu_ladder_page_count(lod_geometry[tile][1], max_lod=lod_geometry[tile][0])
+                for tile in ordinary_tiles
             )
+            pages_preferred += 0 if preview_atlas is None else len(preview_atlas.page_keys)
             capacity_pages_by_tile = {
                 tile: _wgpu_payload_capacity_page_count(
                     payloads[tile],
@@ -1524,7 +1608,7 @@ class WgpuImageView2D(ImageViewShell):
                     representation=representation,
                     selected_lod=lod_geometry[tile][0],
                 )
-                for tile in payloads
+                for tile in ordinary_tiles
             }
             # Progressive commits expose only the payloads materialized so
             # far, while the immutable frame plan already declares the whole
@@ -1532,16 +1616,17 @@ class WgpuImageView2D(ImageViewShell):
             # working set once. Otherwise every small presentation batch
             # grows and copies the texture array again on its way to the same
             # final capacity.
-            planned_count = planned_tile_count(
-                geometry,
-                frame_plan=frame_plan,
-                minimum=len(payloads),
-            )
-            pages_needed = _wgpu_pre_reservation_page_count(
-                capacity_pages_by_tile,
-                planned_count=planned_count,
-                max_layers=int(_shared_wgpu_device().limits["max-texture-array-layers"]),
-            )
+            if preview_atlas is None:
+                pages_needed = _wgpu_pre_reservation_page_count(
+                    capacity_pages_by_tile,
+                    planned_count=planned_count,
+                    max_layers=int(_shared_wgpu_device().limits["max-texture-array-layers"]),
+                )
+            else:
+                # The atlas already represents every still-preview tile, so
+                # forecasting one ordinary page per planned tile would erase
+                # the allocation win before refinement even starts.
+                pages_needed = sum(capacity_pages_by_tile.values()) + len(preview_atlas.page_keys)
             executor = self._ensure_wgpu_executor(
                 {representation: pages_needed},
                 preferred_pages={representation: pages_preferred},
@@ -1570,7 +1655,72 @@ class WgpuImageView2D(ImageViewShell):
             planned_resident = set(executor.page_table.resident_keys())
             planned_upload_tiles = []
             histogram_specs = []
+            if preview_atlas is not None:
+                atlas_plane_indices = {}
+                atlas_uploaded = False
+                for atlas_page, (plane_identity, page_key, page_values) in enumerate(
+                    zip(
+                        preview_atlas.plane_identities,
+                        preview_atlas.page_keys,
+                        preview_atlas.pages,
+                        strict=True,
+                    )
+                ):
+                    atlas_plane_indices[atlas_page] = len(planes)
+                    planes.append(
+                        ContentPlane(
+                            plane_identity,
+                            "preview-atlas",
+                            (PAGE, PAGE),
+                            max_lod=0,
+                            representation=representation,
+                            lod_reducer=preview_atlas.lod_reducer,
+                        )
+                    )
+                    if page_key not in planned_resident:
+                        commands.append(EnsureChunkResident(page_key, page_values))
+                        planned_resident.add(page_key)
+                        atlas_uploaded = True
+                    resident_by_plane[(plane_identity, "preview-atlas", representation)] = [
+                        page_key
+                    ]
+                slots = {int(slot.tile_number): slot for slot in preview_atlas.slots}
+                for tile in sorted(atlas_tiles):
+                    payload = payloads[tile]
+                    slot = slots[tile]
+                    region = layout[tile]
+                    committed_tiles[tile] = {
+                        "identity": tile_ack_identity(payload),
+                        "world_rect": (
+                            float(region.x),
+                            float(region.y),
+                            float(region.width),
+                            float(region.height),
+                        ),
+                        "src_size": tuple(slot.source_size_xy),
+                        "src_origin": tuple(slot.source_origin_xy),
+                        "plane_index": int(atlas_plane_indices[slot.page_index]),
+                        "page_keys": (preview_atlas.page_keys[slot.page_index],),
+                        "lod_level": 0,
+                        "plane_identity": preview_atlas.plane_identities[slot.page_index],
+                        "lod_reducer": preview_atlas.lod_reducer,
+                        "source_index": int(getattr(payload, "source_index", tile)),
+                        # Packed pages are physical presentation backing only.
+                        # The canonical payload summary remains the evidence
+                        # owner; atlas padding/neighbours are never sampled as
+                        # semantic histogram input.
+                        "prepared_histogram_evidence": bool(
+                            getattr(payload, "level_stats", None) is not None
+                            or getattr(payload, "level_data", None) is not None
+                        ),
+                        "histogram_frontier_eligible": False,
+                        "histogram_evidence_key": None,
+                    }
+                if atlas_uploaded:
+                    planned_upload_tiles.extend(sorted(atlas_tiles))
             for tile in sorted(payloads):
+                if tile in atlas_tiles:
+                    continue
                 payload = payloads[tile]
                 identity = tile_ack_identity(payload)
                 texture = textures[tile]
@@ -1700,11 +1850,21 @@ class WgpuImageView2D(ImageViewShell):
                         getattr(payload, "level_stats", None) is not None
                         or getattr(payload, "level_data", None) is not None
                     ),
+                    "histogram_frontier_eligible": True,
                 }
 
             histogram_capable = representation != RGB8
             scheduled_evidence_keys = set()
+            atlas_missing_prepared_evidence = 0
             for tile, info in committed_tiles.items():
+                if not bool(info["histogram_frontier_eligible"]):
+                    info["histogram_evidence_key"] = None
+                    if (
+                        self._wgpu_histogram_evidence_required
+                        and not info["prepared_histogram_evidence"]
+                    ):
+                        atlas_missing_prepared_evidence += 1
+                    continue
                 frontier_keys = (
                     chunk_key_frontier(
                         tuple(
@@ -1715,7 +1875,7 @@ class WgpuImageView2D(ImageViewShell):
                             if key.lod.is_native or key.lod.reducer == info["lod_reducer"]
                         )
                     )
-                    if histogram_capable
+                    if histogram_capable and bool(info["histogram_frontier_eligible"])
                     else ()
                 )
                 histogram_evidence_key = (
@@ -1744,6 +1904,12 @@ class WgpuImageView2D(ImageViewShell):
                         )
                     )
                     scheduled_evidence_keys.add(histogram_evidence_key)
+            if atlas_missing_prepared_evidence:
+                emit_trace(
+                    "wgpu_histogram_queue_bail",
+                    reason="preview_atlas_is_nonsemantic",
+                    missing_tiles=atlas_missing_prepared_evidence,
+                )
 
             self._wgpu_mapping_state = mapping_state
             display_shape = tile_layout_shape(geometry, frame_plan=frame_plan)
@@ -1752,6 +1918,8 @@ class WgpuImageView2D(ImageViewShell):
                 "representation": representation,
                 "display_shape": display_shape,
                 "budget_bytes": int(tile_residency_budget_bytes or 0),
+                "preview_atlas": preview_atlas,
+                "preview_atlas_active_tiles": tuple(sorted(atlas_tiles)),
                 # Payloads are canonical (sorted image axes); an X/Y swap is a
                 # display transform the vertex shader applies via a UV axis swap
                 # (world rects stay display-oriented, source windows canonical).
@@ -2920,6 +3088,10 @@ class WgpuImageView2D(ImageViewShell):
         adapter_info = dict(getattr(adapter, "info", {}) or {})
         drawn_tiles = tuple(self.tileTruthPhysicalRows())
         committed_tiles = tuple(sorted((self._wgpu_committed or {}).get("tiles", ())))
+        preview_atlas = (self._wgpu_committed or {}).get("preview_atlas")
+        preview_atlas_active_tiles = tuple(
+            (self._wgpu_committed or {}).get("preview_atlas_active_tiles", ()) or ()
+        )
         resident = len(executor.page_table.resident_keys()) if executor is not None else 0
         page_pools = () if executor is None else tuple(executor.pool_diagnostics_snapshot())
         diagnostics: dict[str, object] = {
@@ -2938,6 +3110,10 @@ class WgpuImageView2D(ImageViewShell):
             "physically_visible_tile_count": len(drawn_tiles),
             "presented_tile_count": len(committed_tiles),
             "presented_tiles": committed_tiles,
+            "wgpu_preview_atlas_tiles": len(preview_atlas_active_tiles),
+            "wgpu_preview_atlas_pages": (
+                0 if preview_atlas is None else len(preview_atlas.page_keys)
+            ),
             "page_table_resident_count": resident,
             "wgpu_uploads_total": int(getattr(executor, "uploads_total", 0) or 0),
             "wgpu_upload_bytes_total": int(getattr(executor, "texture_upload_bytes_total", 0) or 0),
@@ -3123,6 +3299,167 @@ def _wgpu_physical_payload_identities(
             )
         )
     return tuple(rows)
+
+
+def _wgpu_preview_binding_identity(payload) -> object:
+    """Physical identity of bytes admitted to one preview atlas slot.
+
+    Live typed payloads already carry source-plane provenance outside
+    ``TileIdentity`` equality.  The array record also keeps legacy/test
+    payloads honest: a new buffer under the same opaque ``source_id`` must
+    rebuild the atlas rather than reuse stale texels.
+    """
+
+    identity = tile_ack_identity(payload)
+    texture = np.asarray(
+        payload.texture_data if payload.texture_data is not None else payload.image
+    )
+    pointer = int(texture.__array_interface__["data"][0])
+    return (
+        identity,
+        getattr(identity, "real_plane", None),
+        getattr(identity, "imag_plane", None),
+        getattr(payload, "source_id", None),
+        pointer,
+        tuple(int(value) for value in texture.shape),
+        tuple(int(value) for value in texture.strides),
+        str(texture.dtype),
+    )
+
+
+def _wgpu_preview_payloads(payloads) -> dict[int, object]:
+    """Large-montage preview payloads eligible for compact physical backing."""
+
+    return {
+        int(tile): payload
+        for tile, payload in dict(payloads or {}).items()
+        if str(getattr(payload, "quality", "exact") or "exact") == "preview"
+    }
+
+
+def _wgpu_reusable_preview_atlas(
+    previous,
+    preview_payloads,
+    *,
+    representation: str,
+    lod_reducer: str,
+) -> _WgpuPreviewAtlas | None:
+    """Return a prior atlas when every still-preview slot names the same bytes."""
+
+    if not isinstance(previous, _WgpuPreviewAtlas):
+        return None
+    if previous.representation != str(representation) or previous.lod_reducer != str(lod_reducer):
+        return None
+    slots = {int(slot.tile_number): slot for slot in previous.slots}
+    for tile, payload in preview_payloads.items():
+        slot = slots.get(int(tile))
+        if (
+            slot is None
+            or slot.payload_identity != tile_ack_identity(payload)
+            or slot.binding_identity != _wgpu_preview_binding_identity(payload)
+        ):
+            return None
+    return previous
+
+
+def _wgpu_preview_page_array(representation: str, page: int) -> np.ndarray:
+    """Allocate one zero-padded executor page in the representation's format."""
+
+    if representation == SCALAR_R32F:
+        return np.zeros((page, page), np.float32)
+    if representation == COMPLEX_RG32F:
+        return np.zeros((page, page, 2), np.float32)
+    if representation == RGB8:
+        return np.zeros((page, page, 3), np.uint8)
+    if representation == RGB_WINDOWED_RGBA32F:
+        return np.zeros((page, page, 4), np.float32)
+    raise ValueError(f"unsupported wgpu preview atlas representation {representation!r}")
+
+
+def _build_wgpu_preview_atlas(
+    preview_payloads,
+    textures,
+    *,
+    representation: str,
+    lod_reducer: str,
+) -> _WgpuPreviewAtlas | None:
+    """Shelf-pack a large preview set into at most two native executor pages."""
+
+    from arrayscope.gpu.wgpu_executor import PAGE, plane_chunk_key
+
+    if len(preview_payloads) < _WGPU_PREVIEW_ATLAS_MIN_TILES:
+        return None
+    token = object()
+    pages: list[np.ndarray] = []
+    slots: list[_WgpuPreviewAtlasSlot] = []
+    page_index = -1
+    cursor_x = cursor_y = row_height = 0
+
+    def start_page() -> bool:
+        nonlocal page_index, cursor_x, cursor_y, row_height
+        if len(pages) >= _WGPU_PREVIEW_ATLAS_MAX_PAGES:
+            return False
+        pages.append(_wgpu_preview_page_array(representation, PAGE))
+        page_index += 1
+        cursor_x = cursor_y = row_height = 0
+        return True
+
+    if not start_page():
+        return None
+    for tile in sorted(preview_payloads):
+        texture = np.asarray(textures[tile])
+        height, width = (int(value) for value in texture.shape[:2])
+        if height < 1 or width < 1 or height > PAGE or width > PAGE:
+            return None
+        if cursor_x + width > PAGE:
+            cursor_x = 0
+            cursor_y += row_height
+            row_height = 0
+        if cursor_y + height > PAGE and not start_page():
+            return None
+        pages[page_index][
+            cursor_y : cursor_y + height,
+            cursor_x : cursor_x + width,
+            ...,
+        ] = texture
+        payload = preview_payloads[tile]
+        slots.append(
+            _WgpuPreviewAtlasSlot(
+                tile_number=int(tile),
+                payload_identity=tile_ack_identity(payload),
+                binding_identity=_wgpu_preview_binding_identity(payload),
+                page_index=int(page_index),
+                source_origin_xy=(float(cursor_x), float(cursor_y)),
+                source_size_xy=(float(width), float(height)),
+            )
+        )
+        cursor_x += width
+        row_height = max(row_height, height)
+
+    plane_identities = tuple(("wgpu-preview-atlas", token, index) for index in range(len(pages)))
+    page_keys = tuple(
+        plane_chunk_key(
+            plane_identity,
+            "preview-atlas",
+            0,
+            0,
+            0,
+            dtype=_WGPU_REP_DTYPES[representation],
+            representation=representation,
+            plane_shape=(PAGE, PAGE),
+            reducer=lod_reducer,
+        )
+        for plane_identity in plane_identities
+    )
+    return _WgpuPreviewAtlas(
+        token=token,
+        representation=str(representation),
+        lod_reducer=str(lod_reducer),
+        pages=tuple(pages),
+        page_keys=page_keys,
+        plane_identities=plane_identities,
+        slots=tuple(slots),
+    )
 
 
 def _wgpu_payload_plane_identity(payload) -> object:

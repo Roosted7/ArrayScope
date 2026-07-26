@@ -1506,6 +1506,273 @@ def test_phase_vector_reduced_page_renders_cancellation_black_and_coherence_brig
         view.close()
 
 
+def _preview_lod_payload(tile_number, image, *, base_source_id, level, source_shape):
+    payload = _lod_payload(
+        tile_number,
+        image,
+        base_source_id=base_source_id,
+        level=level,
+        source_shape=source_shape,
+    )
+    return replace(
+        payload,
+        quality="preview",
+        semantic_data=None,
+        semantic_histogram_data=None,
+        tile_identity=replace(payload.tile_identity, quality="preview"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("preview_shape", "level", "expected_pages"),
+    [
+        pytest.param((21, 21), 4, 2, id="two-levels-coarser"),
+        pytest.param((6, 6), 6, 1, id="large-montage-dynamic-level"),
+    ],
+)
+def test_large_preview_montage_uses_shared_pages_with_per_tile_ack_truth(
+    qt_app,
+    preview_shape,
+    level,
+    expected_pages,
+):
+    """Ring 4 helper: compact preview residency must still acknowledge each tile."""
+
+    from arrayscope.display.model.montage_levels import TileLevelStats
+
+    source_shape = (336, 336)
+    tile_count = 272
+    geometry = _montage_geometry(source_shape, 17, 16, loaded=tile_count)
+    payloads = {
+        tile: replace(
+            _preview_lod_payload(
+                tile,
+                np.full(preview_shape, float(tile + 1), np.float32),
+                base_source_id=("preview-atlas", tile),
+                level=level,
+                source_shape=source_shape,
+            ),
+            level_stats=TileLevelStats(
+                source_index=tile,
+                bounds=(float(tile + 1), float(tile + 1)),
+                sample=np.asarray([float(tile + 1)], dtype=np.float32),
+            ),
+        )
+        for tile in range(tile_count)
+    }
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        view.setResidentHistogramEvidenceRequired(True, ("preview-atlas", 1))
+        dispatches_before = (
+            0 if view._wgpu_executor is None else view._wgpu_executor.histogram_dispatches_total
+        )
+
+        report = _commit(view, geometry, payloads, levels=(0.0, float(tile_count + 1)))
+
+        assert report.texture_uploads == expected_pages
+        assert report.presented_tiles == frozenset(payloads)
+        assert report.presented_identities == {
+            tile: payload.tile_identity for tile, payload in payloads.items()
+        }
+        committed = view._wgpu_committed
+        assert len(view._wgpu_executor._bound_planes) == expected_pages
+        assert (
+            len({key for info in committed["tiles"].values() for key in info["page_keys"]})
+            == expected_pages
+        )
+        assert {info["plane_index"] for info in committed["tiles"].values()} == set(
+            range(expected_pages)
+        )
+        assert {instance.lod_level for instance in view._wgpu_tile_instances()} == {0}
+        assert {instance.src_size for instance in view._wgpu_tile_instances()} == {
+            (float(preview_shape[1]), float(preview_shape[0]))
+        }
+        diagnostics = view.wgpuPresentationDiagnostics()
+        assert diagnostics["wgpu_preview_atlas_tiles"] == tile_count
+        assert diagnostics["wgpu_preview_atlas_pages"] == expected_pages
+        assert view.residentHistogramEvidence(payloads) == ()
+        assert view._wgpu_executor.histogram_dispatches_total == dispatches_before
+        region = committed["tiles"][144]["world_rect"]
+        view.getView().setRange(
+            xRange=(region[0], region[0] + region[2]),
+            yRange=(region[1], region[1] + region[3]),
+            padding=0,
+        )
+        _rerender_internal(view)
+        expected = round(145.0 / float(tile_count + 1) * 255.0)
+        assert np.allclose(_center_pixel(view)[:3], expected, atol=2)
+    finally:
+        view.close()
+
+
+def test_partial_preview_cohort_does_not_rebuild_a_growing_atlas(qt_app):
+    """Atlas construction belongs to the complete required-scope boundary."""
+
+    source_shape = (336, 336)
+    geometry = _montage_geometry(source_shape, 17, 16, loaded=272)
+    payloads = {
+        tile: _preview_lod_payload(
+            tile,
+            np.full((21, 21), float(tile + 1), np.float32),
+            base_source_id=("partial-preview-atlas", tile),
+            level=4,
+            source_shape=source_shape,
+        )
+        for tile in range(64)
+    }
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        report = _commit(view, geometry, payloads, levels=(0.0, 272.0))
+
+        assert report.texture_uploads == len(payloads)
+        diagnostics = view.wgpuPresentationDiagnostics()
+        assert diagnostics["wgpu_preview_atlas_tiles"] == 0
+        assert diagnostics["wgpu_preview_atlas_pages"] == 0
+    finally:
+        view.close()
+
+
+def test_exact_refinement_preserves_shared_preview_pages_and_mixed_ack_truth(qt_app):
+    """Exact tiles overlay one retained atlas; untouched tiles keep preview truth."""
+
+    source_shape = (336, 336)
+    tile_count = 272
+    geometry = _montage_geometry(source_shape, 17, 16, loaded=tile_count)
+    preview = {
+        tile: _preview_lod_payload(
+            tile,
+            np.full((21, 21), float(tile + 1), np.float32),
+            base_source_id=("mixed-preview-atlas", tile),
+            level=4,
+            source_shape=source_shape,
+        )
+        for tile in range(tile_count)
+    }
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        first = _commit(view, geometry, preview, levels=(0.0, 300.0))
+        assert first.texture_uploads == 2
+        atlas_keys = {
+            key for info in view._wgpu_committed["tiles"].values() for key in info["page_keys"]
+        }
+        refined = {
+            tile: _lod_payload(
+                tile,
+                np.full(source_shape, float(280 + tile), np.float32),
+                base_source_id=("mixed-preview-atlas", tile),
+                level=0,
+                source_shape=source_shape,
+            )
+            for tile in (0, 144)
+        }
+        mixed = {**preview, **refined}
+
+        second = _commit(view, geometry, mixed, levels=(0.0, 300.0))
+
+        assert second.texture_uploads == 8
+        assert second.presented_tiles == frozenset(mixed)
+        assert second.presented_identities == {
+            tile: payload.tile_identity for tile, payload in mixed.items()
+        }
+        assert atlas_keys <= set(view._wgpu_executor.page_table.resident_keys())
+        preview_keys = {
+            key
+            for tile, info in view._wgpu_committed["tiles"].items()
+            if tile not in refined
+            for key in info["page_keys"]
+        }
+        assert preview_keys == atlas_keys
+        assert len(view._wgpu_executor._bound_planes) == 4
+        assert {instance.lod_level for instance in view._wgpu_tile_instances()} == {0}
+        diagnostics = view.wgpuPresentationDiagnostics()
+        assert diagnostics["wgpu_preview_atlas_tiles"] == tile_count - len(refined)
+        assert diagnostics["wgpu_preview_atlas_pages"] == 2
+        region = view._wgpu_committed["tiles"][0]["world_rect"]
+        view.getView().setRange(
+            xRange=(region[0], region[0] + region[2]),
+            yRange=(region[1], region[1] + region[3]),
+            padding=0,
+        )
+        _rerender_internal(view)
+        assert np.allclose(_center_pixel(view)[:3], round(280.0 / 300.0 * 255.0), atol=2)
+    finally:
+        view.close()
+
+
+def test_complex_preview_montage_uses_two_shared_rg_pages(qt_app):
+    """Complex preview values remain raw and shader-mapped in the shared atlas."""
+
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import DisplayTilePayload
+    from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
+    from arrayscope.display.shader_mapping import (
+        ShaderComponent,
+        ShaderDisplayMode,
+        ShaderMapping,
+        TexturePlaneKind,
+    )
+
+    source_shape = (336, 336)
+    tile_count = 272
+    geometry = _montage_geometry(source_shape, 17, 16, loaded=tile_count)
+    mapping = ShaderMapping(
+        component=ShaderComponent.ABS,
+        display_mode=ShaderDisplayMode.COMPLEX,
+    )
+    payloads = {}
+    for tile in range(tile_count):
+        values = np.full((21, 21), 3.0 + 4.0j, np.complex64)
+        identity = TileIdentity(
+            document_generation=("complex-preview-atlas", 1),
+            operation_key=("abs",),
+            source_index=tile,
+            image_axes=(0, 1),
+            axis_flips=(False, False),
+            channel="complex",
+            complex_mapping=("complex", "abs"),
+            texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+            semantic_generation=("complex-preview", tile),
+            lod=TileLodIdentity(level=4, factor=16),
+            quality="fallback",
+        )
+        payloads[tile] = DisplayTilePayload(
+            tile,
+            tile,
+            values,
+            None,
+            ("complex-preview-atlas", tile, "lod", 16, 4, 0),
+            source_shape=source_shape,
+            lod=LodInfo(
+                level=4,
+                factor=16,
+                source_shape=source_shape,
+                texture_shape=(21, 21),
+            ),
+            shader_mapping=mapping,
+            quality="preview",
+            tile_identity=identity,
+        )
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        report = _commit(view, geometry, payloads, levels=(0.0, 10.0))
+
+        assert report.texture_uploads == 2
+        assert report.presented_tiles == frozenset(payloads)
+        assert {plane.representation for plane in view._wgpu_executor._bound_planes} == {
+            "complex_rg32f"
+        }
+        region = view._wgpu_committed["tiles"][144]["world_rect"]
+        view.getView().setRange(
+            xRange=(region[0], region[0] + region[2]),
+            yRange=(region[1], region[1] + region[3]),
+            padding=0,
+        )
+        _rerender_internal(view)
+        assert np.allclose(_center_pixel(view)[:3], 128, atol=2)
+    finally:
+        view.close()
+
+
 def test_coarser_mean_payload_generates_from_resident_fine_pages_zero_upload(qt_app):
     from arrayscope.display.pyramid import reduce_box_mean
     from arrayscope.gpu.keys import REDUCER_MEAN

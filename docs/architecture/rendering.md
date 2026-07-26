@@ -82,10 +82,25 @@ local page would relabel predecessor texels as current. Residency and
 acknowledgement may never make that substitution: uncertain or absent content
 is non-drawable, not a license to show another window's pixels.
 
-Which of those two systems a view lands in is a *production* decision, not only
-a binding one. A view cropped from its first frame never presents a whole
-source plane, so under a crop-local upload the canonical pages stay cold
-forever and no crop scrub can ever rebind. Anchoring already certifies that the
+Large complete preview passes add a third, deliberately non-semantic physical
+coordinate system: a backend-private compact atlas. Reduced scalar or complex
+tile textures are shelf-packed into at most two 256-square pages only after
+the complete required preview set is available. Each semantic tile still owns
+its acknowledgement identity and draws from its own atlas source rectangle;
+the instance continues to request LOD 0 because that means "finest resident,
+accept a coarser ancestor" for ordinary planes and the atlas itself is already
+the physical preview plane. During refinement, exact per-tile source planes
+bind beside the retained atlas and replace only their corresponding instances.
+Atlas pages never contribute resident histogram, ROI, probe, export, or other
+semantic evidence. A partial preview cohort is never repacked into a growing
+atlas, because repeated rebuilds would spend uploads without completing
+coverage.
+
+Which ordinary source coordinate system a view lands in is a *production*
+decision, not only a binding one. A view cropped from its first frame never
+presents a whole source plane, so under a crop-local upload the canonical pages
+stay cold forever and no crop scrub can ever rebind. Anchoring already
+certifies that the
 operation chain commutes with slicing on the anchored display axes — that is
 what lets the content key drop those axes' windows — so the window-free state
 the key names can simply be evaluated. Under the `resident_crop_rebind`
