@@ -183,7 +183,7 @@ def test_settings_round_trip_defaults_and_values():
     defaults = settings_state.settings_from_mapping({})
     assert defaults.wgpu_pixel_grid is False
     assert defaults.wgpu_clip_indicator is False
-    assert defaults.wgpu_minification_filter is False
+    assert defaults.wgpu_minification_filter is True
     assert defaults.resident_crop_rebind is True
     assert defaults.theme == theme.ThemeChoice.SYSTEM
     assert defaults.panel_resize_behavior == settings_state.PanelResizeBehavior.BEST_EFFORT

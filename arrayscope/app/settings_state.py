@@ -93,12 +93,16 @@ class AppSettingsState:
     chunk_transport_codec: ChunkTransportCodecChoice = ChunkTransportCodecChoice.RAW
     # G7: explicit lossy display-cache experiment; OFF is the exact path.
     texture_codec: TextureCodecChoice = TextureCodecChoice.OFF
-    # wgpu display aids (shader Stage A + C1). All default off so the default
-    # render is byte-identical; the pixel grid is zoom-gated even on, and the
-    # minification filter only engages on a draw that is actually minified.
+    # wgpu display aids (shader Stage A + C1). The two Stage A aids default
+    # off: they draw marks that are not data. The C1 minification filter
+    # defaults ON — it is the honest answer for a draw where a screen pixel
+    # covers several source texels, and on a zoomed-out montage the
+    # point-sampled alternative shows one texel in ~35 and shimmers under pan.
+    # It costs +1.7 ms on a full-window minified draw and is inert on any draw
+    # at or below 1:1, so magnification stays exactly nearest.
     wgpu_pixel_grid: bool = False
     wgpu_clip_indicator: bool = False
-    wgpu_minification_filter: bool = False
+    wgpu_minification_filter: bool = True
     # Montage fast path: a displayed-axis crop-window scrub whose new source
     # window is already physically resident short-circuits to a pure page rebind
     # (no re-evaluation). A rebound window re-anchors its auto levels from the
@@ -136,7 +140,7 @@ def settings_from_mapping(values) -> AppSettingsState:
         texture_codec=normalize_texture_codec_choice(values.get("texture_codec")),
         wgpu_pixel_grid=_to_bool(values.get("wgpu_pixel_grid", False)),
         wgpu_clip_indicator=_to_bool(values.get("wgpu_clip_indicator", False)),
-        wgpu_minification_filter=_to_bool(values.get("wgpu_minification_filter", False)),
+        wgpu_minification_filter=_to_bool(values.get("wgpu_minification_filter", True)),
         resident_crop_rebind=_to_bool(values.get("resident_crop_rebind", True)),
         memory_profile=normalize_memory_profile_choice(values.get("memory_profile")),
         render_memory_budget_mb=normalize_render_memory_budget_mb(

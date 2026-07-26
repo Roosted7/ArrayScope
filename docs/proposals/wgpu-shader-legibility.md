@@ -388,15 +388,44 @@ identically, a coarse-gated filter costs the same per frame as an always-on one
 view — and on a zoomed-out montage the resting view and the pan view are the
 same view at the same 5.9 texels/px.
 
-**What remains open is the plain default, not the gate.** Flipping only
-`AppSettingsState.wgpu_minification_filter` to `True` (leaving the protocol
-dataclass default `False`, which is what the executor oracles construct) keeps
-`tests/gpu tests/display tests/render tests/presentation` green — the display
-oracles magnify, where the filter is inert, so no rebaseline is forced. Read
-that as "not blocked", not as "covered": no oracle exercises a minified wgpu
-draw through app settings. The remaining reason to keep it off is the +1.7 ms
-per minified draw, which is a fifth of a 60 fps budget. That is a product call,
-deliberately left to the owner rather than taken here.
+### The app default is ON (2026-07-26)
+
+`AppSettingsState.wgpu_minification_filter` ships `True`; the protocol
+dataclass default stays `False`, because that is what the executor oracles
+construct and it should keep constructing the unfiltered baseline. The menu
+item is now an override — checked by default, with a tooltip that reads as
+"what unchecking costs you". Authorised on the +1.7 ms measurement.
+
+**The gate went in first, because the honest reading of "all four suites stay
+green" was "not blocked", not "covered".** Nothing exercised a minified wgpu
+draw through app settings — the display oracles all magnify, where this filter
+is inert by design. `test_app_settings_default_renders_a_minified_montage_filtered`
+closes that: it builds a view the way the app does (`settings_from_mapping` →
+`create_image_view`), commits a per-texel checkerboard montage under a (0, 1)
+window, and draws it at 1.82 source texels per screen pixel. A point sample of
+binary data is binary — `g` is 0 or 1, so the LUT index is 0 or 255 — so every
+intermediate grey is proof the footprint was averaged, and nothing else in the
+frame can produce one. Filtered: 99.4% midtones. Point-sampled: zero.
+
+It fails on each link of the chain independently — dataclass default,
+`settings_from_mapping` fallback, factory forwarding, and the view's mapping
+rebuild.
+
+Two things that cost time and are worth not rediscovering:
+
+- **The default has two owners.** `AppSettingsState`'s field default and the
+  literal `settings_from_mapping` falls back to are separate (the convention
+  every sibling setting follows). The first draft of the oracle asserted only
+  the second, and flipping the *dataclass* default back to `False` left it
+  green. The test now asserts both.
+- **Offscreen, `viewRange()` is not a way to ask for a zoom.** The executor's
+  read-back target is a fixed 768², independent of widget size, and
+  pyqtgraph's fit with no real window geometry put the montage somewhere that
+  made `fwidth` read as magnification. `_rerender_internal` inherits that.
+  The oracle pins an explicit `SetOverlayCamera` instead and submits through
+  the view, so the mapping still comes from settings and only the camera is
+  the test's. This is why no display oracle had covered a minified wgpu draw:
+  the harness does not make one easy to ask for.
 
 ## Stage D — per-pixel value labels
 

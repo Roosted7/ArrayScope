@@ -2873,3 +2873,100 @@ def test_camera_is_latched_when_the_paced_draw_runs_not_when_it_is_requested(qt_
         )
     finally:
         view.close()
+
+
+def _pure_grey_midtones(target):
+    """Count opaque pixels that are grey and strictly between the LUT extremes.
+
+    A binary source through a linear (0, 1) window and a grayscale LUT can only
+    produce LUT[0] or LUT[255] under point sampling: ``g`` is 0 or 1, so the
+    index is 0 or 255.  An intermediate grey is therefore proof that more than
+    one source texel contributed to that pixel, and nothing else in the frame
+    can produce one.
+    """
+
+    rgb = target[..., :3].astype(np.int32)
+    grey = (rgb[..., 0] == rgb[..., 1]) & (rgb[..., 1] == rgb[..., 2])
+    return int((grey & (rgb[..., 0] > 40) & (rgb[..., 0] < 215)).sum())
+
+
+def _draw_zoomed_out(view, world_rect):
+    """Re-present the committed tiles under an EXPLICIT camera.
+
+    Not ``_rerender_internal``: that reuses ``_wgpu_camera_command()``, which
+    reads pyqtgraph's ``viewRange()`` — and offscreen, with no real window
+    geometry, that fit is not a stable way to ask for a specific zoom.  The
+    mapping still comes from the view (and therefore from app settings); only
+    the camera is pinned, so "how far zoomed out" is the test's to state.
+    """
+
+    from arrayscope.gpu.command_protocol import SetOverlayCamera, UpdateTileInstances
+
+    view._submit_wgpu(
+        (
+            SetOverlayCamera(world_rect, x_inverted=False, y_inverted=True),
+            UpdateTileInstances(view._wgpu_tile_instances()),
+        )
+    )
+    return view._wgpu_executor.read_target()
+
+
+def test_app_settings_default_renders_a_minified_montage_filtered(qt_app):
+    """The default-ON gate for the C1 minification filter.
+
+    Every other C1 oracle drives the shader directly.  This one drives the
+    DEFAULT: a view built the way the app builds it — ``AppSettingsState``
+    defaults through ``create_image_view`` — rendering a montage zoomed out far
+    enough that a screen pixel covers several source texels.
+
+    The source is a per-texel checkerboard under a (0, 1) window, so a point
+    sample can only emit black or white.  Any intermediate grey is proof the
+    footprint was averaged.
+
+    Turning ``wgpu_minification_filter`` off anywhere along the chain — the
+    dataclass default, ``settings_from_mapping``, the factory, or the view's
+    mapping rebuilds — turns this red.
+    """
+
+    from arrayscope.app.settings_state import AppSettingsState, settings_from_mapping
+    from arrayscope.display.image_view_factory import create_image_view
+
+    # The default has two owners — the dataclass field and the literal
+    # ``settings_from_mapping`` falls back to when the key is absent (the
+    # convention every sibling setting follows).  Assert both, or a drift
+    # between them leaves one of the two uncovered.
+    assert AppSettingsState().wgpu_minification_filter is True
+    # Only the backend is pinned; every other setting is the shipped default.
+    settings = settings_from_mapping({"image_rendering_backend": "wgpu"})
+    assert settings.wgpu_minification_filter is True, "the app default is the thing under test"
+
+    view = create_image_view(settings)
+    try:
+        view.resize(400, 400)
+        view.show()
+        assert view.wgpuMinificationFilterEnabled() is True
+        assert view._wgpu_mapping_state.minification_filter is True
+
+        tile = np.indices((700, 700)).sum(axis=0).astype(np.float32) % 2.0
+        geometry = _montage_geometry((700, 700), 2, 2, loaded=4)
+        payloads = {i: _payload(i, tile, source_id=("minify-default", i)) for i in range(4)}
+        _commit(view, geometry, payloads, levels=(0.0, 1.0))
+
+        # The whole 1400-texel montage across a 768-px target: 1.82 source
+        # texels per screen pixel.  Deliberately not a round ratio — at exactly
+        # 2.0 the taps land on texel boundaries, where which side they fall on
+        # is an f32 tie rather than a filter result.
+        montage = (0.0, 0.0, 1400.0, 1400.0)
+        filtered = _draw_zoomed_out(view, montage)
+
+        # Same frame, same camera, aid explicitly off: the flag is the only
+        # difference, so every changed pixel is the filter's.
+        view.setWgpuMinificationFilterEnabled(False)
+        point_sampled = _draw_zoomed_out(view, montage)
+
+        assert _pure_grey_midtones(point_sampled) == 0, "a point sample of binary data is binary"
+        assert _pure_grey_midtones(filtered) > 100_000
+        changed = int(np.any(filtered != point_sampled, axis=-1).sum())
+        assert changed > 100_000, changed
+    finally:
+        view.close()

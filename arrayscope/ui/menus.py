@@ -212,9 +212,10 @@ class WindowMenuMixin:
             self._theme_actions[choice] = action
         self._sync_theme_actions()
 
-        # Shader display aids (wgpu backend). Legibility toggles, not perf
-        # tuning: the pixel grid only appears when zoomed past whole-texel size,
-        # and the clip indicator marks values outside the window while windowing.
+        # Shader display aids (wgpu backend). The two Stage A aids draw marks
+        # that are not data and are off by default; the minification filter is
+        # ON by default and is here to be turned OFF, so its checkbox starts
+        # checked and its tooltip reads as "what unchecking costs you".
         display_aids_menu = QtWidgets.QMenu("Display Aids", self)
         display_aids_menu.setToolTipsVisible(True)
         view_menu.addMenu(display_aids_menu)
@@ -241,13 +242,13 @@ class WindowMenuMixin:
         self._wgpu_clip_indicator_action = clip_indicator_action
         minification_filter_action = QtGui.QAction("Smooth When Zoomed Out", self, checkable=True)
         minification_filter_action.setToolTip(
-            "Average every source texel a screen pixel covers instead of showing "
-            "just one of them, so a zoomed-out view stops shimmering. Only "
-            "affects draws that are zoomed out; magnification stays exact. "
-            "wgpu backend."
+            "On by default. A zoomed-out view averages every source texel a "
+            "screen pixel covers; turn this off to show just one of them "
+            "instead, which is faster but shimmers under pan. Either way, "
+            "zooming in shows exact texels. wgpu backend."
         )
         minification_filter_action.setChecked(
-            bool(getattr(self.app_settings, "wgpu_minification_filter", False))
+            bool(getattr(self.app_settings, "wgpu_minification_filter", True))
         )
         minification_filter_action.toggled.connect(self._set_wgpu_minification_filter_enabled)
         display_aids_menu.addAction(minification_filter_action)
