@@ -340,6 +340,10 @@ stage." **User-defined operations** are that lighter path. They live entirely in
 the user's config directory — no `pip install`, no entry point — and are managed
 at runtime through `arrayscope.operations.library`.
 
+For the manager-first tutorial, follow
+[Write your own operation](write-your-own-operation.md). This page remains the
+schema and programmatic API reference.
+
 ### Where they live
 
 User ops are stored next to the user's session config, in the `operations/`
@@ -385,6 +389,21 @@ The id **must** be namespaced `user:<slug>`, so a user op can never shadow a
 built-in (`crop`) or a third-party plugin op. Everything else is
 auto-filled on import from an `ast` introspection of the target function, so a
 user rarely writes this JSON by hand.
+
+An `input_slots` row has `name`, `label`, optional `description`, and one or
+more `accepts` values:
+
+| `accepts` value | source delivered to the operation |
+| --- | --- |
+| `dimension-set` | One fixed-index selection from the current base array; displayed axes remain whole. |
+| `open-document` | The current derived array of another document in the Compare group. |
+| `roi-mask` | One ROI rasterized to a 2-D boolean image-plane mask. |
+| `roi-coordinates` | One ROI as an `N×2` float64 `(x, y)` coordinate array. |
+| `saved-array` | One memory-mapped `.npy` array. |
+
+The slot name must be a Python-style identifier, must not duplicate a parameter
+name, and becomes the callable keyword or command-template placeholder. Every
+declared slot is required when the operation is added.
 
 ### Runtime bodies
 
@@ -569,8 +588,9 @@ machine's `all_operations()` or the non-crash smoke harness.
 
 A structurally valid but non-runnable wrapper is different: it remains
 registered with `unavailable_reason`. This covers New's empty template, a
-shape-changing duplicate pending Bundle D, an incomplete command template, a
-missing environment/executable, and an imported command awaiting review.
+Python-environment operation whose input slots cannot yet be transported, an
+incomplete command template, a missing environment/executable, and an imported
+command awaiting review.
 Registered unavailable operations remain visible for diagnosis and editing but
 are never offered as runnable work.
 
@@ -628,22 +648,8 @@ Unavailable operations carry an `(unavailable)` marker and the same reason
 shown by the add popup, axis-chip menu, and command palette; those three
 surfaces render the entry disabled with the reason as tooltip.
 
-### Connecting up a custom function (import vs. link)
-
-**New** creates an empty user entry and selects it without leaving the manager.
-Choose a `.py` source file in the right-hand implementation section; the
-callable picker is populated by `introspect_python_source` (pure `ast`, never
-executing user code). Choosing a callable fills label, description,
-*requires axis*, parameter names, kinds, and defaults into the same ordinary
-editable controls. Inference is visible initial data, never hidden policy. The
-storage choice sits directly below it:
-
-- **Import a copy (recommended)** copies the file into the operations directory,
-  so the op keeps working if you move or edit the original.
-- **Link to the file** keeps a live link to the original path; edits you make to
-  it are picked up automatically (mtime-keyed re-import).
-
-Retargeting keeps the same selected `user:` id through
-`update_user_operation_source`; there is no confirm dialog or second editor.
-The **Open the code file** button opens a user op's `.py` in your default
-editor, and **Open the operations folder** opens the directory itself.
+For the end-to-end **New** / **Duplicate** flow, including source storage,
+bounded parameters, input slots, runtimes and environments, unavailable-state
+repair, characterization, and recipes, see
+[Write your own operation](write-your-own-operation.md). The wrapper schema and
+Qt-free APIs above are the authoritative reference for persisted fields.

@@ -46,9 +46,13 @@ Organized by the question you're asking. Stop at the first useful level.
   loading, the launcher window, and native shell registration
   (`--install-desktop`).
 - [Current state](current-state.md) — maturity snapshot and material risks.
+- [Write your own operation](write-your-own-operation.md) — a manager-first
+  walkthrough from New or Duplicate through source storage, parameters, input
+  slots, runtimes, repair, output discovery, and recipe round-trip.
 - [Plugin operations](plugin-operations.md) — how a third-party pip package
   contributes a Tier-1 (opaque, whole-array) operation via the
-  `arrayscope.operations` entry-point group.
+  `arrayscope.operations` entry-point group, plus the persisted schema
+  reference for user-defined operations.
 
 ## "Why is it this way?"
 

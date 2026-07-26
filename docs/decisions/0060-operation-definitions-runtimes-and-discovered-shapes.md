@@ -1,6 +1,7 @@
 # ADR 0060: One operation definition, pluggable runtimes, discovered shapes
 
-- **Status:** Accepted (2026-07-26); Bundles A–E are implemented. Refines the
+- **Status:** Accepted and implemented (2026-07-26); Bundles A–E and the
+  closing discoverability/authoring phase are complete. Refines the
   operation-extensibility model
   established by the plugin-ops work (ADR-less, `docs/plugin-operations.md`) and
   the custom-operations program that landed 2026-07-24 (`eaaea1cf`). Supersedes

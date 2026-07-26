@@ -3,9 +3,8 @@
 **Status:** Implemented (2026-07-26). Successor to the "custom operations
 first-class" program that landed 2026-07-24 (`eaaea1cf`). That program built the
 *plumbing* — a library, a manager, anchored popups, a user-op wrapper format.
-This proposal is about the part it did not do: making the operation set itself
-worth having, and making every operation something a user can read, copy, and
-change.
+This program made the operation set itself worth having and made every
+operation something a user can read, copy, and change.
 
 Decisions that need to be pinned before code are in
 [ADR 0060](../decisions/0060-operation-definitions-runtimes-and-discovered-shapes.md).
@@ -362,19 +361,30 @@ result. Missing sources restore as disabled/unavailable recipe steps.
 
 ### Phase 6 — Discoverability and polish
 
-- Search/filter in the add popup once the set is large; the "More…" partition
-  reflects the richer taxonomy.
-- A "write your own operation" walkthrough in the docs, built from the manager's
-  own duplicate flow.
-- Gallery scenarios for every surface introduced by phases 3–5 (command
-  template editor, environments, slots), reviewed as screenshots — the import
-  dialog's defects existing *through* a screenshot pass is the reason this is a
-  standing requirement, not a closing chore.
+- Keep the command palette as the one search implementation and link it from the
+  add popup; make the popup's richer taxonomy browsable without one long fold.
+- Add a "write your own operation" walkthrough built from the manager's own
+  duplicate flow.
+- Keep gallery scenarios for every introduced surface and review the rendered
+  screenshots — the import dialog's defects existing *through* a screenshot
+  pass is the reason this is a standing requirement, not a closing chore.
 
 Bundle E supplied reviewed dark/light captures for the slot-bearing parameters
-popup, manager slot editor, and unresolved-slot state. The remaining phase-6
-work is the walkthrough and the already-noted add-popup search/fold redesign;
-the slot surfaces themselves no longer owe gallery coverage.
+popup, manager slot editor, and unresolved-slot state. Phase 6 therefore closed
+the walkthrough and add-popup browse/search decision; the slot surfaces
+themselves did not owe another duplicate gallery pass.
+
+Landed in Phase 6. The command palette remains the single search owner: it now
+flattens the same library-backed listing as the add popup and dimension-chip
+menu, so hidden operations and manager ordering stay coherent, and its search
+field supports type → arrow → Enter with a visible no-match state. The add
+popup links that search path directly and replaces the all-at-once "More…"
+expansion with a one-open-at-a-time category accordion. The manager-first
+[authoring walkthrough](../write-your-own-operation.md) covers New/Duplicate
+through recipe restoration while the schema remains centralized in
+[plugin operations](../plugin-operations.md). Dark/light gallery captures were
+reviewed for Common, category chooser, expanded category, unavailable BART,
+axis, filtered palette, and palette no-match states.
 
 ## How the work is bundled
 
