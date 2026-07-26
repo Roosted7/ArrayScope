@@ -1019,7 +1019,7 @@ def test_montage_viewport_continuity_readiness_uses_canonical_frame_session(qt_a
     assert window._viewport_continuity_ready()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_manual_main_window_resize_releases_settled_pending_viewport_restore(
     qtbot,
     backend,

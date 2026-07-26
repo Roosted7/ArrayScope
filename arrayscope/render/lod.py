@@ -1533,7 +1533,7 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
         )
         # ADR 0056 G5 slice 1: an EXACT reduced plane covering the whole
         # display window carries the window-invariant source anchor (native
-        # rect = window start + native tile extent), so the VisPy pool can
+        # rect = window start + native tile extent), so the residency owner can
         # take the chunked-residency path with uniform plane-pixel pages.
         # Preview floors carry the coordinate anchor too, but backends may
         # use it only to consume already-resident exact source pages; degraded

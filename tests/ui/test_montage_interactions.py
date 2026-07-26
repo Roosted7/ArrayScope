@@ -1,4 +1,3 @@
-import os
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,6 +13,7 @@ from tests.ui.helpers import (
 from tests.ui.helpers import (
     process_events as _process_events,
 )
+from tests.ui.helpers import require_wgpu_adapter
 
 
 def _tile_result(tile, value):
@@ -66,20 +66,11 @@ def _visible_backend_acknowledgements(win, backend):
             for tile_number, state in win.img_view._montage_tile_layer.states.items()
             if state.visible and state.item.isVisible()
         }
-    layer = win.img_view._vispy_gpu_montage_layer
-    pool = layer._pool
-    drawn = {}
-    for page_index, payloads in enumerate(layer._page_payloads_by_index):
-        if (
-            page_index >= len(layer._visuals_by_page)
-            or not layer._visuals_by_page[page_index].visible
-        ):
-            continue
-        for tile_number in payloads:
-            resident_key = pool.tile_resident_keys.get(int(tile_number))
-            if resident_key is not None:
-                drawn[int(tile_number)] = pool.acknowledged_identities.get(resident_key)
-    return drawn
+    return {
+        int(tile_number): row["physical_acknowledged_identity"]
+        for tile_number, row in win.img_view.tileTruthPhysicalRows().items()
+        if row.get("physical_acknowledged_identity") is not None
+    }
 
 
 def _assert_view_contains_applied_montage_plan(win):
@@ -315,7 +306,7 @@ def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
         win.close()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qtbot, backend):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
@@ -407,9 +398,8 @@ def test_switching_to_larger_montage_auto_fits_when_tiles_would_be_hidden(qtbot)
         win.close()
 
 
-def test_vispy_expanded_montage_never_hides_retained_sixty(qtbot):
-    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
-        pytest.skip("physical VisPy continuity requires a real OpenGL display")
+def test_wgpu_expanded_montage_never_hides_retained_sixty(qtbot):
+    require_wgpu_adapter()
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
 
@@ -418,7 +408,7 @@ def test_vispy_expanded_montage_never_hides_retained_sixty(qtbot):
 
     settings = QtCore.QSettings()
     previous_backend = settings.value("image_rendering_backend", "pyqtgraph")
-    settings.setValue("image_rendering_backend", "vispy")
+    settings.setValue("image_rendering_backend", "wgpu")
     settings.setValue("montage_quality_policy", "resident")
     settings.sync()
     data = np.arange(6 * 8 * 272, dtype=np.float32).reshape(6, 8, 272)
@@ -469,7 +459,7 @@ def test_vispy_expanded_montage_never_hides_retained_sixty(qtbot):
         def expanded_and_fitted_without_loss() -> bool:
             diagnostics = surface.presentation_diagnostics()
             visible_tiles = tuple(diagnostics.get("presented_tiles", ()) or ())
-            identities = win.img_view._vispy_gpu_montage_layer._pool.presented_identities()
+            identities = _visible_backend_acknowledgements(win, "wgpu")
             visible_sources = {
                 int(identity.source_index)
                 for tile in visible_tiles
@@ -506,7 +496,7 @@ def test_vispy_expanded_montage_never_hides_retained_sixty(qtbot):
         settings.sync()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_pre_event_loop_complex_montage_eventually_fits_committed_plan(qtbot, backend):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
@@ -566,7 +556,7 @@ def test_pre_event_loop_complex_montage_eventually_fits_committed_plan(qtbot, ba
         settings.sync()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_montage_viewport_resize_is_not_dropped_before_first_image_commit(
     qtbot,
     backend,
@@ -1414,7 +1404,7 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
         win.close()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 @pytest.mark.parametrize(
     "transition",
     ["operation", "channel-real", "complex-mode", "axes"],
@@ -1425,8 +1415,6 @@ def test_semantic_montage_transition_never_leaves_old_tiles_visible(
     transition,
 ):
     _clear_arrayscope_settings()
-    if backend == "vispy" and os.environ.get("QT_QPA_PLATFORM") == "offscreen":
-        pytest.skip("physical VisPy transition acknowledgement requires a real OpenGL display")
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
@@ -1574,7 +1562,7 @@ def test_semantic_montage_transition_never_leaves_old_tiles_visible(
         settings.sync()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend):
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
@@ -1651,7 +1639,7 @@ def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend
         settings.sync()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_one_index_source_window_retarget_remaps_59_without_black_frame(
     qtbot,
     monkeypatch,
@@ -1673,9 +1661,6 @@ def test_one_index_source_window_retarget_remaps_59_without_black_frame(
     settings.setValue("image_rendering_backend", backend)
     settings.setValue("montage_quality_policy", "resident")
     settings.sync()
-
-    if backend == "vispy" and os.environ.get("QT_QPA_PLATFORM") == "offscreen":
-        pytest.skip("physical VisPy source-window continuity requires a real OpenGL display")
 
     data = np.empty((6, 8, 161), dtype=np.float32)
     for source_index in range(data.shape[2]):

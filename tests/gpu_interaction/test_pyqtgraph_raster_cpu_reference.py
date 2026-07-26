@@ -3,7 +3,7 @@
 The gate reads the painted QGraphicsView viewport and compares every required
 scalar tile with ``cpu_display_rgba`` of committed payload values under the
 semantic levels/LUT. It closes the PyQtGraph half of ground rule 10: Qt's
-raster pixels now have the same non-vacuous physical-vs-CPU law as VisPy.
+raster pixels have a non-vacuous physical-vs-CPU law alongside WGPU.
 
 Fault-injection audit (docs/testing/README.md law 5):
 
@@ -93,7 +93,7 @@ def pyqtgraph_gradient_montage_window():
 
 
 def _require_pyqtgraph_layer(harness):
-    assert getattr(harness.win.img_view, "_vispy_canvas", None) is None
+    assert harness.win.img_view.surface.capabilities.name == "pyqtgraph"
     layer = getattr(harness.win.img_view, "_montage_tile_layer", None)
     if layer is None:
         pytest.skip("Qt-raster CPU-reference oracle needs the PyQtGraph tile layer")

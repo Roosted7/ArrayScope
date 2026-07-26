@@ -221,7 +221,7 @@ def _viewport_tiles(
 def _payload_residency_key(payload: DisplayTilePayload) -> tuple[object, object, object, object]:
     # This is the scheduler-side version of the backend resident key: enough
     # identity to tell a cheap tile retarget from new pixel work, without
-    # exposing PyQtGraph ImageItems or VisPy atlas slots to the session.
+    # exposing backend items or GPU page-table slots to the session.
     return (
         payload.source_id,
         id(payload.image),
@@ -3405,7 +3405,7 @@ class FrameSession:
             # Backend truth can be ahead of the session's acknowledged
             # TilePresentationState when a geometry/visibility commit reports
             # already-current resident slots without committed upserts.  If we
-            # leave that split in place, the next VisPy commit receives an
+            # leave that split in place, the next GPU commit receives an
             # active tile with no active payload and clears a perfectly correct
             # atlas mapping.  Rehydrate the acknowledged state from the one
             # allowed source of truth: backend identity == current payload.
@@ -3584,7 +3584,7 @@ class FrameSession:
         build_limit = None
         if max_upserts is not None:
             # Build only what this transaction can admit. Over-building 2x
-            # made a nominal 12-item VisPy slice spend 40 ms reducing/wrapping
+            # made a nominal 12-item GPU slice spend 40 ms reducing/wrapping
             # 24 tiles before a 20 ms backend apply, breaching the 50 ms GUI
             # hard gate without improving committed throughput.
             build_limit = max(int(max_upserts), 8)
@@ -3930,7 +3930,7 @@ class FrameSession:
         # Admission owns both membership and order. Re-filtering the original
         # candidate mapping preserved membership but silently restored its
         # insertion order. That was mostly hidden by small capped uploads, but
-        # VisPy item-free batches may admit the whole remaining cohort: after
+        # Item-free resident batches may admit the whole remaining cohort: after
         # the first eight center tiles, the backend then acknowledged the rest
         # row-by-row. Carry the canonical admission order to the backend.
         upserts = capped_upserts
@@ -4042,7 +4042,7 @@ class FrameSession:
         """Build a complete compatible successor without full reconciliation.
 
         The general builder repairs arbitrary lifecycle, visibility, removal,
-        and level states. A VisPy scroll successor has a narrower contract:
+        and level states. A resident scroll successor has a narrower contract:
         unchanged slots and one current payload for every required on-screen
         tile. After validating that contract, construct that immutable delta
         directly. Ambiguous cases return ``None`` to the general builder.
@@ -4912,7 +4912,7 @@ def plan_presentation_transition(
     sliced-image change and a montage semantic/layout successor.
     The latter normally reuses ``retarget_index_window``, but rapid churn may
     replace an unfinished session; excluding that rebirth allowed a bounded
-    four-tile preview commit to collapse a complete 100-tile VisPy surface.
+    four-tile preview commit to collapse a complete 100-tile surface.
 
     The predicate is deliberately
     conservative (ADR 0051 correctness history): the exact document/operation

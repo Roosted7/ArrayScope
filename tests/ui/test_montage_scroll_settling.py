@@ -12,7 +12,7 @@ kernel and ``required_target_unsettled_tiles()`` non-empty until the
 watchdog asserted.  The deterministic half of the fix is unit-tested in
 ``tests/window/test_montage_backend.py`` (late first-pass evidence arms the
 publication flush); this test drives the live shape offscreen: an
-FFT-over-montage-axis pipeline (shared-transform owner) on the VisPy shader
+FFT-over-montage-axis pipeline (shared-transform owner) on the WGPU shader
 backend, scrolled down and back up, must reach ``required_target_settled``
 in both directions with zero watchdog stall assertions.
 """
@@ -35,7 +35,6 @@ from tests.ui.helpers import (
     make_backend_window,
     restore_default_backend,
     use_pyqtgraph_backend,
-    use_vispy_backend,
     use_wgpu_backend,
 )
 
@@ -71,13 +70,13 @@ def _scroll_to(win, qtbot, indices) -> None:
 
 
 def test_fft_montage_scroll_down_then_up_settles_required_target(qtbot):
-    settings = use_vispy_backend(extra_settings={"montage_quality_policy": "resident"})
+    settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
     from arrayscope.operations.pipeline import CenteredFFT
 
     rng = np.random.default_rng(20260715)
     data = rng.standard_normal((96, 96, 36), dtype=np.float32)
 
-    win = make_backend_window(qtbot, data)
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     win.resize(520, 420)
     try:
         win.show()

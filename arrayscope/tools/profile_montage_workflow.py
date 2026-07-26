@@ -814,6 +814,7 @@ def run_profile_montage_workflow(
         save_session_file,
         settings_key_for_metadata,
     )
+    from arrayscope.display.backend_contract import require_image_view_backend
     from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
     from arrayscope.window import ArrayScopeWindow
 
@@ -839,7 +840,6 @@ def run_profile_montage_workflow(
     settings.clear()
     backend_choice = {
         "pyqtgraph": ImageRenderingBackendChoice.PYQTGRAPH,
-        "vispy": ImageRenderingBackendChoice.VISPY,
         "wgpu": ImageRenderingBackendChoice.WGPU,
     }[backend]
     settings.setValue(
@@ -1002,6 +1002,11 @@ def run_profile_montage_workflow(
             )
 
         win = ArrayScopeWindow(data, filepath=str(data_path))
+        require_image_view_backend(
+            win.img_view,
+            backend,
+            context="montage profile",
+        )
         win._arrayscope_profile_backend = str(backend)
         win._profile_session_fixture_viewport_shape = (
             None
@@ -1237,7 +1242,7 @@ def run_profile_montage_workflow(
             role = str(role)
             if role not in {"x", "y"}:
                 raise ValueError(f"unsupported displayed-axis role {role!r}")
-            presentation_before = _vispy_presentation_diagnostics(win)
+            presentation_before = _backend_presentation_diagnostics(win)
             binding_hits_before = int(
                 presentation_before.get("wgpu_residency_binding_cache_hits", 0) or 0
             )
@@ -1292,7 +1297,7 @@ def run_profile_montage_workflow(
                         indices=indices,
                         text=text,
                     )
-                before = _vispy_presentation_diagnostics(win)
+                before = _backend_presentation_diagnostics(win)
                 uploads_before = _wgpu_upload_total(win)
                 step_started = perf_counter()
                 predecessor_session = getattr(win.renderer, "_frame_session", None)
@@ -1307,7 +1312,7 @@ def run_profile_montage_workflow(
                     budget_s=INTERACTION_SETTLE_HARD_LIMIT_S,
                 )
                 committed_current = _committed_display_frame_is_current(win)
-                after = _vispy_presentation_diagnostics(win)
+                after = _backend_presentation_diagnostics(win)
                 uploads_after = _wgpu_upload_total(win)
                 rows = dict(physical_rows() or {}) if callable(physical_rows) else {}
                 physical_tile_counts.append(len(rows))
@@ -1507,7 +1512,7 @@ def run_profile_montage_workflow(
             montage_restore_committed_current = _committed_display_frame_is_current(win)
             if callable(physical_rows):
                 physical_tile_counts.append(len(dict(physical_rows() or {})))
-            presentation = _vispy_presentation_diagnostics(win)
+            presentation = _backend_presentation_diagnostics(win)
             cold_binding_aliases = tuple(
                 {
                     "tile": int(tile),
@@ -2723,7 +2728,7 @@ def _glide_view_range(
         getattr(win, "resource_governor", None), "_recent_ui_work_observations", ()
     )
     ui_work_start = len(ui_work_buffer)
-    vispy_draw_start = _vispy_draw_count(win)
+    draw_start = _backend_draw_count(win)
     t0 = perf_counter()
     frames = int(frames)
     input_call_ms: list[float] = []
@@ -2776,9 +2781,7 @@ def _glide_view_range(
     elapsed_ms = (perf_counter() - t0) * 1000.0
     ui_work = tuple(ui_work_buffer)[ui_work_start:]
     tile_commits = tuple(item for item in ui_work if item.channel == "tile_layer_commit")
-    physical_draws = tuple(
-        item for item in ui_work if item.channel in {"vispy_canvas_draw", "graphics_view_paint"}
-    )
+    physical_draws = tuple(item for item in ui_work if item.channel == "graphics_view_paint")
     kernel_drains = tuple(item for item in ui_work if item.channel == "kernel_bridge_drain")
     return {
         "frames": frames,
@@ -2798,7 +2801,7 @@ def _glide_view_range(
         "tile_commit_count": len(tile_commits),
         "tile_commit_total_ms": float(sum(item.elapsed_ms for item in tile_commits)),
         "physical_draw_count": (
-            max(0, _vispy_draw_count(win) - vispy_draw_start) or len(physical_draws)
+            max(0, _backend_draw_count(win) - draw_start) or len(physical_draws)
         ),
         "physical_draw_total_ms": float(sum(item.elapsed_ms for item in physical_draws)),
         "kernel_drain_count": len(kernel_drains),
@@ -3015,7 +3018,7 @@ def _fast_scroll_60fps(
     camera_before = _montage_view_range(win)
     if probe is not None:
         probe.reset()
-    draw_start = _vispy_tile_presentation_draw_count(win)
+    draw_start = _tile_presentation_draw_count(win)
     ui_work_buffer = getattr(
         getattr(win, "resource_governor", None), "_recent_ui_work_observations", ()
     )
@@ -3123,7 +3126,7 @@ def _fast_scroll_60fps(
             for before_axis, after_axis in zip(camera_before, camera_after, strict=False)
             for before, after in zip(before_axis, after_axis, strict=False)
         )
-    draw_delta = max(0, _vispy_tile_presentation_draw_count(win) - int(draw_start))
+    draw_delta = max(0, _tile_presentation_draw_count(win) - int(draw_start))
     ui_work = tuple(ui_work_buffer)[ui_work_start:]
     channel_counts: dict[str, int] = {}
     channel_ms: dict[str, float] = {}
@@ -4661,14 +4664,10 @@ def _visual_scene_presented_tiles(
     presentation_diagnostics,
     physical_rows,
 ) -> frozenset[int]:
-    """Return named scene primitives, never residency/acknowledgement rows."""
+    """Return physically drawn rows, never mere residency bookkeeping."""
 
-    if str(backend) == "vispy":
-        return frozenset(
-            int(tile)
-            for tile in tuple(dict(presentation_diagnostics or {}).get("presented_tiles", ()) or ())
-        )
-    # PyQtGraph's physical rows already exclude hidden/empty ImageItems.
+    del backend, presentation_diagnostics
+    # Both maintained backends exclude hidden/empty tiles from physical rows.
     return frozenset(int(tile) for tile in dict(physical_rows or {}))
 
 
@@ -4723,7 +4722,7 @@ def _visual_geometry_summary(
     bounds through the live PyQtGraph camera range makes a mixed-size defect
     searchable in JSONL without trying to infer geometry from a screenshot.
     It also records enough context to distinguish a deliberate maximum-out or
-    deep-zoom gesture from stale VisPy vertices/camera state.
+    deep-zoom gesture from stale draw geometry or camera state.
     """
 
     world_sizes: list[tuple[float, float]] = []
@@ -4777,32 +4776,15 @@ def _visual_geometry_summary(
 
 
 def _visual_camera_state(win, *, session, live_view_range) -> dict[str, object]:
-    """Record every camera representation without making one a new owner."""
+    """Record the canonical and live camera ranges without adding an owner."""
 
+    del win
     session_range = _normalized_view_range(getattr(session, "view_range", None))
     live_range = _normalized_view_range(live_view_range)
-    image_view = getattr(win, "img_view", None)
-    raw_key = getattr(image_view, "_vispy_camera_key", None)
-    vispy_key_range = _normalized_view_range(None if raw_key is None else tuple(raw_key[:2]))
-    camera_rect = None
-    try:
-        rect = image_view._vispy_view.camera.rect
-        camera_rect = (
-            float(rect.left),
-            float(rect.bottom),
-            float(rect.right),
-            float(rect.top),
-        )
-    except Exception:
-        pass
     return {
         "session_view_range": session_range,
         "live_view_range": live_range,
-        "vispy_camera_key": _trace_identity(raw_key, limit=500),
-        "vispy_camera_key_range": vispy_key_range,
-        "vispy_camera_rect": camera_rect,
         "session_matches_live": _view_ranges_close(session_range, live_range),
-        "vispy_key_matches_live": _view_ranges_close(vispy_key_range, live_range),
     }
 
 
@@ -5042,14 +5024,12 @@ def _current_montage_topology(win) -> tuple | None:
 def _backend_visible_tile_count(win) -> int:
     image_view = getattr(win, "img_view", None)
     mode = str(getattr(image_view, "montageDisplayMode", lambda: "")())
-    if mode == "vispy_tile_layer":
-        return int(_vispy_presentation_diagnostics(win).get("presented_tile_count", 0) or 0)
     if mode == "wgpu_tile_layer":
         physical_count = getattr(image_view, "physicalVisibleTileCount", None)
         if callable(physical_count):
             return int(physical_count())
         return int(
-            _vispy_presentation_diagnostics(win).get("physically_visible_tile_count", 0) or 0
+            _backend_presentation_diagnostics(win).get("physically_visible_tile_count", 0) or 0
         )
     layer = getattr(image_view, "_montage_tile_layer", None)
     states = getattr(layer, "states", {}) or {}
@@ -5075,19 +5055,6 @@ def _presentation_identity_token(identity):
 def _backend_presentation_identity(win) -> tuple[tuple[int, object], ...]:
     image_view = getattr(win, "img_view", None)
     mode = str(getattr(image_view, "montageDisplayMode", lambda: "")())
-    if mode == "vispy_tile_layer":
-        layer = getattr(image_view, "_vispy_gpu_montage_layer", None)
-        stats = getattr(layer, "last_stats", None)
-        identities = dict(getattr(stats, "presented_identities", {}) or {})
-        if identities:
-            return tuple(
-                sorted(
-                    (int(tile), _presentation_identity_token(identity))
-                    for tile, identity in identities.items()
-                )
-            )
-        tiles = tuple(getattr(stats, "presented_tiles", ()) or ())
-        return tuple((int(tile), "") for tile in sorted(int(tile) for tile in tiles))
     if mode == "wgpu_tile_layer":
         committed = dict(getattr(image_view, "_wgpu_committed", None) or {})
         tiles = dict(committed.get("tiles", {}) or {})
@@ -5152,7 +5119,7 @@ def _apply_fft_level_refinement_preview(win, *, app=None, QtCore=None) -> dict[s
     for step in range(10):
         offset = -0.05 * step * span
         levels = (base_levels[0] + offset, base_levels[1] + offset)
-        draw_start = _vispy_draw_count(win)
+        draw_start = _backend_draw_count(win)
         preview_start = perf_counter()
         with contextlib.suppress(Exception):
             win.img_view.histogram.setLevels(float(levels[0]), float(levels[1]))
@@ -5364,7 +5331,7 @@ def _run_phase(
     if callable(begin_physical_timeline):
         begin_physical_timeline()
     physical_tile_timeline: tuple[dict[str, object], ...] = ()
-    draw_start = _vispy_draw_count(win)
+    draw_start = _backend_draw_count(win)
     phase_ui_work_start = _recent_ui_work_observations(win)
     governor = getattr(win, "resource_governor", None)
     begin_ui_epoch = getattr(governor, "begin_ui_observation_epoch", None)
@@ -5900,7 +5867,6 @@ def _wait_for_montage_complete(
             stall_last_sig = sig
         else:
             stall_since = None
-        vispy_tiled = str(mode) == "vispy_tile_layer" and _vispy_canvas_visible(win)
         wgpu_tiled = str(mode) == "wgpu_tile_layer"
         pyqtgraph_tiled = str(mode) == "tile_layer"
         if session is not None:
@@ -5922,7 +5888,7 @@ def _wait_for_montage_complete(
             session is not None
             and bool(getattr(session, "display_committed", False))
             and session.is_complete()
-            and mode in {"tile_layer", "vispy_tile_layer", "wgpu_tile_layer"}
+            and mode in {"tile_layer", "wgpu_tile_layer"}
         )
         if logical_complete and first_logical_complete_ms is None:
             first_logical_complete_ms = (perf_counter() - start) * 1000.0
@@ -6027,13 +5993,12 @@ def _wait_for_montage_complete(
         )
         if fully_visible and fully_visible_ms is None:
             fully_visible_ms = (perf_counter() - start) * 1000.0
-        current_request_count = _vispy_tile_presentation_request_count(win)
-        final_drawn = _vispy_tile_presentation_draw_count(win) >= int(current_request_count)
+        current_request_count = _tile_presentation_request_count(win)
+        final_drawn = _tile_presentation_draw_count(win) >= int(current_request_count)
         draw_pending_fn = getattr(win.img_view, "presentationDrawPending", None)
         pyqtgraph_final_drawn = not bool(callable(draw_pending_fn) and draw_pending_fn())
         physical_drawn = bool(
-            (not (vispy_tiled or wgpu_tiled) or final_drawn)
-            and (not pyqtgraph_tiled or pyqtgraph_final_drawn)
+            (not wgpu_tiled or final_drawn) and (not pyqtgraph_tiled or pyqtgraph_final_drawn)
         )
         if (
             fully_visible
@@ -6056,9 +6021,9 @@ def _wait_for_montage_complete(
                 first_visible_tile_ms = 0.0
                 first_visible_levels_state = _levels_histogram_state(win)
                 first_visible_reused_compatible_predecessor = True
-            if vispy_tiled:
+            if wgpu_tiled:
                 draw_after_complete_ms = (perf_counter() - start) * 1000.0
-            if vispy_tiled or wgpu_tiled or pyqtgraph_tiled:
+            if wgpu_tiled or pyqtgraph_tiled:
                 physical_draw_after_complete_ms = (perf_counter() - start) * 1000.0
             display_payload_fill_after_first_payload_ms = _elapsed_between_ms(
                 first_display_payload_ms,
@@ -6166,13 +6131,10 @@ def _wait_for_montage_complete(
                 "active_planned_tile_count": int(visibility_state["active_planned_tile_count"]),
                 "requested_tile_count": int(visibility_state["requested_tile_count"]),
                 "requested_grid_fully_visible": bool(requested_grid_visible),
-                "vispy_draw_count_start": int(draw_start),
-                "vispy_draw_count_complete": _vispy_draw_count(win),
-                "vispy_tile_presentation_request_count": _vispy_tile_presentation_request_count(
-                    win
-                ),
-                "vispy_tile_presentation_draw_count": _vispy_tile_presentation_draw_count(win),
-                "waited_for_vispy_draw_after_complete": bool(vispy_tiled),
+                "presentation_draw_count_start": int(draw_start),
+                "presentation_draw_count_complete": _backend_draw_count(win),
+                "tile_presentation_request_count": _tile_presentation_request_count(win),
+                "tile_presentation_draw_count": _tile_presentation_draw_count(win),
                 "waited_for_wgpu_draw_after_complete": bool(wgpu_tiled),
                 **_histogram_continuity_metrics(histogram_timeline),
             }
@@ -6298,8 +6260,8 @@ def _wait_for_montage_complete(
         f"gpu_budget={int(getattr(getattr(snapshot, 'montage_timing', None), 'tile_layer_budget_bytes', 0) or 0)} "
         f"gpu_warning={str(getattr(getattr(snapshot, 'montage_timing', None), 'tile_layer_capacity_warning', '') or '')!r} "
         f"gpu_pages={presentation_diagnostics.get('tile_atlas_pages', ())!r} "
-        f"overlays={_montage_overlay_count(win)} vispy_draws={_vispy_draw_count(win)} "
-        f"tile_draw={_vispy_tile_presentation_draw_count(win)}/{_vispy_tile_presentation_request_count(win)} "
+        f"overlays={_montage_overlay_count(win)} draws={_backend_draw_count(win)} "
+        f"tile_draw={_tile_presentation_draw_count(win)}/{_tile_presentation_request_count(win)} "
         f"level_pending={final_level_state.get('pending', False)} "
         f"level_stale={final_level_state.get('stale_tiles', 0)} "
         f"level_values={final_level_state.get('active_level_value_count', 0)} "
@@ -6421,7 +6383,7 @@ def _phase_record(
     )
     feedback_channels = () if resource is None else tuple(resource.feedback_channels)
     lane_decisions = () if resource is None else tuple(resource.lane_decisions)
-    vispy = _vispy_presentation_diagnostics(win)
+    presentation = _backend_presentation_diagnostics(win)
     level_state = _montage_level_presentation_state(win)
     return {
         **_window_geometry_state(win),
@@ -6655,57 +6617,58 @@ def _phase_record(
             getattr(win, "_persistent_tile_layer_fast_drain_enabled_count", 0) or 0
         ),
         "montage_overlay_count": _montage_overlay_count(win),
-        "vispy_draw_count": int(vispy.get("draw_count", 0)),
-        "vispy_last_draw_ms": float(vispy.get("last_draw_ms", 0.0) or 0.0),
-        "vispy_max_draw_ms": float(vispy.get("max_draw_ms", 0.0) or 0.0),
-        "vispy_tile_presentation_request_count": int(
-            vispy.get("tile_presentation_request_count", 0)
+        "presentation_draw_count": int(presentation.get("draw_count", 0)),
+        "presentation_last_draw_ms": float(presentation.get("last_draw_ms", 0.0) or 0.0),
+        "presentation_max_draw_ms": float(presentation.get("max_draw_ms", 0.0) or 0.0),
+        "tile_presentation_request_count": int(
+            presentation.get("tile_presentation_request_count", 0)
         ),
-        "vispy_tile_presentation_draw_count": int(vispy.get("tile_presentation_draw_count", 0)),
-        "vispy_tile_presentation_draw_pending": bool(
-            vispy.get("tile_presentation_draw_pending", False)
+        "tile_presentation_draw_count": int(presentation.get("tile_presentation_draw_count", 0)),
+        "tile_presentation_draw_pending": bool(
+            presentation.get("tile_presentation_draw_pending", False)
         ),
-        "vispy_presented_tile_count": int(vispy.get("presented_tile_count", 0)),
-        "vispy_presented_tiles": list(vispy.get("presented_tiles", ()) or ()),
+        "presented_tile_count": int(presentation.get("presented_tile_count", 0)),
+        "presented_tiles": list(presentation.get("presented_tiles", ()) or ()),
         "wgpu_plane_lookup_candidates_total": int(
-            vispy.get("wgpu_plane_lookup_candidates_total", 0) or 0
+            presentation.get("wgpu_plane_lookup_candidates_total", 0) or 0
         ),
-        "wgpu_uploads_total": int(vispy.get("wgpu_uploads_total", 0) or 0),
-        "wgpu_upload_bytes_total": int(vispy.get("wgpu_upload_bytes_total", 0) or 0),
+        "wgpu_uploads_total": int(presentation.get("wgpu_uploads_total", 0) or 0),
+        "wgpu_upload_bytes_total": int(presentation.get("wgpu_upload_bytes_total", 0) or 0),
         # Which page keys the uploads above carried, one row per (lod level,
         # representation).  A raw montage's coarse commit uploads native pages,
         # so the displayed level does not name the uploaded one.
         "wgpu_uploads_by_level": [
-            dict(row) for row in tuple(vispy.get("wgpu_uploads_by_level", ()) or ())
+            dict(row) for row in tuple(presentation.get("wgpu_uploads_by_level", ()) or ())
         ],
-        "wgpu_binding_fast_path_commits": int(vispy.get("wgpu_binding_fast_path_commits", 0) or 0),
+        "wgpu_binding_fast_path_commits": int(
+            presentation.get("wgpu_binding_fast_path_commits", 0) or 0
+        ),
         "wgpu_binding_full_republications": int(
-            vispy.get("wgpu_binding_full_republications", 0) or 0
+            presentation.get("wgpu_binding_full_republications", 0) or 0
         ),
-        "wgpu_last_report_uploads": int(vispy.get("wgpu_last_report_uploads", 0) or 0),
-        "wgpu_page_pools": list(vispy.get("wgpu_page_pools", ()) or ()),
-        "wgpu_atomic_warm_pinned_pages": int(vispy.get("wgpu_atomic_warm_pinned_pages", 0) or 0),
-        "wgpu_last_pool_exhaustion": str(vispy.get("wgpu_last_pool_exhaustion", "") or ""),
-        "wgpu_compressed_uploads_total": int(vispy.get("wgpu_compressed_uploads_total", 0) or 0),
+        "wgpu_last_report_uploads": int(presentation.get("wgpu_last_report_uploads", 0) or 0),
+        "wgpu_page_pools": list(presentation.get("wgpu_page_pools", ()) or ()),
+        "wgpu_atomic_warm_pinned_pages": int(
+            presentation.get("wgpu_atomic_warm_pinned_pages", 0) or 0
+        ),
+        "wgpu_last_pool_exhaustion": str(presentation.get("wgpu_last_pool_exhaustion", "") or ""),
+        "wgpu_compressed_uploads_total": int(
+            presentation.get("wgpu_compressed_uploads_total", 0) or 0
+        ),
         "wgpu_compressed_fallbacks_total": int(
-            vispy.get("wgpu_compressed_fallbacks_total", 0) or 0
+            presentation.get("wgpu_compressed_fallbacks_total", 0) or 0
         ),
-        "wgpu_active_resident_bytes": int(vispy.get("wgpu_active_resident_bytes", 0) or 0),
-        "wgpu_allocated_pool_bytes": int(vispy.get("wgpu_allocated_pool_bytes", 0) or 0),
-        "wgpu_pool_grows_total": int(vispy.get("wgpu_pool_grows_total", 0) or 0),
+        "wgpu_active_resident_bytes": int(presentation.get("wgpu_active_resident_bytes", 0) or 0),
+        "wgpu_allocated_pool_bytes": int(presentation.get("wgpu_allocated_pool_bytes", 0) or 0),
+        "wgpu_pool_grows_total": int(presentation.get("wgpu_pool_grows_total", 0) or 0),
         "wgpu_pool_growth_copy_bytes_total": int(
-            vispy.get("wgpu_pool_growth_copy_bytes_total", 0) or 0
+            presentation.get("wgpu_pool_growth_copy_bytes_total", 0) or 0
         ),
-        "wgpu_codec_family": str(vispy.get("wgpu_codec_family", "none") or "none"),
-        "wgpu_codec_min_psnr_db": float(vispy.get("wgpu_codec_min_psnr_db", 0.0) or 0.0),
-        "wgpu_adapter": str(vispy.get("wgpu_adapter", "") or ""),
-        "wgpu_adapter_type": str(vispy.get("wgpu_adapter_type", "") or ""),
-        "wgpu_power_preference": str(vispy.get("wgpu_power_preference", "") or ""),
-        "vispy_tile_visual_visible_pages": int(vispy.get("tile_visual_visible_pages", 0)),
-        "vispy_tile_visual_min_order": vispy.get("tile_visual_min_order"),
-        "vispy_overlay_visual_visible_items": int(vispy.get("overlay_visual_visible_items", 0)),
-        "vispy_overlay_visual_max_order": vispy.get("overlay_visual_max_order"),
-        "vispy_overlays_above_tiles": bool(vispy.get("overlays_above_tiles", False)),
+        "wgpu_codec_family": str(presentation.get("wgpu_codec_family", "none") or "none"),
+        "wgpu_codec_min_psnr_db": float(presentation.get("wgpu_codec_min_psnr_db", 0.0) or 0.0),
+        "wgpu_adapter": str(presentation.get("wgpu_adapter", "") or ""),
+        "wgpu_adapter_type": str(presentation.get("wgpu_adapter_type", "") or ""),
+        "wgpu_power_preference": str(presentation.get("wgpu_power_preference", "") or ""),
         "resource_feedback_channels": [asdict(channel) for channel in feedback_channels],
         "resource_lane_decisions": [
             {
@@ -6884,8 +6847,7 @@ def _wait_for_tile_presentation_draw(
             draw_pending_fn = getattr(view, "presentationDrawPending", None)
             draw_pending = bool(callable(draw_pending_fn) and draw_pending_fn())
             if (
-                _vispy_tile_presentation_draw_count(win)
-                >= _vispy_tile_presentation_request_count(win)
+                _tile_presentation_draw_count(win) >= _tile_presentation_request_count(win)
                 and not draw_pending
             ):
                 _process_events(app, QtCore, count=2)
@@ -6904,8 +6866,8 @@ def _wait_for_tile_presentation_draw(
         if observing_draw_edges:
             with contextlib.suppress(RuntimeError, TypeError):
                 presentation_drawn.disconnect(record_draw_edge)
-    requested = _vispy_tile_presentation_request_count(win)
-    drawn = _vispy_tile_presentation_draw_count(win)
+    requested = _tile_presentation_request_count(win)
+    drawn = _tile_presentation_draw_count(win)
     draw_pending_fn = getattr(view, "presentationDrawPending", None)
     draw_pending = bool(callable(draw_pending_fn) and draw_pending_fn())
     raise TimeoutError(
@@ -6981,7 +6943,7 @@ def _wait_for_physical_presentation_quiet(
     pending_fn = getattr(getattr(win, "img_view", None), "presentationDrawPending", None)
     raise TimeoutError(
         "physical presentation did not become quiet within "
-        f"{timeout_s:.3f}s: draw_count={_vispy_draw_count(win)} "
+        f"{timeout_s:.3f}s: draw_count={_backend_draw_count(win)} "
         f"draw_pending={bool(callable(pending_fn) and pending_fn())}"
     )
 
@@ -7013,37 +6975,36 @@ def _ui_work_observation_delta(
     return current, True
 
 
-def _vispy_presentation_diagnostics(win) -> dict[str, object]:
+def _backend_presentation_diagnostics(win) -> dict[str, object]:
     image_view = getattr(win, "img_view", None)
-    for name in ("vispyPresentationDiagnostics", "wgpuPresentationDiagnostics"):
-        getter = getattr(image_view, name, None)
-        if callable(getter):
-            try:
-                return dict(getter())
-            except Exception:
-                return {}
-    return {}
+    getter = getattr(image_view, "presentation_diagnostics", None)
+    if not callable(getter):
+        return {}
+    try:
+        return dict(getter())
+    except Exception:
+        return {}
 
 
 def _wgpu_upload_total(win) -> int | None:
-    diagnostics = _vispy_presentation_diagnostics(win)
+    diagnostics = _backend_presentation_diagnostics(win)
     if "wgpu_uploads_total" not in diagnostics:
         return None
     return int(diagnostics.get("wgpu_uploads_total", 0) or 0)
 
 
-def _vispy_draw_count(win) -> int:
-    diagnostics = _vispy_presentation_diagnostics(win)
+def _backend_draw_count(win) -> int:
+    diagnostics = _backend_presentation_diagnostics(win)
     return int(diagnostics.get("draw_count", 0) or 0)
 
 
-def _vispy_tile_presentation_request_count(win) -> int:
-    diagnostics = _vispy_presentation_diagnostics(win)
+def _tile_presentation_request_count(win) -> int:
+    diagnostics = _backend_presentation_diagnostics(win)
     return int(diagnostics.get("tile_presentation_request_count", 0) or 0)
 
 
-def _vispy_tile_presentation_draw_count(win) -> int:
-    diagnostics = _vispy_presentation_diagnostics(win)
+def _tile_presentation_draw_count(win) -> int:
+    diagnostics = _backend_presentation_diagnostics(win)
     return int(diagnostics.get("tile_presentation_draw_count", 0) or 0)
 
 
@@ -7063,11 +7024,11 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
     if not expected:
         expected = set(active)
     presented = {int(tile) for tile in tuple(session.lifecycle.presented_tiles)}
-    vispy = _vispy_presentation_diagnostics(win)
+    presentation = _backend_presentation_diagnostics(win)
     overlay_count = _montage_overlay_count(win)
-    overlays_above_tiles = bool(vispy.get("overlays_above_tiles", False))
+    overlays_above_tiles = bool(presentation.get("overlays_above_tiles", False))
     overlay_nonblocking = overlay_count == 0 or (
-        str(mode) in {"vispy_tile_layer", "wgpu_tile_layer"}
+        str(mode) == "wgpu_tile_layer"
         and not overlays_above_tiles
         and active
         and active.issubset(presented)
@@ -7075,7 +7036,7 @@ def _montage_visibility_state(win, *, mode: str | None = None) -> dict[str, obje
     backlog = _visible_backlog_state(session, active)
     active_presented = active.intersection(presented)
     fully_visible = bool(
-        str(mode) in {"tile_layer", "vispy_tile_layer", "wgpu_tile_layer"}
+        str(mode) in {"tile_layer", "wgpu_tile_layer"}
         and getattr(session, "display_committed", False)
         and not bool(backlog["visible_has_backlog"])
         and active
@@ -7146,16 +7107,6 @@ def _expected_requested_montage_tiles(session) -> tuple[int, ...]:
     # ordinary full-workflow montages the semantic tile numbers are positional.
     # When a custom subset is used, still require every requested tile slot.
     return tuple(index for index in range(len(indices)) if int(index) not in skipped)
-
-
-def _vispy_canvas_visible(win) -> bool:
-    native = getattr(getattr(win, "img_view", None), "_vispy_canvas_native", None)
-    if native is None:
-        return False
-    try:
-        return bool(native.isVisible())
-    except Exception:
-        return False
 
 
 def _montage_overlay_count(win) -> int:
@@ -7285,13 +7236,6 @@ def _window_geometry_state(win) -> dict[str, object]:
         viewport_shape = [int(viewport.height()), int(viewport.width())]
     except Exception:
         viewport_shape = None
-    try:
-        canvas = win.img_view._vispy_canvas_native
-        vispy_canvas_shape = [int(canvas.height()), int(canvas.width())]
-        vispy_canvas_device_pixel_ratio = float(canvas.devicePixelRatioF())
-    except Exception:
-        vispy_canvas_shape = None
-        vispy_canvas_device_pixel_ratio = None
     raw_target = getattr(win, "_profile_session_fixture_viewport_shape", None)
     target = None if raw_target is None else [int(raw_target[0]), int(raw_target[1])]
     shape_matches = bool(
@@ -7332,8 +7276,6 @@ def _window_geometry_state(win) -> dict[str, object]:
         "session_window_size_chrome_delta": window_size_delta,
         "window_minimum_size": minimum_size,
         "viewport_shape": viewport_shape,
-        "vispy_canvas_shape": vispy_canvas_shape,
-        "vispy_canvas_device_pixel_ratio": vispy_canvas_device_pixel_ratio,
         "session_viewport_shape_target": target,
         "session_viewport_shape_matches": shape_matches,
         "image_axes": current_image_axes,
@@ -7462,7 +7404,6 @@ def _replace_settings(settings, *, backend: str, image_choice):
 
     backend_choice = {
         "pyqtgraph": image_choice.PYQTGRAPH,
-        "vispy": image_choice.VISPY,
         "wgpu": image_choice.WGPU,
     }[_normalize_backend(backend)]
     return replace(
@@ -7805,7 +7746,7 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         evidence=record.get("histogram_data_bounds"),
         target="finite non-empty histogram data bounds",
     )
-    shader_backend = str(record.get("backend", "")) in {"vispy", "wgpu"}
+    shader_backend = str(record.get("backend", "")) == "wgpu"
     required_evidence_quality = 1 if shader_backend else 3
     require(
         "first_visible_levels_semantic",
@@ -8217,10 +8158,8 @@ def _default_columns(tile_count: int) -> int:
 
 def _normalize_backend(backend: str) -> str:
     backend = str(backend).strip().lower()
-    if backend not in {"pyqtgraph", "vispy", "wgpu"}:
-        raise ValueError(
-            f"unsupported backend {backend!r}; expected 'pyqtgraph', 'vispy', or 'wgpu'"
-        )
+    if backend not in {"pyqtgraph", "wgpu"}:
+        raise ValueError(f"unsupported backend {backend!r}; expected 'pyqtgraph' or 'wgpu'")
     return backend
 
 
@@ -8840,7 +8779,7 @@ def _run_metadata_summary(summary: dict[str, object]) -> list[str]:
         "- Tools: "
         + ", ".join(
             f"`{name} {versions.get(name, 'unknown')}`"
-            for name in ("python", "PySide6", "pyqtgraph", "vispy", "py-spy", "perf")
+            for name in ("python", "PySide6", "pyqtgraph", "wgpu", "py-spy", "perf")
         ),
     ]
 
@@ -9475,7 +9414,7 @@ def _suite_tool_versions() -> dict[str, str]:
         else "unavailable",
         "perf": _run_text_command(("perf", "--version")) if shutil.which("perf") else "unavailable",
     }
-    for package in ("PySide6", "pyqtgraph", "vispy", "nibabel"):
+    for package in ("PySide6", "pyqtgraph", "wgpu", "nibabel"):
         versions[package] = _package_version(package)
     return versions
 
@@ -9590,7 +9529,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=(192, 256, 40),
         metavar="HEIGHTxWIDTHxDEPTH",
     )
-    parser.add_argument("--backend", choices=("pyqtgraph", "vispy", "wgpu", "all"), default="all")
+    parser.add_argument("--backend", choices=("pyqtgraph", "wgpu", "all"), default="all")
     parser.add_argument(
         "--wgpu-present-method",
         choices=("bitmap", "screen", "auto"),

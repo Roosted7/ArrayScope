@@ -225,7 +225,7 @@ def _map_complex_cpu_payload(
     plans = tuple(getattr(backing, "requested_plans", ()) or ())
     phase_vector = bool(plans and all(plan.reducer == REDUCER_PHASE_VECTOR for plan in plans))
     if phase_vector:
-        # Match VisPy's phase-vector shader mode exactly: page magnitude is
+        # Match the phase-vector shader mode exactly: page magnitude is
         # circular-resultant coherence in [0, 1], not native amplitude, and
         # hue spans the canonical phase range rather than the amplitude level
         # window.  Opposed/all-zero bins therefore stay visibly undefined
@@ -261,7 +261,7 @@ def _assemble_page_backed_payload(
 
     Reduced samples are repeated over their exact planned source rectangles,
     not uniformly stretched. This is nearest-neighbour presentation with the
-    same clipped-bin geometry as VisPy.
+    same clipped-bin geometry as the GPU path.
     """
 
     return _resolve_page_backed_payload(payload, levels=levels).payload
@@ -729,7 +729,7 @@ class MontageTileLayer:
         )
         if level_update_tiles:
             tile_order = tuple(dict.fromkeys(tuple(tile_order) + tuple(level_update_tiles)))
-        # Match the VisPy atlas path's ordering: resolve active payloads to
+        # Match the GPU residency path's ordering: resolve active payloads to
         # resident identities, bind tile placement to resident storage, then
         # decide whether any data upload is needed.  For PyQtGraph the
         # resident storage is the ImageItem state itself.
@@ -741,7 +741,7 @@ class MontageTileLayer:
             tile_source_ids=tile_source_ids,
         )
         cold_holes = _direct_cold_hole_count(preclaim_specs, self._states_by_source_key)
-        # Moving an ImageItem is destructive for its old slot.  Unlike VisPy's
+        # Moving an ImageItem is destructive for its old slot. Unlike a GPU
         # coherent atlas remap, a backend-local cold deadline could stop before
         # the displaced slot is replaced.  The unconstrained range-shift path
         # still preclaims all resident items; deadline-capped callbacks keep

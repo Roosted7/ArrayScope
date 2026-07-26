@@ -4,15 +4,15 @@ import numpy as np
 
 from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ViewState
-from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 from arrayscope.display.frame_planner import ANCHORED_CHUNK_SHAPE, FramePlanner, _axis_origins
 from arrayscope.display.region_source import EagerDisplayRegionSource
+from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.source_anchoring import (
     contiguous_range_start,
     source_anchoring_for_view,
 )
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, Conjugate, Mean
-from tests.display.vispy_test_utils import FakeDisplayImage
 
 TARGET = FrameTarget(
     semantic_key="test", viewport_key=None, presentation_key=None, quality="exact-visible"
@@ -33,7 +33,7 @@ def plan_for(view_state, display_shape, anchoring):
         target=TARGET,
         view_state=view_state,
         display_shape=display_shape,
-        backend_capabilities=VISPY_CAPABILITIES,
+        backend_capabilities=WGPU_CAPABILITIES,
         source_anchoring=anchoring,
     )
 
@@ -195,12 +195,12 @@ class TestAnchoredSourceIds:
         plan = plan_for(state, (1024, 1024), anchoring)
         region = plan.regions[0]
         first = EagerDisplayRegionSource(
-            FakeDisplayImage(np.zeros((1024, 1024), dtype=np.float32)),
+            DisplayImage(np.zeros((1024, 1024), dtype=np.float32)),
             source_key=("request", "window-a"),
             content_key=plan.source_content_key,
         ).read_region(region, quality="exact-visible")
         second = EagerDisplayRegionSource(
-            FakeDisplayImage(np.zeros((1024, 1024), dtype=np.float32)),
+            DisplayImage(np.zeros((1024, 1024), dtype=np.float32)),
             source_key=("request", "window-b"),
             content_key=plan.source_content_key,
         ).read_region(region, quality="exact-visible")
@@ -210,11 +210,11 @@ class TestAnchoredSourceIds:
         state = windowed_state((512, 512))
         plan = plan_for(state, (512, 512), None)
         region = plan.regions[0]
-        image = FakeDisplayImage(np.zeros((512, 512), dtype=np.float32))
+        image = DisplayImage(np.zeros((512, 512), dtype=np.float32))
         first = EagerDisplayRegionSource(image, source_key="k").read_region(
             region, quality="exact-visible"
         )
         other = EagerDisplayRegionSource(
-            FakeDisplayImage(np.zeros((512, 512), dtype=np.float32)), source_key="k"
+            DisplayImage(np.zeros((512, 512), dtype=np.float32)), source_key="k"
         ).read_region(region, quality="exact-visible")
         assert first.source_id != other.source_id

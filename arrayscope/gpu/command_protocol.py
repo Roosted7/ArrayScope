@@ -2,7 +2,7 @@
 
 This module formalizes the semantic command table recorded in
 ``docs/proposals/tensor-engine-endpoint.md`` (renderer strategy): the frame
-planner speaks *these* commands; a renderer backend (wgpu today, VisPy's
+planner speaks *these* commands; a renderer backend (wgpu today, any future
 executor once migrated, Datoviz/native-Vulkan if ever re-opened) merely
 executes them.  Nothing here may assume WGSL, GL texture names, Datoviz IDs,
 Qt, or one-physical-texture-per-tile — the protocol carries ADR 0055/0056

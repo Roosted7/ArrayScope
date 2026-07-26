@@ -29,7 +29,6 @@ def _settings(
     [
         (ImageRenderingBackendChoice.WGPU, True),  # explicit pin: always warm
         (ImageRenderingBackendChoice.PYQTGRAPH, False),  # never a wasted device
-        (ImageRenderingBackendChoice.VISPY, False),
     ],
 )
 def test_should_warm_follows_explicit_pin(choice, expected):
@@ -51,6 +50,99 @@ def test_should_warm_auto_on_linux_display(monkeypatch):
     monkeypatch.setattr(fac.platform, "system", lambda: "Linux")
     monkeypatch.setenv("QT_QPA_PLATFORM", "wayland")
     assert fac._should_warm_wgpu(_settings(ImageRenderingBackendChoice.AUTO)) is True
+
+
+def test_auto_resolver_prefers_wgpu_and_caches_probe(monkeypatch):
+    monkeypatch.setattr(fac, "_auto_resolution_cache", None)
+    monkeypatch.setattr(fac.platform, "system", lambda: "Linux")
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    calls = []
+
+    def probe():
+        calls.append("probe")
+        return "test Vulkan adapter"
+
+    monkeypatch.setattr(fac, "_probe_wgpu_device", probe)
+
+    first = fac.resolve_auto_backend_choice()
+    second = fac.resolve_auto_backend_choice()
+
+    assert first == second
+    assert first[0] is ImageRenderingBackendChoice.WGPU
+    assert "wgpu device" in first[1]
+    assert calls == ["probe"]
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "qt_platform", "reason"),
+    [
+        ("Windows", "", "no reference performance traces"),
+        ("Linux", "offscreen", "offscreen Qt platform"),
+    ],
+)
+def test_auto_resolver_uses_pyqtgraph_without_a_supported_display(
+    monkeypatch,
+    platform_name,
+    qt_platform,
+    reason,
+):
+    monkeypatch.setattr(fac, "_auto_resolution_cache", None)
+    monkeypatch.setattr(fac.platform, "system", lambda: platform_name)
+    if qt_platform:
+        monkeypatch.setenv("QT_QPA_PLATFORM", qt_platform)
+    else:
+        monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setattr(
+        fac,
+        "_probe_wgpu_device",
+        lambda: (_ for _ in ()).throw(AssertionError("device probe must not run")),
+    )
+
+    choice, explanation = fac.resolve_auto_backend_choice()
+
+    assert choice is ImageRenderingBackendChoice.PYQTGRAPH
+    assert reason in explanation
+
+
+def test_auto_resolver_falls_back_to_pyqtgraph_when_wgpu_probe_fails(monkeypatch):
+    monkeypatch.setattr(fac, "_auto_resolution_cache", None)
+    monkeypatch.setattr(fac.platform, "system", lambda: "Linux")
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setattr(fac, "_probe_wgpu_device", lambda: None)
+
+    choice, explanation = fac.resolve_auto_backend_choice()
+
+    assert choice is ImageRenderingBackendChoice.PYQTGRAPH
+    assert explanation == "no usable wgpu device"
+
+
+def test_auto_wgpu_construction_failure_falls_back_to_pyqtgraph(qt_app, monkeypatch):
+    from arrayscope.display.backends import wgpu as wgpu_backend
+
+    monkeypatch.setattr(
+        fac,
+        "resolve_auto_backend_choice",
+        lambda: (ImageRenderingBackendChoice.WGPU, "test device"),
+    )
+
+    class BrokenWgpuSurface:
+        def __init__(self, **_kwargs):
+            raise RuntimeError("injected device loss")
+
+    monkeypatch.setattr(wgpu_backend, "WgpuSurface", BrokenWgpuSurface)
+    messages = []
+    view = fac.create_image_view(
+        _settings(ImageRenderingBackendChoice.AUTO),
+        notify=messages.append,
+    )
+    try:
+        assert view.surface.capabilities.name == "pyqtgraph"
+        assert messages == [
+            "Image rendering backend: wgpu | test device",
+            "wgpu renderer unavailable; using PyQtGraph (injected device loss)",
+        ]
+    finally:
+        view.close()
 
 
 def test_bc_bulk_warm_requires_wgpu_and_enabled_texture_codec():

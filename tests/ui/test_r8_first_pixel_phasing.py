@@ -5,14 +5,14 @@ from collections import Counter
 import numpy as np
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-from tests.ui.helpers import clear_arrayscope_settings
+from tests.ui.helpers import clear_arrayscope_settings, require_wgpu_adapter
 
 
 def _event_index(events, name: str) -> int:
     return next(index for index, event in enumerate(events) if event[0] == name)
 
 
-def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qtbot, monkeypatch):
+def test_wgpu_complex_first_pass_levels_precede_physical_draw_and_refinement(qtbot, monkeypatch):
     """R8B.2: rough payload evidence, draw, histogram, and refinement are phased.
 
     This drives the production preview + target ladder with deterministic
@@ -21,21 +21,22 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
     it does not change scheduling, payloads, batching, or backend results.
     """
 
+    require_wgpu_adapter()
     clear_arrayscope_settings()
 
     from pyqtgraph.Qt import QtCore
 
-    from arrayscope.display.backends.vispy.tiles import GpuWindowedTileVisual
     from arrayscope.display.model.montage_levels import LevelEvidenceQuality
     from arrayscope.display.shader_mapping import TexturePlaneKind
-    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
+    from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
+    from arrayscope.gpu.command_protocol import SetDisplayMapping
     from arrayscope.kernel import Kernel
     from arrayscope.render.level_stats import LevelStatsService
     from arrayscope.window import ArrayScopeWindow
     from arrayscope.window.frame_effects import FramePipelineEffects
 
     settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", "vispy")
+    settings.setValue("image_rendering_backend", "wgpu")
     settings.setValue("montage_quality_policy", "resident")
     settings.sync()
 
@@ -45,8 +46,8 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
 
     original_prepared = LevelStatsService._update_montage_level_bounds_from_prepared
     original_rendered = LevelStatsService._update_montage_level_bounds_from_rendered
-    original_set_levels = GpuWindowedTileVisual.set_levels
-    original_present = VisPyImageView2D.setTiledPresentation
+    original_present = WgpuImageView2D.setTiledPresentation
+    original_submit_wgpu = WgpuImageView2D._submit_wgpu
     original_submit_speculative = Kernel.submit_speculative_batch
     original_admit_reduced = FramePipelineEffects._admit_reduced_display_payload
     original_admit_target = FramePipelineEffects._admit_evaluation_result
@@ -100,16 +101,20 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
         )
         return result
 
-    def set_levels(visual, levels):
-        normalized = tuple(float(value) for value in levels)
-        changed = original_set_levels(visual, levels)
-        if changed:
+    def submit_wgpu(view, commands):
+        for command in commands:
+            if not isinstance(command, SetDisplayMapping):
+                continue
+            normalized = (
+                float(command.mapping.level_lo),
+                float(command.mapping.level_hi),
+            )
             events.append(("shader levels applied", normalized))
             if any(event[0] == "refined evidence start" for event in events) and not any(
                 event[0] == "refined levels publication" for event in events
             ):
                 events.append(("refined levels publication", normalized))
-        return changed
+        return original_submit_wgpu(view, commands)
 
     def present(view, **kwargs):
         delta = kwargs["tile_delta"]
@@ -202,8 +207,8 @@ def test_vispy_complex_first_pass_levels_precede_physical_draw_and_refinement(qt
     monkeypatch.setattr(
         LevelStatsService, "_update_montage_level_bounds_from_rendered", update_rendered
     )
-    monkeypatch.setattr(GpuWindowedTileVisual, "set_levels", set_levels)
-    monkeypatch.setattr(VisPyImageView2D, "setTiledPresentation", present)
+    monkeypatch.setattr(WgpuImageView2D, "_submit_wgpu", submit_wgpu)
+    monkeypatch.setattr(WgpuImageView2D, "setTiledPresentation", present)
     monkeypatch.setattr(Kernel, "submit_speculative_batch", submit_speculative)
     monkeypatch.setattr(FramePipelineEffects, "_admit_reduced_display_payload", admit_reduced)
     monkeypatch.setattr(FramePipelineEffects, "_admit_evaluation_result", admit_target)

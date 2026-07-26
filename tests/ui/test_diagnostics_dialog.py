@@ -215,7 +215,7 @@ def test_compact_overview_bottleneck_ignores_stale_rgb_timing_when_idle():
     assert runtime_bottleneck_text(snapshot) == "idle"
 
 
-def test_diagnostics_reports_actual_image_backend_separately_from_setting(qtbot):
+def test_diagnostics_reports_actual_image_backend_separately_from_auto_setting(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.window import ArrayScopeWindow
@@ -225,11 +225,11 @@ def test_diagnostics_reports_actual_image_backend_separately_from_setting(qtbot)
     try:
         _process_events(qtbot)
         win.app_settings = replace(
-            win.app_settings, image_rendering_backend=ImageRenderingBackendChoice.VISPY
+            win.app_settings, image_rendering_backend=ImageRenderingBackendChoice.AUTO
         )
         snapshot = win.collect_runtime_diagnostics()
 
-        assert snapshot.image_rendering_backend_selected == "vispy"
+        assert snapshot.image_rendering_backend_selected == "auto"
         assert snapshot.image_rendering_backend_actual == "pyqtgraph"
         assert snapshot.image_rendering_backend == "pyqtgraph"
     finally:

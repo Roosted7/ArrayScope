@@ -327,9 +327,8 @@ class FileViewSessionMixin:
             resized = bool(resize(viewport_shape))
         if resized and attempts > 1:
             # A resize can produce a transient matching viewport before Qt has
-            # completed the child-layout pass.  In particular, VisPy's stacked
-            # native canvas settles one event turn after the outer window.  Do
-            # not let that same-turn match release the continuity transaction.
+            # completed the child-layout pass. Do not let that same-turn match
+            # release the continuity transaction.
             Qt.QtCore.QTimer.singleShot(
                 FILE_SESSION_VIEWPORT_RESTORE_RETRY_MS,
                 self,
@@ -492,9 +491,6 @@ class FileViewSessionMixin:
             tx.range_applied = True
             tx.released = True
             self._suppress_montage_autofit_revert_message = False
-            sync_viewport = getattr(self.img_view, "_sync_vispy_camera_to_view", None)
-            if callable(sync_viewport):
-                sync_viewport()
             return
         first_apply = not tx.range_applied
         previous_applying = bool(getattr(self.img_view, "_viewport_applying", False))
@@ -503,9 +499,6 @@ class FileViewSessionMixin:
             view.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
         finally:
             self.img_view._viewport_applying = previous_applying
-        sync_viewport = getattr(self.img_view, "_sync_vispy_camera_to_view", None)
-        if callable(sync_viewport):
-            sync_viewport()
         self._schedule_viewport_continuity_retarget()
         tx.range_applied = True
         if getattr(getattr(self, "view_state", None), "montage_axis", None) is None:
@@ -540,9 +533,6 @@ class FileViewSessionMixin:
             view.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
         finally:
             self.img_view._viewport_applying = previous_applying
-        sync_viewport = getattr(self.img_view, "_sync_vispy_camera_to_view", None)
-        if callable(sync_viewport):
-            sync_viewport()
         self._schedule_viewport_continuity_retarget()
 
     def _viewport_continuity_shape_settled(self) -> bool:

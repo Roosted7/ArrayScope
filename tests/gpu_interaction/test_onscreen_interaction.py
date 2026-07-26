@@ -19,7 +19,7 @@ pytestmark = pytest.mark.gpu_interaction
 MAX_INTERACTION_GAP_MS = 50.0
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_one_index_boundary_scroll_has_pixels_and_trace_clean(backend, tmp_path):
     """V1: a tile touching the viewport boundary remains a render obligation."""
 
@@ -104,7 +104,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(backend, tmp_path)
         # ROI/label shapes otherwise cover most of tiles 6 and 7 and turn a
         # correct texture ramp into an overlay-color assertion.
         h.prepare_image_layer_pixel_sampling()
-        h.assert_vispy_visual_mapping_matches_pool()
+        h.assert_visual_mapping_matches_residency()
         payload_means = {
             int(tile): float(
                 np.asarray(
@@ -149,7 +149,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(backend, tmp_path)
     assert verification["required_targets"] == 36
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
     """V2: final cold-scroll targets paint from viewport focus outward."""
 
@@ -258,7 +258,7 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
     # Worker completion may permute tiles inside the backend's bounded first
     # exact commit; that first visible band must still be the nearest band.
     actual_order = tuple(verification["acknowledgement_order"])
-    first_commit_size = 16 if backend == "vispy" else 8
+    first_commit_size = 8
     expected_first = set(expected_order[:first_commit_size])
     actual_first = set(actual_order[:first_commit_size])
     assert len(actual_first & expected_first) >= first_commit_size - 2, (
@@ -356,12 +356,12 @@ def test_zoom_across_lod_threshold_keeps_content_and_levels_in_sync(montage_wind
         assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), (
             f"never settled after zoom range {x_range}/{y_range}"
         )
-        h.assert_vispy_visual_mapping_matches_pool()
+        h.assert_visual_mapping_matches_residency()
         h.assert_lifecycle_settled()
 
     h.fit_view()
     assert h.wait_settled()
-    h.assert_vispy_visual_mapping_matches_pool()
+    h.assert_visual_mapping_matches_residency()
     h.assert_tile_identity_ramp()
     h.assert_lifecycle_settled()
 

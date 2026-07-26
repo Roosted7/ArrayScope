@@ -1,8 +1,8 @@
 """Experimental wgpu-backed 2D image view (montage scalar/RGB + complex).
 
 Queue row 3 slice (b): a live rendering backend driven purely by the
-renderer command protocol (ADR 0057).  The widget mirrors the VisPy hybrid
-exactly at the shell seam — PyQtGraph keeps the histogram widget and the
+renderer command protocol (ADR 0057). The widget composes shared interaction
+at the shell seam — PyQtGraph keeps the histogram widget and the
 transparent interaction overlay; a rendercanvas ``QRenderWidget`` in bitmap
 present mode owns the pixels by default, and the ``wgpu_present_method``
 setting can pin the native-Wayland screen path instead
@@ -14,7 +14,7 @@ bitmap readback) — but every pixel decision is expressed as
 
 Committed scope (everything else raises ``NotImplementedError`` loudly
 instead of guessing): montages of N scalar, complex, display-ready RGB, or
-windowable RGB tiles. Windowable RGB preserves VisPy's two-signal semantics:
+windowable RGB tiles. Windowable RGB preserves the two-signal semantics:
 the color plane is multiplied by one levels-normalized histogram/luminance
 plane, packed together in one physical RGBA32F page. Complex tiles use
 shader-on-read component modes (magnitude/phase/real/imag), including cyclic
@@ -218,7 +218,7 @@ def import_qrenderwidget():
     (``QT_QPA_PLATFORM=xcb``, ``GDK_BACKEND=x11``).  With a live QApplication
     that cannot change the running Qt platform, but it silently poisons every
     later env reader in the process — e.g. the AUTO-backend probe's offscreen
-    check resolved to VisPy inside offscreen test runs.  Every rendercanvas
+    check selected a different backend inside offscreen test runs. Every rendercanvas
     import (view construction AND test availability probes) must go through
     this helper so the snapshot is taken before the first import.
     """
@@ -460,7 +460,7 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_histogram_evidence_obligation = None
         self._wgpu_histogram_evidence: dict[object, WgpuResidentHistogramEvidence] = {}
         self._wgpu_histogram_evidence_ready: set[object] = set()
-        # Draw-ack discipline (mirrors VisPy's request/draw counters exactly).
+        # Draw-ack discipline uses explicit request/draw counters.
         self._wgpu_draw_count = 0
         self._wgpu_tile_presentation_request_count = 0
         self._wgpu_tile_presentation_draw_count = 0
@@ -542,7 +542,7 @@ class WgpuImageView2D(ImageViewShell):
         self.view.sigRangeChanged.connect(lambda *_args: self._on_wgpu_range_changed())
         # Axis inversion (flips) changes ViewBox STATE without necessarily
         # changing the range; without this hook a flip only became visible
-        # after the next commit (dogfood bug 2026-07-18). Mirrors VisPy.
+        # after the next commit (dogfood bug 2026-07-18).
         state_signal = getattr(self.view, "sigStateChanged", None)
         if state_signal is not None:
             state_signal.connect(lambda *_args: self._request_wgpu_canvas_draw())
@@ -820,8 +820,8 @@ class WgpuImageView2D(ImageViewShell):
             self._record_wgpu_physical_tile_draw()
         except Exception as exc:  # keep the Qt paint loop alive; surface in diagnostics
             self._wgpu_last_draw_error = f"{type(exc).__name__}: {exc}"
-        # Timer category: anti-hang fallback (same rationale as VisPy's draw
-        # ack): a presentationDrawn listener may immediately commit the next
+        # Timer category: anti-hang fallback. A presentationDrawn listener may
+        # immediately commit the next
         # band; emitting from inside the draw callback can drop its canvas
         # update and leave the logical draw gate armed forever.  Publish the
         # physical acknowledgement after the draw callback returns.
@@ -1991,7 +1991,7 @@ class WgpuImageView2D(ImageViewShell):
         )
 
         # Shared shell bookkeeping (placeholder image, histogram bounds,
-        # display levels) mirrors the VisPy backend's minimal set.
+        # display levels) is the renderer's minimal set.
         self.image = img
         self.histogramSource = None
         # ``None`` means that this commit carries no histogram metadata; it is
@@ -2258,7 +2258,7 @@ class WgpuImageView2D(ImageViewShell):
             if explicit is not None:
                 return _resample_lut_to_rgba256(explicit)
             # A bare phase-color mapping means the canonical cyclic phase LUT
-            # (the VisPy _display_shader_mapping template): the view's initial
+            # (the shared display-mapping template): the view's initial
             # grayscale LUT must not silently turn phase presentation gray.
             if getattr(self, "_display_colormap", None) is None:
                 return _resample_lut_to_rgba256(default_phase_lut())
@@ -2635,7 +2635,7 @@ class WgpuImageView2D(ImageViewShell):
     def tileTruthPhysicalRows(self) -> dict[int, dict[str, object]]:
         """Describe the page-backed tile instances submitted to the executor.
 
-        WGPU deliberately has no Qt/VisPy tile-layer object, so inheriting the
+        WGPU deliberately has no Qt tile-layer object, so inheriting the
         shell implementation returned an empty mapping even while the native
         surface drew a complete montage.  The committed command state plus
         current page-table residency is the corresponding physical owner.

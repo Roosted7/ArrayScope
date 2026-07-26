@@ -28,8 +28,8 @@ def _wgpu_adapter_available() -> bool:
         with contextlib.suppress(RuntimeError):  # instance already exists
             # Vulkan-only instance BEFORE the first adapter request: letting
             # the probe create an all-backends instance makes GL adapter
-            # enumeration re-init EGL, which SIGABRTs in workers that hold
-            # live vispy GL state (gate-B Tier 0; full-suite crash 2026-07-18).
+            # enumeration can re-init EGL in workers that hold other live GPU
+            # state (gate-B Tier 0; full-suite crash 2026-07-18).
             set_instance_extras(backends=["Vulkan"])
         wgpu.gpu.request_adapter_sync(power_preference="low-power")
         return True
@@ -1441,6 +1441,67 @@ def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app
         } == {view._wgpu_executor._bound_planes[0].document_generation}
         _rerender_internal(view)
         assert np.allclose(_center_pixel(view)[:3], 204, atol=2)
+    finally:
+        view.close()
+
+
+def test_phase_vector_reduced_page_renders_cancellation_black_and_coherence_bright(qt_app):
+    """Resultant magnitude, not angle alone, owns phase-vector intensity."""
+
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import DisplayTilePayload, PageBackedPresentation
+    from arrayscope.display.pyramid import materialize_lod_page, plan_source_grid_pages
+    from arrayscope.display.shader_mapping import (
+        ShaderComponent,
+        ShaderDisplayMode,
+        ShaderMapping,
+        TexturePlaneKind,
+    )
+
+    def payload(values, content):
+        plan = plan_source_grid_pages(
+            content_key=(content,),
+            valid_source_rect_yx=(0, 2, 0, 2),
+            reduction_yx=(1, 1),
+            stored_page_shape=(1, 1),
+            dtype="complex64",
+            representation="complex_rg32f",
+            reducer="phase_vector",
+        )[0]
+        page = materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan)
+        lod = LodInfo(1, 2, (2, 2), (1, 1), 0)
+        return DisplayTilePayload(
+            0,
+            0,
+            page.values,
+            None,
+            (content, 0),
+            texture_data=page.values,
+            texture_kind=TexturePlaneKind.COMPLEX_RG32F,
+            lod=lod,
+            shader_mapping=ShaderMapping(
+                component=ShaderComponent.ANGLE,
+                display_mode=ShaderDisplayMode.PHASE_COLOR,
+            ),
+            page_backing=PageBackedPresentation((plan,), (page,), (0, 2, 0, 2), lod),
+        )
+
+    cancellation = payload(
+        np.asarray([[1.0 + 0.0j, -1.0 + 0.0j], [0.0j, 0.0j]], np.complex64),
+        "phase-cancellation",
+    )
+    coherent = payload(np.ones((2, 2), np.complex64), "phase-coherence")
+    geometry = _montage_geometry((2, 2), 1, 1, loaded=1)
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        _commit(view, geometry, {0: cancellation}, levels=(0.0, 1.0))
+        view.getView().setRange(xRange=(0, 2), yRange=(0, 2), padding=0)
+        _rerender_internal(view)
+        assert np.allclose(_center_pixel(view)[:3], 0, atol=2)
+
+        _commit(view, geometry, {0: coherent}, levels=(0.0, 1.0))
+        _rerender_internal(view)
+        assert int(np.max(_center_pixel(view)[:3])) > 100
     finally:
         view.close()
 

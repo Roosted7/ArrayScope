@@ -1852,27 +1852,22 @@ class FramePipelineEffects:
                 renderer.request_montage_replan(session)
                 return
             explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
-            if _commit_should_queue_level_stats(
-                renderer,
-                session,
-                first_display_commit=first_display_commit,
-            ):
-                level_key = getattr(session, "level_key", None)
-                existing_level_stats = (
-                    None
-                    if level_key is None
-                    else renderer._montage_level_tracker().summary_for(level_key)
-                )
-                level_stats_seeded = bool(
-                    existing_level_stats is not None and existing_level_stats.source_indices
-                )
-                level_payloads = (
-                    active_payloads
-                    if first_display_commit or not level_stats_seeded
-                    else dict(tile_delta.upserts)
-                )
-                if level_payloads:
-                    renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
+            level_key = getattr(session, "level_key", None)
+            existing_level_stats = (
+                None
+                if level_key is None
+                else renderer._montage_level_tracker().summary_for(level_key)
+            )
+            level_stats_seeded = bool(
+                existing_level_stats is not None and existing_level_stats.source_indices
+            )
+            level_payloads = (
+                active_payloads
+                if first_display_commit or not level_stats_seeded
+                else dict(tile_delta.upserts)
+            )
+            if level_payloads:
+                renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
             if self._empty_first_commit_can_wait(
                 first_display_commit, explicit_auto, active_payloads, tile_delta
             ):
@@ -2005,7 +2000,6 @@ class FramePipelineEffects:
             rendered_geometry = replace(
                 rendered_geometry, montage_tile_states=session.ensure_tile_states()
             )
-            self._install_warm_residency_scheduler(rendered_geometry)
             renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
             prepare_source_start = perf_counter()
             # A cold CPU-windowed first commit may window from a provisional
@@ -2955,13 +2949,9 @@ class FramePipelineEffects:
         if feedback is None and not hasattr(renderer.win, "_record_ui_work"):
             return
         cold_count = int(getattr(report, "cold_count", 0) or 0)
-        warm_count = int(getattr(report, "existing_items_shown", 0) or 0) + int(
-            getattr(report, "relocated_tiles", 0) or 0
-        )
         processed_count = tile_layer_commit_processed_count(report)
         texture_upload_bytes = int(getattr(report, "texture_upload_bytes", 0) or 0)
         storage_rebuilds = int(getattr(report, "storage_rebuilds", 0) or 0)
-        vertex_uploads = int(getattr(report, "vertex_uploads", 0) or 0)
         backend_name = image_view_backend_capabilities(renderer.win.img_view).name
         details = _commit_feedback_details(renderer)
         cold_ms = 0.0
@@ -2981,65 +2971,6 @@ class FramePipelineEffects:
             )
         commit_feedback_ms = renderer._last_montage_tile_commit_ms
         commit_feedback_bytes = texture_upload_bytes
-        vispy_backend = str(backend_name).lower() == "vispy"
-        vispy_uniform_only = bool(
-            vispy_backend and cold_count == 0 and warm_count == 0 and texture_upload_bytes == 0
-        )
-        # Atlas allocation is a one-off fixed cost and must not permanently
-        # collapse the incremental batch. Vertex submission, however, occurs
-        # on virtually every changed VisPy page: excluding it left the
-        # controller blind to the complete 15-30 ms interaction callback and
-        # held the batch at its maximum. Feed that end-to-end cost back while
-        # retaining the layout-specific observation for diagnosis.
-        if vispy_backend and storage_rebuilds > 0:
-            _observe_ui(
-                renderer,
-                "montage_layout_commit",
-                renderer._last_montage_tile_commit_ms,
-                processed_count,
-                texture_upload_bytes,
-                "presentation_layout",
-                backend_name,
-            )
-            commit_feedback_ms = 0.0
-            commit_feedback_bytes = 0
-        elif vispy_backend and vertex_uploads > 0:
-            _observe_ui(
-                renderer,
-                "montage_layout_commit",
-                renderer._last_montage_tile_commit_ms,
-                processed_count,
-                texture_upload_bytes,
-                "presentation_layout",
-                backend_name,
-            )
-            _observe_ui(
-                renderer,
-                "montage_present_total",
-                renderer._last_montage_tile_commit_ms,
-                processed_count,
-                texture_upload_bytes,
-                "presentation_upsert",
-                backend_name,
-            )
-        elif vispy_backend and cold_count > 0:
-            _observe_ui(
-                renderer,
-                "montage_present_total",
-                renderer._last_montage_tile_commit_ms,
-                processed_count,
-                texture_upload_bytes,
-                "presentation_upsert",
-                backend_name,
-            )
-            commit_feedback_ms = max(0.0, renderer._last_montage_tile_commit_ms - cold_ms)
-            commit_feedback_bytes = 0
-        elif vispy_uniform_only:
-            # A uniform/no-payload turn has no admission-dependent work and
-            # therefore cannot teach the tile batch size. Its total callback
-            # remains recorded by the outer tile-layer observation/gate.
-            commit_feedback_ms = 0.0
-            commit_feedback_bytes = 0
         _observe_ui(
             renderer,
             "montage_commit",
@@ -3059,79 +2990,6 @@ class FramePipelineEffects:
             backend_name,
             details=details,
         )
-
-    def _install_warm_residency_scheduler(self, geometry) -> None:
-        view = getattr(self.renderer.win, "img_view", None)
-        if view is None or not hasattr(view, "_vispy_warm_tile_scheduler"):
-            return
-        session = self.session
-        renderer = self.renderer
-        viewport_value = (
-            int(getattr(session, "session_id", 0) or 0),
-            int(getattr(session, "viewport_revision", 0) or 0),
-            tuple(
-                sorted(
-                    int(tile) for tile in tuple(getattr(session, "visible_tile_numbers", ()) or ())
-                )
-            ),
-        )
-
-        def current_viewport_value() -> tuple:
-            return (
-                int(getattr(session, "session_id", 0) or 0),
-                int(getattr(session, "viewport_revision", 0) or 0),
-                tuple(
-                    sorted(
-                        int(tile)
-                        for tile in tuple(getattr(session, "visible_tile_numbers", ()) or ())
-                    )
-                ),
-            )
-
-        def schedule(process) -> None:
-            if not callable(process):
-                return
-
-            def cancel_pending() -> None:
-                view._vispy_pending_warm_tile_payloads = {}
-                view._vispy_pending_warm_tile_context = {}
-
-            if not self._side_work_visible_settled():
-                cancel_pending()
-                return
-            submitted_key = getattr(renderer, "_vispy_warm_residency_submitted_key", None)
-            if submitted_key == viewport_value:
-                cancel_pending()
-                return
-
-            def admit():
-                return True
-
-            def done(_value=None):
-                if (
-                    current_viewport_value() != viewport_value
-                    or not self._side_work_visible_settled()
-                ):
-                    cancel_pending()
-                    return
-                renderer._vispy_warm_residency_submitted_key = viewport_value
-                process()
-
-            renderer.win.kernel.submit_speculative_batch(
-                kind="vispy-warm-residency",
-                scope=f"montage:{session.key!r}:warm-residency",
-                generation=viewport_value,
-                key=("vispy-warm-residency", session.key, viewport_value),
-                fn=admit,
-                priority=Priority.PREFETCH,
-                lane=WorkLane.SPECULATIVE_RESIDENCY,
-                max_items=len(getattr(view, "_vispy_pending_warm_tile_payloads", {}) or ()),
-                on_done=done,
-                on_stale=lambda: None,
-                on_error=lambda exc: handle_ui_exception("vispy warm residency", exc),
-            )
-
-        view._vispy_warm_tile_scheduler = schedule
 
     def _side_work_visible_settled(self) -> bool:
         session = self.session
@@ -3275,16 +3133,6 @@ def _commit_report_accepts_new_preview(session, report, tile_delta, tile_state) 
         if previously_presented.get(int(tile_number)) != tile_ack_identity(payload):
             return True
     return False
-
-
-def _commit_should_queue_level_stats(renderer, session, *, first_display_commit: bool) -> bool:
-    capabilities = image_view_backend_capabilities(renderer.win.img_view)
-    if str(getattr(capabilities, "name", "")).lower() != "vispy":
-        return True
-    if bool(first_display_commit):
-        return True
-    stats = renderer._montage_level_tracker().summary_for(session.level_key)
-    return bool(stats is None or not stats.source_indices)
 
 
 def plan_stage_fan_in_candidates(
@@ -4665,7 +4513,7 @@ def pyqtgraph_payload_upload_nbytes(payload) -> int:
     return max(1, 0 if image is None else int(getattr(np.asarray(image), "nbytes", 0) or 0))
 
 
-def vispy_payload_upload_nbytes(payload) -> int:
+def texture_payload_upload_nbytes(payload) -> int:
     texture = getattr(payload, "texture_data", None)
     if texture is None:
         texture = getattr(payload, "image", None)
@@ -4739,9 +4587,9 @@ def wgpu_payload_upload_nbytes(payload) -> int:
     if texture is None:
         texture = getattr(payload, "image", None)
     if texture is None:
-        return vispy_payload_upload_nbytes(payload)
-    # The histogram array rides the same accounting as VisPy's: it is separate
-    # from the page grid, so it is charged as itself, not rounded.
+        return texture_payload_upload_nbytes(payload)
+    # The histogram array is separate from the page grid, so it is charged as
+    # itself rather than rounded to a texture page.
     total = wgpu_page_rounded_nbytes(texture)
     histogram = getattr(payload, "histogram_data", None)
     if histogram is not None and histogram is not texture:
@@ -4782,8 +4630,8 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         # callback target on the reference 60-tile workflow.
         batch_limit = min(8, max(4, int(batch_limit)))
     else:
-        # A tiled VisPy transaction has a measured fixed cost even when one
-        # small texture is uploaded. Treating that entire transaction as the
+        # A tiled GPU transaction has a measured fixed cost even when one small
+        # texture is uploaded. Treating that entire transaction as the
         # cost of one item makes feedback collapse an idle drain to one tile
         # and repeats planning/presentation hundreds of times. The byte cap
         # remains authoritative for large textures; four is only the minimum
@@ -4822,7 +4670,7 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         "upsert_cost_fn": (
             wgpu_payload_upload_nbytes
             if capabilities.name == "wgpu"
-            else vispy_payload_upload_nbytes
+            else texture_payload_upload_nbytes
         ),
         # Physical atlas/page-table residency is the only proof that a retarget
         # can bypass every cold admission cap.  The complete resident set must

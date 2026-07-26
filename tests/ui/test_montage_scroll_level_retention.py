@@ -24,7 +24,6 @@ from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
     restore_default_backend,
-    use_vispy_backend,
     use_wgpu_backend,
 )
 
@@ -39,11 +38,8 @@ def _window_settled(win, indices) -> bool:
     return frame_session_settled(win)
 
 
-def _run(qtbot, backend):
-    if backend == "wgpu":
-        settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
-    else:
-        settings = use_vispy_backend(extra_settings={"montage_quality_policy": "resident"})
+def _run(qtbot):
+    settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
 
     rng = np.random.default_rng(7)
     height = width = 96
@@ -55,7 +51,7 @@ def _run(qtbot, backend):
         # a rough handful of sources unmistakably narrower than the full window.
         data[:, :, k] = base * float(k + 1)
 
-    win = make_backend_window(qtbot, data, backend=backend, require_gpu_atlas=(backend == "wgpu"))
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     win.resize(1100, 850)
     try:
         win.show()
@@ -108,8 +104,4 @@ def _run(qtbot, backend):
 
 
 def test_wgpu_one_tile_scroll_retains_level_population(qtbot):
-    _run(qtbot, "wgpu")
-
-
-def test_vispy_one_tile_scroll_retains_level_population(qtbot):
-    _run(qtbot, "vispy")
+    _run(qtbot)

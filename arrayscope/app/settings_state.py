@@ -35,9 +35,8 @@ class FFTWorkersChoice(Enum):
 class ImageRenderingBackendChoice(Enum):
     AUTO = "auto"
     PYQTGRAPH = "pyqtgraph"
-    VISPY = "vispy"
-    # Experimental backend; AUTO prefers wgpu first on Linux with a real GPU
-    # device (see resolve_auto_backend_choice). This value is the explicit pin.
+    # AUTO prefers wgpu on Linux with a real GPU device
+    # (see resolve_auto_backend_choice). This value is the explicit pin.
     WGPU = "wgpu"
 
 
@@ -231,8 +230,7 @@ def normalize_montage_quality_policy_choice(value) -> MontageQualityPolicyChoice
         return MontageQualityPolicyChoice(str(value))
     except Exception:
         # ADR 0050: resident is the montage default; native-only remains the
-        # explicit fallback policy (and the effective one on non-VisPy
-        # backends via the frame renderer capability gate).
+        # explicit fallback policy on backends without resident LOD.
         return MontageQualityPolicyChoice.RESIDENT
 
 

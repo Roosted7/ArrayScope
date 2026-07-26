@@ -3,10 +3,9 @@
 
 Renders the real ArrayScope window across a matrix of scenarios (data shapes,
 features, edge cases), themes (dark/light/system), and window sizes, and saves
-PNG screenshots for visual review. Uses the PyQtGraph rendering backend only
-(VisPy does not work offscreen) and the Qt "offscreen" platform plugin, so it
-runs headless and never touches the real user settings (a private QSettings
-application name is used).
+PNG screenshots for visual review. Uses the PyQtGraph rendering backend and
+the Qt "offscreen" platform plugin, so it runs headless and never touches the
+real user settings (a private QSettings application name is used).
 
 Usage:
     python tools/ui_gallery.py                # render everything

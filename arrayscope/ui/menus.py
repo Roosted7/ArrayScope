@@ -339,9 +339,6 @@ class WindowMenuMixin:
             (ImageRenderingBackendChoice.AUTO, "Auto (GPU picks wgpu)"),
             (ImageRenderingBackendChoice.PYQTGRAPH, "PyQtGraph (CPU / remote)"),
             (ImageRenderingBackendChoice.WGPU, "wgpu (GPU compute)"),
-            # VisPy is being retired via the roadmap ladder; kept as an explicit
-            # pin. AUTO now resolves to wgpu on any GPU-capable device (2026-07-22).
-            (ImageRenderingBackendChoice.VISPY, "VisPy (legacy, retiring)"),
         ):
             action = QtGui.QAction(label, self, checkable=True)
             self._image_rendering_backend_action_group.addAction(action)
@@ -484,7 +481,7 @@ class WindowMenuMixin:
         ):
             action = QtGui.QAction(label, self, checkable=True)
             action.setToolTip(
-                "Resident presents the closest materialized pyramid level for zoomed-out montages (VisPy tiled scenes); "
+                "Resident presents the closest materialized pyramid level for zoomed-out montages; "
                 "Native only always presents full-resolution textures."
             )
             self._montage_quality_action_group.addAction(action)

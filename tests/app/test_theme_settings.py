@@ -148,6 +148,8 @@ def test_theme_backend_keeps_builtin_palette_even_when_optional_backend_availabl
 
 
 def test_settings_round_trip_defaults_and_values():
+    """A persisted retired backend value migrates through the AUTO policy."""
+
     settings = settings_state.settings_from_mapping(
         {
             "theme": "dark",
@@ -178,7 +180,7 @@ def test_settings_round_trip_defaults_and_values():
         "panel_resize_behavior": "off",
         "fft_backend": "pyfftw",
         "fft_workers": "2",
-        "image_rendering_backend": "vispy",
+        "image_rendering_backend": "auto",
         "wgpu_present_method": "screen",
         "montage_quality_policy": "resident",
         "chunk_transport_codec": "zfp",
@@ -192,6 +194,7 @@ def test_settings_round_trip_defaults_and_values():
         "qt_platform": "xcb",
         "python_free_threading": "force_disabled",
     }
+    assert settings.image_rendering_backend == settings_state.ImageRenderingBackendChoice.AUTO
     defaults = settings_state.settings_from_mapping({})
     assert defaults.wgpu_pixel_grid is False
     assert defaults.wgpu_clip_indicator is False

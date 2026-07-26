@@ -50,7 +50,7 @@ if _XDIST_WORKER:
 def pytest_xdist_auto_num_workers(config):
     """Cap ``-n auto`` at half the logical cores.
 
-    Many tests create real GL contexts (vispy/pyqtgraph surfaces). Running one
+    Many tests create real rendering contexts and Qt surfaces. Running one
     worker per core saturates the CPU and, more importantly, has every worker
     building GL contexts against the same offscreen/software-GL stack at once,
     which intermittently segfaults the driver and starves the timing-sensitive

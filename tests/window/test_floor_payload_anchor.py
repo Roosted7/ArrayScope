@@ -2,7 +2,7 @@
 
 ``render.lod.ensure_floor_payloads`` stamps
 ``session._payload_source_anchor(plan.tile_shape)`` on EXACT reduced floor
-payloads so the VisPy pool can take the chunked-residency path.  Two laws
+payloads so the maintained GPU page table can take the resident-page path. Two laws
 must hold or anchors/chunk keys corrupt (field-report hypothesis H3,
 2026-07-15):
 

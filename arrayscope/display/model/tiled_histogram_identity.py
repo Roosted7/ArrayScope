@@ -53,7 +53,7 @@ def histogram_data_from_tile_payloads(payloads):
 
     Backend-agnostic source of truth for the montage histogram: the histogram
     is built from the committed tile PAYLOADS, never from a single bound
-    ImageItem (a tiled montage has none).  Both the VisPy and PyQtGraph views
+    ImageItem (a tiled montage has none). Both maintained views
     feed their histogram from this.
     """
 

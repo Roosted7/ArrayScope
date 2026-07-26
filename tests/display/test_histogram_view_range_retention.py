@@ -7,7 +7,7 @@ reset (double-click / Auto button, funnelled through
 
 The pure policy lives in ``histogram_view_range`` and its Qt application lives
 in ``HistogramDisplayController``. Exercising the shared controller through the
-pyqtgraph view covers the wgpu/vispy backends too.
+pyqtgraph view covers the wgpu backend too.
 """
 
 import numpy as np

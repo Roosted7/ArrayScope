@@ -25,7 +25,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
         description="Profile 60Hz dimension scrolling in a real ArrayScope window"
     )
     parser.add_argument("--data", default=str(DEFAULT_DATA_PATH))
-    parser.add_argument("--backend", choices=("pyqtgraph", "vispy"), default="vispy")
+    parser.add_argument("--backend", choices=("pyqtgraph", "wgpu"), default="wgpu")
     parser.add_argument("--axis", type=int, default=2)
     parser.add_argument("--image-y", type=int, default=1)
     parser.add_argument("--image-x", type=int, default=0)
@@ -50,7 +50,13 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
+    from arrayscope.display.backend_contract import require_image_view_backend
     from arrayscope.window import ArrayScopeWindow
+
+    if args.backend == "wgpu":
+        from arrayscope.display.wgpu_imageview2d import configure_wgpu_adapter_for_profile
+
+        configure_wgpu_adapter_for_profile("low-power")
 
     app = pg.mkQApp()
     data_path = Path(args.data)
@@ -64,8 +70,8 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     previous_backend = settings.value("image_rendering_backend", None)
     settings.setValue(
         "image_rendering_backend",
-        ImageRenderingBackendChoice.VISPY.value
-        if args.backend == "vispy"
+        ImageRenderingBackendChoice.WGPU.value
+        if args.backend == "wgpu"
         else ImageRenderingBackendChoice.PYQTGRAPH.value,
     )
     settings.sync()
@@ -85,6 +91,11 @@ def main(argv: tuple[str, ...] | None = None) -> int:
             raise ValueError("empty scroll index range")
 
         win = ArrayScopeWindow(data, filepath=data_path)
+        require_image_view_backend(
+            win.img_view,
+            args.backend,
+            context="scroll-input profile",
+        )
         win.app_settings = _replace_backend(
             win.app_settings, args.backend, ImageRenderingBackendChoice
         )
@@ -249,9 +260,7 @@ def _replace_backend(settings, backend: str, image_choice):
 
     return replace(
         settings,
-        image_rendering_backend=image_choice.VISPY
-        if backend == "vispy"
-        else image_choice.PYQTGRAPH,
+        image_rendering_backend=image_choice.WGPU if backend == "wgpu" else image_choice.PYQTGRAPH,
     )
 
 

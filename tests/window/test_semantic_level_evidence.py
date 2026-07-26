@@ -6,7 +6,6 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.core.window_levels import LevelSourceRank
 from arrayscope.display.backend_contract import (
     PYQTGRAPH_CAPABILITIES,
-    VISPY_CAPABILITIES,
     WGPU_CAPABILITIES,
 )
 from arrayscope.display.montage import make_montage_plan
@@ -250,10 +249,10 @@ def test_semantic_owner_rejects_superseded_generation_results():
     assert predecessor.semantic_level_evidence_progress.covered_sources == set()
 
 
-def test_vispy_uses_background_batches_but_converges_to_the_same_population():
+def test_wgpu_uses_background_batches_but_converges_to_the_same_population():
     data = np.arange(10 * 12 * 20, dtype=np.float32).reshape(10, 12, 20)
     session = _session(data)
-    service, kernel = _service(session, capabilities=VISPY_CAPABILITIES)
+    service, kernel = _service(session, capabilities=WGPU_CAPABILITIES)
     _close_coverage_phase(session)
 
     service._schedule_semantic_level_evidence(session)
@@ -275,12 +274,12 @@ def test_vispy_uses_background_batches_but_converges_to_the_same_population():
     assert session.display_tile_payloads == {}
 
 
-def test_vispy_semantic_background_batches_publish_once_after_full_population():
+def test_wgpu_semantic_background_batches_publish_once_after_full_population():
     """Refinement batches must not replay the settled tiled presentation."""
 
     data = np.arange(10 * 12 * 20, dtype=np.float32).reshape(10, 12, 20)
     session = _session(data)
-    service, kernel = _service(session, capabilities=VISPY_CAPABILITIES)
+    service, kernel = _service(session, capabilities=WGPU_CAPABILITIES)
     publications = []
     session.shader_display = True
     session.display_committed = True

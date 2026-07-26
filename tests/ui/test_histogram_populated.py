@@ -1,12 +1,12 @@
-"""Regression: the montage histogram must be populated for BOTH backends.
+"""Regression: the montage histogram must be populated for maintained backends.
 
 Field defect (2026-07): the PyQtGraph histogram panel rendered empty while the
-VisPy one worked.  A tiled montage has no single bound ``ImageItem``, and the
+GPU path worked.  A tiled montage has no single bound ``ImageItem``, and the
 aggregate ``histogram_plot_data`` derived from level stats is not published on
 every backend/commit — so the CPU-LUT histogram had no data source and stayed
 empty.  The fix feeds the histogram from the committed tile PAYLOADS
 (``semantic_data``, the ADR-0050 semantic pixels), the same backend-agnostic
-source of truth VisPy uses.  These tests fail on the pre-fix tree for pyqtgraph.
+source of truth WGPU uses.  These tests fail on the pre-fix tree for pyqtgraph.
 """
 
 import numpy as np
@@ -35,7 +35,7 @@ def _histogram_curve(win):
     return x, y
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_montage_histogram_has_data_points(qtbot, backend):
     _clear_arrayscope_settings()
     _select_image_backend(backend)

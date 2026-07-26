@@ -63,25 +63,7 @@ def assert_size_close(actual, expected, tolerance=1):
     assert abs(actual.height() - expected.height()) <= tolerance
 
 
-# --- Live backend-window harness (shared by the VisPy live gates) -----------
-# tests/ui/test_window_shift_live_path.py, test_vispy_phase_framebuffer.py,
-# test_scrub_presentation_retention.py, test_montage_scroll_settling.py.
-
-
-def use_vispy_backend(extra_settings=None):
-    """Point QSettings at the VisPy backend; returns the settings object."""
-
-    from pyqtgraph.Qt import QtCore
-
-    from arrayscope.app.settings_state import ImageRenderingBackendChoice
-
-    clear_arrayscope_settings()
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
-    for key, value in (extra_settings or {}).items():
-        settings.setValue(key, value)
-    settings.sync()
-    return settings
+# --- Live backend-window harness --------------------------------------------
 
 
 def use_pyqtgraph_backend(extra_settings=None):
@@ -107,6 +89,7 @@ def use_wgpu_backend(extra_settings=None):
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
 
+    require_wgpu_adapter()
     clear_arrayscope_settings()
     settings = QtCore.QSettings()
     settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.WGPU.value)
@@ -123,7 +106,7 @@ def restore_default_backend(settings):
     settings.sync()
 
 
-def make_backend_window(qtbot, data, *, backend="vispy", require_gpu_atlas=False):
+def make_backend_window(qtbot, data, *, backend, require_gpu_atlas=False):
     """Build an ArrayScopeWindow on the given backend, skipping if unavailable."""
 
     import pytest
@@ -131,6 +114,8 @@ def make_backend_window(qtbot, data, *, backend="vispy", require_gpu_atlas=False
     from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.window import ArrayScopeWindow
 
+    if backend == "wgpu":
+        require_wgpu_adapter()
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     capabilities = image_view_backend_capabilities(win.img_view)
@@ -140,6 +125,24 @@ def make_backend_window(qtbot, data, *, backend="vispy", require_gpu_atlas=False
     if require_gpu_atlas:
         assert capabilities.tile_residency_kind == "gpu_atlas"
     return win
+
+
+def require_wgpu_adapter() -> None:
+    """Skip an explicit WGPU test when no Vulkan adapter exists locally."""
+
+    import contextlib
+
+    import pytest
+
+    wgpu = pytest.importorskip("wgpu")
+    from wgpu.backends.wgpu_native.extras import set_instance_extras
+
+    with contextlib.suppress(RuntimeError):
+        set_instance_extras(backends=["Vulkan"])
+    try:
+        wgpu.gpu.request_adapter_sync(power_preference="low-power")
+    except Exception as exc:
+        pytest.skip(f"no WGPU Vulkan adapter: {exc}")
 
 
 def frame_session_settled(win) -> bool:

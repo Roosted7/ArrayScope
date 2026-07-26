@@ -3,13 +3,13 @@ import time
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from arrayscope.tools.interaction_budget import (
     INTERACTION_SETTLE_HARD_LIMIT_S,
     bounded_interaction_settle_timeout_s,
 )
 from tests.ui.helpers import give_generous_work_area as _give_generous_work_area
+from tests.ui.helpers import require_wgpu_adapter
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -209,12 +209,11 @@ def test_progressive_view_configuration_artifacts(qt_app):
         _process_events(qt_app)
 
 
-def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
+def test_wgpu_backend_hover_bridge_and_screenshot_artifact(qt_app):
+    require_wgpu_adapter()
     from pyqtgraph.Qt import QtCore
 
     _clear_arrayscope_settings()
-
-    pytest.importorskip("vispy")
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.display.overlays import MontageTileOverlay
@@ -224,7 +223,7 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
     win = None
     try:
         settings = QtCore.QSettings()
-        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.WGPU.value)
         settings.sync()
 
         win = ArrayScopeWindow(data)
@@ -234,18 +233,18 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
         win.show()
         _process_events(qt_app, count=20)
 
-        assert win.img_view.surface.capabilities.name == "vispy"
+        assert win.img_view.surface.capabilities.name == "wgpu"
         selection = win.img_view.createRoi(
             "rectangle", rect=(18.0, 20.0, 34.0, 28.0), color=(255, 32, 16)
         )
-        assert selection.id in getattr(win.img_view, "_vispy_roi_visuals", {})
-        assert selection.id in getattr(win.img_view, "_vispy_roi_handle_visuals", {})
+        assert selection in win.img_view.roiSelections()
+        assert win.img_view._wgpu_overlay_geometry
         win.img_view.setProfileMarker(38.0, 42.0, visible=True)
-        assert getattr(win.img_view, "_vispy_profile_visuals", {})
+        assert win.img_view._wgpu_overlay_geometry
         win.img_view.setMontageTileOverlays(
             (MontageTileOverlay(58, 16, 18, 18, "loading", "Loading"),)
         )
-        assert getattr(win.img_view, "_vispy_overlay_visuals", [])
+        assert win.img_view.montageOverlayCount() == 1
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(20.0, 20.0))
         win.img_view.view.scene().sigMouseMoved.emit(scene_pos)
         deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S
@@ -254,7 +253,7 @@ def test_vispy_backend_hover_bridge_and_screenshot_artifact(qt_app):
 
         assert win.widgets["labels"]["pixelValue"].text()
         assert "FIXME" not in win.widgets["labels"]["pixelValue"].text()
-        _grab_widget(win, "arrayscope_vispy_backend_smoke.png", min_width=500, min_height=360)
+        _grab_widget(win, "arrayscope_wgpu_backend_smoke.png", min_width=500, min_height=360)
     finally:
         if win is not None:
             win.close()

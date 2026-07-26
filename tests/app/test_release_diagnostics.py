@@ -1,9 +1,24 @@
+import contextlib
 import json
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
 
 from arrayscope.tools.interaction_budget import bounded_interaction_settle_timeout_s
+
+
+def _wgpu_adapter_available() -> bool:
+    try:
+        import wgpu
+        from wgpu.backends.wgpu_native.extras import set_instance_extras
+
+        with contextlib.suppress(RuntimeError):
+            set_instance_extras(backends=["Vulkan"])
+        wgpu.gpu.request_adapter_sync(power_preference="low-power")
+        return True
+    except Exception:
+        return False
 
 
 def _read_jsonl(path):
@@ -12,7 +27,7 @@ def _read_jsonl(path):
 
 @pytest.mark.parametrize(
     ("backend", "previous_backend"),
-    [("pyqtgraph", "vispy"), ("vispy", "pyqtgraph")],
+    [("pyqtgraph", "wgpu"), ("wgpu", "pyqtgraph")],
 )
 def test_release_diagnostics_writes_trace_and_preserves_image_renderer_choice(
     qt_app,
@@ -20,6 +35,9 @@ def test_release_diagnostics_writes_trace_and_preserves_image_renderer_choice(
     backend,
     previous_backend,
 ):
+    if backend == "wgpu" and not _wgpu_adapter_available():
+        pytest.skip("no wgpu adapter on this machine")
+
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.core.diagnostics_trace import summarize_diagnostics_trace
@@ -65,6 +83,31 @@ def test_release_diagnostics_rejects_unknown_backend(tmp_path):
 
     with pytest.raises(ValueError, match="unsupported backend"):
         capture_release_diagnostics(tmp_path / "diagnostics.jsonl", backend="unknown")
+
+
+def test_release_diagnostics_rejects_a_mislabeled_backend_fallback(
+    qt_app,
+    tmp_path,
+    monkeypatch,
+):
+    import arrayscope.window as window_module
+    from arrayscope.display.backend_contract import PYQTGRAPH_CAPABILITIES
+    from arrayscope.tools.release_diagnostics import capture_release_diagnostics
+
+    class FallbackWindow:
+        def __init__(self, _data):
+            self.img_view = SimpleNamespace(rendering_capabilities=PYQTGRAPH_CAPABILITIES)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(window_module, "ArrayScopeWindow", FallbackWindow)
+
+    with pytest.raises(RuntimeError, match=r"requested backend 'wgpu'.*'pyqtgraph'"):
+        capture_release_diagnostics(
+            tmp_path / "mislabeled-wgpu.jsonl",
+            backend="wgpu",
+        )
 
 
 def test_capture_completion_rejects_geometry_only_and_incomplete_physical_truth():
@@ -116,7 +159,7 @@ def test_capture_completion_rejects_geometry_only_and_incomplete_physical_truth(
     class ImageView:
         draw_pending = False
         rows: ClassVar[dict] = {}
-        rendering_capabilities = type("Capabilities", (), {"name": "vispy"})()
+        rendering_capabilities = type("Capabilities", (), {"name": "wgpu"})()
 
         def presentationDrawPending(self):
             return self.draw_pending
@@ -146,6 +189,7 @@ def test_capture_completion_rejects_geometry_only_and_incomplete_physical_truth(
         0: {
             "physical_acknowledged_identity": identity,
             "physical_draw_bounds_match_layout": True,
+            "physical_storage_mode": "wgpu_page_table",
         }
     }
     image_view.draw_pending = True
@@ -172,6 +216,11 @@ def test_capture_completion_rejects_geometry_only_and_incomplete_physical_truth(
     image_view.rows[0]["physical_draw_bounds_match_layout"] = False
     assert not presentation_is_settled(win)
     image_view.rows[0]["physical_draw_bounds_match_layout"] = True
+    image_view.rows[0].pop("physical_storage_mode")
+    assert not presentation_is_settled(win)
+    image_view.rows[0]["physical_storage_mode"] = "image_item"
+    assert not presentation_is_settled(win)
+    image_view.rows[0]["physical_storage_mode"] = "wgpu_page_table"
 
     image_view.rows[0]["physical_acknowledged_identity"] = object()
     assert not presentation_is_settled(win)
@@ -180,6 +229,7 @@ def test_capture_completion_rejects_geometry_only_and_incomplete_physical_truth(
     image_view.rows[1] = {
         "physical_acknowledged_identity": object(),
         "physical_draw_bounds_match_layout": True,
+        "physical_storage_mode": "wgpu_page_table",
     }
     assert not presentation_is_settled(win)
     session.visible_tile_numbers = frozenset({0, 1})

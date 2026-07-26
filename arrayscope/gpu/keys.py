@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 # Canonical representation labels for resident chunk values. "Raw" values
 # stay raw on the GPU; display mapping is shader work (ADR 0055 §4). These
-# match the atlas storage modes in the VisPy backend.
+# match the renderer's physical storage modes.
 SCALAR_R32F = "scalar_r32f"
 COMPLEX_RG32F = "complex_rg32f"
 RGB8 = "rgb8"

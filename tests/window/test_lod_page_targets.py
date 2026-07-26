@@ -1,6 +1,6 @@
 """G5 live-ladder page-target contract (ADR 0056).
 
-The ladder must name desired logical pages before the VisPy pool resolves
+The ladder must name desired logical pages before a backend page table resolves
 them to physical residency.  Planning is a pure source-grid geometry step:
 no Qt receiver, timer, scheduler, cache claim, or upload belongs here.
 """
@@ -87,7 +87,7 @@ def test_desired_mean_page_identity_stays_separate_from_coarse_resolution():
         representation=target.representation,
     )
     table = PageTable()
-    coarse_slot = PageSlot("vispy-atlas", 0, 3)
+    coarse_slot = PageSlot("test-page-pool", 0, 3)
     table.bind(coarse, coarse_slot, nbytes=256 * 256 * 4)
 
     resolution = table.resolve(target)

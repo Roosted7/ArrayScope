@@ -1,5 +1,4 @@
 import ast
-import re
 from collections import Counter
 from pathlib import Path
 
@@ -216,7 +215,6 @@ def _interaction_wait_name(function_name):
             "montage_complete",
             "profile_montage_workflow",
             "presentation_quiet",
-            "vispy_tile_draw",
         )
     )
 
@@ -788,7 +786,7 @@ def test_display_presentation_boundary_modules_exist():
         Path("arrayscope/display/planning.py"),
         Path("arrayscope/display/commit.py"),
         Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
-        Path("arrayscope/display/backends/vispy/tiles.py"),
+        Path("arrayscope/display/wgpu_imageview2d.py"),
         Path("arrayscope/display/model/montage_levels.py"),
         Path("arrayscope/window/frame_controller.py"),
         Path("arrayscope/window/viewport_bridge.py"),
@@ -903,18 +901,6 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
                 "UI cosmetic",
             ): 1,
             (
-                "arrayscope/display/vispy_imageview2d.py",
-                "VisPyImageView2D.setupUI",
-                "QTimer",
-                "UI cosmetic",
-            ): 1,
-            (
-                "arrayscope/display/vispy_imageview2d.py",
-                "VisPyImageView2D._on_vispy_draw",
-                "singleShot",
-                "anti-hang fallback",
-            ): 1,
-            (
                 "arrayscope/display/wgpu_imageview2d.py",
                 "WgpuImageView2D._on_wgpu_draw",
                 "singleShot",
@@ -925,12 +911,6 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
             (
                 "arrayscope/display/backends/wgpu/screen_canvas.py",
                 "WgpuScreenCanvas.request_draw",
-                "singleShot",
-                "UI cosmetic",
-            ): 1,
-            (
-                "arrayscope/display/vispy_imageview2d.py",
-                "VisPyImageView2D._request_vispy_camera_sync",
                 "singleShot",
                 "UI cosmetic",
             ): 1,
@@ -1193,13 +1173,6 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
     assert found == allowed_without_category
 
 
-def test_vispy_warm_residency_has_no_backend_scheduling_timer():
-    text = (ROOT / "arrayscope" / "display" / "vispy_imageview2d.py").read_text()
-    assert "_vispy_warm_tile_timer" not in text
-    assert "_process_vispy_warm_tile_residency" in text
-    assert "_vispy_warm_tile_scheduler" in text
-
-
 def test_image_view_shell_exposes_surface_contract():
     text = (ROOT / "arrayscope" / "display" / "imageview2d.py").read_text()
     backend_text = (ROOT / "arrayscope" / "display" / "backends" / "base.py").read_text()
@@ -1226,17 +1199,6 @@ def test_image_view_shell_exposes_surface_contract():
     assert "MontageTileLayer" in text
     assert "TileLayerItemState" in layer_text
     assert "montageDisplayMode" in text
-
-
-def test_vispy_view_inherits_shell_not_pyqtgraph_concrete_view():
-    text = (ROOT / "arrayscope" / "display" / "vispy_imageview2d.py").read_text()
-    shell_import = re.search(
-        r"from arrayscope\.display\.imageview2d import \([^)]*\bImageViewShell\b",
-        text,
-    )
-    assert shell_import is not None
-    assert "class VisPyImageView2D(ImageViewShell)" in text
-    assert "class VisPyImageView2D(ImageView2D)" not in text
 
 
 def test_builtin_backend_method_adapters_are_removed():
@@ -1374,17 +1336,15 @@ def test_display_semantics_live_in_display_package():
         Path("arrayscope/display/planning.py"),
         Path("arrayscope/display/commit.py"),
         Path("arrayscope/display/backends/pyqtgraph/tiles.py"),
-        Path("arrayscope/display/backends/vispy/tiles.py"),
+        Path("arrayscope/display/wgpu_imageview2d.py"),
     )
     retired = (
-        Path("arrayscope/display/backends/vispy/gpu_mapped_visual.py"),
         Path("arrayscope/window/display_frame.py"),
         Path("arrayscope/window/render_model.py"),
         Path("arrayscope/window/presentation.py"),
         Path("arrayscope/window/display_commit.py"),
         Path("arrayscope/window/montage_levels.py"),
         Path("arrayscope/display/montage_tile_layer.py"),
-        Path("arrayscope/display/vispy_tiled_renderer.py"),
     )
     for rel in canonical:
         assert (ROOT / rel).exists()
@@ -1420,7 +1380,7 @@ def test_display_surfaces_do_not_resurrect_normal_image_commit_entry_points():
 
     for rel in (
         Path("arrayscope/display/imageview2d.py"),
-        Path("arrayscope/display/vispy_imageview2d.py"),
+        Path("arrayscope/display/wgpu_imageview2d.py"),
     ):
         text = (ROOT / rel).read_text()
         assert "def setImage(" not in text, rel
@@ -1779,7 +1739,7 @@ def test_live_lod_modules_cannot_import_legacy_whole_plane_ownership():
         "window/frame_session.py",
         "window/montage_prefetch.py",
         "presentation/tile_lifecycle.py",
-        "display/backends/vispy/tiles.py",
+        "display/wgpu_imageview2d.py",
         "display/backends/pyqtgraph/tiles.py",
     )
     offenders = []
@@ -1808,3 +1768,19 @@ def test_live_lod_modules_cannot_import_legacy_whole_plane_ownership():
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert definitions.isdisjoint(legacy_names)
+
+
+def test_backend_labelled_evidence_rejects_factory_fallbacks():
+    """A profiler must never label PyQtGraph output as requested WGPU evidence."""
+
+    evidence_tools = (
+        ROOT / "arrayscope" / "tools" / "profile_montage_workflow.py",
+        ROOT / "arrayscope" / "tools" / "profile_scroll_input.py",
+        ROOT / "arrayscope" / "tools" / "release_diagnostics.py",
+    )
+    missing = [
+        str(path.relative_to(ROOT))
+        for path in evidence_tools
+        if "require_image_view_backend(" not in path.read_text()
+    ]
+    assert not missing, f"backend-labelled evidence accepts factory fallback: {missing}"

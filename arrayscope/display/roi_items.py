@@ -84,7 +84,7 @@ class MovableInfoPanel(QtWidgets.QFrame):
     Structured mode (`set_rows`) renders one line per ROI: bold name +
     italic kind on the left, then a single continuous vertical divider,
     then the value columns right-aligned so they line up across rows.
-    `setText` remains for plain-text callers (VisPy path, tests).
+    `setText` remains for plain-text callers and tests.
     """
 
     def __init__(self, parent=None):

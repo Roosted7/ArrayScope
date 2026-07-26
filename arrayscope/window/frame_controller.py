@@ -345,7 +345,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         continuity_shape = getattr(self.win, "_viewport_continuity_shape_target", lambda: None)()
         if continuity_shape is not None:
             # Child layouts can resize after an outer-window continuity resize
-            # has looked settled (the VisPy native canvas is one example).
+            # has looked settled.
             # A genuine top-level user resize releases the transaction in the
             # window's resizeEvent before this callback, so an extant target is
             # still authoritative and must be restored instead of reflowed.
@@ -446,9 +446,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             display_mode = ""
         if not montage_viewport_retarget_policy(capabilities, display_mode).enabled:
             return False
-        cancel_speculative = getattr(self.win.img_view, "_cancel_vispy_speculative_work", None)
-        if callable(cancel_speculative):
-            cancel_speculative()
         view_state = self.win.view_state
         _additions, presentation_changed = session.retarget_viewport(
             view_range=viewport_plan.view_range,
@@ -1439,14 +1436,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             return True
 
         # Hidden residency is keyed to the viewport that selected its near
-        # payloads. Programmatic camera changes do not pass through the render
-        # coordinator's interaction cancellation path, so cancel the queued
-        # backend batches at the canonical viewport-retarget boundary before
-        # a freshly installed scheduler can accidentally adopt them.
-        cancel_speculative = getattr(self.win.img_view, "_cancel_vispy_speculative_work", None)
-        if callable(cancel_speculative):
-            cancel_speculative()
-
         additions, presentation_changed = session.retarget_viewport(
             view_range=viewport_plan.view_range,
             viewport_shape=viewport_plan.viewport_shape,

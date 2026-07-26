@@ -673,7 +673,7 @@ class DisplayPresentationMixin:
             return False
         if str(getattr(self.win.img_view, "montageDisplayMode", lambda: "none")()) not in {
             "tile_layer",
-            "vispy_tile_layer",
+            "wgpu_tile_layer",
         }:
             return False
 

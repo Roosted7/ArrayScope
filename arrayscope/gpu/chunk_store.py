@@ -50,7 +50,7 @@ class CapacityError(RuntimeError):
 class SlotPool:
     """Fixed-size physical slots organized in pages, grown up to a budget.
 
-    Mirrors the VisPy atlas structure (uniform slots in growable pages) so
+    Uses uniform slots in growable pages so
     the atlas can adopt it in G2, but knows nothing about textures: a slot
     is an address, not storage.
     """

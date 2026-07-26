@@ -56,9 +56,6 @@ arrayscope = "arrayscope.__main__:main"
 # "mypkg:reverse_rows" = "mypkg.arrayscope_ops:make_reverse_rows"
 
 [project.optional-dependencies]
-vispy = [
-    "vispy>=0.14.0",
-]
 # Optional wgpu GPU rendering backend (and the GPU benchmark tools). Pinned
 # below 0.32: wgpu-py 0.32.0 pairs with wgpu-native 29, whose QueueWorkDone
 # callback gained a WGPUStringView argument, but 0.32.0's own sync work-done
@@ -174,7 +171,7 @@ select = [
 ]
 ignore = [
     # Import order after runtime setup is load-bearing here: prefer_pyside6()
-    # and env-var setup must run before pyqtgraph.Qt / vispy / wgpu imports.
+    # and env-var setup must run before pyqtgraph.Qt / wgpu imports.
     "E402",
     # The formatter wraps what it can; residual long lines are strings/URLs.
     "E501",

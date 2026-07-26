@@ -52,7 +52,7 @@ def run_audit(
     lod_pages = max(256 * MiB, int(policy.display_cache_budget_bytes) // 2)
     source_resident = int(input_bytes) if source_mode == "eager" else 0
     backend = str(backend).strip().lower()
-    if backend not in {"pyqtgraph", "vispy", "wgpu"}:
+    if backend not in {"pyqtgraph", "wgpu"}:
         raise ValueError(f"unknown backend {backend!r}")
     owners = [
         _owner(
@@ -203,7 +203,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--render-cap-mb", type=int, default=512)
     parser.add_argument("--source-mode", choices=("lazy", "eager"), default="lazy")
-    parser.add_argument("--backend", choices=("pyqtgraph", "vispy", "wgpu"), default="wgpu")
+    parser.add_argument("--backend", choices=("pyqtgraph", "wgpu"), default="wgpu")
     parser.add_argument("--json", type=Path)
     return parser
 

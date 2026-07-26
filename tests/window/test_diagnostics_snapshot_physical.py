@@ -34,8 +34,6 @@ def test_presentation_diagnostics_uses_shared_backend_contract_for_wgpu():
                 "wgpu_page_pools": ({"representation": "scalar_r32f"},),
                 "wgpu_last_pool_exhaustion": "pool exhausted",
             },
-            # The old VisPy-only lookup silently discarded the WGPU fields.
-            vispyPresentationDiagnostics=dict,
         )
     )
 

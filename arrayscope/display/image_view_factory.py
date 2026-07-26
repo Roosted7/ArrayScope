@@ -14,8 +14,6 @@ from arrayscope.app.settings_state import (
 )
 from arrayscope.display.backends.pyqtgraph import PyQtGraphSurface
 
-_SOFTWARE_RENDERER_MARKERS = ("llvmpipe", "softpipe", "swrast", "software rasterizer")
-
 # Cached AUTO probe result for this process: (resolved_choice, reason).
 _auto_resolution_cache: tuple[ImageRenderingBackendChoice, str] | None = None
 
@@ -32,7 +30,7 @@ def warm_image_backend_async(settings=None) -> None:
     when the effective image backend will be wgpu, the ~2 s of device init and
     ~165 ms of shader compilation run concurrently with the file read instead of
     stalling the first image behind it.  A no-op when the backend cannot be wgpu
-    (explicit PyQtGraph/VisPy pin, non-Linux, offscreen Qt) so we never spend
+    (explicit PyQtGraph pin, non-Linux, offscreen Qt) so we never spend
     ~2 s building a device the app will not use.  Idempotent per process.
     """
 
@@ -58,11 +56,10 @@ def _should_warm_wgpu(settings) -> bool:
     if choice == ImageRenderingBackendChoice.WGPU.value:
         return True  # explicit pin: warm regardless of platform heuristics
     if choice != ImageRenderingBackendChoice.AUTO.value:
-        return False  # explicit PyQtGraph / VisPy pin
+        return False  # explicit PyQtGraph pin
     # AUTO: mirror _probe_auto_backend_choice's wgpu preconditions so the warm
     # matches what create_image_view will resolve.  A device that ultimately
-    # fails to build simply leaves the warm a no-op and the GL fallback runs
-    # (on the GUI thread, as today).
+    # fails to build simply leaves the warm a no-op and PyQtGraph is used.
     if platform.system() != "Linux":
         return False
     return os.environ.get("QT_QPA_PLATFORM", "") not in {"offscreen", "minimal"}
@@ -72,8 +69,8 @@ def cpu_display_backend_likely(settings=None) -> bool:
     """Whether the effective image backend uses the CPU display kernels.
 
     ``cpu_display_rgba`` / ``rgb_display_for_levels`` run only on the pyqtgraph
-    backend; wgpu and vispy shade on the GPU.  Consulted at startup so their
-    optional numba kernels are not compiled for a wgpu/vispy session.  A
+    backend; wgpu shades on the GPU.  Consulted at startup so their optional
+    numba kernels are not compiled for a wgpu session.  A
     wgpu->pyqtgraph fallback (device build failure) is still covered by the lazy
     warm on the first CPU display call, so a False here never breaks anything.
     """
@@ -81,10 +78,7 @@ def cpu_display_backend_likely(settings=None) -> bool:
     choice = _image_backend_choice_value(settings)
     if choice == ImageRenderingBackendChoice.PYQTGRAPH.value:
         return True
-    if choice in {
-        ImageRenderingBackendChoice.WGPU.value,
-        ImageRenderingBackendChoice.VISPY.value,
-    }:
+    if choice == ImageRenderingBackendChoice.WGPU.value:
         return False
     # AUTO: pyqtgraph is the CPU fallback chosen when the wgpu preconditions fail.
     return not _should_warm_wgpu(settings)
@@ -136,8 +130,7 @@ def create_image_view(settings=None, *, notify=None):
 
     ``AUTO`` resolves to **wgpu** (the promotion-candidate backend, 2026-07-22)
     whenever a real GPU device can be created on Linux with a display; it falls
-    back to VisPy where a hardware GL context exists but wgpu cannot init, and
-    to PyQtGraph for software GL, headless/offscreen, platforms without
+    back to PyQtGraph for headless/offscreen sessions, platforms without
     reference traces, or any probe failure. Users can always pin a backend.
     If wgpu init fails at construction, the factory degrades to PyQtGraph.
     """
@@ -186,16 +179,6 @@ def create_image_view(settings=None, *, notify=None):
         view = PyQtGraphSurface()
         view._notify_status = notify
         return view
-    if choice_value == ImageRenderingBackendChoice.VISPY.value:
-        try:
-            from arrayscope.display.backends.vispy import VisPySurface
-
-            view = VisPySurface()
-            view._notify_status = notify
-            return view
-        except Exception as exc:
-            if callable(notify):
-                notify(f"VisPy renderer unavailable; using PyQtGraph ({exc})")
     view = PyQtGraphSurface()
     view._notify_status = notify
     return view
@@ -206,9 +189,8 @@ def resolve_auto_backend_choice() -> tuple[ImageRenderingBackendChoice, str]:
 
     Decision rule (ADR 0047, updated 2026-07-22 — wgpu promotion): on Linux
     with a real display, prefer **wgpu** whenever a GPU device can be created;
-    fall back to VisPy where a hardware GL context exists but wgpu cannot init,
-    and to PyQtGraph for software GL, headless/offscreen, non-Linux, or any
-    probe failure. Users can always pin a specific backend.
+    otherwise use PyQtGraph for headless/offscreen sessions, non-Linux
+    platforms, or any probe failure. Users can always pin a specific backend.
     """
 
     global _auto_resolution_cache
@@ -226,27 +208,13 @@ def _probe_auto_backend_choice() -> tuple[ImageRenderingBackendChoice, str]:
         )
     if os.environ.get("QT_QPA_PLATFORM", "") in {"offscreen", "minimal"}:
         return (ImageRenderingBackendChoice.PYQTGRAPH, "offscreen Qt platform")
-    # Prefer wgpu (the promotion-candidate backend) whenever a real GPU device
-    # can be created. The probe pins Vulkan (no EGL re-init that would SIGABRT a
-    # GL context) and caches the shared device the WgpuImageView2D reuses, so it
-    # is not wasted work. wgpu first also means we never create a GL context on
-    # the wgpu path.
+    # Prefer wgpu whenever a real GPU device can be created. The probe pins
+    # Vulkan and caches the shared device the WgpuImageView2D reuses, so it is
+    # not wasted work.
     wgpu_device = _probe_wgpu_device()
     if wgpu_device is not None:
         return (ImageRenderingBackendChoice.WGPU, f"wgpu device [{wgpu_device}]")
-    renderer = _probe_hardware_gl_renderer()
-    if renderer is None:
-        return (ImageRenderingBackendChoice.PYQTGRAPH, "no usable wgpu or OpenGL device")
-    lowered = renderer.lower()
-    if any(marker in lowered for marker in _SOFTWARE_RENDERER_MARKERS):
-        return (
-            ImageRenderingBackendChoice.PYQTGRAPH,
-            f"SW OpenGL [{renderer}]",
-        )
-    return (
-        ImageRenderingBackendChoice.VISPY,
-        f"HW OpenGL, wgpu unavailable [{renderer}]",
-    )
+    return (ImageRenderingBackendChoice.PYQTGRAPH, "no usable wgpu device")
 
 
 def _probe_wgpu_device() -> str | None:
@@ -277,26 +245,3 @@ def _probe_wgpu_device() -> str | None:
             with contextlib.suppress(Exception):
                 info = get_info() or {}
     return str(info.get("device") or info.get("description") or "gpu")
-
-
-def _probe_hardware_gl_renderer() -> str | None:
-    """Create a short-lived GL context and return its renderer string."""
-
-    from arrayscope.display.backends.vispy.tiles import query_gpu_device_limits
-
-    try:
-        from vispy import app as vispy_app
-        from vispy import gloo
-
-        canvas = vispy_app.Canvas(show=False, size=(4, 4))
-        try:
-            canvas.set_current()
-            limits = query_gpu_device_limits(gloo)
-        finally:
-            canvas.close()
-        if str(getattr(limits, "source", "")) != "opengl":
-            return None
-        renderer = str(getattr(limits, "renderer", "") or "")
-        return renderer or None
-    except Exception:
-        return None

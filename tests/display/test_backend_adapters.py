@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 
 from arrayscope.core.view_state import ViewState
-from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+from arrayscope.display.backend_contract import (
+    PYQTGRAPH_CAPABILITIES,
+    WGPU_CAPABILITIES,
+    require_image_view_backend,
+)
 from arrayscope.display.backends import surface_for_view
 from arrayscope.display.backends.base import tiled_presentation_visible
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
@@ -23,7 +27,7 @@ from arrayscope.display.viewport import ViewportPolicy
 
 class _FakeSurface:
     def __init__(self):
-        self.capabilities = VISPY_CAPABILITIES
+        self.capabilities = WGPU_CAPABILITIES
         self.widget = object()
         self.calls = []
         self.physically_visible_tile_count = 0
@@ -68,7 +72,7 @@ class _FakeSurface:
         return {
             "backend": self.capabilities.name,
             "interaction_event_owner": self.interaction_event_owner(),
-            "montage_display_mode": "vispy_tile_layer",
+            "montage_display_mode": "wgpu_tile_layer",
             "physically_visible_tile_count": self.physically_visible_tile_count,
         }
 
@@ -83,6 +87,19 @@ class _FakeSurface:
 
     def teardown_surface(self):
         self.calls.append(("teardown", None, None))
+
+
+def test_evidence_backend_guard_accepts_the_active_surface():
+    view = SimpleNamespace(rendering_capabilities=WGPU_CAPABILITIES)
+
+    assert require_image_view_backend(view, "wgpu", context="test evidence") == "wgpu"
+
+
+def test_evidence_backend_guard_rejects_a_factory_fallback():
+    view = SimpleNamespace(rendering_capabilities=PYQTGRAPH_CAPABILITIES)
+
+    with pytest.raises(RuntimeError, match=r"requested backend 'wgpu'.*active.*'pyqtgraph'"):
+        require_image_view_backend(view, "wgpu", context="test evidence")
 
 
 def _geometry(*, montage=False):
@@ -159,7 +176,7 @@ def test_surface_resolver_explains_nonconforming_surface():
 def test_tiled_visibility_uses_physical_draw_count_not_selected_mode():
     surface = _FakeSurface()
 
-    assert surface.presentation_diagnostics()["montage_display_mode"] == "vispy_tile_layer"
+    assert surface.presentation_diagnostics()["montage_display_mode"] == "wgpu_tile_layer"
     assert tiled_presentation_visible(surface) is False
 
     surface.physically_visible_tile_count = 1

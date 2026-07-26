@@ -8,6 +8,7 @@ from tests.ui.helpers import (
 from tests.ui.helpers import (
     process_events as _process_events,
 )
+from tests.ui.helpers import require_wgpu_adapter
 
 
 def test_render_preserves_viewport_for_same_display_shape(qtbot):
@@ -157,8 +158,8 @@ def test_one_to_one_is_one_shot_and_slice_updates_preserve_user_view(qtbot):
         win.close()
 
 
-def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
-    pytest.importorskip("vispy")
+def test_wgpu_axis_direction_changes_sync_camera_orientation(qtbot):
+    require_wgpu_adapter()
 
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
@@ -169,13 +170,13 @@ def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
     win = None
     try:
         settings = QtCore.QSettings()
-        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.WGPU.value)
         settings.sync()
 
         win = ArrayScopeWindow(np.arange(20 * 30, dtype=np.float32).reshape(20, 30))
         qtbot.addWidget(win)
         _process_events(qtbot, count=20)
-        assert win.img_view.surface.capabilities.name == "vispy"
+        assert win.img_view.surface.capabilities.name == "wgpu"
         y_dim, x_dim = win.view_state.image_axes
 
         win._set_view_state(
@@ -185,7 +186,10 @@ def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
         _process_events(qtbot)
         assert win.img_view.getView().state["xInverted"] is True
         assert win.img_view.getView().state["yInverted"] is False
-        assert win.img_view._vispy_view.camera.flip == (True, False, False)
+        camera = win.img_view._wgpu_camera_command()
+        assert camera is not None
+        assert camera.x_inverted is True
+        assert camera.y_inverted is False
 
         win._set_view_state(
             win.view_state.with_axis_flipped(y_dim, False).with_axis_flipped(x_dim, False)
@@ -194,7 +198,10 @@ def test_vispy_axis_direction_changes_sync_camera_orientation(qtbot):
         _process_events(qtbot)
         assert win.img_view.getView().state["xInverted"] is False
         assert win.img_view.getView().state["yInverted"] is True
-        assert win.img_view._vispy_view.camera.flip == (False, True, False)
+        camera = win.img_view._wgpu_camera_command()
+        assert camera is not None
+        assert camera.x_inverted is False
+        assert camera.y_inverted is True
     finally:
         if win is not None:
             win.close()

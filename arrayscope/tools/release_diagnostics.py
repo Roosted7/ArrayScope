@@ -23,19 +23,24 @@ def capture_release_diagnostics(
 ) -> Path:
     """Capture a small real-window diagnostics JSONL trace for RC evidence."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    backend = _normalize_backend(backend)
 
     from arrayscope import __version__
     from arrayscope.app.qt_binding import prefer_pyside6
 
     prefer_pyside6()
+    if backend == "wgpu":
+        from arrayscope.display.wgpu_imageview2d import configure_wgpu_adapter_for_profile
+
+        configure_wgpu_adapter_for_profile("low-power")
     import pyqtgraph as pg
     from pyqtgraph.Qt import QtCore
 
+    from arrayscope.display.backend_contract import require_image_view_backend
     from arrayscope.ui.diagnostics_logging import DiagnosticsJsonlLogger
     from arrayscope.window import ArrayScopeWindow
 
     app = pg.mkQApp()
-    backend = _normalize_backend(backend)
     settings = QtCore.QSettings()
     previous_backend = settings.value("image_rendering_backend", None)
     settings.setValue("image_rendering_backend", backend)
@@ -46,6 +51,11 @@ def capture_release_diagnostics(
     try:
         data = _release_dataset()
         win = ArrayScopeWindow(data)
+        require_image_view_backend(
+            win.img_view,
+            backend,
+            context="release diagnostics",
+        )
         # Physical draw completion is a capture prerequisite; a hidden widget
         # can acknowledge payloads without ever receiving the paint that
         # clears ``presentationDrawPending``.
@@ -117,8 +127,8 @@ def _release_dataset() -> np.ndarray:
 
 def _normalize_backend(backend: str) -> str:
     backend = str(backend).strip().lower()
-    if backend not in {"pyqtgraph", "vispy"}:
-        raise ValueError(f"unsupported backend {backend!r}; expected 'pyqtgraph' or 'vispy'")
+    if backend not in {"pyqtgraph", "wgpu"}:
+        raise ValueError(f"unsupported backend {backend!r}; expected 'pyqtgraph' or 'wgpu'")
     return backend
 
 
@@ -191,7 +201,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
         description="Capture deterministic ArrayScope RC diagnostics JSONL"
     )
     parser.add_argument("--jsonl", required=True, help="Path for the diagnostics JSONL artifact")
-    parser.add_argument("--backend", default="pyqtgraph", choices=("pyqtgraph", "vispy"))
+    parser.add_argument("--backend", default="pyqtgraph", choices=("pyqtgraph", "wgpu"))
     parser.add_argument("--interval-ms", type=int, default=500)
     args = parser.parse_args(argv)
 

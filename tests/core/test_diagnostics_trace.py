@@ -13,7 +13,7 @@ def _write_trace(path):
         {
             "event": "start",
             "interval_ms": 500,
-            "config": {"image_rendering_backend_actual": "vispy"},
+            "config": {"image_rendering_backend_actual": "wgpu"},
         },
         {
             "event": "snapshot",
@@ -67,7 +67,7 @@ def test_trace_summary_detects_sampling_stall_and_changed_timing(tmp_path):
 
     summary = summarize_diagnostics_trace(path)
 
-    assert summary.backend == "vispy"
+    assert summary.backend == "wgpu"
     assert summary.snapshot_count == 3
     assert summary.median_gap_ms == pytest.approx(1500.0)
     assert summary.max_gap_ms == pytest.approx(2500.0)
@@ -105,7 +105,7 @@ def test_trace_summary_markdown_marks_unattributed_stall(tmp_path):
 
     text = format_trace_summary_markdown(summarize_diagnostics_trace(path))
 
-    assert "## vispy" in text
+    assert "## wgpu" in text
     assert "no tracked timing changed" in text
 
 

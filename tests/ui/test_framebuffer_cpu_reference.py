@@ -1,110 +1,137 @@
-"""Default-ring smoke for the framebuffer-to-CPU reference oracle.
-
-Ring 1 (default offscreen suite).  Offscreen software GL renders the VisPy
-tile shader faithfully for this path (precedent:
-tests/ui/test_vispy_phase_framebuffer.py), so this smoke keeps the oracle
-itself — geometry mapping, CPU reference, tolerance, vacuity guards — honest
-on every push.  It is NOT acceptance for rendering claims: the real-GL gate
-is tests/gpu_interaction/test_framebuffer_cpu_reference.py (ring 4).
-
-Pins the oracle mandated by docs/testing/stress-and-trace-strategy.md
-(addendum law 2 — intent is not pixels): a settled scene must match the CPU
-semantic reference, and an injected wrong levels uniform must make the
-oracle FAIL (an oracle that has never failed on an injected fault is
-unproven), then pass again after repair.
-"""
+"""Default-ring smoke for the WGPU framebuffer-to-CPU reference oracle."""
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 import numpy as np
 import pytest
 
-from arrayscope.tools.framebuffer_reference import assert_frame_matches_cpu_reference
+from arrayscope.tools.framebuffer_reference import assert_wgpu_frame_matches_cpu_reference
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
     restore_default_backend,
-    use_vispy_backend,
+    use_wgpu_backend,
 )
 
 TILE = 32
 GRID = 3
 COUNT = GRID * GRID
+_PAL_RELAXED_ORANGE = np.asarray((249, 127, 16), dtype=np.int16)
 
 
 def _gradient_montage_data() -> np.ndarray:
-    """(32, 32, 9): frame k = 20*k + smooth x+y gradient.
-
-    Per-tile offsets make swapped/stale content visible; the in-tile gradient
-    makes wrong geometry (flip, shifted texcoords, wrong LOD placement)
-    visible where constant tiles would hide it.
-    """
-
     yy, xx = np.mgrid[0:TILE, 0:TILE].astype(np.float32)
     gradient = (yy + xx) * (8.0 / (2.0 * (TILE - 1)))
     frames = np.arange(COUNT, dtype=np.float32)[:, None, None] * 20.0 + gradient[None]
     return frames.transpose(1, 2, 0).copy()
 
 
-def _settled(win) -> bool:
-    if getattr(win, "_committed_display_frame", None) is None:
-        return False
-    return frame_session_settled(win)
+def _orange_pixel_count(frame: np.ndarray) -> int:
+    rgb = np.asarray(frame)[..., :3].astype(np.int16)
+    return int(np.count_nonzero(np.all(np.abs(rgb - _PAL_RELAXED_ORANGE) <= 16, axis=-1)))
 
 
-def test_settled_montage_matches_cpu_reference_and_fails_on_injected_uniform(qtbot):
-    pytest.importorskip("vispy")
-    settings = use_vispy_backend()
-    win = make_backend_window(qtbot, _gradient_montage_data(), require_gpu_atlas=True)
+def test_settled_montage_matches_cpu_reference_and_rejects_bad_mapping(qtbot, monkeypatch):
+    settings = use_wgpu_backend(extra_settings={"texture_codec": "off"})
+    win = make_backend_window(qtbot, _gradient_montage_data(), backend="wgpu")
     try:
-        # Offscreen windows never get a layout pass unless shown at an
-        # explicit size; a subpixel canvas would starve the oracle's
-        # per-tile sample floor (its vacuity guard would fail loudly).
         win.resize(720, 600)
         win.show()
         qtbot.waitExposed(win)
         win._set_view_state(win.view_state.with_montage_axis(2, text=":"))
-        win.render(reason="fb-cpu-reference-smoke")
-        qtbot.waitUntil(lambda: _settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+        win.render(reason="wgpu-fb-cpu-reference-smoke")
+        qtbot.waitUntil(
+            lambda: frame_session_settled(win),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
 
         session = win.renderer._frame_session
         required = set(session.required_tile_numbers())
-        assert len(required) == COUNT, f"smoke regime drifted: required tiles {sorted(required)}"
-        # Regime guard (strategy law 3): this smoke covers the native-LOD
-        # scalar regime only; entering another regime silently must fail.
-        for number in sorted(required):
-            payload = session.display_tile_payloads[int(number)]
-            level = 0 if payload.lod is None else int(payload.lod.level)
-            assert level == 0, (
-                f"tile {number} presented LOD level {level}; the smoke pins "
-                "the native-resolution regime"
-            )
-
-        report = assert_frame_matches_cpu_reference(win)
+        assert len(required) == COUNT, f"smoke regime drifted: {sorted(required)}"
+        report = assert_wgpu_frame_matches_cpu_reference(win)
         assert {tile.tile_number for tile in report.tiles} == required
         assert all(tile.samples >= report.min_samples_per_tile for tile in report.tiles)
 
-        # Fault injection: a wrong levels uniform on the live page visual —
-        # CPU-side truth (payloads, UI levels) untouched, so every label
-        # stays truthful while the frame is visibly wrong.
-        layer = win.img_view._vispy_gpu_montage_layer
-        visuals = [
-            visual for visual in layer._visuals_by_page if bool(getattr(visual, "visible", False))
-        ]
-        assert visuals, "no visible VisPy tile page visual"
-        originals = [tuple(visual._levels) for visual in visuals]
-        for visual in visuals:
-            low, high = visual._levels
-            visual.set_levels((low, low + (high - low) * 4.0))
-        with pytest.raises(AssertionError, match="diverges from the CPU"):
-            assert_frame_matches_cpu_reference(win)
+        from arrayscope.gpu.command_protocol import SetDisplayMapping
 
-        # Repair: restoring the uniform restores the oracle — the failure
-        # above was caused by the injected fault, nothing else.
-        for visual, levels in zip(visuals, originals, strict=False):
-            visual.set_levels(levels)
-        assert_frame_matches_cpu_reference(win)
+        original_submit = win.img_view._submit_wgpu
+        mapping = win.img_view._wgpu_mapping_state
+        bad_mapping = replace(
+            mapping,
+            level_hi=mapping.level_lo + 4.0 * (mapping.level_hi - mapping.level_lo),
+        )
+
+        def corrupt_mapping(commands, **kwargs):
+            corrupted = tuple(
+                SetDisplayMapping(bad_mapping)
+                if isinstance(command, SetDisplayMapping)
+                else command
+                for command in commands
+            )
+            return original_submit(corrupted, **kwargs)
+
+        monkeypatch.setattr(win.img_view, "_submit_wgpu", corrupt_mapping)
+        with pytest.raises(AssertionError, match="diverges from the CPU"):
+            assert_wgpu_frame_matches_cpu_reference(win)
+        monkeypatch.setattr(win.img_view, "_submit_wgpu", original_submit)
+        assert_wgpu_frame_matches_cpu_reference(win)
+    finally:
+        win.close()
+        restore_default_backend(settings)
+
+
+def test_phase_color_zero_magnitude_is_physically_black_and_repairs_mapping(qtbot):
+    """Zero magnitude modulates the phase LUT to black in production WGPU."""
+
+    settings = use_wgpu_backend(extra_settings={"texture_codec": "off"})
+    data = np.zeros((128, 128), dtype=np.complex64)
+    data[8:24, 8:24] = 40.0 + 0.0j
+    win = make_backend_window(qtbot, data, backend="wgpu")
+    try:
+        win.resize(720, 600)
+        win.show()
+        qtbot.waitExposed(win)
+        win._on_channel_clicked("complex")
+        win.render(reason="wgpu-phase-zero-background")
+        qtbot.waitUntil(
+            lambda: frame_session_settled(win),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+
+        assert_wgpu_frame_matches_cpu_reference(win)
+        view = win.img_view
+        mapping = view._wgpu_mapping_state
+        assert mapping.mode == "magnitude"
+        assert mapping.phase_color is True
+        healthy = view._wgpu_executor.read_target()
+        assert _orange_pixel_count(healthy) == 0
+
+        from arrayscope.gpu.command_protocol import SetDisplayMapping, UpdateTileInstances
+
+        bad_mapping = replace(mapping, phase_color=False)
+        view._submit_wgpu(
+            (
+                SetDisplayMapping(bad_mapping),
+                view._wgpu_camera_command(),
+                UpdateTileInstances(view._wgpu_tile_instances()),
+            )
+        )
+        corrupted = view._wgpu_executor.read_target()
+        assert _orange_pixel_count(corrupted) > 100
+
+        view._submit_wgpu(
+            (
+                SetDisplayMapping(mapping),
+                view._wgpu_camera_command(),
+                UpdateTileInstances(view._wgpu_tile_instances()),
+            )
+        )
+        recovered = view._wgpu_executor.read_target()
+        assert _orange_pixel_count(recovered) == 0
+        assert_wgpu_frame_matches_cpu_reference(win)
     finally:
         win.close()
         restore_default_backend(settings)

@@ -21,7 +21,7 @@ JOURNEYS = (
     "index_scroll",
     "deep_zoom_far_scroll",
 )
-BACKENDS = ("wgpu", "pyqtgraph", "vispy")
+BACKENDS = ("wgpu", "pyqtgraph")
 DRIVER_RUNS = {
     "cold": ("raw_full_tiled_montage", ("cold_fill",)),
     "scroll": (
@@ -42,22 +42,16 @@ PROFILE_SESSION_FIXTURE = (
     Path(__file__).parents[2] / "tests" / "fixtures" / "profile_montage_session.json"
 )
 MIN_COMMITS = {
-    ("vispy", "cold_fill"): 2,
     ("pyqtgraph", "cold_fill"): 2,
-    ("vispy", "zoom_in"): 1,
     ("pyqtgraph", "zoom_in"): 1,
-    ("vispy", "zoom_out"): 0,  # Finer retained pixels need no payload commit.
     ("pyqtgraph", "zoom_out"): 0,
-    ("vispy", "scroll_shuffle"): 2,
     ("pyqtgraph", "scroll_shuffle"): 2,
-    ("vispy", "index_scroll"): 1,
     ("pyqtgraph", "index_scroll"): 1,
     ("wgpu", "cold_fill"): 2,
     ("wgpu", "zoom_in"): 0,  # Finer resident pages need no payload commit.
     ("wgpu", "zoom_out"): 0,
     ("wgpu", "scroll_shuffle"): 2,
     ("wgpu", "index_scroll"): 1,
-    ("vispy", "deep_zoom_far_scroll"): 1,
     ("pyqtgraph", "deep_zoom_far_scroll"): 1,
     ("wgpu", "deep_zoom_far_scroll"): 1,
 }
@@ -218,7 +212,7 @@ def _presentation_oracle(
         limit = int(event.get("max_upserts", 0) or 0)
         reason = str(event.get("unbounded_reason", "") or "")
         zero_upload_rebind = bool(
-            backend in {"vispy", "wgpu"}
+            backend == "wgpu"
             and "uploads" in event
             and "upload_bytes" in event
             and "vertex_uploads" in event
@@ -228,7 +222,7 @@ def _presentation_oracle(
         )
         cold_upserts = tuple(event.get("cold_upsert_tiles", ()) or ())
         bounded_mixed_rebind = bool(
-            backend in {"vispy", "wgpu"}
+            backend == "wgpu"
             and "cold_upsert_tiles" in event
             and limit > 0
             and len(cold_upserts) <= limit
@@ -531,82 +525,12 @@ def evaluate_artifact_dir(artifact_dir: str | Path) -> dict[str, object]:
             health = _driver_health(metrics_path, stderr_path)
             driver_health.append({"backend": backend, "run": run_name, **health})
 
-    cold_stderr = artifact_dir / "wgpu" / "cold" / "driver.stderr.log"
-    _classify_reference_blocked_wgpu_rows(
-        rows,
-        wgpu_runtime_clean=(
-            not cold_stderr.exists()
-            or _wgpu_cold_runtime_clean(cold_stderr.read_text(encoding="utf-8"))
-        ),
-    )
     return {
         "ok": all(bool(row["ok"]) for row in rows)
         and all(bool(item["ok"]) for item in driver_health),
         "rows": rows,
         "driver_health": driver_health,
     }
-
-
-def _only_cold_level_oracle_red(row: dict[str, object]) -> bool:
-    """Whether cold fill failed only the shared coverage/convergence oracle."""
-
-    results = list(row.get("results", ()) or ())
-    return bool(results) and all(
-        bool(result.get("completed"))
-        and bool(result.get("phase_ordered"))
-        and bool(dict(result.get("presentation", {}) or {}).get("ok"))
-        and bool(result.get("first_new_pixels_within_budget"))
-        and bool(result.get("demand_fresh_within_budget"))
-        and not bool(result.get("coverage_pass_observed"))
-        and not bool(result.get("level_converged_within_budget"))
-        for result in results
-    )
-
-
-def _wgpu_cold_runtime_clean(stderr: str) -> bool:
-    """Exclude actual backend exceptions from reference-blocked unsupported."""
-
-    exception_prefixes = (
-        "AssertionError:",
-        "GPUValidationError:",
-        "KeyError:",
-        "NotImplementedError:",
-        "RuntimeError:",
-        "TypeError:",
-        "ValueError:",
-    )
-    return not any(
-        marker in line for line in str(stderr).splitlines() for marker in exception_prefixes
-    )
-
-
-def _classify_reference_blocked_wgpu_rows(
-    rows: list[dict[str, object]], *, wgpu_runtime_clean: bool = True
-) -> None:
-    """Record wgpu cold fill unsupported while its reference oracle is red.
-
-    This does not forgive either backend's cold-level defect: the VisPy row
-    remains failed, so the matrix remains red.  It says only that the renderer
-    comparison cannot adjudicate wgpu on an oracle the incumbent fails in the
-    same way.  The classification automatically disappears when either wgpu
-    passes or the reference no longer has the identical isolated failure.
-    """
-
-    indexed = {(str(row.get("backend", "")), str(row.get("journey", ""))): row for row in rows}
-    vispy = indexed.get(("vispy", "cold_fill"))
-    wgpu = indexed.get(("wgpu", "cold_fill"))
-    if (
-        vispy is None
-        or wgpu is None
-        or not bool(wgpu_runtime_clean)
-        or bool(wgpu.get("ok"))
-        or not _only_cold_level_oracle_red(vispy)
-        or not _only_cold_level_oracle_red(wgpu)
-    ):
-        return
-    wgpu["status"] = "unsupported"
-    wgpu["unsupported_reasons"] = ["reference_vispy_cold_level_convergence_standing_red"]
-    wgpu["ok"] = True
 
 
 def _journey_ring(args) -> str:

@@ -397,10 +397,9 @@ class DiagnosticsDialog(QtWidgets.QDialog):
             total=snapshot.display_cache.max_bytes,
             detail=_cache_tier_detail(snapshot.display_cache),
         )
-        show_gpu = str(getattr(snapshot, "image_rendering_backend_actual", "")) in {
-            "vispy",
-            "wgpu",
-        } and _gpu_available(snapshot)
+        show_gpu = str(
+            getattr(snapshot, "image_rendering_backend_actual", "")
+        ) == "wgpu" and _gpu_available(snapshot)
         bars["gpu"].setVisible(show_gpu)
         bars["tile"].setVisible(not show_gpu)
 

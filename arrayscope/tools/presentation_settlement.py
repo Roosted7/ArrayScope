@@ -121,7 +121,7 @@ def presentation_settlement_snapshot(
     session = getattr(window, "_frame_session", None)
     image_view = getattr(window, "img_view", None)
     backend = str(image_view_backend_capabilities(image_view).name or "")
-    if backend not in {"pyqtgraph", "vispy"}:
+    if backend not in {"pyqtgraph", "wgpu"}:
         raise RuntimeError(f"unsupported image backend settlement contract: {backend!r}")
     if session is None:
         return PresentationSettlementSnapshot(
@@ -299,9 +299,11 @@ def _physical_truth_errors(
         row = rows[tile]
         if row.get("physical_acknowledged_identity") != backend_identities[tile]:
             errors.append(f"identity_mismatch={tile}")
-        if backend == "vispy":
+        if backend == "wgpu":
             if row.get("physical_draw_bounds_match_layout") is not True:
-                errors.append(f"vispy_geometry_unproven={tile}")
+                errors.append(f"wgpu_geometry_unproven={tile}")
+            if row.get("physical_storage_mode") != "wgpu_page_table":
+                errors.append(f"wgpu_residency_unproven={tile}")
         elif row.get("physical_storage_mode") != "image_item":
             errors.append(f"pyqtgraph_geometry_unproven={tile}")
     return tuple(errors)

@@ -13,7 +13,7 @@ oracles A–G) to the live payload shapes (queue row 3a):
 - **Honest pools per representation**: ``scalar_r32f`` chunks live in an
   ``r32float`` pool (no zero-imaginary waste), ``complex_rg32f`` in
   ``rg32float``, ``rgb8`` in ``rgba8unorm`` (display-ready: sampled as-is,
-  levels/LUT bypassed), and windowable RGB in ``rgba32float`` (VisPy-faithful
+  levels/LUT bypassed), and windowable RGB in ``rgba32float`` (reference-faithful
   color RGB + scalar-window signal in alpha). Pool budgets are per
   representation; LRU eviction touches unpinned pages of the same pool only
   and pinned exhaustion is a loud error.  Keys a submission's own
@@ -68,6 +68,7 @@ from arrayscope.gpu.command_protocol import (
 from arrayscope.gpu.keys import (
     COMPLEX_RG32F,
     REDUCER_MEAN,
+    REDUCER_PHASE_VECTOR,
     REPRESENTATIONS,
     RGB8,
     RGB_WINDOWED_RGBA32F,
@@ -296,7 +297,7 @@ const AID_PIXEL_GRID: u32 = 1u;
 const AID_CLIP_INDICATOR: u32 = 2u;
 const AID_MINIFY_FILTER: u32 = 4u;
 struct LodInfo { base: u32, grid_w: u32, grid_h: u32, _pad: u32 };
-struct PlaneInfo { rep: u32, max_lod: u32, lod_base: u32, _pad: u32 };
+struct PlaneInfo { rep: u32, max_lod: u32, lod_base: u32, phase_vector: u32 };
 struct Tile {
     dst: vec4<f32>,
     src: vec4<f32>,
@@ -553,7 +554,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         let c = textureLoad(rgb_pool, r.texel, r.layer, 0);
         color = vec4<f32>(c.rgb, 1.0);
     } else if (p.rep == 3u) {
-        // VisPy parity: preserve the color plane and modulate it by one
+        // Preserve the color plane and modulate it by one
         // levels-normalized scalar plane (packed in alpha), not by three
         // independent per-channel windows.
         let c = textureLoad(rgb_windowed_pool, r.texel, r.layer, 0);
@@ -574,7 +575,7 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
             // A2: a non-finite source texel is a bad-data signal, not a value.
             color = nan_marker(in.pos.xy);
         } else {
-            color = map_value(p, s.v);
+            color = map_value(p, s.v, r.lod);
         }
     }
     // A1: applied once to the final colour; identity at normal zoom.
@@ -583,7 +584,22 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
 // Scalar/complex value -> displayed colour: the mode/scale/levels/LUT path,
 // plus the A4 clip markers.  `v` is the resident, finite source sample.
-fn map_value(p: PlaneInfo, v: vec2<f32>) -> vec4<f32> {
+fn map_value(p: PlaneInfo, v: vec2<f32>, lod: u32) -> vec4<f32> {
+    if (p.phase_vector != 0u && lod > 0u && mapping.phase_color != 0u) {
+        // A reduced phase-vector texel is a circular resultant: its phase is
+        // hue and its already-normalized magnitude is coherence. Native L0
+        // complex samples still use the normal component/levels mapping.
+        let phase = atan2(v.y, v.x);
+        let phase_g = clamp(
+            (phase + 3.141592653589793) / 6.283185307179586,
+            0.0,
+            1.0,
+        );
+        let phase_idx = clamp(i32(round(phase_g * 255.0)), 0, 255);
+        let lut_color = textureLoad(lut, vec2<i32>(phase_idx, 0), 0);
+        let coherence = clamp(length(v), 0.0, 1.0);
+        return vec4<f32>(lut_color.rgb * coherence, lut_color.a);
+    }
     var x: f32;
     if (p.rep == 0u) {
         // Scalar planes ignore complex mapping modes: the value IS the scalar.
@@ -652,7 +668,7 @@ const AID_PIXEL_GRID: u32 = 1u;
 const AID_CLIP_INDICATOR: u32 = 2u;
 const AID_MINIFY_FILTER: u32 = 4u;
 struct LodInfo { base: u32, grid_w: u32, grid_h: u32, _pad: u32 };
-struct PlaneInfo { rep: u32, max_lod: u32, lod_base: u32, _pad: u32 };
+struct PlaneInfo { rep: u32, max_lod: u32, lod_base: u32, phase_vector: u32 };
 struct Tile {
     dst: vec4<f32>,
     src: vec4<f32>,
@@ -904,14 +920,26 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         if (s.nonfinite != 0u) {
             color = nan_marker(in.pos.xy);  // A2
         } else {
-            color = map_value(p, s.v);
+            color = map_value(p, s.v, r.lod);
         }
     }
     return pixel_grid(color, in.src, fw, mapping.aids & AID_PIXEL_GRID);  // A1
 }
 
 // Scalar/complex value -> displayed colour (mode/scale/levels/LUT + A4 clip).
-fn map_value(p: PlaneInfo, v: vec2<f32>) -> vec4<f32> {
+fn map_value(p: PlaneInfo, v: vec2<f32>, lod: u32) -> vec4<f32> {
+    if (p.phase_vector != 0u && lod > 0u && mapping.phase_color != 0u) {
+        let phase = atan2(v.y, v.x);
+        let phase_g = clamp(
+            (phase + 3.141592653589793) / 6.283185307179586,
+            0.0,
+            1.0,
+        );
+        let phase_idx = clamp(i32(round(phase_g * 255.0)), 0, 255);
+        let lut_color = textureLoad(lut, vec2<i32>(phase_idx, 0), 0);
+        let coherence = clamp(length(v), 0.0, 1.0);
+        return vec4<f32>(lut_color.rgb * coherence, lut_color.a);
+    }
     var x: f32;
     if (p.rep == 0u) {
         x = v.x;
@@ -2461,7 +2489,14 @@ class WgpuPlaneExecutor:
                 lod_rows.append((base, gw, gh, 0))
                 base += gw * gh
             self._plane_grids.append(grids)
-            plane_rows.append((_REP_INDEX[plane.representation], plane.max_lod, lod_base, 0))
+            plane_rows.append(
+                (
+                    _REP_INDEX[plane.representation],
+                    plane.max_lod,
+                    lod_base,
+                    int(plane.lod_reducer == REDUCER_PHASE_VECTOR),
+                )
+            )
             family = (
                 plane.document_generation,
                 plane.operation_key,

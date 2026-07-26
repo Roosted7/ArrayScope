@@ -25,7 +25,7 @@ def test_tile_presentation_draw_wait_fails_loudly_when_request_is_not_drawn(monk
     monkeypatch.setattr(workflow, "_process_events", lambda *_args, **_kwargs: None)
     win = SimpleNamespace(
         img_view=SimpleNamespace(
-            vispyPresentationDiagnostics=lambda: {
+            presentation_diagnostics=lambda: {
                 "tile_presentation_request_count": 2,
                 "tile_presentation_draw_count": 1,
             },
@@ -45,7 +45,7 @@ def test_phase_record_excludes_montage_counters_without_live_owners(monkeypatch)
     import arrayscope.tools.profile_montage_workflow as workflow
 
     snapshot = SimpleNamespace(
-        image_rendering_backend_actual="pyqtgraph",
+        image_rendering_backend_actual="wgpu",
         montage=MontageRuntimeDiagnostics(active=False),
         montage_timing=MontageTimingDiagnostics(),
         render_timing=RenderTimingDiagnostics(),
@@ -56,7 +56,20 @@ def test_phase_record_excludes_montage_counters_without_live_owners(monkeypatch)
         renderer=SimpleNamespace(),
     )
     monkeypatch.setattr(workflow, "_window_geometry_state", lambda _win: {})
-    monkeypatch.setattr(workflow, "_vispy_presentation_diagnostics", lambda _win: {})
+    monkeypatch.setattr(
+        workflow,
+        "_backend_presentation_diagnostics",
+        lambda _win: {
+            "draw_count": 7,
+            "tile_presentation_request_count": 6,
+            "tile_presentation_draw_count": 5,
+            "presented_tile_count": 4,
+            "presented_tiles": (0, 1, 2, 3),
+            "wgpu_uploads_total": 11,
+            "wgpu_upload_bytes_total": 4096,
+            "wgpu_binding_fast_path_commits": 3,
+        },
+    )
     monkeypatch.setattr(workflow, "_wgpu_frame_cadence", lambda _win: {})
     monkeypatch.setattr(workflow, "_montage_overlay_count", lambda _win: 0)
     monkeypatch.setattr(
@@ -85,6 +98,14 @@ def test_phase_record_excludes_montage_counters_without_live_owners(monkeypatch)
     assert "montage_quality_ingest_reductions" not in record
     assert "montage_quality_stage_hits_serving_derivations" not in record
     assert "montage_quality_preview_reduced_scheduled" in record
+    assert record["presentation_draw_count"] == 7
+    assert record["tile_presentation_request_count"] == 6
+    assert record["tile_presentation_draw_count"] == 5
+    assert record["presented_tile_count"] == 4
+    assert record["presented_tiles"] == [0, 1, 2, 3]
+    assert record["wgpu_uploads_total"] == 11
+    assert record["wgpu_upload_bytes_total"] == 4096
+    assert record["wgpu_binding_fast_path_commits"] == 3
 
 
 def _journey_gesture_win(pending_fn, capture_log):
@@ -278,7 +299,7 @@ def test_physical_quiet_wait_fails_loudly_while_draw_is_pending(monkeypatch):
     win = SimpleNamespace(
         img_view=SimpleNamespace(
             presentationDrawPending=lambda: True,
-            vispyPresentationDiagnostics=lambda: {"draw_count": 7},
+            presentation_diagnostics=lambda: {"draw_count": 7},
         )
     )
 
@@ -303,7 +324,7 @@ def test_physical_quiet_wait_ignores_draw_churn_after_presentation_ack(monkeypat
     win = SimpleNamespace(
         img_view=SimpleNamespace(
             presentationDrawPending=lambda: False,
-            vispyPresentationDiagnostics=lambda: {
+            presentation_diagnostics=lambda: {
                 "draw_count": draw_count["value"],
             },
         )
@@ -388,7 +409,7 @@ def test_visual_sampler_uses_draw_acks_only_during_wgpu_gesture():
 
     probe._capture_interval()
     probe._capture_presentation_draw_ack()
-    probe._backend = "vispy"
+    probe._backend = "pyqtgraph"
     probe._capture_interval()
     probe._win._arrayscope_active_gesture_id = ""
     probe._backend = "wgpu"
@@ -688,12 +709,10 @@ def test_visual_geometry_summary_projects_physical_bounds_through_live_camera():
 def test_visual_scene_presented_tiles_does_not_treat_residency_as_drawn():
     from arrayscope.tools.profile_montage_workflow import _visual_scene_presented_tiles
 
-    resident_rows = {tile: {} for tile in range(60)}
-
     assert _visual_scene_presented_tiles(
-        "vispy",
-        presentation_diagnostics={"presented_tiles": (40, 41, 50, 51)},
-        physical_rows=resident_rows,
+        "wgpu",
+        presentation_diagnostics={"page_table_resident_count": 60},
+        physical_rows={40: {}, 41: {}, 50: {}, 51: {}},
     ) == frozenset({40, 41, 50, 51})
     assert _visual_scene_presented_tiles(
         "pyqtgraph",
@@ -702,25 +721,18 @@ def test_visual_scene_presented_tiles_does_not_treat_residency_as_drawn():
     ) == frozenset({4, 8})
 
 
-def test_visual_camera_state_reports_session_live_and_vispy_key_drift():
-    from types import SimpleNamespace
-
+def test_visual_camera_state_reports_session_and_live_range_drift():
     from arrayscope.tools.profile_montage_workflow import _visual_camera_state
 
-    rect = SimpleNamespace(left=1.0, bottom=2.0, right=11.0, top=22.0)
-    image_view = SimpleNamespace(
-        _vispy_camera_key=((1.0, 11.0), (2.0, 22.0), False, True),
-        _vispy_view=SimpleNamespace(camera=SimpleNamespace(rect=rect)),
-    )
     state = _visual_camera_state(
-        SimpleNamespace(img_view=image_view),
+        SimpleNamespace(),
         session=SimpleNamespace(view_range=((0.0, 10.0), (0.0, 20.0))),
         live_view_range=((1.0, 11.0), (2.0, 22.0)),
     )
 
     assert state["session_matches_live"] is False
-    assert state["vispy_key_matches_live"] is True
-    assert state["vispy_camera_rect"] == (1.0, 2.0, 11.0, 22.0)
+    assert state["session_view_range"] == ((0.0, 10.0), (0.0, 20.0))
+    assert state["live_view_range"] == ((1.0, 11.0), (2.0, 22.0))
 
 
 def test_view_intersection_distinguishes_off_content_camera_and_visible_tile():
@@ -772,7 +784,7 @@ def test_profile_suite_commands_cover_required_profilers(tmp_path):
     from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
 
     commands = profiler_suite_commands(
-        ("--backend", "vispy", "--profile-suite", str(tmp_path)), tmp_path
+        ("--backend", "wgpu", "--profile-suite", str(tmp_path)), tmp_path
     )
 
     assert {item["profiler_type"] for item in commands} == {
@@ -806,7 +818,7 @@ def test_profile_suite_can_opt_into_cprofile_without_passing_flag_to_child(tmp_p
     from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
 
     commands = profiler_suite_commands(
-        ("--backend", "vispy", "--profile-suite", str(tmp_path), "--include-cprofile"),
+        ("--backend", "wgpu", "--profile-suite", str(tmp_path), "--include-cprofile"),
         tmp_path,
     )
     by_type = {item["profiler_type"]: item for item in commands}
@@ -1072,7 +1084,7 @@ def test_profile_suite_commands_preserve_stage_filter_flags(tmp_path):
     commands = profiler_suite_commands(
         (
             "--backend",
-            "vispy",
+            "wgpu",
             "--profile-suite",
             str(tmp_path),
             "--stages",
@@ -1094,9 +1106,9 @@ def test_profile_parser_default_scroll_window_and_custom_value():
     from arrayscope.tools.profile_montage_workflow import DEFAULT_SESSION_FIXTURE, _build_parser
 
     parser = _build_parser()
-    default_args = parser.parse_args(["--backend", "vispy"])
+    default_args = parser.parse_args(["--backend", "wgpu"])
     custom_args = parser.parse_args(
-        ["--backend", "vispy", "--scroll-max-tiles", "84", "--verbose-tile-trace"]
+        ["--backend", "wgpu", "--scroll-max-tiles", "84", "--verbose-tile-trace"]
     )
     wgpu_args = parser.parse_args(["--backend", "wgpu"])
     default_backend_args = parser.parse_args([])
@@ -1154,7 +1166,7 @@ def test_profile_suite_commands_preserve_scroll_max_tiles(tmp_path):
     commands = profiler_suite_commands(
         (
             "--backend",
-            "vispy",
+            "wgpu",
             "--profile-suite",
             str(tmp_path),
             "--scroll-max-tiles",
@@ -1212,7 +1224,7 @@ def test_profile_suite_can_opt_into_native_py_spy_without_passing_suite_flag_to_
     from arrayscope.tools.profile_montage_workflow import profiler_suite_commands
 
     commands = profiler_suite_commands(
-        ("--backend", "vispy", "--profile-suite", str(tmp_path), "--py-spy-native"),
+        ("--backend", "wgpu", "--profile-suite", str(tmp_path), "--py-spy-native"),
         tmp_path,
     )
     by_type = {item["profiler_type"]: item for item in commands}
@@ -1238,11 +1250,6 @@ def test_profile_workflow_preserves_theme_while_forcing_backend_and_resident_pol
         backend="pyqtgraph",
         image_choice=ImageRenderingBackendChoice,
     )
-    vispy = _replace_settings(
-        AppSettingsState(),
-        backend="vispy",
-        image_choice=ImageRenderingBackendChoice,
-    )
     wgpu = _replace_settings(
         AppSettingsState(),
         backend="wgpu",
@@ -1251,8 +1258,6 @@ def test_profile_workflow_preserves_theme_while_forcing_backend_and_resident_pol
 
     assert pyqtgraph.theme == ThemeChoice.SYSTEM
     assert pyqtgraph.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
-    assert vispy.theme == ThemeChoice.SYSTEM
-    assert vispy.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
     assert wgpu.theme == ThemeChoice.SYSTEM
     assert wgpu.image_rendering_backend == ImageRenderingBackendChoice.WGPU
     assert wgpu.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
@@ -1299,8 +1304,8 @@ def test_profile_fit_stretch_pulse_uses_window_fit_command_and_reports_cost():
     assert metrics["fit_stretch_retarget_delivery_ms"] >= 0.0
 
 
-def _passing_r8_phase_record(*, backend="vispy"):
-    evidence_quality = 1 if backend in {"vispy", "wgpu"} else 3
+def _passing_r8_phase_record(*, backend="wgpu"):
+    evidence_quality = 1 if backend == "wgpu" else 3
     return {
         "phase": "raw_full_tiled_montage",
         "backend": backend,
@@ -1369,7 +1374,7 @@ def _passing_r8_phase_record(*, backend="vispy"):
 def test_r8_certification_passes_complete_semantic_and_responsive_phase():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
-    for backend in ("vispy", "wgpu"):
+    for backend in ("wgpu", "pyqtgraph"):
         result = _r8_certification(_passing_r8_phase_record(backend=backend))
 
         assert result["r8_gate_applicable"] is True
@@ -1966,7 +1971,7 @@ def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch
     monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
     visible = _base_record(
         run_id="run",
-        backend="vispy",
+        backend="wgpu",
         data_path=Path("data.nii"),
         data=np.zeros((2, 3, 4), dtype=np.float32),
         load_mode="native",
@@ -1999,7 +2004,7 @@ def test_profile_base_record_marks_offscreen_or_capped_runs_as_smoke(monkeypatch
         **visible,
         **_base_record(
             run_id="run",
-            backend="vispy",
+            backend="wgpu",
             data_path=Path("data.nii"),
             data=np.zeros((2, 3, 4), dtype=np.float32),
             load_mode="native",
@@ -2035,7 +2040,7 @@ def test_profile_base_record_exposes_intentional_scroll_grid_as_pacing_evidence(
     monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
     record = _base_record(
         run_id="run",
-        backend="vispy",
+        backend="wgpu",
         data_path=Path("data.nii"),
         data=np.zeros((2, 3, 272), dtype=np.float32),
         load_mode="native",
@@ -2597,7 +2602,7 @@ def test_profile_timing_detects_immediate_level_work():
     assert _timing_has_level_work(None) is False
 
 
-def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
+def test_profile_montage_completion_waits_for_fully_visible_wgpu_draw():
     from arrayscope.display.model.presentation_generation import PresentationGenerationTracker
     from arrayscope.operations.stage_fanin import StageFanInState
     from arrayscope.tools.profile_montage_workflow import _wait_for_montage_complete
@@ -2615,13 +2620,8 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
             def __init__(self, *_args):
                 pass
 
-    class FakeNative:
-        def isVisible(self):
-            return True
-
     class FakeImageView:
         def __init__(self):
-            self._vispy_canvas_native = FakeNative()
             self.diagnostics = {
                 "draw_count": 0,
                 "tile_presentation_request_count": 4,
@@ -2638,12 +2638,12 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
             }
 
         def montageDisplayMode(self):
-            return "vispy_tile_layer"
+            return "wgpu_tile_layer"
 
         def montageTileOverlayCount(self):
             return 1
 
-        def vispyPresentationDiagnostics(self):
+        def presentation_diagnostics(self):
             return dict(self.diagnostics)
 
     target_state = {"settled": False}
@@ -2698,7 +2698,7 @@ def test_profile_montage_completion_waits_for_fully_visible_vispy_draw():
     assert result["active_presented_tile_count"] == 2
     assert result["active_planned_tile_count"] == 2
     assert result["fully_visible_ms"] is not None
-    assert result["vispy_tile_presentation_draw_count"] == 4
+    assert result["tile_presentation_draw_count"] == 4
     assert result["required_target_settled"] is True
 
 
@@ -2727,26 +2727,26 @@ def test_profile_montage_visibility_ignores_offscreen_unsettled_targets():
         def montageTileOverlayCount(self):
             return 0
 
-        def vispyPresentationDiagnostics(self):
+        def presentation_diagnostics(self):
             return {}
 
     win = SimpleNamespace(img_view=FakeImageView(), _frame_session=session)
 
-    state = _montage_visibility_state(win, mode="vispy_tile_layer")
+    state = _montage_visibility_state(win, mode="wgpu_tile_layer")
 
     assert state["fully_visible"] is True
     assert state["visible_target_unsettled_tiles"] == 0
     assert state["active_presented_tile_count"] == 2
 
     session.required_target_unsettled_tiles = lambda: (1,)
-    state = _montage_visibility_state(win, mode="vispy_tile_layer")
+    state = _montage_visibility_state(win, mode="wgpu_tile_layer")
 
     assert state["fully_visible"] is False
     assert state["visible_target_unsettled_tiles"] == 1
 
     session.required_target_unsettled_tiles = lambda: (5,)
     session.atomic_successor_pending = True
-    state = _montage_visibility_state(win, mode="vispy_tile_layer")
+    state = _montage_visibility_state(win, mode="wgpu_tile_layer")
 
     assert state["fully_visible"] is False
     assert state["atomic_successor_pending"] is True
@@ -2777,12 +2777,12 @@ def test_profile_montage_visibility_is_viewport_scoped_when_selection_is_larger(
         def montageTileOverlayCount(self):
             return 0
 
-        def vispyPresentationDiagnostics(self):
+        def presentation_diagnostics(self):
             return {}
 
     win = SimpleNamespace(img_view=FakeImageView(), _frame_session=session)
 
-    state = _montage_visibility_state(win, mode="vispy_tile_layer")
+    state = _montage_visibility_state(win, mode="wgpu_tile_layer")
 
     assert state["fully_visible"] is True
     assert state["active_presented_tile_count"] == 44
@@ -2893,9 +2893,6 @@ def test_profile_montage_workflow_realistic_dataset_optional(tmp_path):
         for backend in os.environ.get("ARRAYSCOPE_PROFILE_BACKENDS", "wgpu,pyqtgraph").split(",")
         if backend.strip()
     )
-    if "vispy" in backends:
-        pytest.importorskip("vispy")
-
     timeout_s = bounded_interaction_settle_timeout_s(
         float(os.environ.get("ARRAYSCOPE_PROFILE_TIMEOUT_S", "5"))
     )

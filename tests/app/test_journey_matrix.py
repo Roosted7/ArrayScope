@@ -107,7 +107,7 @@ def _artifacts(tmp_path):
     )
 
 
-def _evaluate(trace, timeline, interval, *, backend="vispy"):
+def _evaluate(trace, timeline, interval, *, backend="wgpu"):
     return evaluate_gesture(trace, timeline, backend=backend, interval=interval)
 
 
@@ -196,7 +196,7 @@ def test_wgpu_descriptor_only_missed_redraw_keeps_freshness_red(tmp_path):
 def test_matrix_declares_every_backend_journey_cell():
     from arrayscope.tools.journey_matrix import BACKENDS, DRIVER_RUNS, JOURNEYS, MIN_COMMITS
 
-    assert BACKENDS == ("wgpu", "pyqtgraph", "vispy")
+    assert BACKENDS == ("wgpu", "pyqtgraph")
     assert set(MIN_COMMITS) == {(backend, journey) for backend in BACKENDS for journey in JOURNEYS}
     assert MIN_COMMITS[("pyqtgraph", "cold_fill")] >= 2
     assert "deep_zoom_far_scroll" in DRIVER_RUNS["zoom"][1]
@@ -375,8 +375,7 @@ def test_bounded_priority_commit_oracle_fault_injection(tmp_path):
     assert not result["presentation"]["priority_ordered"]
 
 
-@pytest.mark.parametrize("backend", ["vispy", "wgpu"])
-def test_gpu_zero_upload_rebind_is_exempt_from_item_cap(tmp_path, backend):
+def test_wgpu_zero_upload_rebind_is_exempt_from_item_cap(tmp_path):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[1]["delta_qualities"] = [[0, "preview", 2], [2, "preview", 2]]
     trace[1]["delta_priority_ranks"] = [[0, 0], [2, 1]]
@@ -385,7 +384,7 @@ def test_gpu_zero_upload_rebind_is_exempt_from_item_cap(tmp_path, backend):
     trace[1]["upload_bytes"] = 0
     trace[1]["vertex_uploads"] = 0
 
-    result = _evaluate(trace, timeline, interval, backend=backend)
+    result = _evaluate(trace, timeline, interval, backend="wgpu")
 
     assert result["presentation"]["bounded"]
     assert result["presentation"]["cap_exemptions"] == [
@@ -393,13 +392,12 @@ def test_gpu_zero_upload_rebind_is_exempt_from_item_cap(tmp_path, backend):
             "sequence": 10,
             "size": 2,
             "limit": 1,
-            "reason": f"{backend}_zero_upload_rebind",
+            "reason": "wgpu_zero_upload_rebind",
         }
     ]
 
 
-@pytest.mark.parametrize("backend", ["vispy", "wgpu"])
-def test_gpu_pixel_upload_cannot_claim_rebind_cap_exemption(tmp_path, backend):
+def test_wgpu_pixel_upload_cannot_claim_rebind_cap_exemption(tmp_path):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[1]["delta_qualities"] = [[0, "preview", 2], [2, "preview", 2]]
     trace[1]["delta_priority_ranks"] = [[0, 0], [2, 1]]
@@ -408,14 +406,13 @@ def test_gpu_pixel_upload_cannot_claim_rebind_cap_exemption(tmp_path, backend):
     trace[1]["upload_bytes"] = 4096
     trace[1]["vertex_uploads"] = 0
 
-    result = _evaluate(trace, timeline, interval, backend=backend)
+    result = _evaluate(trace, timeline, interval, backend="wgpu")
 
     assert not result["presentation"]["bounded"]
     assert result["presentation"]["cap_exemptions"] == []
 
 
-@pytest.mark.parametrize("backend", ["vispy", "wgpu"])
-def test_gpu_mixed_resident_rebind_caps_only_reported_cold_tiles(tmp_path, backend):
+def test_wgpu_mixed_resident_rebind_caps_only_reported_cold_tiles(tmp_path):
     trace, timeline, interval = _artifacts(tmp_path)
     trace[1]["delta_qualities"] = [
         [0, "preview", 2],
@@ -429,7 +426,7 @@ def test_gpu_mixed_resident_rebind_caps_only_reported_cold_tiles(tmp_path, backe
     trace[1]["upload_bytes"] = 4096
     trace[1]["vertex_uploads"] = 0
 
-    result = _evaluate(trace, timeline, interval, backend=backend)
+    result = _evaluate(trace, timeline, interval, backend="wgpu")
 
     assert result["presentation"]["bounded"]
     assert result["presentation"]["cap_exemptions"] == [
@@ -438,7 +435,7 @@ def test_gpu_mixed_resident_rebind_caps_only_reported_cold_tiles(tmp_path, backe
             "size": 3,
             "limit": 1,
             "cold_size": 1,
-            "reason": f"{backend}_resident_rebind_with_bounded_cold_upserts",
+            "reason": "wgpu_resident_rebind_with_bounded_cold_upserts",
         }
     ]
 
@@ -598,115 +595,32 @@ def test_level_convergence_oracle_fault_injection(tmp_path):
     assert not result["level_converged_within_budget"]
 
 
-def test_wgpu_cold_level_red_is_unsupported_only_with_identical_reference_red():
-    from arrayscope.tools.journey_matrix import _classify_reference_blocked_wgpu_rows
+def test_wgpu_cold_level_red_remains_failed_in_matrix_report(tmp_path):
+    from arrayscope.tools.journey_matrix import evaluate_artifact_dir
 
-    isolated_red = {
-        "completed": True,
-        "phase_ordered": True,
-        "presentation": {"ok": True},
-        "first_new_pixels_within_budget": True,
-        "demand_fresh_within_budget": True,
-        "coverage_pass_observed": False,
-        "level_converged_within_budget": False,
-    }
-    rows = [
-        {
-            "backend": "vispy",
-            "journey": "cold_fill",
-            "status": "failed",
-            "ok": False,
-            "results": [dict(isolated_red)],
-        },
-        {
-            "backend": "wgpu",
-            "journey": "cold_fill",
-            "status": "failed",
-            "ok": False,
-            "results": [dict(isolated_red)],
-        },
-    ]
-
-    _classify_reference_blocked_wgpu_rows(rows)
-
-    assert rows[0]["status"] == "failed"
-    assert not rows[0]["ok"]
-    assert rows[1]["status"] == "unsupported"
-    assert rows[1]["ok"]
-    assert rows[1]["unsupported_reasons"] == ["reference_vispy_cold_level_convergence_standing_red"]
-
-
-def test_wgpu_cold_level_red_stays_failed_if_reference_has_another_oracle_red():
-    from arrayscope.tools.journey_matrix import _classify_reference_blocked_wgpu_rows
-
-    isolated_red = {
-        "completed": True,
-        "phase_ordered": True,
-        "presentation": {"ok": True},
-        "first_new_pixels_within_budget": True,
-        "demand_fresh_within_budget": True,
-        "coverage_pass_observed": False,
-        "level_converged_within_budget": False,
-    }
-    reference_red = dict(isolated_red)
-    reference_red["first_new_pixels_within_budget"] = False
-    rows = [
-        {
-            "backend": "vispy",
-            "journey": "cold_fill",
-            "status": "failed",
-            "ok": False,
-            "results": [reference_red],
-        },
-        {
-            "backend": "wgpu",
-            "journey": "cold_fill",
-            "status": "failed",
-            "ok": False,
-            "results": [isolated_red],
-        },
-    ]
-
-    _classify_reference_blocked_wgpu_rows(rows)
-
-    assert rows[1]["status"] == "failed"
-    assert not rows[1]["ok"]
-
-
-def test_wgpu_cold_level_red_stays_failed_on_backend_runtime_error():
-    from arrayscope.tools.journey_matrix import (
-        _classify_reference_blocked_wgpu_rows,
-        _wgpu_cold_runtime_clean,
+    trace, timeline, _interval = _artifacts(tmp_path)
+    trace[2]["ts_ns"] = 6_300_000_001
+    trace[-1]["ts_ns"] = 6_300_000_001
+    output = tmp_path / "wgpu" / "cold"
+    output.mkdir(parents=True)
+    (output / "trace.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in trace),
+        encoding="utf-8",
+    )
+    (output / "wgpu-visual-timeline.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in timeline),
+        encoding="utf-8",
     )
 
-    isolated_red = {
-        "completed": True,
-        "phase_ordered": True,
-        "presentation": {"ok": True},
-        "first_new_pixels_within_budget": True,
-        "demand_fresh_within_budget": True,
-        "coverage_pass_observed": False,
-        "level_converged_within_budget": False,
-    }
-    rows = [
-        {
-            "backend": backend,
-            "journey": "cold_fill",
-            "status": "failed",
-            "ok": False,
-            "results": [dict(isolated_red)],
-        }
-        for backend in ("vispy", "wgpu")
-    ]
-    stderr = "GPUValidationError: Dimension Z value 2832 exceeds the limit of 2048"
-
-    _classify_reference_blocked_wgpu_rows(
-        rows,
-        wgpu_runtime_clean=_wgpu_cold_runtime_clean(stderr),
+    report = evaluate_artifact_dir(tmp_path)
+    row = next(
+        item
+        for item in report["rows"]
+        if item["backend"] == "wgpu" and item["journey"] == "cold_fill"
     )
 
-    assert rows[1]["status"] == "failed"
-    assert not rows[1]["ok"]
+    assert row["status"] == "failed"
+    assert not row["ok"]
 
 
 def test_missing_coverage_close_oracle_fault_injection(tmp_path):

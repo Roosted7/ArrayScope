@@ -33,7 +33,6 @@ dependencies:
   - py-spy
   - ruff
   - twine
-  - vispy>=0.14
   - pytest-xdist
   - pip
   - pip:

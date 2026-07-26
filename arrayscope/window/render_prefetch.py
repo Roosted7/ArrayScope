@@ -470,12 +470,21 @@ class RenderPrefetchMixin:
             view_state,
             result,
             shader_display=bool(getattr(capabilities, "shader_windowing", False)),
+            canonical_orientation=bool(getattr(capabilities, "display_axis_transpose", False)),
         )
         if payload is None:
             return False
         return bool(warm(payload))
 
-    def _prefetched_plane_payload(self, document, view_state, result, *, shader_display: bool):
+    def _prefetched_plane_payload(
+        self,
+        document,
+        view_state,
+        result,
+        *,
+        shader_display: bool,
+        canonical_orientation: bool,
+    ):
         """Build the anchored exact payload of one prefetched plane.
 
         Mirrors the frame session's construction for the pieces that decide
@@ -514,7 +523,11 @@ class RenderPrefetchMixin:
         from arrayscope.display.source_anchoring import source_anchoring_for_view
         from arrayscope.render.lod import texture_source_for_rendered
 
-        anchoring = source_anchoring_for_view(document, view_state)
+        anchoring = source_anchoring_for_view(
+            document,
+            view_state,
+            canonical_orientation=canonical_orientation,
+        )
         if anchoring is None:
             return None
         texture, _histogram, texture_kind = texture_source_for_rendered(
@@ -527,12 +540,19 @@ class RenderPrefetchMixin:
             shader_display=shader_display,
         )
         height, width = (int(image.shape[0]), int(image.shape[1]))
-        starts = tuple(getattr(anchoring, "anchored_starts", (None, None)))
+        starts = tuple(getattr(anchoring, "source_starts_yx", (None, None)))
         y_start = int(starts[0] or 0)
         x_start = int(starts[1] or 0)
+        source_axes = (
+            tuple(sorted(int(axis) for axis in image_axes))
+            if canonical_orientation
+            else tuple(int(axis) for axis in image_axes)
+        )
+        plane_shape = tuple(int(view_state.shape[axis]) for axis in source_axes)
         source_anchor = PayloadSourceAnchor(
             content_key=anchoring.content_key,
             source_rect=(y_start, y_start + height, x_start, x_start + width),
+            plane_shape=plane_shape,
         )
         texture_shape = (int(texture.shape[0]), int(texture.shape[1]))
         try:

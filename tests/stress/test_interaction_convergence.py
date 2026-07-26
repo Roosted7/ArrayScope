@@ -22,12 +22,10 @@ Offscreen runs historically do NOT reproduce the scheduling shape (see
 docs/redesign/black-tiles-and-priority.md ground rules); the deterministic
 unit gates live in tests/core/test_view_state.py,
 tests/window/test_montage_lod_residency.py, and
-tests/display/test_vispy_physical_presentation.py.
+tests/display/test_wgpu_imageview2d.py.
 
-Set ``ARRAYSCOPE_STRESS_BACKENDS=vispy`` (or a comma-separated matrix) to run
-the legacy backend explicitly. Its private shader-uniform oracle remains an
-additional VisPy-only assertion; the full interaction choreography and common
-settlement gates run for every selected backend.
+Set ``ARRAYSCOPE_STRESS_BACKENDS`` to a comma-separated subset of ``wgpu`` and
+``pyqtgraph`` to narrow the maintained backend matrix.
 """
 
 from __future__ import annotations
@@ -70,61 +68,24 @@ from arrayscope.tools.interaction_budget import (
 _FILL_TIMEOUT_S = 120
 
 
-# PAL-relaxed LUT[0]: the color of zero-magnitude complex texels drawn
-# without their phase mapping (a_mode 3 instead of 4).  The count is retained
-# as failure context; real phase-color content can legitimately contain this
-# color, so physical mapping truth is the pass/fail oracle.
-_PAL_RELAXED_ORANGE = (249, 127, 16)
-_ORANGE_TOLERANCE = 16
-
-
-def _orange_pixel_count(win) -> int:
-    frame = np.asarray(win.img_view._vispy_canvas.render())[..., :3].astype(np.int16)
-    reference = np.array(_PAL_RELAXED_ORANGE, dtype=np.int16)
-    return int(np.count_nonzero(np.all(np.abs(frame - reference) <= _ORANGE_TOLERANCE, axis=-1)))
-
-
 def _assert_phase_mapping_physical_truth(win, *, context: str) -> None:
-    """Reject the exact physical state that makes zero magnitude orange.
+    """Require the maintained GPU renderer's submitted phase-color mapping."""
 
-    Real phase data can legitimately cover thousands of framebuffer pixels
-    near PAL-relaxed red at some zooms, so an RGB count is not a semantic
-    oracle.  The field defect is unambiguous in physical truth: phase-color
-    quads use mode 4, the visual component uniform is ABS (2), and every
-    visible page carries a shader key.  During an atomic transition the
-    layer's desired key may advance before retained visuals cross, so equality
-    with that future key is not a physical-correctness condition.  Fault
-    injection for these fields lives in test_vispy_physical_presentation.py;
-    the framebuffer consequence is pinned by test_vispy_phase_framebuffer.py.
-    """
-
-    layer = getattr(win.img_view, "_vispy_gpu_montage_layer", None)
-    if layer is None:
+    if win.img_view.surface.capabilities.name != "wgpu":
         return
-    rows = layer.tile_truth_physical_rows()
-    drawn_rows = {
-        int(tile): row
-        for tile, row in rows.items()
-        # The pool may retain draw parts while a tile has no span in the
-        # current GL vertex buffer.  Only a sampled a_mode proves pixels are
-        # physically drawable from this row.
-        if row.get("physical_mapping_mode") is not None
-    }
+    mapping = win.img_view._wgpu_mapping_state
+    rows = win.img_view.tileTruthPhysicalRows()
+    assert rows, f"{context} has no physically submitted WGPU tiles"
     violations = {
-        int(tile): {
-            "mode": row.get("physical_mapping_mode"),
-            "component": row.get("physical_component_mode"),
-            "mapping": row.get("physical_shader_mapping_key"),
-        }
-        for tile, row in drawn_rows.items()
-        if row.get("physical_mapping_mode") != 4.0
-        or row.get("physical_component_mode") != 2.0
-        or row.get("physical_shader_mapping_key") in {None, "None"}
+        int(tile): row.get("physical_mapping_mode")
+        for tile, row in rows.items()
+        if row.get("physical_mapping_mode") != mapping.mode
     }
-    orange = _orange_pixel_count(win)
+    assert mapping.mode == "magnitude"
+    assert mapping.phase_color is True
     assert not violations, (
-        f"{context} has {len(violations)} physically mis-mapped drawn complex tiles "
-        f"and {orange} PAL-relaxed orange pixels: {dict(list(violations.items())[:8])}"
+        f"{context} has {len(violations)} physically mis-mapped WGPU tiles: "
+        f"{dict(list(violations.items())[:8])}"
     )
 
 
@@ -226,7 +187,6 @@ def _build_fft_montage_window(qtbot, *, backend: str):
         make_backend_window,
         restore_default_backend,
         use_pyqtgraph_backend,
-        use_vispy_backend,
         use_wgpu_backend,
     )
 
@@ -240,7 +200,6 @@ def _build_fft_montage_window(qtbot, *, backend: str):
     backend_settings = {
         "wgpu": use_wgpu_backend,
         "pyqtgraph": use_pyqtgraph_backend,
-        "vispy": use_vispy_backend,
     }
     try:
         configure_backend = backend_settings[str(backend)]

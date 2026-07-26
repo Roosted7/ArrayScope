@@ -538,10 +538,10 @@ def test_payload_level_stats_are_bounded_and_deferred(monkeypatch):
 
     class Window(FrameControllerMixin):
         def __init__(self):
-            from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+            from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 
             self.win = self
-            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
+            self.img_view = SimpleNamespace(rendering_capabilities=WGPU_CAPABILITIES)
             self._tracker = MontageLevelTracker()
             self.scheduled = 0
 
@@ -650,10 +650,10 @@ def test_prepared_payload_level_stats_merge_without_background_sampling(monkeypa
 
     class Window(FrameControllerMixin):
         def __init__(self):
-            from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+            from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 
             self.win = self
-            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
+            self.img_view = SimpleNamespace(rendering_capabilities=WGPU_CAPABILITIES)
             self._tracker = MontageLevelTracker()
             self.scheduled = 0
 
@@ -866,10 +866,10 @@ def test_level_stats_refresh_waits_for_pending_visible_upserts(monkeypatch):
 
     class Window(LevelStatsService):
         def __init__(self, session):
-            from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+            from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 
             self.win = self
-            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
+            self.img_view = SimpleNamespace(rendering_capabilities=WGPU_CAPABILITIES)
             self.kernel = InlineKernel()
             self._frame_session = session
             self._tracker = MontageLevelTracker()
@@ -946,7 +946,7 @@ def test_preview_payload_level_data_updates_provisional_level_tracker(monkeypatc
             self.win = self
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
-                    name="vispy", shader_windowing=True
+                    name="wgpu", shader_windowing=True
                 )
             )
             self._tracker = MontageLevelTracker()
@@ -1062,7 +1062,7 @@ def test_preview_level_evidence_is_not_promoted_to_refined_when_pyqtgraph_waits(
 def test_preview_level_evidence_stays_provisional_on_shader_backend_until_exact():
     from types import SimpleNamespace
 
-    from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+    from arrayscope.display.backend_contract import WGPU_CAPABILITIES
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker
     from arrayscope.render.level_stats import _rendered_tile_from_previous_payload
@@ -1071,7 +1071,7 @@ def test_preview_level_evidence_stays_provisional_on_shader_backend_until_exact(
     class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
-            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
+            self.img_view = SimpleNamespace(rendering_capabilities=WGPU_CAPABILITIES)
             self._tracker = MontageLevelTracker()
 
         def _montage_level_tracker(self):
@@ -1088,7 +1088,7 @@ def test_preview_level_evidence_stays_provisional_on_shader_backend_until_exact(
         quality="preview",
     )
     win = Window()
-    key = ("levels", "preview-refined-vispy")
+    key = ("levels", "preview-refined-wgpu")
 
     win._update_montage_level_bounds_from_rendered(
         key,
@@ -1123,7 +1123,7 @@ def test_preview_level_evidence_stays_provisional_on_shader_backend_until_exact(
 
 
 def test_finish_complete_montage_queues_exact_payloads_for_refined_levels():
-    from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+    from arrayscope.display.backend_contract import WGPU_CAPABILITIES
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker
     from arrayscope.render.level_stats import _rendered_tile_from_previous_payload
@@ -1132,7 +1132,7 @@ def test_finish_complete_montage_queues_exact_payloads_for_refined_levels():
     class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
-            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
+            self.img_view = SimpleNamespace(rendering_capabilities=WGPU_CAPABILITIES)
             self._tracker = MontageLevelTracker()
             self.scheduled = 0
 
@@ -1197,7 +1197,7 @@ def test_finish_complete_montage_queues_exact_payloads_for_refined_levels():
 
 
 def test_finish_complete_montage_seeds_rough_levels_from_display_payloads():
-    from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+    from arrayscope.display.backend_contract import WGPU_CAPABILITIES
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.model.montage_levels import MontageLevelTracker
     from arrayscope.window.frame_controller import FrameControllerMixin
@@ -1205,7 +1205,7 @@ def test_finish_complete_montage_seeds_rough_levels_from_display_payloads():
     class Window(FrameControllerMixin):
         def __init__(self):
             self.win = self
-            self.img_view = SimpleNamespace(rendering_capabilities=VISPY_CAPABILITIES)
+            self.img_view = SimpleNamespace(rendering_capabilities=WGPU_CAPABILITIES)
             self._tracker = MontageLevelTracker()
             self.cached_schedules = 0
             self.refined_schedules = 0
@@ -1336,7 +1336,7 @@ def test_montage_level_metadata_publishes_when_evidence_quality_improves():
     assert Window()._should_publish_montage_level_metadata(session, stats) is True
 
 
-def test_vispy_first_pass_level_metadata_publishes_on_rough_coverage_growth():
+def test_wgpu_first_pass_level_metadata_publishes_on_rough_coverage_growth():
     from arrayscope.core.window_levels import LevelSource, LevelSourceRank
     from arrayscope.display.model.montage_levels import LevelEvidenceQuality, MontageLevelStats
     from arrayscope.window.frame_controller import FrameControllerMixin
@@ -1793,7 +1793,7 @@ def test_shader_first_pixels_wait_for_rough_source_but_not_complete_source():
 
     window = SimpleNamespace(
         img_view=SimpleNamespace(
-            rendering_capabilities=ImageViewBackendCapabilities(name="vispy", shader_windowing=True)
+            rendering_capabilities=ImageViewBackendCapabilities(name="wgpu", shader_windowing=True)
         )
     )
     window.win = window
@@ -1855,7 +1855,7 @@ def test_first_display_level_scan_continuation_uses_visible_lane(shader_windowin
 
     image_view = SimpleNamespace(
         rendering_capabilities=ImageViewBackendCapabilities(
-            name="vispy" if shader_windowing else "pyqtgraph",
+            name="wgpu" if shader_windowing else "pyqtgraph",
             shader_windowing=shader_windowing,
         )
     )
@@ -1910,7 +1910,7 @@ def test_first_shader_payload_level_evidence_uses_visible_lane():
     service.win = SimpleNamespace(
         kernel=Kernel(),
         img_view=SimpleNamespace(
-            rendering_capabilities=ImageViewBackendCapabilities(name="vispy", shader_windowing=True)
+            rendering_capabilities=ImageViewBackendCapabilities(name="wgpu", shader_windowing=True)
         ),
     )
     session = SimpleNamespace(
@@ -2571,7 +2571,7 @@ def test_montage_commit_reschedules_restored_roi_stats():
     assert calls == ["viewport", ("roi", "montage-semantic-commit")]
 
 
-def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
+def test_wgpu_persistent_upsert_limits_use_governed_upload_limit():
     from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace()
@@ -2582,7 +2582,7 @@ def test_vispy_persistent_upsert_limits_use_governed_upload_limit():
     window = SimpleNamespace(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(
-                name="vispy",
+                name="wgpu",
                 persistent_tile_residency=True,
                 shader_windowing=True,
             ),
@@ -3006,7 +3006,7 @@ def test_hidden_target_warm_accepts_visible_commit_slot_owner(monkeypatch):
     assert replans == []
 
 
-def test_vispy_atomic_successor_marker_ignores_lod_but_not_source_index():
+def test_shader_successor_marker_ignores_lod_but_not_source_index():
     from arrayscope.window import frame_effects as montage_commit
 
     coarse = SimpleNamespace(
@@ -3027,7 +3027,7 @@ def test_vispy_atomic_successor_marker_ignores_lod_but_not_source_index():
     assert montage_commit._shader_successor_transaction_payload_marker(wrong_source) != marker
 
 
-def test_vispy_first_persistent_upsert_limits_use_shared_commit_batch():
+def test_wgpu_first_persistent_upsert_limits_use_shared_commit_batch():
     from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace(display_committed=False)
@@ -3035,7 +3035,7 @@ def test_vispy_first_persistent_upsert_limits_use_shared_commit_batch():
     window = SimpleNamespace(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(
-                name="vispy",
+                name="wgpu",
                 persistent_tile_residency=True,
                 shader_windowing=True,
             )
@@ -3055,7 +3055,7 @@ def test_vispy_first_persistent_upsert_limits_use_shared_commit_batch():
     assert limits["max_upsert_bytes"] == 1024 * 1024
 
 
-def test_vispy_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transaction_cost():
+def test_wgpu_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transaction_cost():
     from arrayscope.window import frame_effects as montage_commit
 
     image = np.zeros((512, 512), dtype=np.float32)
@@ -3080,7 +3080,7 @@ def test_vispy_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transact
     window = SimpleNamespace(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(
-                name="vispy",
+                name="wgpu",
                 persistent_tile_residency=True,
                 shader_windowing=True,
             )
@@ -3299,7 +3299,7 @@ def test_wgpu_upload_cost_is_whole_pages_on_every_route():
     )
 
 
-def test_vispy_idle_upsert_cohort_scales_to_large_backlog():
+def test_wgpu_idle_upsert_cohort_scales_to_large_backlog():
     # The tiled commit's cost is fixed-dominated (full-plan classify + delta
     # walk + acknowledgement run once per commit regardless of item count),
     # so a latency-governed item clamp multiplies the fixed cost across a
@@ -3320,7 +3320,7 @@ def test_vispy_idle_upsert_cohort_scales_to_large_backlog():
     window = SimpleNamespace(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(
-                name="vispy",
+                name="wgpu",
                 persistent_tile_residency=True,
                 shader_windowing=True,
             )
@@ -3651,14 +3651,14 @@ def test_pyqtgraph_display_committed_tile_layer_can_use_direct_delta_commit():
     assert montage_commit.direct_montage_tile_delta_commit_enabled(window, session) is False
 
 
-def test_vispy_persistent_tile_layer_can_direct_delta_first_session_commit():
+def test_wgpu_persistent_tile_layer_can_direct_delta_first_session_commit():
     from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace(display_committed=False)
     window = SimpleNamespace(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(
-                name="vispy",
+                name="wgpu",
                 persistent_tile_residency=True,
                 shader_windowing=True,
             )
@@ -3716,13 +3716,13 @@ def test_pyqtgraph_tile_layer_uses_shared_commit_batch_without_cost_signature():
     assert limits["max_upsert_bytes"] == 4096
 
 
-def test_vispy_persistent_limits_use_shared_commit_batch_without_cost_signature():
+def test_wgpu_persistent_limits_use_shared_commit_batch_without_cost_signature():
     from arrayscope.window import frame_effects as montage_commit
 
     window = SimpleNamespace(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(
-                name="vispy",
+                name="wgpu",
                 persistent_tile_residency=True,
                 shader_windowing=True,
             )
@@ -3757,7 +3757,7 @@ def test_vispy_persistent_limits_use_shared_commit_batch_without_cost_signature(
     assert limits["max_upsert_bytes"] == 8 * 1024 * 1024
 
 
-def test_vispy_persistent_resident_remap_uses_shared_commit_batch():
+def test_wgpu_persistent_resident_remap_uses_shared_commit_batch():
     from arrayscope.display.model.frame import DisplayTilePayload, TilePresentationState
     from arrayscope.window import frame_effects as montage_commit
 
@@ -3771,7 +3771,7 @@ def test_vispy_persistent_resident_remap_uses_shared_commit_batch():
     window = SimpleNamespace(
         img_view=SimpleNamespace(
             rendering_capabilities=ImageViewBackendCapabilities(
-                name="vispy",
+                name="wgpu",
                 persistent_tile_residency=True,
                 shader_windowing=True,
             )
@@ -4426,11 +4426,11 @@ def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monke
             self.commits = 0
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
-                    name="vispy",
+                    name="wgpu",
                     persistent_tile_residency=True,
                     shader_windowing=True,
                 ),
-                montageDisplayMode=lambda: "vispy_tile_layer",
+                montageDisplayMode=lambda: "wgpu_tile_layer",
             )
 
         def _montage_viewport_plan(self, view_state, *, view_range=None):
@@ -4552,11 +4552,11 @@ def test_viewport_update_retains_existing_deferred_tiles_without_quiet_gate(qt_a
             self.pipeline_retargets = 0
             self.img_view = SimpleNamespace(
                 rendering_capabilities=ImageViewBackendCapabilities(
-                    name="vispy",
+                    name="wgpu",
                     persistent_tile_residency=True,
                     shader_windowing=True,
                 ),
-                montageDisplayMode=lambda: "vispy_tile_layer",
+                montageDisplayMode=lambda: "wgpu_tile_layer",
             )
 
         def _montage_viewport_plan(self, view_state, *, view_range=None):
@@ -4652,7 +4652,7 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
         def __init__(self):
             self.invalidations = []
             self.capabilities = ImageViewBackendCapabilities(
-                name="vispy",
+                name="wgpu",
                 persistent_tile_residency=True,
                 shader_windowing=True,
             )
@@ -5259,10 +5259,10 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
     from arrayscope.window.montage_viewport import montage_viewport_retarget_policy
 
     capabilities = ImageViewBackendCapabilities(
-        name="vispy",
+        name="wgpu",
         persistent_tile_residency=True,
     )
-    persistent_nonvispy = ImageViewBackendCapabilities(
+    persistent_future = ImageViewBackendCapabilities(
         name="future-backend",
         persistent_tile_residency=True,
         shader_windowing=True,
@@ -5277,12 +5277,11 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
         shader_windowing=False,
     )
     assert (
-        montage_viewport_retarget_policy(capabilities, "vispy_tile_layer").coverage_margin_tiles
-        == 1
+        montage_viewport_retarget_policy(capabilities, "wgpu_tile_layer").coverage_margin_tiles == 1
     )
     assert (
         persistent_tile_residency_backend(
-            _window_ns(img_view=SimpleNamespace(rendering_capabilities=persistent_nonvispy)),
+            _window_ns(img_view=SimpleNamespace(rendering_capabilities=persistent_future)),
             SimpleNamespace(),
         )
         is True

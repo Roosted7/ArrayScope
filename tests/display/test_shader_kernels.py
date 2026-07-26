@@ -187,7 +187,7 @@ def test_unregistered_group_is_never_ready():
 
 
 def test_display_prewarm_is_gated_to_the_cpu_backend():
-    # The display kernels run only on pyqtgraph; a wgpu/vispy session must not
+    # The display kernels run only on pyqtgraph; a wgpu session must not
     # bulk-compile them. The gate is a settings-only check (no numba needed).
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.display.image_view_factory import cpu_display_backend_likely
@@ -197,7 +197,6 @@ def test_display_prewarm_is_gated_to_the_cpu_backend():
             self.image_rendering_backend = choice
 
     assert cpu_display_backend_likely(_Settings(ImageRenderingBackendChoice.WGPU)) is False
-    assert cpu_display_backend_likely(_Settings(ImageRenderingBackendChoice.VISPY)) is False
     assert cpu_display_backend_likely(_Settings(ImageRenderingBackendChoice.PYQTGRAPH)) is True
 
     # The registered display group defers to that predicate for bulk prewarm.

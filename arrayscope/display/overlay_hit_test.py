@@ -2,7 +2,7 @@
 
 The interaction owner and the rendering backend must agree on what is
 interactive.  Keeping the geometry tests here avoids separate, slowly
-drifting PyQtGraph and VisPy interpretations of ROI handles and outlines.
+drifting backend interpretations of ROI handles and outlines.
 """
 
 from __future__ import annotations

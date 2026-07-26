@@ -25,7 +25,6 @@ from tests.ui.helpers import (
     make_backend_window,
     plane_settled,
     restore_default_backend,
-    use_vispy_backend,
     use_wgpu_backend,
 )
 
@@ -39,9 +38,9 @@ def _surface_blank(win) -> bool:
     mode = str(win.img_view.montageDisplayMode())
     if mode == "none":
         return True
-    layer = getattr(win.img_view, "_vispy_gpu_montage_layer", None)
-    if layer is not None:
-        return int(getattr(layer, "_visible_items", 0) or 0) <= 0
+    executor = getattr(win.img_view, "_wgpu_executor", None)
+    if executor is not None:
+        return not bool(getattr(executor, "_tiles", {}))
     tile_layer = getattr(win.img_view, "_montage_tile_layer", None)
     if tile_layer is not None:
         states = getattr(tile_layer, "_states", {}) or {}
@@ -204,12 +203,12 @@ def test_scrub_step_retains_previous_plane_pyqtgraph(qtbot):
         win.close()
 
 
-def test_scrub_step_retains_previous_plane_vispy(qtbot):
-    pytest.importorskip("vispy")
-    settings = use_vispy_backend()
+def test_scrub_step_retains_previous_plane_wgpu(qtbot):
+    pytest.importorskip("wgpu")
+    settings = use_wgpu_backend()
     rng = np.random.default_rng(19)
     data = rng.standard_normal((4, HEIGHT, WIDTH)).astype(np.float32)
-    win = make_backend_window(qtbot, data, backend="vispy")
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     try:
         _assert_scrub_step_never_blanks(qtbot, win, data)
         _assert_document_change_blanks(qtbot, win)
@@ -304,12 +303,12 @@ def test_interactive_stage_backed_scrub_replaces_retained_plane_pyqtgraph(qtbot)
         win.close()
 
 
-def test_interactive_stage_backed_scrub_replaces_retained_plane_vispy(qtbot):
-    pytest.importorskip("vispy")
-    settings = use_vispy_backend()
+def test_interactive_stage_backed_scrub_replaces_retained_plane_wgpu(qtbot):
+    pytest.importorskip("wgpu")
+    settings = use_wgpu_backend()
     rng = np.random.default_rng(29)
     data = rng.standard_normal((4, HEIGHT, WIDTH)).astype(np.float32)
-    win = make_backend_window(qtbot, data, backend="vispy")
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     try:
         _assert_stage_backed_scrub_replaces_retained_plane_while_interactive(
             qtbot,

@@ -1,8 +1,6 @@
 """Physical-presentation truth gates for the pyqtgraph tile layer.
 
-Mirrors tests/display/test_vispy_physical_presentation.py for the CPU
-backend: what the commit stats report must match what the ImageItems
-physically draw.
+What the commit stats report must match what the ImageItems physically draw.
 """
 
 from types import SimpleNamespace

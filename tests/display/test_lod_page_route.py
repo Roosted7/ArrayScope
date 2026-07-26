@@ -16,7 +16,6 @@ from arrayscope.display.backends.pyqtgraph.tiles import (
     _payload_rgb_already_windowed,
     _resolve_page_backed_payload,
 )
-from arrayscope.display.backends.vispy.tiles import TextureAtlasPool, _payload_mode
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.frame import (
@@ -47,7 +46,6 @@ from arrayscope.gpu import PageSlot, PageTable
 from arrayscope.gpu.keys import COMPLEX_RG32F, RGB8, SCALAR_R32F
 from arrayscope.presentation.tile_lifecycle import TileTarget, payload_ref_from_display_payload
 from arrayscope.render import lod as render_lod
-from tests.display.vispy_test_utils import FakeGloo
 
 CONTENT = ("src-anchored", ("doc", 4), ("op", "fft"))
 
@@ -293,31 +291,12 @@ def test_native_uint8_route_keeps_two_dimensional_values_scalar():
         source_origin_yx=(0, 0),
         plans=key.plans,
     )
-    lod = LodInfo(0, 1, values.shape, values.shape, 0)
-    payload = DisplayTilePayload(
-        0,
-        0,
-        values,
-        values,
-        ("uint8-scalar-payload", 0),
-        semantic_data=values,
-        texture_data=values,
-        lod=lod,
-        page_backing=PageBackedPresentation(key.plans, pages, (0, 3, 0, 4), lod),
-    )
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=512)
-
-    _uvs, stats = pool.update_payloads(
-        {0: payload},
-        tile_shape=values.shape,
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        tile_world_regions={0: (0, 0, 4, 3)},
-    )
-
-    assert stats.presented_tiles == (0,)
-    assert all(page.key in pool.resident_slots for page in pages)
-    assert {page.storage_mode for page in pool.pages} == {"scalar"}
+    table = PageTable()
+    for index, page in enumerate(pages):
+        table.bind(page.key, PageSlot("scalar-pages", 0, index), nbytes=page.nbytes)
+    assert all(table.lookup(page.key) is not None for page in pages)
+    assert {page.key.representation for page in pages} == {SCALAR_R32F}
+    assert all(page.values.ndim == 2 for page in pages)
 
 
 def test_materialized_representation_rejects_two_dimensional_values_under_rgb_key():
@@ -1154,32 +1133,7 @@ def _expanded_direct_oracle(reduction):
     return expanded
 
 
-def _assert_vispy_scalar_pages_match_oracle(pool, pages, reduction):
-    values_by_rect = dict(zip(reduction.source_rects, reduction.values.reshape(-1), strict=True))
-    for materialized in pages:
-        page_index, slot_index = pool.resident_slots[materialized.key]
-        atlas = pool.pages[page_index]
-        offset = atlas.offset_for_slot(slot_index)
-        uploads = [
-            values
-            for upload_offset, values in atlas.scalar_texture.uploads
-            if upload_offset == offset
-        ]
-        assert uploads, f"VisPy did not upload canonical page {materialized.key!r}"
-        expected = np.asarray(
-            [values_by_rect[rect] for rect in materialized.plan.sample_source_rects_yx],
-            dtype=reduction.values.dtype,
-        ).reshape(materialized.plan.stored_shape)
-        actual = np.asarray(uploads[-1])
-        if actual.ndim == 3 and actual.shape[-1] == 1:
-            actual = actual[..., 0]
-        np.testing.assert_allclose(
-            actual[: expected.shape[0], : expected.shape[1]],
-            expected,
-        )
-
-
-def test_clipped_page_backed_backends_share_direct_oracle_and_exact_draw_geometry():
+def test_clipped_page_backing_matches_direct_oracle_and_canonical_resolution():
     rect = (100, 105, 101, 114)
     values = source(rect)
     reduction = (1, 1)
@@ -1216,61 +1170,18 @@ def test_clipped_page_backed_backends_share_direct_oracle_and_exact_draw_geometr
         page_plan.key for page_plan in plans
     )
 
-    world_x, world_y = (7, 11)
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=16)
-    _uvs, stats = pool.update_payloads(
-        {0: payload},
-        tile_shape=(2, 2),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=1,
-        tile_world_regions={0: (world_x, world_y, values.shape[1], values.shape[0])},
-    )
-    assert stats.presented_tiles == (0,)
-    resolutions = pool.tile_page_target_resolutions[0]
+    table = PageTable()
+    for index, page in enumerate(pages):
+        table.bind(page.key, PageSlot("clipped-pages", 0, index), nbytes=page.nbytes)
+    resolutions = tuple(table.resolve(page_plan.key) for page_plan in plans)
+    assert all(item is not None for item in resolutions)
     assert tuple(item.target_key for item in resolutions) == tuple(
         page_plan.key for page_plan in plans
     )
     assert all(item.actual_key == item.target_key for item in resolutions)
-    _assert_vispy_scalar_pages_match_oracle(pool, pages, oracle)
-
-    parts = pool.tile_draw_parts[0]
-    assert parts
-    source_y_edges = {edge for source_rect in oracle.source_rects for edge in source_rect[:2]}
-    source_x_edges = {edge for source_rect in oracle.source_rects for edge in source_rect[2:]}
-    assert sum(
-        (part.world_rect[2] - part.world_rect[0]) * (part.world_rect[3] - part.world_rect[1])
-        for part in parts
-    ) == pytest.approx(values.size)
-    for part in parts:
-        native_x0 = part.world_rect[0] - world_x + rect[2]
-        native_y0 = part.world_rect[1] - world_y + rect[0]
-        native_x1 = part.world_rect[2] - world_x + rect[2]
-        native_y1 = part.world_rect[3] - world_y + rect[0]
-        assert {native_y0, native_y1}.issubset(source_y_edges)
-        assert {native_x0, native_x1}.issubset(source_x_edges)
-    for by0, by1, bx0, bx1 in oracle.source_rects:
-        expected_world = (
-            world_x + bx0 - rect[2],
-            world_y + by0 - rect[0],
-            world_x + bx1 - rect[2],
-            world_y + by1 - rect[0],
-        )
-        assert (
-            sum(
-                int(
-                    part.world_rect[0] <= expected_world[0]
-                    and part.world_rect[1] <= expected_world[1]
-                    and expected_world[2] <= part.world_rect[2]
-                    and expected_world[3] <= part.world_rect[3]
-                )
-                for part in parts
-            )
-            == 1
-        )
 
 
-def test_mean_abs_page_values_match_both_backends_and_never_alias_complex_mean():
+def test_mean_abs_page_values_match_canonical_route_and_never_alias_complex_mean():
     rect = (0, 4, 0, 4)
     values = np.asarray(
         [
@@ -1348,26 +1259,19 @@ def test_mean_abs_page_values_match_both_backends_and_never_alias_complex_mean()
     pyqtgraph = _resolve_page_backed_payload(payload)
     np.testing.assert_array_equal(pyqtgraph.payload.image, expected)
 
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
-    _uvs, stats = pool.update_payloads(
-        {0: payload},
-        tile_shape=(2, 2),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=1,
-        tile_world_regions={0: (0, 0, 4, 4)},
-    )
-    assert stats.presented_tiles == (0,)
+    table = PageTable()
+    for index, page in enumerate(mean_abs_pages):
+        table.bind(page.key, PageSlot("mean-abs-family", 0, index), nbytes=page.nbytes)
     assert all(
-        resolution.actual_key == resolution.target_key
-        for resolution in pool.tile_page_target_resolutions[0]
+        (resolution := table.resolve(page_plan.key)) is not None
+        and resolution.actual_key == resolution.target_key
+        for page_plan in mean_abs_plans
     )
-    _assert_vispy_scalar_pages_match_oracle(pool, mean_abs_pages, mean_abs_oracle)
 
     table = PageTable()
     table.bind(mean_pages[0].key, PageSlot("mean-family", 0, 0), nbytes=mean_pages[0].nbytes)
     assert table.resolve(mean_abs_plans[0].key) is None
-    assert _vispy_resolve_materialized_pages(mean_abs_plans[0], mean_pages) is None
+    assert _resolve_materialized_pages(mean_abs_plans[0], mean_pages) is None
     with pytest.raises(ValueError, match="do not belong"):
         PageBackedPresentation(mean_abs_plans, mean_pages, rect, lod)
 
@@ -1409,26 +1313,13 @@ def _anisotropic_page_candidates(*, candidate_reducers=("mean", "mean")):
     return rect, values, target, pages
 
 
-def _vispy_resolve_materialized_pages(target, pages):
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
-    payloads = {
-        index: DisplayTilePayload(
-            index,
-            index,
-            page.values,
-            None,
-            page.key,
-        )
-        for index, page in enumerate(pages)
-    }
-    pool.update_payloads(
-        payloads,
-        tile_shape=pages[0].values.shape[:2],
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=len(payloads),
-    )
-    return pool.resolve_page_targets({17: target.key})[17]
+def _resolve_materialized_pages(target, pages):
+    """Resolve supplied pages through the backend-neutral page-table owner."""
+
+    table = PageTable()
+    for index, page in enumerate(pages):
+        table.bind(page.key, PageSlot("materialized-pages", 0, index), nbytes=page.nbytes)
+    return table.resolve(target.key)
 
 
 def test_page_backed_residency_requires_exact_supplied_pages_not_fallback_coverage():
@@ -1462,21 +1353,11 @@ def test_page_backed_residency_requires_exact_supplied_pages_not_fallback_covera
         source_origin_yx=(0, 0),
         plan=coarse_plan,
     )
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
-    pool.update_payloads(
-        {
-            0: DisplayTilePayload(
-                0,
-                0,
-                coarse_page.values,
-                None,
-                coarse_page.key,
-            )
-        },
-        tile_shape=coarse_page.values.shape[:2],
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=1,
+    table = PageTable()
+    table.bind(
+        coarse_page.key,
+        PageSlot("coarse-pages", 0, 0),
+        nbytes=coarse_page.nbytes,
     )
 
     lod = LodInfo(1, 2, values.shape, fine_page.values.shape, 0)
@@ -1492,12 +1373,14 @@ def test_page_backed_residency_requires_exact_supplied_pages_not_fallback_covera
         page_backing=PageBackedPresentation((fine_plan,), (fine_page,), rect, lod),
     )
 
-    assert pool._page_table.resolve(fine_page.key) is not None
-    assert pool._page_table.lookup(fine_page.key) is None
-    assert pool.payload_resident(fine_payload) is False
+    assert table.resolve(fine_page.key) is not None
+    assert table.lookup(fine_page.key) is None
+    supplied_keys = {page.key for page in fine_payload.page_backing.materialized_pages}
+    assert fine_page.key in supplied_keys
+    assert table.lookup(fine_page.key) is None
 
 
-def test_pyqtgraph_anisotropic_resolution_matches_page_table_and_vispy(qt_app):
+def test_pyqtgraph_anisotropic_resolution_matches_canonical_page_table(qt_app):
     """The backend must not own an anisotropic tie-break rank.
 
     Both candidates have reduction-step sum four.  PyQtGraph's deleted
@@ -1539,10 +1422,10 @@ def test_pyqtgraph_anisotropic_resolution_matches_page_table_and_vispy(qt_app):
     assert pyqtgraph.resolutions[0].actual_key == canonical.actual_key
     assert pyqtgraph.resolutions[0].scale == canonical.scale == (0.5, 0.5)
 
-    vispy = _vispy_resolve_materialized_pages(target, pages)
-    assert vispy is not None
-    assert vispy.actual_key == canonical.actual_key
-    assert vispy.scale == canonical.scale
+    supplied = _resolve_materialized_pages(target, pages)
+    assert supplied is not None
+    assert supplied.actual_key == canonical.actual_key
+    assert supplied.scale == canonical.scale
 
     expected = np.repeat(np.repeat(two_by_two.values, 4, axis=0), 4, axis=1)
     np.testing.assert_array_equal(pyqtgraph.payload.image, expected)
@@ -1726,19 +1609,14 @@ def test_heterogeneous_actual_pages_remain_target_aligned_physical_truth(qt_app)
     assert backing.sample_presented_value_at_native(0, 0) == pages[0].values[0, 0]
     assert backing.sample_presented_value_at_native(0, 31) == pages[1].values[0, 1]
 
-    pool = TextureAtlasPool(FakeGloo(), max_texture_size=8)
-    pool.update_payloads(
-        {
-            index: DisplayTilePayload(index, index, page.values, None, page.key)
-            for index, page in enumerate(pages)
-        },
-        tile_shape=pages[0].values.shape[:2],
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=len(pages),
-    )
-    vispy = pool.resolve_page_targets({index: target.key for index, target in enumerate(targets)})
-    assert tuple(max(vispy[index].actual_key.lod.reduction) for index in range(len(targets))) == (
+    table = PageTable()
+    for index, page in enumerate(pages):
+        table.bind(page.key, PageSlot("heterogeneous-pages", 0, index), nbytes=page.nbytes)
+    physical = {index: table.resolve(target.key) for index, target in enumerate(targets)}
+    assert all(resolution is not None for resolution in physical.values())
+    assert tuple(
+        max(physical[index].actual_key.lod.reduction) for index in range(len(targets))
+    ) == (
         3,
         4,
     )
@@ -2007,7 +1885,7 @@ def test_cross_family_page_is_rejected_by_payload_and_both_resolvers():
     for index, page in enumerate(pages):
         table.bind(page.key, PageSlot("cross-family", 0, index), nbytes=page.nbytes)
     assert table.resolve(target.key) is None
-    assert _vispy_resolve_materialized_pages(target, pages) is None
+    assert _resolve_materialized_pages(target, pages) is None
 
     lod = LodInfo(1, 2, (8, 8), target.stored_shape, 0)
     with pytest.raises(ValueError, match="do not belong"):
@@ -2045,7 +1923,7 @@ def test_phase_vector_backend_route_blacks_cancellation_and_rejects_mean_family(
     table = PageTable()
     table.bind(mean_page.key, PageSlot("phase-family", 0, 0), nbytes=mean_page.nbytes)
     assert table.resolve(target.key) is None
-    assert _vispy_resolve_materialized_pages(target, (mean_page,)) is None
+    assert _resolve_materialized_pages(target, (mean_page,)) is None
 
     lod = LodInfo(1, 2, (2, 2), (1, 1), 0)
     with pytest.raises(ValueError, match="do not belong"):
@@ -2069,13 +1947,15 @@ def test_phase_vector_backend_route_blacks_cancellation_and_rejects_mean_family(
         page_backing=PageBackedPresentation((target,), (phase_page,), rect, lod),
     )
 
-    assert _payload_mode(payload, rgb_already_windowed=False) == 5
+    assert payload.shader_mapping.display_mode == ShaderDisplayMode.PHASE_COLOR
+    assert payload.shader_mapping.component == ShaderComponent.ANGLE
+    assert payload.shader_mapping.histogram_source_policy == "mapped"
     resolved = _resolve_page_backed_payload(payload, levels=(-1000.0, 1000.0))
     assert resolved.resolutions[0].actual_key == target.key
     np.testing.assert_array_equal(resolved.payload.image, np.zeros((2, 2, 3), np.uint8))
-    vispy = _vispy_resolve_materialized_pages(target, (phase_page,))
-    assert vispy is not None
-    assert vispy.actual_key == target.key
+    physical = _resolve_materialized_pages(target, (phase_page,))
+    assert physical is not None
+    assert physical.actual_key == target.key
 
 
 @pytest.mark.parametrize(

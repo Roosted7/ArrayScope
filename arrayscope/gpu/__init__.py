@@ -1,4 +1,4 @@
-"""Qt-free, VisPy-free GPU residency engine (ADR 0055, G-program).
+"""Qt-free GPU residency engine (ADR 0055, G-program).
 
 This package owns the three-way vocabulary that ADR 0055 separates:
 
@@ -8,7 +8,7 @@ This package owns the three-way vocabulary that ADR 0055 separates:
   a backend memory pool, with explicit "not resident" state.
 
 Rendering backends consume this engine; they do not define it. Nothing here
-may import Qt, VisPy, pyqtgraph, or ``arrayscope.display`` — the dependency
+may import Qt, pyqtgraph, or ``arrayscope.display`` — the dependency
 points the other way.
 """
 

@@ -11,6 +11,7 @@ from tests.ui.helpers import (
 from tests.ui.helpers import (
     process_events as _process_events,
 )
+from tests.ui.helpers import require_wgpu_adapter
 
 
 def test_hidden_montage_roi_stats_use_semantic_demand_not_presented_payloads(monkeypatch):
@@ -285,13 +286,11 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         win.close()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
     qtbot,
     backend,
 ):
-    if backend == "vispy":
-        pytest.importorskip("vispy")
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
 
@@ -325,7 +324,7 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
                     image.shape,
                     int(image.nbytes),
                 ),
-                shader_display=backend == "vispy",
+                shader_display=backend == "wgpu",
             )
 
         win._set_view_state(first_state)
@@ -362,9 +361,9 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
         settings.sync()
 
 
-def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
+def test_wgpu_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
+    require_wgpu_adapter()
     _clear_arrayscope_settings()
-    pytest.importorskip("vispy")
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
@@ -373,17 +372,17 @@ def test_vispy_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
     from arrayscope.window import ArrayScopeWindow
 
     settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.WGPU.value)
     settings.sync()
 
     data = np.arange(8 * 8, dtype=float).reshape(8, 8)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        if image_view_backend_capabilities(win.img_view).name != "vispy":
-            pytest.skip("VisPy backend unavailable in this Qt environment")
+        if image_view_backend_capabilities(win.img_view).name != "wgpu":
+            pytest.skip("WGPU backend unavailable in this Qt environment")
         win.renderer._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4))
-        win.render(reason="test-vispy-tiled-roi")
+        win.render(reason="test-wgpu-tiled-roi")
         _process_events(qtbot, count=30)
         assert getattr(win._committed_display_frame, "is_tiled", False)
 

@@ -12,7 +12,7 @@ LOD_REASON_NATIVE_POLICY = (
     "desired LOD is not applied: the native-only montage LOD policy is selected"
 )
 LOD_REASON_BACKEND_ADOPTION_PENDING = (
-    "desired LOD awaits resident-LOD adoption on this backend (resident is VisPy-only, ADR 0050)"
+    "desired LOD awaits resident-LOD adoption on this backend (ADR 0050)"
 )
 LOD_REASON_INVALID_VIEW = (
     "native resolution selected because viewport LOD demand could not be measured"

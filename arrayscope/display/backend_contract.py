@@ -2,7 +2,7 @@
 
 The viewer should ask what a rendering surface can do, not branch on a library
 name.  This deliberately describes semantic behaviour rather than concrete Qt,
-PyQtGraph, VisPy, OpenGL, or future Qt Quick implementation details.
+PyQtGraph, WGPU, or future Qt Quick implementation details.
 """
 
 from __future__ import annotations
@@ -42,17 +42,6 @@ PYQTGRAPH_CAPABILITIES = ImageViewBackendCapabilities(
     # ImageItems read a transposed VIEW of the canonical tile buffer, so an X/Y
     # axis-order swap re-lays-out existing items instead of re-materializing.
     display_axis_transpose=True,
-)
-
-VISPY_CAPABILITIES = ImageViewBackendCapabilities(
-    name="vispy",
-    persistent_tile_residency=True,
-    tile_residency_kind="gpu_atlas",
-    shader_windowing=True,
-    # The current backend intentionally uses the shared PyQtGraph interaction
-    # surface.  Marking this accurately prevents the hybrid experiment from
-    # being mistaken for a fully native VisPy viewer.
-    native_pointer_interaction=False,
 )
 
 WGPU_CAPABILITIES = ImageViewBackendCapabilities(
@@ -104,3 +93,27 @@ def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
         )
 
     return ImageViewBackendCapabilities(name="pyqtgraph")
+
+
+def require_image_view_backend(
+    view,
+    expected: str,
+    *,
+    context: str = "rendering evidence",
+) -> str:
+    """Reject evidence captured through a fallback backend.
+
+    Interactive startup may degrade an unavailable explicit GPU choice to
+    PyQtGraph. Profilers and release tools cannot inherit that convenience:
+    an artifact labelled for one backend is invalid when another backend
+    actually rendered it.
+    """
+
+    expected = str(expected).strip().lower()
+    actual = str(image_view_backend_capabilities(view).name).strip().lower()
+    if actual != expected:
+        raise RuntimeError(
+            f"{context} requested backend {expected!r}, but the active "
+            f"image surface is {actual!r}; refusing mislabeled evidence"
+        )
+    return actual

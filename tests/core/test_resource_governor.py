@@ -63,7 +63,7 @@ def test_commit_batch_knob_covers_last_observed_bytes_per_item():
         item_count=6,
         byte_count=6 * 1024 * 1024,
         work_class="presentation_upsert",
-        backend="vispy",
+        backend="wgpu",
     )
 
     decision = governor.decide_commit_batch(interactive=False)
@@ -80,7 +80,7 @@ def test_callback_observations_are_kept_without_decision_ring():
     observation = GuiCallbackObservation(
         channel="montage_commit",
         work_class="tile_upsert",
-        backend="vispy",
+        backend="wgpu",
         target_ms=4.0,
         warning_ms=16.0,
         item_cap=12,

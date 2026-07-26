@@ -3,11 +3,11 @@
 Pins the residual of the "Progressive-load publication correctness" standing
 lane (a50247e0): a real-Wayland visual open of a progressively-filled source
 must, at completion, show ZERO unread (zero-fill) regions and the correct
-final pixels/levels on the first-class backends.  ``ProgressiveArraySource``
+final pixels/levels on the maintained backends.  ``ProgressiveArraySource``
 (arrayscope/io/progressive.py) already publishes atomic detached region
 snapshots and the OFFSCREEN gate is green (tests/io/test_progressive.py); by
 testing law #1 a torn/unread-tile failure is a live-render failure and must be
-pinned by the ring that can SEE it -- real GL/Qt raster, this ring.
+pinned by the ring that can SEE it -- real WGPU/Qt raster, this ring.
 
 Two oracles, deliberately layered:
 
@@ -28,7 +28,7 @@ an oracle that has never failed on an injected fault is unproven):
   again.  This is why the coverage gate, not the pixel oracle alone, is the
   load-bearing acceptance for progressive publication.
 
-Ring: tests/gpu_interaction only (real display, real GL / real Qt raster).
+Ring: tests/gpu_interaction only (real display, real WGPU / real Qt raster).
 The offscreen sanity for the underlying source lives in
 tests/io/test_progressive.py and is never acceptance for a rendering claim.
 """
@@ -167,7 +167,7 @@ def assert_full_coverage(harness, final) -> None:
         )
 
 
-BACKENDS = ("vispy", "pyqtgraph")
+BACKENDS = ("wgpu", "pyqtgraph")
 
 
 @pytest.fixture(params=BACKENDS)
@@ -190,8 +190,8 @@ def progressive_window(request, qt_app):
 
     backend = request.param
     choice = (
-        ImageRenderingBackendChoice.VISPY
-        if backend == "vispy"
+        ImageRenderingBackendChoice.WGPU
+        if backend == "wgpu"
         else ImageRenderingBackendChoice.PYQTGRAPH
     )
 

@@ -238,7 +238,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self.interaction_controller = DisplayInteractionController()
         self._pointer_interaction = QtPointerInteractionDriver(self, self.interaction_controller)
         # Touchpad pinch-zoom / two-finger-pan is shared by every backend;
-        # wgpu/vispy additionally install the plain-mouse navigation driver.
+        # wgpu additionally installs the plain-mouse navigation driver.
         self._gesture_navigation = QtGestureNavigationDriver(self)
         self._middle_drag_target_provider = None
         self._middle_drag_step_handler = None
@@ -368,8 +368,6 @@ class ImageViewShell(QtWidgets.QWidget):
 
         tokens = tokens or current_theme_tokens()
         try:
-            # VisPy paints its own GL canvas beneath a transparent
-            # GraphicsView; an opaque background here would cover it.
             if self._paints_qgraphics_scene():
                 self.graphicsView.setBackground(tokens.canvas)
         except Exception:
@@ -386,10 +384,7 @@ class ImageViewShell(QtWidgets.QWidget):
                 line.setPen(pg.mkPen(handle, width=2))
                 line.setHoverPen(pg.mkPen(tokens.accent, width=2))
             if self._paints_qgraphics_scene():
-                # Subtle level-region fill for the pyqtgraph backend. The
-                # VisPy backend keeps the pyqtgraph default: its offscreen
-                # smoke test measures chroma over the histogram area, and
-                # recoloring it there would defeat that signal.
+                # Subtle level-region fill for the PyQtGraph backend.
                 region_brush = pg.mkColor(tokens.level_handle)
                 region_brush.setAlpha(14)
                 item.region.setBrush(pg.mkBrush(region_brush))
@@ -508,7 +503,7 @@ class ImageViewShell(QtWidgets.QWidget):
             or int(timing["tile_layer_texture_uploads"]) > 0
             or int(timing["tile_layer_vertex_uploads"]) > 0
             or int(timing["tile_layer_level_updates"]) > 0
-            or str(timing["mode"]) in {"full", "fast", "vispy_full", "vispy_fast"}
+            or str(timing["mode"]) in {"full", "fast"}
         )
         upload_timing = ImageUploadTiming(
             total_ms=(perf_counter() - float(timing["start"])) * 1000.0,
@@ -1287,7 +1282,7 @@ class ImageViewShell(QtWidgets.QWidget):
         conversion merely because the mouse button was released.
         """
 
-        if self._montage_display_mode not in {"tile_layer", "vispy_tile_layer"}:
+        if self._montage_display_mode not in {"tile_layer", "wgpu_tile_layer"}:
             return
         handler = getattr(self, "_level_presentation_change_handler", None)
         if callable(handler):
@@ -2843,7 +2838,7 @@ class ImageView2D(ImageViewShell):
                 # A tiled montage has no single bound ImageItem, so the
                 # histogram cannot be read off ``imageItem()``.  Derive it from
                 # the committed tile PAYLOADS — the same backend-agnostic source
-                # of truth VisPy uses — so the CPU-LUT histogram is populated
+                # of truth used by shader backends — so the CPU-LUT histogram is populated
                 # instead of staying empty.  Cached by semantic identity so an
                 # unchanged montage keeps a stable array id (skip-upload works).
                 histogramPlotData = self._payload_derived_histogram_plot_data(montage_tile_payloads)

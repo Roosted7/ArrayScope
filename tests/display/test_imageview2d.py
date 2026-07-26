@@ -43,7 +43,9 @@ def _view_class(backend):
 
         return ImageView2D
     if backend == "wgpu":
-        pytest.importorskip("wgpu")
+        from tests.ui.helpers import require_wgpu_adapter
+
+        require_wgpu_adapter()
         from arrayscope.display.wgpu_imageview2d import WgpuImageView2D, import_qrenderwidget
 
         try:
@@ -56,7 +58,9 @@ def _view_class(backend):
 
         return WgpuImageView2D
     if backend == "wgpu-screen":
-        pytest.importorskip("wgpu")
+        from tests.ui.helpers import require_wgpu_adapter
+
+        require_wgpu_adapter()
         from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
 
         def _screen_view(*args, **kwargs):
@@ -70,10 +74,7 @@ def _view_class(backend):
             return view
 
         return _screen_view
-    pytest.importorskip("vispy")
-    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-
-    return VisPyImageView2D
+    raise ValueError(f"unknown backend {backend!r}")
 
 
 def _present_tiled(
@@ -471,17 +472,6 @@ def test_tile_commit_report_preserves_backend_presented_ids_outside_delta_payloa
 
     assert report.presented_tiles == frozenset({0, 1, 2})
     assert report.committed_upserts == frozenset({0})
-
-
-def test_vispy_requested_presented_tiles_use_active_scope_not_delta_subset():
-    from types import SimpleNamespace
-
-    from arrayscope.display.vispy_imageview2d import _requested_direct_payload_tiles
-
-    payloads = {0: object()}
-    delta = SimpleNamespace(active_tiles=(0, 1, 2), upserts=payloads)
-
-    assert _requested_direct_payload_tiles(payloads, delta) == {0, 1, 2}
 
 
 def test_pyqtgraph_tile_commit_report_counts_distinct_updated_tiles():
@@ -3105,7 +3095,7 @@ def test_imageview_inspection_tool_validation(qt_app):
     view.close()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_roi_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     from pyqtgraph.Qt import QtCore
 
@@ -3151,7 +3141,7 @@ def test_roi_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     view.close()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_out_of_bounds_roi_can_be_dragged_back_into_content(qt_app, backend):
     from pyqtgraph.Qt import QtCore
 
@@ -3197,7 +3187,7 @@ def test_out_of_bounds_roi_can_be_dragged_back_into_content(qt_app, backend):
     view.close()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_set_roi_selections_preserves_id_counter_for_next_roi(qt_app, backend):
     from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
 
@@ -3219,7 +3209,7 @@ def test_set_roi_selections_preserves_id_counter_for_next_roi(qt_app, backend):
     view.close()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_profile_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     from pyqtgraph.Qt import QtCore
 
@@ -3365,7 +3355,7 @@ def test_surface_reset_cancels_roi_drawing_lifecycle(qt_app, phase):
         view.close()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_pointer_hit_testing_ignores_margin_outside_committed_frame(qt_app, backend):
     from pyqtgraph.Qt import QtCore
 

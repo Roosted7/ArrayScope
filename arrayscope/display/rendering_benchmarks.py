@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import gc
 import itertools
 import json
@@ -90,6 +89,17 @@ class RenderingBenchmarkEnvironment:
 
 
 @dataclass(frozen=True)
+class _GpuLimits:
+    max_texture_size: int = 0
+    max_texture_image_units: int = 0
+    vendor: str = ""
+    renderer: str = ""
+    version: str = ""
+    source: str = ""
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class RenderingBenchmarkSample:
     run: int
     timestamp: float
@@ -106,19 +116,17 @@ class _ActionMeasurement:
     ui_max_gap_ms: float | None = None
 
 
-def benchmark_rendering_backends(
+def benchmark_pyqtgraph_rendering(
     *, measure_presented: bool | None = None
 ) -> tuple[RenderingBenchmarkResult, ...]:
-    """Compare PyQtGraph and VisPy display-update hot paths.
+    """Measure the PyQtGraph display-update hot paths.
 
     ``elapsed_ms``/``submission_ms`` measures CPU-side setter submission only.
     Set ``measure_presented=True`` (or ``ARRAYSCOPE_BENCH_PRESENTED=1``) to also
-    observe first-frame scheduling and Qt event-loop starvation.  Neither field
-    is presented as GPU execution time because VisPy uploads execute asynchronously.
-    Deterministic tests should gate on work counters rather than wall-clock time.
+    observe first-frame scheduling and Qt event-loop starvation. Deterministic
+    tests should gate on work counters rather than wall-clock time. WGPU's
+    renderer-specific scaling benchmarks live later in this module.
     """
-
-    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
 
     if measure_presented is None:
         measure_presented = os.environ.get("ARRAYSCOPE_BENCH_PRESENTED") == "1"
@@ -147,15 +155,7 @@ def benchmark_rendering_backends(
                 measure_presented=measure_presented,
             )
             for scenario in scenarios
-            for view_type in (ImageView2D, VisPyImageView2D)
-        )
-
-        results.append(
-            _run_view_benchmark(
-                VisPyImageView2D,
-                _benchmark_warm_residency_queue_scaling,
-                measure_presented=measure_presented,
-            )
+            for view_type in (ImageView2D,)
         )
         return tuple(results)
     finally:
@@ -165,7 +165,7 @@ def benchmark_rendering_backends(
 def _run_view_benchmark(
     view_type, scenario, *, measure_presented: bool
 ) -> RenderingBenchmarkResult:
-    """Run one scenario and close its parentless Qt/VisPy view."""
+    """Run one scenario and close its parentless Qt view."""
 
     view = view_type()
     try:
@@ -602,74 +602,6 @@ def _benchmark_progressive_tile_stream_configured(
     )
 
 
-def _benchmark_warm_residency_queue_scaling(
-    view, *, measure_presented: bool
-) -> RenderingBenchmarkResult:
-    from arrayscope.display.backends.vispy.tiles import PayloadBatchQueue
-
-    active_count = 8
-    total_count = 40
-    _placeholder, _histogram, geometry, sources, payloads = _direct_tile_layer_inputs(
-        tile_shape=(64, 64),
-        count=total_count,
-        columns=8,
-    )
-    active = {index: payloads[index] for index in range(active_count)}
-    state = TilePresentationState(payloads)
-    delta = TilePresentationDelta(
-        structure_revision=1,
-        payload_revision=1,
-        visibility_revision=1,
-        level_revision=1,
-        histogram_revision=1,
-        viewport_revision=1,
-        upserts=active,
-        active_tiles=tuple(range(active_count)),
-        planned_tiles=tuple(range(total_count)),
-        near_tiles=tuple(range(total_count)),
-        near_tile_source_ids=sources,
-        force_refresh=True,
-    )
-    view.setTiledPresentation(
-        geometry=geometry,
-        tile_state=state,
-        tile_delta=delta,
-        histogramPlotData=None,
-        levels=(0.0, 1.0),
-        histogramRange=(0.0, 1.0),
-        rgb_already_windowed=False,
-        tile_residency_budget_bytes=512 * 1024 * 1024,
-    )
-    layer = getattr(view, "_vispy_gpu_montage_layer", None)
-    if layer is None:
-        raise RuntimeError("VisPy warm-residency benchmark requires a GPU montage layer")
-    warm_payloads = {index: payloads[index] for index in range(active_count, total_count)}
-    stats = []
-
-    def warm_batches():
-        queue = PayloadBatchQueue(warm_payloads)
-        while queue:
-            batch = queue.take(max_items=4, max_bytes=8 * 1024 * 1024)
-            stats.append(
-                layer.warm_residency(
-                    payloads=batch,
-                    geometry=geometry,
-                    rgb_already_windowed=False,
-                    tile_delta=delta,
-                    tile_residency_budget_bytes=512 * 1024 * 1024,
-                )
-            )
-
-    measurement = _measure_action(view, warm_batches, measure_presented=measure_presented)
-    return _result(
-        view,
-        "warm_residency_queue_scaling",
-        measurement,
-        timing=_sum_gpu_stats(stats, mode="warm_residency_queue_scaling"),
-        commit_count=len(stats),
-    )
-
-
 def _present_benchmark_tiled(
     view,
     *,
@@ -1012,56 +944,6 @@ def _sum_upload_timings(timings) -> ImageUploadTiming:
     )
 
 
-def _sum_gpu_stats(stats, *, mode: str) -> ImageUploadTiming:
-    stats = tuple(stats)
-    if not stats:
-        return ImageUploadTiming(mode=mode)
-    last = stats[-1]
-
-    def total(field):
-        values = [getattr(stat, field) for stat in stats]
-        finite = [float(value) for value in values if value is not None]
-        return sum(finite) if finite else None
-
-    return ImageUploadTiming(
-        total_ms=total("upload_ms"),
-        tile_layer_upload_ms=total("upload_ms"),
-        visible_bytes=0,
-        visible_pixels=0,
-        fast_same_object=False,
-        mode=mode,
-        tile_layer_visible_items=int(last.visible_items),
-        tile_layer_items_updated=sum(int(stat.items_updated) for stat in stats),
-        tile_layer_items_skipped=sum(int(stat.items_skipped) for stat in stats),
-        tile_layer_resident_items=int(last.resident_items),
-        tile_layer_storage_capacity=int(last.storage_capacity),
-        tile_layer_storage_rebuilds=sum(int(stat.storage_rebuilds) for stat in stats),
-        tile_layer_storage_evictions=sum(int(stat.storage_evictions) for stat in stats),
-        tile_layer_texture_uploads=sum(int(stat.texture_uploads) for stat in stats),
-        tile_layer_texture_upload_bytes=sum(int(stat.texture_upload_bytes) for stat in stats),
-        tile_layer_vertex_uploads=sum(int(stat.vertex_uploads) for stat in stats),
-        tile_layer_level_updates=sum(int(stat.level_updates) for stat in stats),
-        tile_layer_estimated_gpu_bytes=int(last.estimated_gpu_bytes),
-        tile_layer_cpu_shadow_bytes=int(last.cpu_shadow_bytes),
-        tile_layer_page_count=int(last.page_count),
-        tile_layer_active_pages=int(last.active_pages),
-        tile_layer_device_max_texture_size=int(last.device_max_texture_size),
-        tile_layer_budget_bytes=int(last.budget_bytes),
-        tile_layer_near_resident_items=int(last.near_resident_items),
-        tile_layer_warm_resident_items=int(last.warm_resident_items),
-        tile_layer_evicted_near_items=sum(int(stat.evicted_near_items) for stat in stats),
-        tile_layer_lod_level=int(last.lod_level),
-        tile_layer_lod_factor=int(last.lod_factor),
-        tile_layer_source_texels_per_pixel=float(last.source_texels_per_pixel),
-        tile_layer_gutter_pixels=int(last.gutter_pixels),
-        tile_layer_mipmap_updates=sum(int(stat.mipmap_updates) for stat in stats),
-        tile_layer_mipmap_available=any(bool(stat.mipmap_available) for stat in stats),
-        tile_layer_complex_texture_uploads=sum(int(stat.complex_texture_uploads) for stat in stats),
-        tile_layer_shader_uniform_updates=sum(int(stat.shader_uniform_updates) for stat in stats),
-        tile_layer_capacity_warning=str(last.capacity_warning),
-    )
-
-
 def _measure_action(view, action, *, measure_presented: bool) -> _ActionMeasurement:
     if not measure_presented:
         start = perf_counter()
@@ -1071,13 +953,7 @@ def _measure_action(view, action, *, measure_presented: bool) -> _ActionMeasurem
 
 
 def _measure_presented_action(view, action) -> _ActionMeasurement:
-    """Measure Qt/VisPy frame scheduling separately from setter submission.
-
-    This observes the first draw/paint callback and event-loop starvation.  It
-    deliberately does not claim to be GPU execution time: VisPy's GL commands
-    and texture uploads execute asynchronously, and a paint callback may still precede
-    the final compositor scan-out.
-    """
+    """Measure Qt frame scheduling separately from setter submission."""
 
     from pyqtgraph.Qt import QtCore, QtWidgets
 
@@ -1093,30 +969,22 @@ def _measure_presented_action(view, action) -> _ActionMeasurement:
     start_time: float | None = None
     frame_times: list[float] = []
     heartbeat_times: list[float] = []
-    draw_events = getattr(getattr(view, "_vispy_canvas", None), "events", None)
-    draw_emitter = getattr(draw_events, "draw", None)
-    paint_target = None
-    paint_probe = None
+    paint_target = view.graphicsView.viewport()
 
     def note_frame(*_args):
         if start_time is not None:
             frame_times.append(perf_counter())
 
-    if draw_emitter is not None:
-        draw_emitter.connect(note_frame)
-    else:
-        paint_target = view.graphicsView.viewport()
+    class PaintProbe(QtCore.QObject):
+        def eventFilter(self, obj, event):
+            if obj is paint_target and event.type() == QtCore.QEvent.Type.Paint:
+                # Timer category: UI cosmetic. Benchmark paint probe
+                # defers frame accounting until the current paint returns.
+                QtCore.QTimer.singleShot(0, self, note_frame)
+            return False
 
-        class PaintProbe(QtCore.QObject):
-            def eventFilter(self, obj, event):
-                if obj is paint_target and event.type() == QtCore.QEvent.Type.Paint:
-                    # Timer category: UI cosmetic. Benchmark paint probe
-                    # defers frame accounting until the current paint returns.
-                    QtCore.QTimer.singleShot(0, self, note_frame)
-                return False
-
-        paint_probe = PaintProbe(paint_target)
-        paint_target.installEventFilter(paint_probe)
+    paint_probe = PaintProbe(paint_target)
+    paint_target.installEventFilter(paint_probe)
 
     loop = QtCore.QEventLoop()
     # Timer category: UI cosmetic. Benchmark heartbeat measures event-loop
@@ -1147,11 +1015,7 @@ def _measure_presented_action(view, action) -> _ActionMeasurement:
         loop.exec()
     finally:
         heartbeat.stop()
-        if draw_emitter is not None:
-            with contextlib.suppress(Exception):
-                draw_emitter.disconnect(note_frame)
-        if paint_target is not None and paint_probe is not None:
-            paint_target.removeEventFilter(paint_probe)
+        paint_target.removeEventFilter(paint_probe)
 
     end_time = perf_counter()
     heartbeat_times.append(end_time)
@@ -1167,9 +1031,6 @@ def _measure_presented_action(view, action) -> _ActionMeasurement:
 
 
 def _request_view_update(view) -> None:
-    canvas = getattr(view, "_vispy_canvas", None)
-    if canvas is not None:
-        canvas.update()
     try:
         view.graphicsView.viewport().update()
     except Exception:
@@ -1181,13 +1042,11 @@ def assert_optional_perf_gates(results: tuple[RenderingBenchmarkResult, ...]) ->
         return
     by_name = {result.name: result for result in results}
     required = (
-        "vispy_clean_tile_flush",
-        "vispy_pan_zoom_no_upload",
-        "vispy_tile_level_uniform_update",
-        "vispy_one_dirty_tile_commit",
-        "vispy_large_complex_tiled_initial",
-        "vispy_progressive_tile_stream",
-        "vispy_warm_residency_queue_scaling",
+        "pyqtgraph_clean_tile_flush",
+        "pyqtgraph_pan_zoom_no_upload",
+        "pyqtgraph_one_dirty_tile_commit",
+        "pyqtgraph_large_complex_tiled_initial",
+        "pyqtgraph_progressive_tile_stream",
     )
     missing_frames = [name for name in required if by_name[name].first_frame_ms is None]
     assert not missing_frames, (
@@ -1221,27 +1080,24 @@ def benchmark_large_progressive_montage(
     payloads consume roughly 200 MiB before backend storage is counted.
     """
 
-    from arrayscope.display.vispy_imageview2d import VisPyImageView2D
-
     if measure_presented is None:
         measure_presented = os.environ.get("ARRAYSCOPE_BENCH_PRESENTED") == "1"
     results = []
-    for view_type in (ImageView2D, VisPyImageView2D):
-        view = view_type()
-        try:
-            results.append(
-                _benchmark_progressive_tile_stream_configured(
-                    view,
-                    tile_shape=tile_shape,
-                    count=count,
-                    columns=columns,
-                    batch_size=batch_size,
-                    scenario="stress_large_progressive_tile_stream",
-                    measure_presented=bool(measure_presented),
-                )
+    view = ImageView2D()
+    try:
+        results.append(
+            _benchmark_progressive_tile_stream_configured(
+                view,
+                tile_shape=tile_shape,
+                count=count,
+                columns=columns,
+                batch_size=batch_size,
+                scenario="stress_large_progressive_tile_stream",
+                measure_presented=bool(measure_presented),
             )
-        finally:
-            view.close()
+        )
+    finally:
+        view.close()
     return tuple(results)
 
 
@@ -1275,7 +1131,7 @@ def collect_benchmark_samples(
         results = (
             benchmark_large_progressive_montage(measure_presented=measure_presented)
             if stress
-            else benchmark_rendering_backends(measure_presented=measure_presented)
+            else benchmark_pyqtgraph_rendering(measure_presented=measure_presented)
         )
         environment = rendering_benchmark_environment(results)
         timestamp = time.time()
@@ -1333,48 +1189,16 @@ def rendering_benchmark_environment(results=()) -> RenderingBenchmarkEnvironment
 
 
 def _gpu_limits_from_results(results):
-    from arrayscope.display.backends.vispy.tiles import GpuDeviceLimits, query_gpu_device_limits
-
-    try:
-        from vispy import gloo
-
-        limits = query_gpu_device_limits(gloo)
-        if str(getattr(limits, "source", "")) != "fallback":
-            return limits
-    except Exception:
-        pass
-    # The device-limit query needs a current GL context; benchmark views are
-    # already closed by the time the environment record is written, so make a
-    # short-lived context for the query.
-    try:
-        from vispy import app as vispy_app
-        from vispy import gloo
-
-        canvas = vispy_app.Canvas(show=False, size=(4, 4))
-        try:
-            canvas.set_current()
-            limits = query_gpu_device_limits(gloo)
-        finally:
-            canvas.close()
-        if str(getattr(limits, "source", "")) != "fallback":
-            return limits
-    except Exception:
-        pass
     for result in tuple(results or ()):
         timing = getattr(result, "timing", None)
         if timing is not None and int(
             getattr(timing, "tile_layer_device_max_texture_size", 0) or 0
         ):
-            return GpuDeviceLimits(
+            return _GpuLimits(
                 max_texture_size=int(timing.tile_layer_device_max_texture_size),
                 source="benchmark_timing",
             )
-    try:
-        from vispy import gloo
-
-        return query_gpu_device_limits(gloo)
-    except Exception:
-        return GpuDeviceLimits()
+    return _GpuLimits()
 
 
 def _sample_record(sample: RenderingBenchmarkSample) -> dict:

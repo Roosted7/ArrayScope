@@ -30,8 +30,7 @@ def _wgpu_adapter_available() -> bool:
         with contextlib.suppress(RuntimeError):  # instance already exists
             # Vulkan-only instance BEFORE the first adapter request: letting
             # the probe create an all-backends instance makes GL adapter
-            # enumeration re-init EGL, which SIGABRTs in workers that hold
-            # live vispy GL state (gate-B Tier 0; full-suite crash 2026-07-18).
+            # enumeration re-init EGL on some test hosts.
             set_instance_extras(backends=["Vulkan"])
         wgpu.gpu.request_adapter_sync(power_preference="low-power")
         return True
@@ -54,7 +53,6 @@ def _live_wayland_session() -> bool:
 
 BACKENDS = (
     "pyqtgraph",
-    "vispy",
     pytest.param(
         "wgpu",
         marks=pytest.mark.skipif(
@@ -180,12 +178,9 @@ def test_invalidate_tiled_presentation_hides_pixels_but_retains_residency(qt_app
         if backend == "pyqtgraph":
             layer = view._montage_tile_layer
             resident_before = len(layer.states)
-        elif backend in ("wgpu", "wgpu-screen"):
+        else:
             executor = view._wgpu_executor
             resident_before = len(executor.page_table.resident_keys())
-        else:
-            layer = view._vispy_gpu_montage_layer
-            resident_before = layer._pool.resident_count
 
         view.invalidate_tiled_presentation("semantic-transition")
 
@@ -196,13 +191,10 @@ def test_invalidate_tiled_presentation_hides_pixels_but_retains_residency(qt_app
             assert all(
                 not state.visible and not state.item.isVisible() for state in layer.states.values()
             )
-        elif backend in ("wgpu", "wgpu-screen"):
+        else:
             # Residency (page-table entries) survives; no tile is drawn.
             assert len(executor.page_table.resident_keys()) == resident_before
             assert len(executor._tiles) == 0
-        else:
-            assert layer._pool.resident_count == resident_before
-            assert all(not visual.visible for visual in layer._visuals_by_page)
     finally:
         view.close()
 
@@ -262,8 +254,8 @@ def test_preview_levels_route_through_shared_driver(qt_app, backend):
 def test_widget_close_cancels_active_pointer_interaction(qt_app, backend):
     """Closing the widget must cancel a live drag on every backend.
 
-    Regression: the VisPy close override dropped `_cancel_interaction`, so a
-    drag could survive widget close on one backend only.
+    Regression: a backend close override once dropped `_cancel_interaction`,
+    so a drag could survive widget close on one surface only.
     """
 
     from pyqtgraph.Qt import QtCore

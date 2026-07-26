@@ -81,7 +81,7 @@ class TileAdmissionQueue:
             tile = int(tile)
             cost = 0 if cost_fn is None else max(0, int(cost_fn(tile) or 0))
             # `free_fn` declares an item genuinely instant for the backend
-            # (e.g. a VisPy resident atlas remap): it bypasses every cap.
+            # (e.g. a resident page-table remap): it bypasses every cap.
             # `item_free_fn` is weaker: it bypasses the item count but still
             # pays bytes/time. Everything else is paced because "not an
             # upload" is not "not work" on backends that rebuild items.

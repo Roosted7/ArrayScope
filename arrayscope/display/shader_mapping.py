@@ -1,7 +1,7 @@
 """Shader-equivalent display mapping helpers.
 
 The module is deliberately pure NumPy so tests and CPU fallbacks can compare
-the same formulas used by VisPy shader paths.
+the same formulas used by GPU shader paths.
 """
 
 from __future__ import annotations
@@ -417,7 +417,7 @@ def _coerce_enum(enum_type, value):
 # executor's per-pixel oracle (``tests/gpu/test_wgpu_command_protocol.py``
 # ``Scene.reference``) mirrors the WGSL without re-deriving the math.  These
 # are deliberately NOT wired into :func:`cpu_display_rgba` — that is the
-# VisPy/PyQtGraph display path, which Stage A does not touch.  Colours here
+# maintained display paths, which Stage A does not touch. Colours here
 # are the shader's normalized f32 space; callers reproduce the GPU's
 # ``rgba8unorm`` store with ``round(x * 255)``.
 # --------------------------------------------------------------------------

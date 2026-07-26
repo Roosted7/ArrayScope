@@ -93,13 +93,11 @@ def montage_window(qt_app):
     prefer_pyside6()
     from arrayscope.app.launch import _create_window
     from arrayscope.display.backend_contract import image_view_backend_capabilities
-    from tests.ui.helpers import use_vispy_backend
+    from tests.ui.helpers import use_wgpu_backend
 
-    # This fixture's lifecycle and framebuffer oracles are VisPy-specific.
     # Requesting ``qt_app`` activates the suite's isolated QSettings namespace;
-    # pinning the backend here prevents a developer's persisted WGPU choice
-    # from redirecting the window while the test samples the Qt backing store.
-    use_vispy_backend(extra_settings={"first_run_hints_dismissed": True})
+    # pin the maintained GPU renderer explicitly for physical ring-4 evidence.
+    use_wgpu_backend(extra_settings={"first_run_hints_dismissed": True})
     app = win = None
     try:
         app, win = _create_window(
@@ -107,7 +105,7 @@ def montage_window(qt_app):
             title="gpu-harness",
             application_name="ArrayScopeTests",
         )
-        assert image_view_backend_capabilities(win.img_view).name == "vispy"
+        assert image_view_backend_capabilities(win.img_view).name == "wgpu"
         harness = Harness(app, win)
         harness.pump(0.3)
         vs = win.view_state
@@ -160,78 +158,25 @@ class Harness:
         active = {int(tile) for tile in s._last_active_tiles}
         parked_active = s.lifecycle.parked_tiles & active
         assert not parked_active, f"parked tiles inside active scope: {sorted(parked_active)}"
-        # Semantic-vs-backend agreement (field defect 2026-07-05): the layer's
-        # last payload map must present the same LOD the session believes is
-        # presented — a levels-only commit that falsely acknowledged level
-        # swaps left the GPU on the old level until an unrelated pan.
-        layer = getattr(self.win.img_view, "_vispy_gpu_montage_layer", None)
-        stats = getattr(layer, "last_stats", None)
-        active_levels = [
-            int(getattr(getattr(p, "lod", None), "level", 0) or 0)
-            for number, p in s.display_tile_payloads.items()
-            if int(number) in active
-        ]
-        if stats is not None and active_levels:
-            session_level = max(active_levels)
-            layer_level = int(getattr(stats, "lod_level", 0) or 0)
-            assert layer_level == session_level, (
-                f"backend presents level {layer_level} while the session "
-                f"believes level {session_level} is presented (stale-LOD desync)"
-            )
+        # Semantic-vs-physical agreement: every active payload identity must be
+        # the identity acknowledged by the maintained backend's physical row.
+        from arrayscope.display.model.frame import tile_ack_identity
 
-    def assert_vispy_visual_mapping_matches_pool(self) -> None:
-        """Canonical page bindings must match every submitted draw quad."""
+        rows = self.win.img_view.tileTruthPhysicalRows()
+        for tile in active:
+            payload = s.display_tile_payloads.get(tile)
+            assert payload is not None, f"active tile {tile} has no committed payload"
+            assert tile in rows, f"active tile {tile} has no physical truth row"
+            assert rows[tile]["physical_acknowledged_identity"] == tile_ack_identity(payload)
 
-        layer = getattr(self.win.img_view, "_vispy_gpu_montage_layer", None)
-        if layer is None:
-            return
-        from arrayscope.display.backends.vispy.tiles import _tile_quad_rects
+    def assert_visual_mapping_matches_residency(self) -> None:
+        """Every physically drawn tile must resolve all named resident pages."""
 
-        for tile, resolutions in layer._pool.tile_page_target_resolutions.items():
-            bound_pages = {int(resolution.slot.page_index) for resolution in resolutions}
-            drawn_pages = {
-                int(part.page_index)
-                for part in layer._pool.tile_draw_parts.get(int(tile), ())
-                if part.page_index is not None
-            }
-            assert drawn_pages, f"tile {tile} has no draw pages"
-            assert drawn_pages.issubset(bound_pages), (
-                f"tile {tile} draw pages {sorted(drawn_pages)} do not match "
-                f"bound pages {sorted(bound_pages)}"
-            )
-        for page_index, payloads in enumerate(layer._page_payloads_by_index):
-            if not payloads:
-                continue
-            visual = layer._visuals_by_page[page_index]
-            expected_texcoords = []
-            for tile in sorted(int(tile) for tile in payloads):
-                for _world, (u0, v0, u1, v1) in _tile_quad_rects(
-                    tile,
-                    layer._last_layout,
-                    layer._pool.tile_uvs,
-                    layer._pool.tile_draw_parts,
-                    page_index=page_index,
-                ):
-                    expected_texcoords.extend(
-                        (
-                            (u0, v0),
-                            (u1, v0),
-                            (u1, v1),
-                            (u0, v0),
-                            (u1, v1),
-                            (u0, v1),
-                        )
-                    )
-            expected = np.asarray(expected_texcoords, dtype=np.float32).reshape((-1, 2))
-            actual = np.asarray(visual.texcoord_data, dtype=np.float32).reshape((-1, 2))
-            assert actual.shape == expected.shape, (
-                f"page {page_index} submitted texcoords diverge from canonical "
-                f"draw parts: actual={actual.shape}, expected={expected.shape}"
-            )
-            assert np.allclose(actual, expected), (
-                f"page {page_index} submitted texcoords diverge from canonical "
-                f"draw parts: actual={actual.shape}, expected={expected.shape}"
-            )
+        rows = self.win.img_view.tileTruthPhysicalRows()
+        for tile, row in rows.items():
+            bindings = tuple(row.get("physical_page_bindings", ()) or ())
+            assert bindings, f"tile {tile} has no physical page bindings"
+            assert all(binding.get("actual_key") is not None for binding in bindings)
 
     def prepare_image_layer_pixel_sampling(self) -> None:
         """Hide independent composition overlays before sampling image pixels.
@@ -447,7 +392,7 @@ class Harness:
 
         The generalization of :meth:`assert_tile_identity_ramp` mandated by
         docs/testing/stress-and-trace-strategy.md (addendum law 2): reads
-        either the real VisPy canvas or PyQtGraph's painted Qt viewport and
+        either WGPU's executor target or PyQtGraph's painted Qt viewport and
         compares each required tile's interior against ``cpu_display_rgba``
         of the committed payload values (component/scale/levels/LUT applied),
         tolerating only calibrated raster rounding. Returns the per-tile
@@ -455,14 +400,17 @@ class Harness:
         """
 
         from arrayscope.tools.framebuffer_reference import (
-            assert_frame_matches_cpu_reference,
             assert_qt_raster_matches_cpu_reference,
+            assert_wgpu_frame_matches_cpu_reference,
         )
 
         self.prepare_image_layer_pixel_sampling()
-        if getattr(self.win.img_view, "_vispy_canvas", None) is None:
+        backend = self.win.img_view.surface.capabilities.name
+        if backend == "wgpu":
+            return assert_wgpu_frame_matches_cpu_reference(self.win, **kwargs)
+        if backend == "pyqtgraph":
             return assert_qt_raster_matches_cpu_reference(self.win, **kwargs)
-        return assert_frame_matches_cpu_reference(self.win, **kwargs)
+        raise AssertionError(f"unsupported physical-oracle backend {backend!r}")
 
     def assert_tile_identity_ramp(self, *, tolerance: float = 12.0) -> list[float]:
         """Every tile must show ITS OWN constant value.

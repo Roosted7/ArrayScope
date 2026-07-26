@@ -5,7 +5,6 @@ from dataclasses import replace
 import numpy as np
 
 from arrayscope.core.view_state import ChannelMode, ViewState
-from arrayscope.display.backends.vispy.tiles import TextureAtlasPool
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.image_upload import rgb_display_for_levels
 from arrayscope.display.imageview2d import ImageView2D
@@ -29,27 +28,11 @@ from arrayscope.display.shader_mapping import (
     ShaderDisplayMode,
     ShaderMapping,
     TexturePlaneKind,
-    cpu_display_rgba,
-    pack_texture_data,
 )
 from arrayscope.display.slice_engine import complex_to_rgb
 from arrayscope.display.tile_truth_overlay import tile_truth_overlay_text
 from arrayscope.render.lod import texture_source_for_rendered
 from arrayscope.window.frame_session import FrameSession
-
-
-class _Texture2D:
-    def __init__(self, data=None, *, shape=None, **_kwargs):
-        self.shape = tuple(shape) if shape is not None else tuple(np.shape(data))
-        self.updates = []
-
-    def set_data(self, data, *, offset=None, copy=True):
-        self.updates.append((np.array(data, copy=True), offset, bool(copy)))
-
-
-class _Gloo:
-    Texture2D = _Texture2D
-
 
 _MAPPING = ShaderMapping(
     component=ShaderComponent.ABS,
@@ -388,43 +371,6 @@ def test_pyqtgraph_adversarial_complex_fixture_draws_cpu_reference(qt_app):
         view.close()
 
 
-def test_vispy_adversarial_complex_fixture_uploads_cpu_reference_planes():
-    payloads = _adversarial_payloads(shader_display=True)
-    pool = TextureAtlasPool(_Gloo(), max_texture_size=64)
-
-    _uvs, stats = pool.update_payloads(
-        payloads,
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=len(payloads),
-        tile_delta=_adversarial_delta(payloads),
-    )
-
-    assert stats.presented_tiles == tuple(payloads)
-    assert stats.presented_identities == {
-        tile: payload.tile_identity for tile, payload in payloads.items()
-    }
-    assert len(pool.scalar_texture.updates) == len(payloads)
-    for (uploaded, _offset, copy), payload in zip(
-        pool.scalar_texture.updates, payloads.values(), strict=True
-    ):
-        assert copy
-        assert payload.texture_kind == TexturePlaneKind.COMPLEX_RG32F
-        np.testing.assert_array_equal(
-            uploaded, pack_texture_data(payload.semantic_data, payload.texture_kind)
-        )
-        reference = cpu_display_rgba(
-            payload.semantic_data,
-            replace(payload.shader_mapping, levels=(0.0, 900.0)),
-        )
-        assert reference.shape == (4, 4, 4)
-        assert np.all(reference[..., 3] == 255)
-        if payload.source_index == 4:
-            assert not np.any(uploaded)
-            assert not np.any(reference[..., :3])
-
-
 def _assert_truth_record(
     targets,
     acknowledged,
@@ -544,44 +490,3 @@ def test_pyqtgraph_report_excludes_state_mirror_when_image_item_is_hidden(qt_app
         assert 5 not in report.presented_identities
     finally:
         view.close()
-
-
-def test_vispy_complex_semantic_transition_hides_unacknowledged_tiles():
-    first, successors, targets, mixed = _transition_fixture(shader_display=True)
-    pool = TextureAtlasPool(_Gloo(), max_texture_size=32)
-    pool.update_payloads(
-        first,
-        tile_shape=(4, 4),
-        dirty_tiles=None,
-        rgb_already_windowed=False,
-        reserve_count=4,
-        tile_delta=_delta(
-            upserts=first,
-            targets={tile: _target(tile) for tile in range(4)},
-            base_revision=0,
-        ),
-    )
-
-    _uvs, stats = pool.update_payloads(
-        mixed,
-        tile_shape=(4, 4),
-        dirty_tiles=(0,),
-        rgb_already_windowed=False,
-        reserve_count=4,
-        tile_delta=_delta(upserts={0: successors[0]}, targets=targets, base_revision=1),
-    )
-
-    assert stats.presented_tiles == (0,)
-    assert stats.presented_identities == {0: successors[0].tile_identity}
-    assert set(pool.tile_resident_keys) == {0}
-    physical = pool.tile_truth_physical_rows()
-    assert physical[0]["physical_texture_kind"] == "complex_rg32f"
-    assert physical[0]["physical_storage_mode"] == "complex"
-    assert physical[0]["physical_texture_shape"] == (4, 4, 2)
-    assert physical[0]["physical_acknowledged_identity"] == successors[0].tile_identity
-    _assert_truth_record(
-        targets,
-        stats.presented_identities,
-        mixed,
-        expected_texture_kind=TexturePlaneKind.COMPLEX_RG32F,
-    )

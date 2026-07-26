@@ -5,11 +5,11 @@ index window changes, entering tiles present resident complex floor planes
 from the persistent pyramid cache — but ``lod_preview_metadata`` (which
 recorded each plane's shader mapping) is per-session state and is gone.
 ``ensure_floor_payloads`` then built COMPLEX_RG32F payloads with
-``shader_mapping=None``, so the VisPy layer derived per-quad ``a_mode=3``
-(magnitude through the cyclic LUT) instead of ``4`` (phase color): every
-zero-magnitude texel rendered the PAL-relaxed LUT[0] orange until the exact
-evaluation replaced the tile.  The physical-divergence audit cannot catch
-this by construction — the payload itself IS the desired state.
+``shader_mapping=None``, so the shader backend interpreted the complex plane
+as magnitude through the cyclic LUT instead of phase color: every
+zero-magnitude texel rendered the PAL-relaxed LUT[0] orange until exact
+evaluation replaced the tile. The physical-divergence audit cannot catch this
+by construction — the payload itself IS the desired state.
 
 The mapping is a pure function of the current view state (channel, scale,
 LUT), so the floor builder must mint it when the metadata is gone.
@@ -20,7 +20,6 @@ from __future__ import annotations
 import numpy as np
 
 from arrayscope.core.view_state import ViewState
-from arrayscope.display.backends.vispy.tiles import _payload_mode
 from arrayscope.display.lod import LOD_POLICY_RESIDENT, select_lod_demand
 from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import LodPageCache, materialize_lod_page
@@ -147,9 +146,7 @@ def test_metadata_free_complex_floor_mints_current_phase_mapping():
     assert mapping is not None
     assert mapping.display_mode == ShaderDisplayMode.PHASE_COLOR
     assert mapping.component == ShaderComponent.ABS
-    # The backend seam that turned this into orange: an unmapped complex
-    # payload draws a_mode=3 (magnitude through the cyclic LUT).
-    assert _payload_mode(payload, rgb_already_windowed=False) == 4
+    assert mapping.histogram_source_policy == "mapped"
 
 
 def test_metadata_free_scalar_floor_keeps_no_mapping():
@@ -162,4 +159,3 @@ def test_metadata_free_scalar_floor_keeps_no_mapping():
 
     assert payload.texture_kind == TexturePlaneKind.SCALAR_R32F
     assert payload.shader_mapping is None
-    assert _payload_mode(payload, rgb_already_windowed=False) == 0

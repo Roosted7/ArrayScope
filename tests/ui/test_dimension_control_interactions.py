@@ -8,6 +8,7 @@ from tests.ui.helpers import (
 from tests.ui.helpers import (
     process_events as _process_events,
 )
+from tests.ui.helpers import require_wgpu_adapter
 from tests.ui.test_montage_interactions import _committed_tile_payload
 
 
@@ -483,6 +484,7 @@ def test_wgpu_montage_x_y_swap_reuses_gpu_residency(qtbot):
     value.
     """
 
+    require_wgpu_adapter()
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
 
@@ -558,6 +560,7 @@ def test_wgpu_transposed_nonsquare_montage_floor_admission_survives(qtbot):
 
     import logging
 
+    require_wgpu_adapter()
     _clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
 

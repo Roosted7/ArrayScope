@@ -5,22 +5,19 @@ import pytest
 
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 
-pytest.importorskip("vispy")
-
 
 @pytest.fixture(scope="module")
 def benchmark_results(qt_app):
     from pyqtgraph.Qt import QtWidgets
 
     from arrayscope.display.backends.pyqtgraph.surface import PyQtGraphSurface
-    from arrayscope.display.backends.vispy.surface import VisPySurface
-    from arrayscope.display.rendering_benchmarks import benchmark_rendering_backends
+    from arrayscope.display.rendering_benchmarks import benchmark_pyqtgraph_rendering
 
-    view_types = (PyQtGraphSurface, VisPySurface)
+    view_types = (PyQtGraphSurface,)
     before = sum(
         isinstance(widget, view_types) for widget in QtWidgets.QApplication.topLevelWidgets()
     )
-    results = benchmark_rendering_backends(measure_presented=False)
+    results = benchmark_pyqtgraph_rendering(measure_presented=False)
     after = sum(
         isinstance(widget, view_types) for widget in QtWidgets.QApplication.topLevelWidgets()
     )
@@ -35,34 +32,19 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(benchmark_result
 
     assert {result.name for result in results} == {
         "pyqtgraph_tiled_small_initial",
-        "vispy_tiled_small_initial",
         "pyqtgraph_tiled_large_initial",
-        "vispy_tiled_large_initial",
         "pyqtgraph_one_tile_montage_initial",
-        "vispy_one_tile_montage_initial",
         "pyqtgraph_multi_tile_montage_initial",
-        "vispy_multi_tile_montage_initial",
         "pyqtgraph_scalar_level_preview",
-        "vispy_scalar_level_preview",
         "pyqtgraph_large_histogram_plot_refresh",
-        "vispy_large_histogram_plot_refresh",
         "pyqtgraph_complex_tile_level_preview",
-        "vispy_complex_tile_level_preview",
         "pyqtgraph_large_tile_level_preview",
-        "vispy_large_tile_level_preview",
         "pyqtgraph_tile_level_uniform_update",
-        "vispy_tile_level_uniform_update",
         "pyqtgraph_clean_tile_flush",
-        "vispy_clean_tile_flush",
         "pyqtgraph_large_complex_tiled_initial",
-        "vispy_large_complex_tiled_initial",
         "pyqtgraph_one_dirty_tile_commit",
-        "vispy_one_dirty_tile_commit",
         "pyqtgraph_pan_zoom_no_upload",
-        "vispy_pan_zoom_no_upload",
         "pyqtgraph_progressive_tile_stream",
-        "vispy_progressive_tile_stream",
-        "vispy_warm_residency_queue_scaling",
     }
     for result in results:
         assert result.elapsed_ms >= 0.0
@@ -74,7 +56,7 @@ def test_rendering_backend_benchmarks_report_expected_scenarios(benchmark_result
         assert result.commit_count >= 1
         assert result.timing.mode
         if result.scenario == "tiled_large_initial":
-            assert result.timing.mode in {"tile_layer", "vispy_tile_layer"}
+            assert result.timing.mode == "tile_layer"
             assert result.timing.tile_layer_visible_items == 16
         assert result.lod_policy == "native-only"
         assert result.lod_applied_factor == 1
@@ -115,64 +97,6 @@ def test_benchmark_result_does_not_mask_backend_applied_lod():
     assert result.kernel_counters["backend_commit"]["completed"] == 2
 
 
-def test_vispy_gpu_stat_aggregation_keeps_atlas_uploads_out_of_visible_bytes():
-    from arrayscope.display.rendering_benchmarks import _sum_gpu_stats
-
-    stats = (
-        SimpleNamespace(
-            upload_ms=1.0,
-            texture_upload_bytes=4096,
-            texture_uploads=2,
-            visible_items=2,
-            items_updated=2,
-            items_skipped=0,
-            resident_items=2,
-            storage_capacity=8,
-            storage_rebuilds=1,
-            storage_evictions=0,
-            vertex_uploads=1,
-            level_updates=0,
-            estimated_gpu_bytes=8192,
-            cpu_shadow_bytes=0,
-            page_count=1,
-            active_pages=1,
-            device_max_texture_size=4096,
-            budget_bytes=65536,
-            near_resident_items=0,
-            warm_resident_items=0,
-            evicted_near_items=0,
-            lod_level=0,
-            lod_factor=1,
-            source_texels_per_pixel=1.0,
-            gutter_pixels=0,
-            mipmap_updates=0,
-            mipmap_available=False,
-            complex_texture_uploads=0,
-            shader_uniform_updates=0,
-            capacity_warning="",
-        ),
-    )
-
-    timing = _sum_gpu_stats(stats, mode="warm_residency_queue_scaling")
-
-    assert timing.visible_bytes == 0
-    assert timing.tile_layer_texture_upload_bytes == 4096
-
-
-def test_vispy_complex_tile_preview_uses_less_cpu_work_than_pyqtgraph(benchmark_results):
-    results = {result.name: result for result in benchmark_results}
-    pyqtgraph = results["pyqtgraph_complex_tile_level_preview"].timing
-    vispy = results["vispy_complex_tile_level_preview"].timing
-
-    assert pyqtgraph.tile_layer_rgb_window_tiles > 0
-    assert pyqtgraph.tile_layer_rgb_window_ms > 0.0
-    assert vispy.tile_layer_rgb_window_tiles == 0
-    assert vispy.tile_layer_rgb_window_ms == 0.0
-    assert vispy.tile_layer_upload_ms == 0.0
-    assert vispy.visible_bytes == 0
-    assert vispy.tile_layer_items_skipped == vispy.tile_layer_visible_items
-
-
 def test_large_pyqtgraph_tile_preview_reports_level_work_without_texture_counters(
     benchmark_results,
 ):
@@ -186,74 +110,39 @@ def test_large_pyqtgraph_tile_preview_reports_level_work_without_texture_counter
     assert timing.tile_layer_level_update_pending_items == 0
 
 
-def test_vispy_clean_tile_flush_skips_existing_visuals(benchmark_results):
+def test_pyqtgraph_clean_tile_flush_attempts_no_item_work(benchmark_results):
     results = {result.name: result for result in benchmark_results}
-    vispy = results["vispy_clean_tile_flush"].timing
+    timing = results["pyqtgraph_clean_tile_flush"].timing
 
-    assert vispy.tile_layer_visible_items > 0
-    assert vispy.tile_layer_items_updated == 0
-    assert vispy.tile_layer_items_skipped == vispy.tile_layer_visible_items
-    assert vispy.tile_layer_upload_ms == 0.0
-    assert vispy.visible_bytes == 0
+    assert timing.tile_layer_visible_items > 0
+    assert timing.tile_layer_items_updated == 0
+    assert timing.tile_layer_items_skipped == 0
+    assert timing.tile_layer_texture_uploads == 0
 
 
-def test_vispy_dirty_and_pan_scenarios_have_deterministic_upload_counters(benchmark_results):
+def test_pyqtgraph_dirty_and_pan_scenarios_have_deterministic_work_counters(benchmark_results):
     results = {result.name: result for result in benchmark_results}
-    dirty = results["vispy_one_dirty_tile_commit"].timing
-    pan = results["vispy_pan_zoom_no_upload"].timing
+    dirty = results["pyqtgraph_one_dirty_tile_commit"].timing
+    pan = results["pyqtgraph_pan_zoom_no_upload"].timing
 
     assert dirty.tile_layer_items_updated == 1
-    assert dirty.tile_layer_items_skipped > 0
-    assert dirty.visible_bytes == 0
-    assert dirty.tile_layer_texture_upload_bytes > 0
+    # PyQtGraph receives only the dirty delta; unchanged visible items are not
+    # attempted and therefore are neither updated nor counted as skipped.
+    assert dirty.tile_layer_items_skipped == 0
     assert pan.tile_layer_items_updated == 0
     assert pan.tile_layer_texture_uploads == 0
     assert pan.tile_layer_texture_upload_bytes == 0
     assert pan.tile_layer_vertex_uploads == 0
-    assert pan.tile_layer_level_updates == 0
-    assert pan.tile_layer_shader_uniform_updates == 0
-    assert pan.visible_bytes == 0
-
-
-def test_vispy_level_only_tile_commit_updates_uniforms_without_uploads(benchmark_results):
-    results = {result.name: result for result in benchmark_results}
-    timing = results["vispy_tile_level_uniform_update"].timing
-
-    assert timing.tile_layer_visible_items > 0
-    assert timing.tile_layer_items_updated == 0
-    assert timing.tile_layer_items_skipped == timing.tile_layer_visible_items
-    assert timing.tile_layer_texture_uploads == 0
-    assert timing.tile_layer_texture_upload_bytes == 0
-    assert timing.tile_layer_level_updates > 0
-    assert timing.tile_layer_shader_uniform_updates > 0
-    assert timing.visible_bytes == 0
-
-
-def test_warm_residency_queue_scaling_reports_batched_speculative_uploads(benchmark_results):
-    results = {result.name: result for result in benchmark_results}
-    result = results["vispy_warm_residency_queue_scaling"]
-    timing = result.timing
-
-    assert result.commit_count == 8
-    assert timing.tile_layer_items_updated == 32
-    assert timing.tile_layer_resident_items == 40
-    assert timing.tile_layer_warm_resident_items == 32
-    assert timing.tile_layer_texture_uploads > 0
-    assert timing.tile_layer_texture_upload_bytes > 0
-    assert timing.tile_layer_near_resident_items == 40
 
 
 def test_progressive_tile_stream_reports_aggregate_work(benchmark_results):
     results = {result.name: result for result in benchmark_results}
-    vispy_result = results["vispy_progressive_tile_stream"]
-    timing = vispy_result.timing
+    result = results["pyqtgraph_progressive_tile_stream"]
+    timing = result.timing
 
-    assert vispy_result.commit_count == 12
+    assert result.commit_count == 12
     assert timing.tile_layer_visible_items == 96
     assert timing.tile_layer_items_updated == 96
-    assert timing.tile_layer_storage_rebuilds == 1
-    assert timing.tile_layer_resident_items == 96
-    assert timing.tile_layer_texture_uploads > 0
 
 
 def test_benchmark_jsonl_writer_emits_mergeable_sample_records(qt_app, tmp_path):

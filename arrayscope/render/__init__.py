@@ -20,10 +20,10 @@ Ownership rules:
    of tile state; this package never keeps a parallel tile collection.
 2. The kernel (arrayscope.kernel) is the only executor. No per-purpose pools, no
    pacing timers here; the GUI thread only applies commit batches.
-3. Backends declare capabilities (shader windowing, atlas residency, uniform
+3. Backends declare capabilities (shader windowing, persistent residency, uniform
    level changes); the ladder and pipeline branch on capabilities, never on
-   backend names. Both backends are first-class: VisPy exploits GPU
-   residency/uniforms, PyQtGraph gets correct (bounded CPU) equivalents.
+   backend names. Both maintained backends are first-class: WGPU exploits GPU
+   residency/uniforms, while PyQtGraph gets correct bounded CPU equivalents.
 4. Operations run once per rung on reduced input when they commute with
    reduction (`operations.capabilities`), else once at native + reduce.
 """

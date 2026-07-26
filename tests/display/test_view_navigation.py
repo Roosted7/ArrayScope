@@ -111,7 +111,7 @@ def _make_seeded_view(qt_app):
     """A base pyqtgraph view, seeded and unlocked from fit, ready for gestures.
 
     Touchpad gestures are handled in the shared ``ImageViewShell`` driver, so the
-    lightweight pyqtgraph backend exercises the same code path as wgpu/vispy
+    lightweight pyqtgraph backend exercises the same code path as wgpu
     without a GPU.
     """
 

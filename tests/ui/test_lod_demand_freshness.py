@@ -13,7 +13,6 @@ selected_lod_factor. This gate drives the real widget path.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 
@@ -35,25 +34,12 @@ def _demand_for_current_camera(win):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "OPEN (2026-07-18, both backends, field screenshots + this offscreen "
-        "repro): a zoom under AUTO camera intent rebuilds the session with "
-        "the FIT range instead of the live camera (probe: camera "
-        "[[706,835],[470,556]] vs session.view_range ((0,1541),(-1,1028))) — "
-        "the auto_like planning override in _montage_viewport_plan erases a "
-        "live zoomed camera, so LOD demand freezes at the fit level and "
-        "quality never upgrades. Fix owner: scope the AUTO/FIT replay "
-        "override to extent-change/no-camera cases."
-    ),
-)
 def test_zoom_in_rederives_lod_demand(qtbot):
-    from tests.ui.helpers import make_backend_window, restore_default_backend, use_vispy_backend
+    from tests.ui.helpers import make_backend_window, restore_default_backend, use_wgpu_backend
 
-    settings = use_vispy_backend(extra_settings={"montage_quality_policy": "resident"})
+    settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
     data = np.random.default_rng(5).normal(size=(256, 256, 24)).astype(np.float32)
-    win = make_backend_window(qtbot, data)
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     try:
         win.resize(900, 700)
         win.show()

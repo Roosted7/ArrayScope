@@ -281,7 +281,7 @@ def test_montage_prefetch_completion_warms_gpu_atlas_residency(qtbot, monkeypatc
 
     _clear_arrayscope_settings()
     from arrayscope.core.frame_targets import WorkStart
-    from arrayscope.display.backend_contract import VISPY_CAPABILITIES
+    from arrayscope.display.backend_contract import WGPU_CAPABILITIES
     from arrayscope.display.montage import RenderedTile
     from arrayscope.window import ArrayScopeWindow, montage_prefetch
 
@@ -336,7 +336,7 @@ def test_montage_prefetch_completion_warms_gpu_atlas_residency(qtbot, monkeypatc
         monkeypatch.setattr(
             montage_prefetch,
             "image_view_backend_capabilities",
-            lambda _view: VISPY_CAPABILITIES,
+            lambda _view: WGPU_CAPABILITIES,
         )
         monkeypatch.setattr(
             win.operation_evaluator,

@@ -5,7 +5,7 @@ from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.operations.evaluator import EvaluationResult
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-from tests.ui.helpers import clear_arrayscope_settings, process_events
+from tests.ui.helpers import clear_arrayscope_settings, process_events, require_wgpu_adapter
 
 
 def _tile_result(tile, value):
@@ -25,15 +25,12 @@ def _backend_residency_snapshot(win, backend):
             for tile_number, state in win.img_view._montage_tile_layer.states.items()
             if state.visible and state.item.isVisible()
         }
-    pool = win.img_view._vispy_gpu_montage_layer._pool
     return {
         int(tile_number): (
-            resident_key,
-            pool.source_ids.get(resident_key),
-            pool.acknowledged_identities.get(resident_key),
+            tuple(binding.get("actual_key") for binding in row.get("physical_page_bindings", ())),
+            row.get("physical_acknowledged_identity"),
         )
-        for tile_number, resident_key in pool.tile_resident_keys.items()
-        if resident_key in pool.active_resident_keys
+        for tile_number, row in win.img_view.tileTruthPhysicalRows().items()
     }
 
 
@@ -163,10 +160,8 @@ def test_rapid_scroll_latest_control_state_not_blocked_by_slow_commit(qtbot, mon
         win.close()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, backend):
-    if backend == "vispy":
-        pytest.importorskip("vispy")
     clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
 
@@ -189,7 +184,7 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, backend):
                 montage_axis=2,
                 colormap_lut=None,
                 result=_tile_result(tile, int(tile.source_index) + 1),
-                shader_display=backend == "vispy",
+                shader_display=backend == "wgpu",
             )
         evaluations_before = win.operation_evaluator.image_evaluations
         win._set_view_state(state)
@@ -203,10 +198,8 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, backend):
         win.close()
 
 
-@pytest.mark.parametrize("backend", ["pyqtgraph", "vispy"])
+@pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, backend):
-    if backend == "vispy":
-        pytest.importorskip("vispy")
     clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
 
@@ -229,7 +222,7 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, backend):
                 montage_axis=2,
                 colormap_lut=None,
                 result=_tile_result(tile, int(tile.source_index) + 1),
-                shader_display=backend == "vispy",
+                shader_display=backend == "wgpu",
             )
         evaluations_before = win.operation_evaluator.image_evaluations
         win._set_view_state(state)
@@ -266,9 +259,8 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, backend):
         win.close()
 
 
-def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtbot, monkeypatch):
-    pytest.importorskip("vispy")
-
+def test_wgpu_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtbot, monkeypatch):
+    require_wgpu_adapter()
     clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
 
@@ -279,7 +271,7 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
     win = None
     try:
         settings = QtCore.QSettings()
-        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.WGPU.value)
         settings.sync()
 
         win = ArrayScopeWindow(np.arange(2 * 2 * 8, dtype=np.float32).reshape(2, 2, 8))
@@ -290,7 +282,7 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
         )
         win.update_image_view()
         qtbot.waitUntil(
-            lambda: win.img_view.montageDisplayMode() == "vispy_tile_layer",
+            lambda: win.img_view.montageDisplayMode() == "wgpu_tile_layer",
             timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
         monkeypatch.setattr(
@@ -299,13 +291,13 @@ def test_vispy_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtb
             lambda: scheduled.append(win.img_view.getView().viewRange()),
         )
 
-        assert win.img_view._vispy_canvas_native.testAttribute(
+        assert win.img_view._wgpu_canvas.testAttribute(
             QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents
         )
         win.img_view.getView().setRange(xRange=(0.0, 4.0), yRange=(0.0, 2.0), padding=0)
         process_events(qtbot)
 
-        assert win.img_view.surface.capabilities.name == "vispy"
+        assert win.img_view.surface.capabilities.name == "wgpu"
         assert scheduled
     finally:
         if win is not None:
@@ -345,9 +337,8 @@ def test_montage_viewport_continuation_never_retargets_inline(qtbot, monkeypatch
         clear_arrayscope_settings()
 
 
-def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeypatch):
-    pytest.importorskip("vispy")
-
+def test_wgpu_montage_view_range_change_expands_visible_tile_set(qtbot, monkeypatch):
+    require_wgpu_adapter()
     clear_arrayscope_settings()
     from pyqtgraph.Qt import QtCore
 
@@ -357,7 +348,7 @@ def test_vispy_montage_view_range_change_expands_visible_tile_set(qtbot, monkeyp
     win = None
     try:
         settings = QtCore.QSettings()
-        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.VISPY.value)
+        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.WGPU.value)
         settings.sync()
 
         # Keep tiles narrow (width 10): viewport constraints cap zoom-out at a
