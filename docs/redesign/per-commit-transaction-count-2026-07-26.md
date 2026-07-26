@@ -1,10 +1,15 @@
 # Per-commit whole-montage cost — why 18 transactions, and what one costs (2026-07-26)
 
-**Status:** diagnosed, measured, **no code change landed**. The cause is proven
-and the lever is identified; the lever's *safe bound* is not established by this
-workload alone, and picking a constant without that would be the fourth
-speculative perf fix this repo has reverted. What would justify landing it is
-named at the end.
+**Status:** diagnosed and measured (§1–§7). The lever's *safe bound* is still not
+established by this workload alone, so **the byte cap is untouched** — picking a
+constant without those measurements would be the fourth speculative perf fix
+this repo has reverted. §6 names what would justify it.
+
+**§8 records three follow-ups since landed or refuted:** the 2.32× upload
+undercharge is fixed (`cbd85384`, measured to change nothing here, which is the
+point), the "two empty commits" premise is **refuted** — they are metadata
+publications, not no-ops (§8.2) — and admission now names the cap that bit, so a
+supply-starved batch stops reading as variance (`0d51e136`, §8.3).
 
 This closes the first open question of
 [preview-lod-anatomy](preview-lod-anatomy-2026-07-26.md) ("why 18 transactions
@@ -224,6 +229,7 @@ exceeds the residency budget, to see whether a single transaction evicts inside
 itself; (c) the journey matrix's bounded-commit oracle, which is the gate that
 caught the last ungoverned batch (pyqtgraph zoom_in, `max_upserts=0`); (d) the
 2.32× undercharge fixed first, so whatever bound is chosen means what it says.
+**(d) is done — §8.1.** (a)–(c) remain open, and until they are, the cap stays.
 
 ## 7. Loose ends worth a line
 
@@ -233,7 +239,7 @@ caught the last ungoverned batch (pyqtgraph zoom_in, `max_upserts=0`); (d) the
   it is doing *something*; the first differs from its predecessor in no traced
   field at all. `commit_gate_no_progress` fires on both — but with
   `outcome="backend-applied"`, i.e. after the 90 ms is already spent. ~180–380 ms
-  per fill, 4–9% of the stage.
+  per fill, 4–9% of the stage. **Followed up and reframed in §8.2.**
 - **The refinement is bistable.** One baseline run (`base2`, unmodified code)
   refined in **49 batches of 3–8 upserts over 8.0 s** instead of 2 batches over
   0.28 s — `fully_visible_ms` 16 015 vs 4245. `max_upserts` was 12–32 and the
@@ -241,7 +247,102 @@ caught the last ungoverned batch (pyqtgraph zoom_in, `max_upserts=0`); (d) the
   dribs. This is `f450660`'s pathology reappearing through a different door and
   it is not reproducible on demand (1 of 16 passes). It is also the single
   largest source of this stage's wall-clock spread, and it means the quoted
-  4.0–4.9 s range understates the tail.
+  4.0–4.9 s range understates the tail. **Made nameable in §8.3, which also
+  narrows where it lives.**
+
+## 8. Follow-ups taken (2026-07-26, same day)
+
+Three, on top of `c9b572a1`. The byte cap itself is left exactly where §6 left
+it, pending criteria (a)–(c).
+
+### 8.1 The 2.32× undercharge is fixed — and it changes nothing here, by design
+
+`cbd85384`. `wgpu_payload_upload_nbytes` is documented as "physical bytes for
+WGPU" and was not: it charged a plane warm 451 584 B where the commit writes
+four whole 256² pages, 1 048 576 B. The non-warm route was wrong by more — a
+level-4 tile is 1 764 B logical against one whole page.
+
+Predicted no behaviour change on this workload, because 32 MiB ÷ 1 MiB = 32 is
+the same cohort `_idle_backlog_cohort`'s item ceiling already produced.
+Measured none: 9–10 preview batches and 1258–1454 ms of commit time over three
+in-process passes, inside the unmodified spread of six baseline passes (9–10,
+1258–1816 ms). That coincidence *is* the result — it is why the error was
+invisible, and why criterion (d) had to be settled before the byte cap's value
+could be argued about at all. What changed is that the cap now describes the
+transaction it paces.
+
+### 8.2 The empty commits are not empty — premise refuted
+
+The proposal was to gate them out before the republication, on the reading that
+they change nothing. Instrumented once (a temporary `probe_empty_delta` trace
+carrying every component of `_empty_progressive_commit_settled` plus the
+metadata predicates, then removed), both commits in the 272-tile phase report:
+
+```
+publish_metadata=True  publish_histogram_plot=True  level_metadata_improved=True
+visible_plan_complete=False   force_refresh=False   geometry_changed=False
+```
+
+They are **level/histogram metadata publications**. `_empty_progressive_commit_settled`
+declines them correctly and on two independent grounds. Gating them out would
+drop the published levels, not 180 ms of nothing.
+
+The true statement is narrower and is the same root cause as §4, not a separate
+bug: **a metadata-only commit pays a whole-montage tile republication**, because
+levels and tiles share one commit path and
+`_apply_backend_tiled_presentation` is driven by `montage_tile_payloads` rather
+than by the delta.
+
+The fix that *would* be correct is a mapping-only fast path: when the payload
+set is identical by object identity to the previous commit's, and
+representation, layout, `display_shape`/`transposed` and the resident page set
+are all unchanged, every value the per-tile loop derives is a pure function of
+those inputs, so `self._wgpu_committed` can be reused and the submission
+reduced to `SetDisplayMapping` (+ camera). That is provable by construction
+rather than by taste, which is the bar this file wants — but it is a real change
+to the most dangerous function in the commit path for ~4% of the stage, and it
+is not something to land in the same window as the FFT-stall work. Left for a
+session that can own it.
+
+### 8.3 Supply-starvation is now nameable — and it moves the search
+
+`0d51e136`. `TileAdmissionDecision` carries `limit`: the first cap to defer
+anything, or `""` when none did (first is the right one — admission walks in
+priority order, so whatever stopped the highest-priority candidate set the batch
+size). The commit trace carries it beside `admission_deferred` and
+`admission_candidates`; `forget_admission_verdict` clears it per commit so the
+atomic-successor paths, which never run admission, report `candidates=-1`
+("did not run") instead of the previous commit's answer.
+
+The reference fill now reads its own cause:
+
+```
+items  cand  defer      limit  maxU      ms   qual
+   19    19      0                 2    85.2  preview     <- supply
+   41    41      0                32    55.7  preview     <- supply
+   32   212    180      items     32    66.7  preview     <- cap
+   32   180    148      items     32    83.7  preview
+   ...
+   20    20      0                20   107.7  preview     <- supply
+    0     0      0                12   102.9  -           <- admission ran, nothing offered
+  101   101      0                32   133.0  exact       <- supply
+  171   171      0                32   157.6  exact       <- supply
+```
+
+A 49-batch refinement would now show 49 rows of `limit=""` with
+`candidates == items` — supply starvation, stated, not inferred from the absence
+of a cap.
+
+**And it already pays a second time.** The *healthy* refinement reads `limit=""`
+too: its 2 batches are **supply-bound as well**, not one atomic transaction
+admitted past the caps. So the good case and the bistable case differ only in
+how the free-retarget supply arrives — which takes the commit caps out of the
+frame entirely and puts the next investigation on the retarget/lifecycle side.
+That is a narrowing the counter bought on its first run.
+
+Counters only; no caps, no scheduling, no policy. Three in-process passes
+measure 9–10 preview batches and 1288–1405 ms of commit time against the same
+build without them at 9–10 and 1258–1454.
 - **A/B discipline, paid for again.** The first pass of this investigation ran
   base → probe → probe sequentially and measured the probe **1.4 s worse**,
   which read as a clean refutation. It was process ordering: with in-process
