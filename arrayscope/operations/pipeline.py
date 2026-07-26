@@ -10,7 +10,7 @@ import numpy as np
 
 from arrayscope.core.axis_info import axes_for_shape, output_axes_for_operations
 from arrayscope.core.axis_utils import validate_axis
-from arrayscope.operations import _numba_reductions, dim_ops
+from arrayscope.operations import _numba_native_ops, _numba_reductions, dim_ops
 from arrayscope.operations.capabilities import (
     OperationCapabilities,
     OperationKind,
@@ -1670,6 +1670,9 @@ def _normalize(data, axis):
     array = np.asarray(data)
     if _is_integer_dtype(array.dtype):
         array = array.astype(np.float32)
+    accelerated = _numba_native_ops.normalize_if_ready(array, axis)
+    if accelerated is not None:
+        return accelerated
     norm = np.sqrt(np.sum(np.abs(array) ** 2, axis=axis, keepdims=True))
     result = np.zeros_like(array)
     np.divide(array, norm, out=result, where=norm != 0)

@@ -204,6 +204,13 @@ on 2's editor; 4 is engine-side and unblocks 5.
 region-capable where it truly is pointwise; external backends keep only what
 genuinely needs them.
 
+**Bundle A implemented 2026-07-26 on `claude/native-ops-bundle-a`.** The Numba
+verdict and exact measurements are recorded in the
+[dated review](../reviews/2026-07-26-native-operations-numba.md): normalize
+landed behind the shared lazy runtime; faster log-magnitude and soft-threshold
+kernels were rejected because mixed NumPy/Numba region paths failed the exact
+ELEMENTWISE oracle by 1–2 ULP.
+
 - Implement natively (built-in tier, `pipeline.py` + registry): magnitude, phase,
   real, imag, log-magnitude (with an epsilon parameter), scale, offset, power,
   normalize (axis or global), clip, soft/hard threshold, roll/circshift, pad
