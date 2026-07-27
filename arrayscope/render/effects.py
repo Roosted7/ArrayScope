@@ -74,7 +74,7 @@ from arrayscope.presentation import LevelPhase
 from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import TileLodState
 
-SHARED_PREVIEW_ROUTE = ("shared-transform-preview", 1, "sample-display-axes-before-operations")
+SHARED_PREVIEW_ROUTE = ("shared-transform-preview", 2, "transform-native-then-box-mean")
 
 
 def _check_render_cancelled(token) -> None:
@@ -523,10 +523,13 @@ def evaluate_shared_preview(
     shader_display: bool,
     evaluation_context=None,
 ):
-    """Evaluate one reduced display volume and return value-helper rows.
+    """Evaluate one native cohort volume and return reduced display rows.
 
     ADR 0059 retired this function's separate scheduler. It remains useful for
     direct value tests and tools, but owns no admission, claims, or barrier.
+    The worker keeps the transformed native volume long enough to prepare
+    per-tile range evidence, then box-means only the page values. One cohort
+    therefore still performs one operation pipeline/FFT.
     """
 
     if not can_evaluate_reduced_preview(session, seed_tile) or demand is None:
@@ -541,19 +544,18 @@ def evaluate_shared_preview(
         axis_overrides[int(axis)] = values
         slice_remaps[int(axis)] = local_indices
     source_alignment = _preview_source_alignment(session)
-    reduced_base, _preview_state = read_reduced_preview_base_and_state(
+    native_base, _preview_state = read_reduced_preview_base_and_state(
         session.document,
         seed_tile.view_state,
-        factor_xy=factor_xy,
+        factor_xy=(1, 1),
         cancellation_token=cancellation_token,
         evaluation_context=evaluation_context,
         axis_region_overrides=axis_overrides,
-        sample_display_axes=True,
         source_aligned=source_alignment,
     )
     transformed = _evaluate_reduced_preview_volume(
         session.document,
-        reduced_base,
+        native_base,
         cancellation_token=cancellation_token,
     )
     previews = []
@@ -571,7 +573,7 @@ def evaluate_shared_preview(
         preview_state = reduced_preview_view_state(
             tile.view_state,
             np.shape(transformed),
-            factor_xy=factor_xy,
+            factor_xy=(1, 1),
             slice_remap=_shared_evaluation_slice_remap(
                 session,
                 tile,
@@ -623,6 +625,7 @@ def evaluate_shared_preview(
             texture_kind=getattr(value, "texture_kind", None),
             semantic_data=None,
             semantic_histogram_data=None,
+            lod_source_data=getattr(value, "lod_source_data", None),
             lod=getattr(value, "lod", None),
             level_data=getattr(value, "level_data", None),
             level_stats=getattr(value, "level_stats", None),
@@ -640,20 +643,38 @@ def evaluate_shared_preview(
             shader_display=bool(shader_display),
         )
         source = page_route.source
-        source_height, source_width = (
-            int(value) for value in render_lod.canonical_source_tile_shape(session)[:2]
+        source_origin_yx = render_lod.source_origin_yx_for_rendered(
+            session,
+            rendered,
+            source,
         )
+        reduced_source = reduce_array_display_axes(
+            source,
+            (0, 1),
+            factor_xy,
+            source_starts={
+                0: int(source_origin_yx[0]),
+                1: int(source_origin_yx[1]),
+            },
+        )
+        source_height, source_width = (int(size) for size in np.shape(source)[:2])
+        source_y, source_x = source_origin_yx
         plans = plan_source_grid_pages(
-            # Reduced-before-operation shared values are deliberately
-            # non-semantic.  Keep their value identity separate from direct
-            # canonical display-plane pages so residency can provide a floor
-            # without suppressing or aliasing later exact materialization.
+            # The complete-scope preview still has a distinct physical family:
+            # its one transform is shared across the cohort rather than owned
+            # by any one target tile. The stored values now honor the declared
+            # box-mean reducer; only their residency identity stays separate.
             content_key=(
                 "src-anchored",
                 semantic_source_id,
                 ("display-plane", SHARED_PREVIEW_ROUTE),
             ),
-            valid_source_rect_yx=(0, source_height, 0, source_width),
+            valid_source_rect_yx=(
+                source_y,
+                source_y + source_height,
+                source_x,
+                source_x + source_width,
+            ),
             reduction_yx=page_route.reduction_yx,
             stored_page_shape=(256, 256),
             dtype=page_route.dtype,
@@ -667,9 +688,17 @@ def evaluate_shared_preview(
             reducer=page_route.reducer,
             plans=plans,
         )
-        pages = _materialize_shared_preview_pages(source, plans=plans)
+        pages = _materialize_shared_preview_pages(reduced_source, plans=plans)
         histogram = _preview_display_histogram(
-            rendered, source, texture_kind, getattr(value, "histogram_data", None)
+            rendered,
+            reduced_source,
+            texture_kind,
+            None,
+        )
+        rough_level_stats = _preview_level_stats_from_native_source(
+            source,
+            source_index=int(tile.source_index),
+            mapping=getattr(value, "shader_mapping", None),
         )
         previews.append(
             (
@@ -680,7 +709,7 @@ def evaluate_shared_preview(
                 getattr(value, "shader_mapping", None),
                 texture_kind,
                 getattr(value, "level_data", None),
-                getattr(value, "level_stats", None),
+                rough_level_stats,
             )
         )
     return tuple(previews)
@@ -1679,6 +1708,26 @@ def chunk_level_stats_for_pages(pages, *, source_index: int, mapping=None) -> Ti
     )
 
 
+def _preview_level_stats_from_native_source(
+    source,
+    *,
+    source_index: int,
+    mapping=None,
+) -> TileLevelStats | None:
+    """Prepare exact bounds from the worker's pre-reduction display plane."""
+
+    values = np.asarray(source)
+    if mapping is not None:
+        values = mapped_scalar(values, mapping)
+    elif np.iscomplexobj(values):
+        values = np.abs(values).astype(np.float32, copy=False)
+    return provisional_tile_level_stats(
+        values,
+        int(source_index),
+        evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+    )
+
+
 def _page_summary_matches_mapping(page: MaterializedLodPage, mapping) -> bool:
     if getattr(mapping, "scale", None) != ShaderScale.LINEAR:
         return False
@@ -1768,12 +1817,14 @@ def _evaluate_tile_reduced_input_preview(
     stage_cache,
     stage_materializer,
 ):
-    """Evaluate one coarse tile from a real-document reduced stage.
+    """Evaluate one coarse tile from one shared native-output stage.
 
     The stage identity is the real document plus its source region and
-    reduction.  A montage-axis transform expands every tile request to the
-    same region, so the stage cache computes the reduced volume once and the
-    per-tile ladder workers only slice and page it.
+    reduction target. A montage-axis transform expands every tile request to
+    the same region, so the stage cache computes the native transformed volume
+    once. Per-tile workers derive native range evidence from their slab, then
+    box-mean only the displayed pages. This keeps the one-FFT sharing property
+    without deriving R3 evidence from lossy preview pixels.
     """
 
     factor_xy = factor_xy_for_level(demand, int(level))
@@ -1781,7 +1832,7 @@ def _evaluate_tile_reduced_input_preview(
     read_spec = _reduced_preview_read_spec(
         session.document,
         tile.view_state,
-        factor_xy=factor_xy,
+        factor_xy=(1, 1),
         source_aligned=source_aligned,
     )
     candidate = _reduced_preview_stage_candidate(
@@ -1791,17 +1842,17 @@ def _evaluate_tile_reduced_input_preview(
     )
 
     def compute():
-        reduced_base, _preview_state = read_reduced_preview_base_and_state(
+        native_base, _preview_state = read_reduced_preview_base_and_state(
             session.document,
             tile.view_state,
-            factor_xy=factor_xy,
+            factor_xy=(1, 1),
             cancellation_token=cancellation_token,
             evaluation_context=evaluation_context,
             source_aligned=source_aligned,
         )
         transformed = _evaluate_reduced_preview_volume(
             session.document,
-            reduced_base,
+            native_base,
             cancellation_token=cancellation_token,
         )
         values = np.asarray(transformed)
@@ -1837,7 +1888,7 @@ def _evaluate_tile_reduced_input_preview(
     preview_state = reduced_preview_view_state(
         tile.view_state,
         transformed.shape,
-        factor_xy=factor_xy,
+        factor_xy=(1, 1),
         slice_remap=read_spec.slice_remap,
     )
     request = request_for_image(preview_state)
@@ -1887,6 +1938,7 @@ def _evaluate_tile_reduced_input_preview(
         texture_kind=getattr(value, "texture_kind", None),
         semantic_data=None,
         semantic_histogram_data=None,
+        lod_source_data=getattr(value, "lod_source_data", None),
         lod=getattr(value, "lod", None),
         level_data=getattr(value, "level_data", None),
         level_stats=getattr(value, "level_stats", None),
@@ -1944,15 +1996,25 @@ def _evaluate_tile_reduced_input_preview(
         reducer=page_route.reducer,
         plans=plans,
     )
-    pages = _materialize_shared_preview_pages(source, plans=plans)
+    source_origin_yx = (valid_source_rect_yx[0], valid_source_rect_yx[2])
+    reduced_source = reduce_array_display_axes(
+        source,
+        (0, 1),
+        factor_xy,
+        source_starts={
+            0: int(source_origin_yx[0]),
+            1: int(source_origin_yx[1]),
+        },
+    )
+    pages = _materialize_shared_preview_pages(reduced_source, plans=plans)
     histogram = _preview_display_histogram(
         rendered,
-        source,
+        reduced_source,
         texture_kind,
-        getattr(value, "histogram_data", None),
+        None,
     )
-    rough_level_stats = chunk_level_stats_for_pages(
-        pages,
+    rough_level_stats = _preview_level_stats_from_native_source(
+        source,
         source_index=int(tile.source_index),
         mapping=getattr(value, "shader_mapping", None),
     )
@@ -1972,9 +2034,9 @@ def _evaluate_tile_reduced_input_preview(
 def _reduced_preview_route(factor_xy) -> tuple:
     return (
         "reduced-input-preview",
-        1,
+        2,
         tuple(int(value) for value in factor_xy),
-        "box-mean-display-axes-before-operations",
+        "operations-before-box-mean-display-axes",
     )
 
 
@@ -2057,8 +2119,8 @@ def _evaluate_tile_native_output_preview(
         else TexturePlaneKind.SCALAR_R32F
     )
     mapping = getattr(value, "shader_mapping", None)
-    rough_level_stats = chunk_level_stats_for_pages(
-        pages,
+    rough_level_stats = _preview_level_stats_from_native_source(
+        source,
         source_index=int(tile.source_index),
         mapping=mapping,
     )

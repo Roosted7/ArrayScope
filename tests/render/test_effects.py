@@ -521,12 +521,15 @@ def test_evaluate_shared_preview_fans_out_display_only_payloads():
         assert level_stats is not None
         assert int(level_stats.source_index) == int(tile_number)
         assert level_stats.bounds == (
-            float(np.min(_stored_preview_values(pages))),
-            float(np.max(_stored_preview_values(pages))),
+            float(np.min(np.asarray(session.document.base_data)[..., int(tile_number)])),
+            float(np.max(np.asarray(session.document.base_data)[..., int(tile_number)])),
         )
-        np.testing.assert_array_equal(
+        np.testing.assert_allclose(
             _stored_preview_values(pages),
-            np.asarray(session.document.base_data)[::2, ::2, int(tile_number)],
+            effects.reduce_display_payload_axes(
+                np.asarray(session.document.base_data)[..., int(tile_number)],
+                (2, 2),
+            ),
         )
 
 
@@ -730,37 +733,55 @@ def test_pyqtgraph_shared_fft_preview_retains_reduced_complex_source_format():
         assert mapping is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "R3 exposure: round levels are summarized from the reduced preview "
-        "pages, and that reduction point-samples rather than averaging, so an "
-        "extreme that misses the stride grid is absent from the round window "
-        "and every target tile carrying it is clipped"
-    ),
-)
-def test_preview_cohort_level_evidence_contains_the_native_extremes():
+def test_shared_fft_prepares_native_evidence_without_a_second_transform(monkeypatch):
+    data = np.arange(16 * 16 * 8, dtype=np.float32).reshape(16, 16, 8)
+    session = _session(data)
+    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    session.shader_display = True
+    session.lod_preview_level = 2
+    original = effects._evaluate_reduced_preview_volume
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(effects, "_evaluate_reduced_preview_volume", counted)
+    rows = effects.evaluate_shared_preview(
+        session,
+        session.plan.tiles[0],
+        session.plan.tiles,
+        demand=_demand(1),
+        level=2,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+
+    assert len(rows) == len(session.plan.tiles)
+    assert calls == 1
+    assert all(row[-1].bounds is not None for row in rows)
+
+
+@pytest.mark.parametrize("extreme_yx", [(8, 8), (9, 9)])
+@pytest.mark.parametrize("extreme_value", [-1000.0, 1000.0])
+def test_preview_cohort_level_evidence_contains_the_native_extremes(
+    extreme_yx,
+    extreme_value,
+):
     """Round levels from the preview cohort must still contain what is drawn.
 
-    Round levels now come from the preview cohort rather than a source-slab
-    sweep, and `chunk_level_stats_for_pages` summarizes the *materialized
-    reduced pages*. Those pages are point-sampled: the page key reports
-    ``reducer="mean"``, but a value that lands off the level's stride grid is
-    dropped rather than averaged in.
-
-    So a lone extreme survives only if it happens to sit on the grid. Off it,
-    the cohort reports a window that does not contain the native range, and
-    PyQtGraph keeps that window for the whole round -- exactly the clipping R3
-    forbids. FFT is the realistic case: k-space is one very sharp DC peak on an
-    otherwise dim field, so missing that single sample mis-scales the montage.
-
-    Expected behavior: the cohort's bounds contain the native range regardless
-    of where the extreme falls. Fixing this means summarizing the pre-reduction
-    slab, or using an extreme-preserving reduction for evidence.
+    The displayed page is a real box mean, while the cohort bounds come from
+    the transformed native plane the same preview worker held before reducing
+    those pixels. A lone extreme must therefore affect the mean by the same
+    amount and remain verbatim in the evidence regardless of stride alignment.
+    FFT is the realistic case: k-space is one sharp DC peak on an otherwise dim
+    field, so losing that one source value would mis-scale the whole montage.
     """
 
     data = np.zeros((16, 16, 3), dtype=np.float32)
-    data[9, 9, :] = 1000.0  # deliberately OFF the level-2 stride grid
+    data[extreme_yx[0], extreme_yx[1], :] = extreme_value
     session = _session(data)
     session.lod_preview_level = 2
 
@@ -776,12 +797,15 @@ def test_preview_cohort_level_evidence_contains_the_native_extremes():
     )
 
     assert rows
-    stats = rows[0][6]
+    _tile, key, pages, _histogram, _mapping, _kind, _level_data, stats = rows[0]
     assert stats is not None, "preview cohort must carry level evidence"
-    assert max(stats.bounds) >= 1000.0, (
-        f"cohort bounds {stats.bounds} exclude the native maximum 1000.0, "
-        "so every target tile carrying it is clipped"
-    )
+    assert key.reducer == "mean"
+    stored = _stored_preview_values(pages)
+    assert float(
+        stored[np.unravel_index(np.argmax(np.abs(stored)), stored.shape)]
+    ) == pytest.approx(extreme_value / 16.0)
+    assert stats.bounds[0] <= float(np.min(data))
+    assert stats.bounds[1] >= float(np.max(data))
 
 
 def test_pyqtgraph_per_tile_fft_preview_also_retains_the_complex_source_format():
@@ -916,7 +940,7 @@ def test_noncommuting_shared_preview_cannot_alias_direct_exact_pages():
     assert cache.exact_pages(exact_key.plans) is None
 
 
-def test_shared_fft_shift_ifft_preview_matches_sampled_exact_complex_output():
+def test_shared_fft_shift_ifft_preview_box_means_exact_complex_output():
     data = np.arange(8 * 10 * 8, dtype=np.float32).reshape(8, 10, 8)
     session = _session(data)
     operations = (
@@ -944,7 +968,10 @@ def test_shared_fft_shift_ifft_preview_matches_sampled_exact_complex_output():
     for tile_number, _key, pages, *_rest in rows:
         np.testing.assert_allclose(
             _stored_preview_values(pages),
-            np.asarray(exact)[::4, ::4, int(tile_number)],
+            effects.reduce_display_payload_axes(
+                np.asarray(exact)[..., int(tile_number)],
+                (4, 4),
+            ),
             rtol=1e-5,
             atol=1e-5,
         )
@@ -1006,8 +1033,9 @@ def test_fft_coarse_rung_materializes_one_reduced_stage_for_272_tiles():
     assert cache.stores == 1
     [(stage_key, stage_value)] = evaluator.stage_cache._resident_snapshot
     assert region_shape(stage_key.shape, stage_value.region) == stage_value.data.shape
-    assert tuple(stage_value.region.axes[0].value) == (0, 16, 16)
-    assert tuple(stage_value.region.axes[1].value) == (0, 16, 16)
+    assert stage_value.region.axes[0].value is None
+    assert stage_value.region.axes[1].value is None
+    assert stage_value.data.shape == (16, 16, 272)
     assert len(rows) == 272
     assert all(row[0].level_xy == (4, 4) for row in rows)
     assert all(row[-1] is None for row in rows), "coarse pages carry no native warm plane"
@@ -1055,7 +1083,10 @@ def test_shared_fft_preview_maps_shifted_flipped_window_by_source_index():
     for row, source_index in zip(rows, (5, 6, 7), strict=True):
         np.testing.assert_allclose(
             _stored_preview_values(row[2]),
-            np.asarray(exact)[::4, ::4, int(source_index)],
+            effects.reduce_display_payload_axes(
+                np.asarray(exact)[..., int(source_index)],
+                (4, 4),
+            ),
             rtol=1e-5,
             atol=1e-5,
         )

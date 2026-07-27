@@ -259,6 +259,34 @@ def test_admitted_preview_claim_prevents_source_sweep_race():
     assert any(task["scope"] == "montage:semantic-level-evidence" for task in kernel.tasks)
 
 
+@pytest.mark.parametrize("capabilities", [PYQTGRAPH_CAPABILITIES, WGPU_CAPABILITIES])
+def test_pending_preview_cohort_parks_sweep_only_while_first_presentation_is_blocked(
+    capabilities,
+):
+    """The pending-cohort park is safe only because no backend can present."""
+
+    from arrayscope.window.frame_effects import tile_layer_first_pixels_wait_for_level_source
+
+    data = np.arange(8 * 10 * 20, dtype=np.float32).reshape(8, 10, 20)
+    session = _session(data)
+    session.scheduling_policy.retarget("preview-pass", (0,), progressive=True)
+    service, kernel = _service(session, capabilities=capabilities)
+
+    assert service._expect_preview_cohort_level_evidence(session)
+    service._schedule_semantic_level_evidence(session)
+
+    summary = service._montage_level_tracker().summary_for(session.level_key)
+    assert session.round_level_evidence_source == "preview-cohort-pending"
+    assert not kernel.tasks, "fallback sweep ran while the preview cohort was pending"
+    assert session.lifecycle.presented_tiles == frozenset()
+    assert tile_layer_first_pixels_wait_for_level_source(
+        service,
+        session,
+        True,
+        summary,
+    )
+
+
 def test_wgpu_target_evidence_only_widens_preview_cohort_before_commit():
     data = np.arange(8 * 10 * 20, dtype=np.float32).reshape(8, 10, 20)
     session = _session(data)

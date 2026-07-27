@@ -4657,6 +4657,13 @@ def tile_layer_first_pixels_wait_for_level_source(
 
     if not bool(first_display_commit):
         return False
+    if str(getattr(session, "round_level_evidence_source", "") or "") == "preview-cohort-pending":
+        # The fallback semantic sweep is deliberately parked while the preview
+        # cohort owns the round-level decision. That is safe only while no tile
+        # from the round can reach a backend. A complete cohort is admitted
+        # atomically, so holding both backend families here costs no normal
+        # shared-preview progress and keeps the parked window unobservable.
+        return True
     shader_windowing = bool(image_view_backend_capabilities(window.win.img_view).shader_windowing)
     has_rough_source = bool(
         level_stats is not None
