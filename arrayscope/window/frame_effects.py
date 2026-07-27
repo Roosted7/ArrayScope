@@ -4681,17 +4681,13 @@ def tile_layer_first_pixels_wait_for_level_source(
         # waits for the remaining refinement.
         semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
         refined_sources = {
-            int(source)
-            for source in tuple(getattr(semantic_progress, "covered_sources", ()) or ())
+            int(source) for source in tuple(getattr(semantic_progress, "covered_sources", ()) or ())
         }
         blocking_source_count = min(
             len(required_sources),
             MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
         )
-        if (
-            required_sources
-            and len(refined_sources & required_sources) >= blocking_source_count
-        ):
+        if required_sources and len(refined_sources & required_sources) >= blocking_source_count:
             return False
         # Provisional first-batch acceptance: a large cold scope must not hold
         # every already-evaluated floor hostage to the full evidence sweep

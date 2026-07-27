@@ -71,16 +71,10 @@ def coarse_rung_level(
         default=0.0,
     )
     if source_texels_per_pixel > 0.0:
-        while (
-            (2**level) / source_texels_per_pixel
-            < COARSE_RUNG_MIN_SCREEN_PIXELS_PER_TEXEL
-        ):
+        while (2**level) / source_texels_per_pixel < COARSE_RUNG_MIN_SCREEN_PIXELS_PER_TEXEL:
             level += 1
         retention_footprint = (2**retention) / source_texels_per_pixel
-        if (
-            retention > level
-            and retention_footprint <= COARSE_RUNG_MAX_SCREEN_PIXELS_PER_TEXEL
-        ):
+        if retention > level and retention_footprint <= COARSE_RUNG_MAX_SCREEN_PIXELS_PER_TEXEL:
             level = retention
     return level
 
