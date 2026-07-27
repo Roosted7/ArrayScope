@@ -59,12 +59,24 @@ python -m arrayscope.core.diagnostics_trace \
   tests/artifacts/v0.8.0-diagnostics-wgpu.jsonl \
   > tests/artifacts/v0.8.0-diagnostics-wgpu-summary.md
 QT_QPA_PLATFORM=offscreen python -m arrayscope.display.rendering_benchmarks \
+  --runs 1 \
+  --jsonl tests/artifacts/v0.8.0-rendering-benchmark-pyqtgraph-linux.jsonl
+QT_QPA_PLATFORM=offscreen python -m arrayscope.display.rendering_benchmarks \
   --tile-counts 1,16,64 \
   --pan-steps 8 \
   --pan-tile-edge 64 \
   --pan-present-method bitmap \
   --jsonl tests/artifacts/v0.8.0-rendering-benchmark-wgpu-linux.jsonl
 ```
+
+**Both maintained backends produce a benchmark artifact, and the two runs are
+different tools.** Without `--tile-counts`, `rendering_benchmarks` runs the
+PyQtGraph display-update scenarios (`benchmark_pyqtgraph_rendering`); with it,
+it runs the WGPU montage pan-scaling harness. Neither substitutes for the
+other, and an RC that ships only the WGPU row has no evidence for the
+CPU/headless/remote backend that ADR 0061 keeps first-class for correctness.
+Name the JSONL for the backend it measured — the file name is the only thing
+that carries that distinction into the artifact directory.
 
 Do not feed rendering benchmark JSONL into
 `arrayscope.core.diagnostics_trace`; benchmark samples and runtime diagnostics

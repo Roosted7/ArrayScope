@@ -344,6 +344,15 @@ jobs:
           python -m arrayscope.core.diagnostics_trace \
             tests/artifacts/v0.8.0-diagnostics-wgpu.jsonl \
             > tests/artifacts/v0.8.0-diagnostics-wgpu-summary.md
+      - name: Generate PyQtGraph performance-baseline artifact
+        # Without --tile-counts this is the PyQtGraph display-update harness,
+        # not a smaller WGPU run. ADR 0061 keeps PyQtGraph first-class for
+        # correctness, so an RC that ships only the WGPU row below has no
+        # baseline for the CPU/headless/remote backend.
+        run: |
+          python -m arrayscope.display.rendering_benchmarks \
+            --runs 1 \
+            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-pyqtgraph-linux.jsonl
       - name: Generate WGPU performance-baseline artifact
         run: |
           python -m arrayscope.display.rendering_benchmarks \
