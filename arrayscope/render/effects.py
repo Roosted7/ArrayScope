@@ -540,6 +540,7 @@ def evaluate_shared_preview(
         axis, values, local_indices = override
         axis_overrides[int(axis)] = values
         slice_remaps[int(axis)] = local_indices
+    source_alignment = _preview_source_alignment(session)
     reduced_base, _preview_state = read_reduced_preview_base_and_state(
         session.document,
         seed_tile.view_state,
@@ -548,7 +549,7 @@ def evaluate_shared_preview(
         evaluation_context=evaluation_context,
         axis_region_overrides=axis_overrides,
         sample_display_axes=True,
-        source_aligned=getattr(session, "source_anchoring", None) is not None,
+        source_aligned=source_alignment,
     )
     transformed = _evaluate_reduced_preview_volume(
         session.document,
@@ -1247,7 +1248,7 @@ def _reduced_preview_read_spec(
     factor_xy: tuple[int, int],
     axis_region_overrides=None,
     sample_display_axes: bool = False,
-    source_aligned: bool = False,
+    source_aligned: bool | tuple[bool, bool] = False,
 ):
     """Plan the real-document region that feeds one reduced preview stage."""
 
@@ -1257,6 +1258,7 @@ def _reduced_preview_read_spec(
     }
     base_shape = tuple(int(size) for size in np.shape(document.base_data))
     image_axes = tuple(int(axis) for axis in view_state.image_axes)
+    aligned_y, aligned_x = _preview_axis_alignment(source_aligned)
     reduced_shape = list(base_shape)
     display_y_region = _display_axis_region_for_preview(
         view_state, image_axes[0], base_shape[image_axes[0]]
@@ -1264,26 +1266,25 @@ def _reduced_preview_read_spec(
     display_x_region = _display_axis_region_for_preview(
         view_state, image_axes[1], base_shape[image_axes[1]]
     )
-    display_source_starts = (
-        {
-            image_axes[0]: _axis_region_first_index(display_y_region),
-            image_axes[1]: _axis_region_first_index(display_x_region),
-        }
-        if source_aligned
-        else {}
-    )
+    display_source_starts = {
+        image_axes[0]: _axis_region_first_index(display_y_region) if aligned_y else None,
+        image_axes[1]: _axis_region_first_index(display_x_region) if aligned_x else None,
+    }
+    display_source_starts = {
+        axis: int(start) for axis, start in display_source_starts.items() if start is not None
+    }
     if sample_display_axes:
         preview_y_region = _sample_preview_axis_region(
             display_y_region,
             base_shape[image_axes[0]],
             max(1, int(factor_xy[1])),
-            source_aligned=source_aligned,
+            source_aligned=aligned_y,
         )
         preview_x_region = _sample_preview_axis_region(
             display_x_region,
             base_shape[image_axes[1]],
             max(1, int(factor_xy[0])),
-            source_aligned=source_aligned,
+            source_aligned=aligned_x,
         )
         reduced_shape[image_axes[0]] = _axis_region_length(
             preview_y_region,
@@ -1300,13 +1301,13 @@ def _reduced_preview_read_spec(
             display_y_region,
             base_shape[image_axes[0]],
             max(1, int(factor_xy[1])),
-            source_aligned=source_aligned,
+            source_aligned=aligned_y,
         )
         reduced_shape[image_axes[1]] = _reduced_axis_length(
             display_x_region,
             base_shape[image_axes[1]],
             max(1, int(factor_xy[0])),
-            source_aligned=source_aligned,
+            source_aligned=aligned_x,
         )
     reduced_shape = tuple(int(size) for size in reduced_shape)
     planning_document = ArrayDocument(
@@ -1344,13 +1345,13 @@ def _reduced_preview_read_spec(
             read_axes[image_axes[0]],
             base_shape[image_axes[0]],
             max(1, int(factor_xy[1])),
-            source_aligned=source_aligned,
+            source_aligned=aligned_y,
         )
         stage_axes[image_axes[1]] = _sample_preview_axis_region(
             read_axes[image_axes[1]],
             base_shape[image_axes[1]],
             max(1, int(factor_xy[0])),
-            source_aligned=source_aligned,
+            source_aligned=aligned_x,
         )
     read_shape = [
         _axis_region_length(axis_region, base_shape[axis])
@@ -1363,6 +1364,31 @@ def _reduced_preview_read_spec(
         slice_remap=dict(slice_remap),
         display_source_starts=display_source_starts,
     )
+
+
+def _preview_source_alignment(session) -> bool | tuple[bool, bool]:
+    """Return the display-axis alignment promised by source-page identity."""
+
+    anchoring = getattr(session, "source_anchoring", None)
+    if anchoring is None:
+        return False
+    starts = tuple(getattr(anchoring, "anchored_starts", ()) or ())
+    if len(starts) != 2:
+        # Lightweight test sessions predate the per-axis SourceAnchoring
+        # contract. Preserve their all-or-nothing behavior.
+        return True
+    return tuple(start is not None for start in starts)
+
+
+def _preview_axis_alignment(
+    source_aligned: bool | tuple[bool, bool],
+) -> tuple[bool, bool]:
+    if isinstance(source_aligned, tuple):
+        if len(source_aligned) != 2:
+            raise ValueError("preview source alignment requires two display axes")
+        return bool(source_aligned[0]), bool(source_aligned[1])
+    aligned = bool(source_aligned)
+    return aligned, aligned
 
 
 def _sample_preview_axis_region(
@@ -1745,7 +1771,7 @@ def _evaluate_tile_reduced_input_preview(
     """
 
     factor_xy = factor_xy_for_level(demand, int(level))
-    source_aligned = getattr(session, "source_anchoring", None) is not None
+    source_aligned = _preview_source_alignment(session)
     read_spec = _reduced_preview_read_spec(
         session.document,
         tile.view_state,

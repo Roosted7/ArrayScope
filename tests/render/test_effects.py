@@ -18,6 +18,7 @@ from arrayscope.display.pyramid import (
     plan_source_grid_pages,
 )
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping
+from arrayscope.display.source_anchoring import SourceAnchoring
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import (
     ArrayDocument,
@@ -399,6 +400,54 @@ def test_evaluate_preview_tile_uses_requested_rung_level():
     key, pages, *_rest = preview
     assert key.level_xy == (2, 2)
     assert pages[0].values.shape == (1, 2)
+
+
+def test_reduced_preview_keeps_unanchored_stepped_crop_window_local():
+    data = np.arange(336 * 336 * 3, dtype=np.float32).reshape(336, 336, 3)
+    session = _session(data)
+    state = (
+        session.view_state.with_axis_range(
+            0,
+            indices=tuple(range(94, 296, 2)),
+            text="94:2:294",
+        )
+        .with_axis_range(
+            1,
+            indices=tuple(range(66, 268, 2)),
+            text="66:2:266",
+        )
+        .with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
+    )
+    session.view_state = state
+    session.plan = make_montage_plan(
+        state,
+        axis=2,
+        indices=(0, 1, 2),
+        tile_shape=(101, 101),
+        columns=3,
+        viewport_shape=(100, 100),
+    )
+    session.source_anchoring = SourceAnchoring(
+        anchored_starts=(None, None),
+        content_key=("stepped-window-local",),
+    )
+    tile = session.plan.tiles[0]
+
+    preview = effects.evaluate_preview_tile(
+        session,
+        tile,
+        demand=_demand(0),
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        level=4,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert preview is not None
+    _key, pages, *_rest = preview
+    assert pages[0].plan.valid_source_rect_yx == (0, 101, 0, 101)
+    assert _stored_preview_values(pages).shape == (7, 7)
 
 
 def test_reusable_preview_keeps_captured_route_and_source_anchor():
