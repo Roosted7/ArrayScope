@@ -4240,9 +4240,7 @@ def _release_fit_after_montage_build(
                 "fit_stretch_disable_delivery_ms": float(delivery_ms),
                 "fit_stretch_retarget_call_ms": float(retarget_call_ms),
                 "fit_stretch_retarget_delivery_ms": float(delivery_ms),
-                "fit_stretch_release_total_ms": float(
-                    (perf_counter() - total_start) * 1000.0
-                ),
+                "fit_stretch_release_total_ms": float((perf_counter() - total_start) * 1000.0),
                 "fit_disable_viewport_mode": str(getattr(mode, "value", mode) or ""),
                 "fit_disable_view_range": view_range,
             }
@@ -5743,9 +5741,7 @@ def _coarse_target_trace_metrics(
             for event in reversed(phase_window)
             if str(event.get("kind", "")) == "scheduling_phase"
             and str(event.get("event", "")) == "scope_started"
-            and tuple(
-                int(tile) for tile in tuple(event.get("required_tile_numbers", ()) or ())
-            )
+            and tuple(int(tile) for tile in tuple(event.get("required_tile_numbers", ()) or ()))
             == required_tile_numbers
         ),
         None,
@@ -5793,9 +5789,7 @@ def _coarse_target_trace_metrics(
             for event in scope_window
             if str(event.get("kind", "")) == "scheduling_phase"
             and str(event.get("event", "")) == "coverage_closed"
-            and (
-                int(event.get("generation", 0) or 0) == scheduling_generation
-            )
+            and (int(event.get("generation", 0) or 0) == scheduling_generation)
         ),
         None,
     )
@@ -5805,10 +5799,7 @@ def _coarse_target_trace_metrics(
         if str(event.get("kind", "")) == "backend_ack"
         and bool(event.get("accepted", False))
         and int(event.get("tile", -1)) >= 0
-        and (
-            scope_session_id == 0
-            or int(event.get("session_id", 0) or 0) == scope_session_id
-        )
+        and (scope_session_id == 0 or int(event.get("session_id", 0) or 0) == scope_session_id)
     )
     preview_acks = tuple(
         event
@@ -5826,8 +5817,7 @@ def _coarse_target_trace_metrics(
     target_acks = tuple(
         event
         for event in all_target_acks
-        if scope_session_id == 0
-        or int(event.get("session_id", 0) or 0) == scope_session_id
+        if scope_session_id == 0 or int(event.get("session_id", 0) or 0) == scope_session_id
     )
     preview_starts = tuple(
         event
@@ -5835,10 +5825,7 @@ def _coarse_target_trace_metrics(
         if str(event.get("kind", "")) == "kernel_start"
         and int(-1 if event.get("rung", -1) is None else event.get("rung", -1)) == 0
         and int(event.get("scheduling_generation", 0) or 0) == scheduling_generation
-        and (
-            scope_session_id == 0
-            or int(event.get("session_id", 0) or 0) == scope_session_id
-        )
+        and (scope_session_id == 0 or int(event.get("session_id", 0) or 0) == scope_session_id)
     )
     preview_finishes = tuple(
         event
@@ -5846,16 +5833,12 @@ def _coarse_target_trace_metrics(
         if str(event.get("kind", "")) == "kernel_finish"
         and int(-1 if event.get("rung", -1) is None else event.get("rung", -1)) == 0
         and int(event.get("scheduling_generation", 0) or 0) == scheduling_generation
-        and (
-            scope_session_id == 0
-            or int(event.get("session_id", 0) or 0) == scope_session_id
-        )
+        and (scope_session_id == 0 or int(event.get("session_id", 0) or 0) == scope_session_id)
     )
     target_starts = tuple(
         event
         for event in phase_window
-        if str(event.get("kind", "")) == "kernel_start"
-        and int(event.get("rung", -1) or -1) >= 2
+        if str(event.get("kind", "")) == "kernel_start" and int(event.get("rung", -1) or -1) >= 2
     )
 
     def first_ack_by_tile(events):

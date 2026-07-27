@@ -1022,9 +1022,7 @@ class FrameSession:
     def first_pass_required_tile_numbers(self) -> tuple[int, ...]:
         """Return the lifecycle-backed scope adopted by the phase owner."""
 
-        return tuple(
-            int(tile) for tile in self.scheduling_policy.verdict.required_tiles
-        )
+        return tuple(int(tile) for tile in self.scheduling_policy.verdict.required_tiles)
 
     def first_pass_accepts_quality(self, quality: str) -> bool:
         """Whether a current payload proves its slot for the latched pass.
