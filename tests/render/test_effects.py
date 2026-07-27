@@ -724,6 +724,56 @@ def test_pyqtgraph_shared_fft_preview_retains_reduced_complex_source_format():
         assert mapping is not None
 
 
+def test_pyqtgraph_per_tile_fft_preview_also_retains_the_complex_source_format():
+    """The per-tile reduced route carries the same storm-safety invariant.
+
+    ``can_evaluate_reduced_preview`` used to decline CPU-composited complex
+    outright, because a ``(h, w, 3)`` display plane is neither scalar nor
+    complex and ``render.lod._reducer_format_for_rendered`` raises on it: the
+    rung failed, the pipeline replanned, and it failed again -- a real session
+    logged 18314 admissions against 773 completions. That blanket decline is
+    gone, so the safety now rests on every preview route emitting a complex
+    plane instead. ``evaluate_shared_preview`` is covered above; this is the
+    other route, reached through ``evaluate_preview_tile`` when the shared
+    batch is not used, and it was previously untested.
+    """
+
+    data = np.arange(8 * 10 * 8, dtype=np.float32).reshape(8, 10, 8)
+    session = _session(data)
+    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    session.rgb = True
+    session.shader_display = False
+    session.lod_preview_level = 2
+    tile = session.plan.tiles[0]
+
+    assert effects.display_output_is_composited_rgb(session) is True
+    assert effects.can_evaluate_reduced_preview(session, tile) is True
+
+    result = effects.evaluate_preview_tile(
+        session,
+        tile,
+        demand=_demand(1),
+        semantic_source_id=("session", 0),
+        level=2,
+        cancellation_token=None,
+        shader_display=False,
+    )
+
+    assert result is not None
+    _key, pages, _display, mapping, texture_kind, *_rest = result
+    values = _stored_preview_values(pages)
+    assert texture_kind == TexturePlaneKind.COMPLEX_RG32F
+    assert np.iscomplexobj(values), "a composited (h, w, 3) plane would re-open the replan storm"
+    assert values.ndim == 2
+
+    # The step the storm actually died on: this must route, not raise.
+    reducer, dtype, representation = render_lod._reducer_format_for_rendered(
+        SimpleNamespace(shader_mapping=mapping), values
+    )
+    assert (dtype, representation) == ("complex64", "complex_rg32f")
+    assert reducer
+
+
 def test_display_axis_fft_is_not_admitted_to_the_coarse_ladder():
     session = _session()
     session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=0),))
