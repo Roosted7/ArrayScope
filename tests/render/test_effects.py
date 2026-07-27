@@ -1018,6 +1018,55 @@ def test_pyqtgraph_per_tile_fft_preview_also_retains_the_complex_source_format()
     assert reducer
 
 
+@pytest.mark.parametrize("shader_display", [True, False])
+@pytest.mark.parametrize(
+    ("operations", "admitted"),
+    [
+        ((), True),
+        ((FFTShift(axis=2),), True),
+        ((Conjugate(),), True),
+        ((FFTShift(axis=2), CenteredFFT(axis=2)), True),
+        ((FFTShift(axis=0),), False),
+        ((CenteredFFT(axis=0),), False),
+    ],
+    ids=[
+        "raw",
+        "montage-axis-reindex",
+        "pointwise",
+        "reindex-then-montage-fft",
+        "display-axis-reindex",
+        "display-axis-fft",
+    ],
+)
+def test_montage_axis_reindex_keeps_its_preview_pass(operations, admitted, shader_display):
+    """A pipeline that only reindexes the montage axis still previews.
+
+    ``preview_pipeline_is_tile_local`` used to require an expanding, cacheable
+    stage on the montage axis before admitting the reduced coarse rung. An
+    operation that merely REINDEXES that axis -- ``FFTShift`` along it -- expands
+    no request, so it never set that flag and was refused, even though it is
+    strictly easier to serve than the shared-stage FFT case that was admitted.
+
+    The visible consequence was total: `_reduced_input_coarse_rung_available`
+    returned False, the ladder planned no FLOOR rung, and changing operations or
+    reloading the source with any such operation active jumped the montage
+    straight to target quality with no preview pass at all -- an R4 violation
+    reported from the field on WGPU.
+
+    Display-axis transforms must still be refused: a roll along a display axis
+    does not commute with a source-anchored reduction unless the shift is a
+    multiple of the reduction factor.
+    """
+
+    data = np.arange(16 * 16 * 4, dtype=np.float32).reshape(16, 16, 4)
+    session = _session(data)
+    session.document = ArrayDocument(data, operations=operations)
+    session.shader_display = shader_display
+    seed = session.plan.tiles[0]
+
+    assert effects.preview_pipeline_is_tile_local(session, seed) is admitted
+
+
 def test_display_axis_fft_is_not_admitted_to_the_coarse_ladder():
     session = _session()
     session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=0),))

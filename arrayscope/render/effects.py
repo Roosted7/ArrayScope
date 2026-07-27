@@ -1236,7 +1236,22 @@ def preview_pipeline_is_tile_local(session, tile) -> bool:
         shape = tuple(int(size) for size in operation.output_shape(shape))
         dtype = operation.output_dtype(dtype)
     if not expanded_stage_found:
-        return False
+        # Nothing expands the montage axis, so there is no shared stage for the
+        # cacheability rule above to protect: every tile's read stays the
+        # bounded region it asks for. Requiring an expanding stage here refused
+        # the strictly easier case -- a pipeline that merely REINDEXES the
+        # montage axis, such as `FFTShift` along it, expands no request and so
+        # never set the flag. That cost those pipelines their whole preview
+        # pass: `_reduced_input_coarse_rung_available` went False, the ladder
+        # planned no FLOOR rung, and an operation change or a reload with any
+        # such operation active jumped straight to target quality.
+        #
+        # A non-narrowable axis only reaches this point when restricting the
+        # request does not shrink the input, and an operation that genuinely
+        # needed the whole axis would have declared it in
+        # `expands_request_axes`. Absence of expansion is therefore the safe
+        # direction, not the unsafe one.
+        return True
     tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
     if len(tiles) < 2:
         return True
