@@ -316,6 +316,42 @@ def test_fft_off_the_display_axes_commutes_and_on_them_does_not():
     )
 
 
+def test_fft_pipeline_declares_complete_native_magnitude_envelopes():
+    from arrayscope.operations.capabilities import (
+        pipeline_complete_native_magnitude_envelope,
+        pipeline_has_complete_native_magnitude_envelope,
+    )
+    from arrayscope.operations.pipeline import evaluate as evaluate_pipeline
+
+    rng = np.random.default_rng(20260727)
+    values = rng.standard_normal((7, 9, 8)).astype(np.float32)
+    fft = (CenteredFFT(axis=2),)
+    phase_modulation = (
+        CenteredFFT(axis=2),
+        FFTShift(axis=2),
+        CenteredIFFT(axis=2),
+    )
+
+    for operations in (fft, phase_modulation):
+        assert pipeline_has_complete_native_magnitude_envelope(operations, axis=2)
+        bound = pipeline_complete_native_magnitude_envelope(
+            operations,
+            values,
+            axis=2,
+        )
+        exact = evaluate_pipeline(values, operations)
+        assert bound >= float(np.max(np.abs(exact)))
+
+    assert not pipeline_has_complete_native_magnitude_envelope(
+        (CenteredFFT(axis=1),),
+        axis=2,
+    )
+    assert not pipeline_has_complete_native_magnitude_envelope(
+        (CenteredFFT(axis=2), Conjugate()),
+        axis=2,
+    )
+
+
 def test_montage_axis_fft_on_reduced_display_input_is_numerically_exact():
     """The reason gate 1 exists: reduce-then-FFT == FFT-then-reduce, exactly.
 

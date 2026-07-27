@@ -733,18 +733,17 @@ def test_pyqtgraph_shared_fft_preview_retains_reduced_complex_source_format():
         assert mapping is not None
 
 
-def test_shared_fft_prepares_native_evidence_without_a_second_transform(monkeypatch):
-    data = np.arange(16 * 16 * 8, dtype=np.float32).reshape(16, 16, 8)
+def test_shared_fft_prepares_native_evidence_without_a_second_full_transform(monkeypatch):
+    data = np.arange(128 * 128 * 8, dtype=np.float32).reshape(128, 128, 8)
     session = _session(data)
     session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
     session.shader_display = True
     session.lod_preview_level = 2
     original = effects._evaluate_reduced_preview_volume
-    calls = 0
+    input_shapes = []
 
     def counted(*args, **kwargs):
-        nonlocal calls
-        calls += 1
+        input_shapes.append(tuple(int(size) for size in np.shape(args[1])))
         return original(*args, **kwargs)
 
     monkeypatch.setattr(effects, "_evaluate_reduced_preview_volume", counted)
@@ -760,8 +759,37 @@ def test_shared_fft_prepares_native_evidence_without_a_second_transform(monkeypa
     )
 
     assert len(rows) == len(session.plan.tiles)
-    assert calls == 1
+    assert input_shapes == [(32, 32, 8)]
     assert all(row[-1].bounds is not None for row in rows)
+
+
+def test_shared_fft_native_floor_reuses_one_input_read_for_pixels_and_bounds(monkeypatch):
+    data = np.arange(16 * 16 * 8, dtype=np.float32).reshape(16, 16, 8)
+    session = _session(data)
+    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    session.shader_display = True
+    session.lod_preview_level = 0
+    original = effects.read_reduced_preview_base_and_state
+    factors = []
+
+    def counted(*args, **kwargs):
+        factors.append(tuple(kwargs["factor_xy"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(effects, "read_reduced_preview_base_and_state", counted)
+    rows = effects.evaluate_shared_preview(
+        session,
+        session.plan.tiles[0],
+        session.plan.tiles,
+        demand=_demand(0),
+        level=0,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+
+    assert rows
+    assert factors == [(1, 1)]
 
 
 @pytest.mark.parametrize("extreme_yx", [(8, 8), (9, 9)])
@@ -856,6 +884,36 @@ def test_preview_cohort_bounds_survive_above_the_evidence_sample_limit(extreme_v
     )
 
 
+@pytest.mark.parametrize("extreme_value", [-1000.0, 1000.0])
+def test_shared_fft_analytic_bounds_cover_a_field_scale_native_peak(extreme_value):
+    data = np.zeros((336, 336, 8), dtype=np.float32)
+    data[169, 169, :] = extreme_value
+    session = _session(data)
+    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    session.shader_display = True
+    session.lod_preview_level = 2
+
+    rows = effects.evaluate_shared_preview(
+        session,
+        session.plan.tiles[0],
+        session.plan.tiles,
+        demand=_demand(0),
+        level=2,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+
+    exact = evaluate_pipeline(data, session.document.enabled_operations)
+    exact_low = float(np.min(np.real(exact)))
+    exact_high = float(np.max(np.real(exact)))
+    for row in rows:
+        stats = row[-1]
+        assert stats is not None
+        assert stats.bounds[0] <= exact_low
+        assert stats.bounds[1] >= exact_high
+
+
 def test_pyqtgraph_per_tile_fft_preview_also_retains_the_complex_source_format():
     """The per-tile reduced route carries the same storm-safety invariant.
 
@@ -913,6 +971,21 @@ def test_display_axis_fft_is_not_admitted_to_the_coarse_ladder():
 
     assert effects.preview_pipeline_commutes_for_display_lod(session, tile) is False
     assert effects.preview_pipeline_is_tile_local(session, tile) is False
+
+    with pytest.raises(
+        ValueError,
+        match="commuting tile-local admission",
+    ):
+        effects.evaluate_shared_preview(
+            session,
+            tile,
+            session.plan.tiles,
+            demand=_demand(1),
+            level=2,
+            cancellation_token=None,
+            shader_display=True,
+            evaluation_context=None,
+        )
 
 
 def test_raw_and_pointwise_pipelines_stay_coarse_ladder_admissible():
@@ -1023,6 +1096,10 @@ def test_shared_fft_shift_ifft_preview_box_means_exact_complex_output():
             rtol=1e-5,
             atol=1e-5,
         )
+        stats = _rest[-1]
+        exact_plane = np.real(np.asarray(exact)[..., int(tile_number)])
+        assert stats.bounds[0] <= float(np.min(exact_plane))
+        assert stats.bounds[1] >= float(np.max(exact_plane))
 
 
 def test_fft_coarse_rung_materializes_one_reduced_stage_for_272_tiles():

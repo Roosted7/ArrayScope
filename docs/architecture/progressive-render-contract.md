@@ -259,7 +259,21 @@ Both altitude errors have now been repaired:
 - **Round levels — repaired.** `LevelStatsService` claims the decision when a
   preview rung is admitted, then installs the complete preview cohort as one
   tracker revision. The cohort rows carry worker-prepared bounds and samples,
-  so no source-slab scan or repeated operation/FFT runs beside that preview.
+  so no per-source slab sweep or duplicate full operation/FFT runs beside that
+  preview.
+  For the admitted montage-axis orthonormal FFT, the displayed pages box-mean
+  the display axes before the operation pipeline, while the same cohort worker
+  scans every native input value and derives the conservative L1 envelope
+  `max(sum(abs(x), axis) / sqrt(N))`. The profiler's admitted
+  FFT/shift/IFFT chain is a phase modulation and uses the native maximum
+  magnitude. These are complete native-resolution bounds rather than sparse
+  samples, so they cover R2 free reuse without a native FFT. The ladder's
+  commuting tile-local predicate, exact operation shape, transform axis, and
+  linear shader scale are executable preconditions; an unproved chain keeps
+  the transform-once-native route. When the preview floor is already native,
+  the one native input read supplies both the envelope and the one displayed
+  transform. PyQtGraph still waits for the complete cohort decision before its
+  first bake.
   PyQtGraph holds its first bake until the complete round source exists and
   keeps that value for the round. WGPU may widen the installed value from
   current-round target evidence, but does so before the corresponding tile is

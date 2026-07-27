@@ -48,6 +48,8 @@ from arrayscope.display.slice_engine import (
 from arrayscope.gpu.chunk_summary import aggregate_chunk_summaries, summarize_chunk
 from arrayscope.operations.capabilities import (
     pipeline_commutes_for_display_lod,
+    pipeline_complete_native_magnitude_envelope,
+    pipeline_has_complete_native_magnitude_envelope,
     pipeline_supports_reduced_display_lod,
     pipeline_windowable_display_axes,
 )
@@ -74,7 +76,11 @@ from arrayscope.presentation import LevelPhase
 from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import TileLodState
 
-SHARED_PREVIEW_ROUTE = ("shared-transform-preview", 2, "transform-native-then-box-mean")
+SHARED_PREVIEW_ROUTE = (
+    "shared-transform-preview",
+    4,
+    "box-mean-before-transform-with-complete-native-evidence",
+)
 
 
 def _check_render_cancelled(token) -> None:
@@ -523,17 +529,23 @@ def evaluate_shared_preview(
     shader_display: bool,
     evaluation_context=None,
 ):
-    """Evaluate one native cohort volume and return reduced display rows.
+    """Evaluate one reduced cohort plus complete native-resolution evidence.
 
     ADR 0059 retired this function's separate scheduler. It remains useful for
     direct value tests and tools, but owns no admission, claims, or barrier.
-    The worker keeps the transformed native volume long enough to prepare
-    per-tile range evidence, then box-means only the page values. One cohort
-    therefore still performs one operation pipeline/FFT.
+    The displayed pages take the cheap commuting route: box-mean the display
+    axes, then run the operation pipeline once. R3 evidence scans every native
+    source value. A single montage-axis orthonormal FFT uses its L1 envelope,
+    so evidence needs no native FFT; other admitted pipelines retain the
+    transform-once-native route unless their complete bound is known.
     """
 
     if not can_evaluate_reduced_preview(session, seed_tile) or demand is None:
         return ()
+    if not preview_pipeline_is_tile_local(session, seed_tile):
+        raise ValueError(
+            "shared reduced preview requires the ladder's commuting tile-local admission"
+        )
     level = preview_evaluation_level(session, demand) if level is None else int(level)
     factor_xy = factor_xy_for_level(demand, level)
     axis_overrides = {}
@@ -544,10 +556,15 @@ def evaluate_shared_preview(
         axis_overrides[int(axis)] = values
         slice_remaps[int(axis)] = local_indices
     source_alignment = _preview_source_alignment(session)
-    native_base, _preview_state = read_reduced_preview_base_and_state(
+    analytic_evidence = _shared_preview_has_complete_analytic_evidence(
+        session,
+        seed_tile,
+    )
+    evaluation_factor = factor_xy if analytic_evidence else (1, 1)
+    preview_base, _preview_state = read_reduced_preview_base_and_state(
         session.document,
         seed_tile.view_state,
-        factor_xy=(1, 1),
+        factor_xy=evaluation_factor,
         cancellation_token=cancellation_token,
         evaluation_context=evaluation_context,
         axis_region_overrides=axis_overrides,
@@ -555,9 +572,29 @@ def evaluate_shared_preview(
     )
     transformed = _evaluate_reduced_preview_volume(
         session.document,
-        native_base,
+        preview_base,
         cancellation_token=cancellation_token,
     )
+    native_base = transformed
+    analytic_bound = None
+    if analytic_evidence:
+        if evaluation_factor == (1, 1):
+            native_base = preview_base
+        else:
+            native_base, _evidence_state = read_reduced_preview_base_and_state(
+                session.document,
+                seed_tile.view_state,
+                factor_xy=(1, 1),
+                cancellation_token=cancellation_token,
+                evaluation_context=evaluation_context,
+                axis_region_overrides=axis_overrides,
+                source_aligned=source_alignment,
+            )
+        analytic_bound = _shared_preview_complete_native_bound(
+            session,
+            seed_tile,
+            native_base,
+        )
     previews = []
     # PyQtGraph CPU-composites its final complex tiles, but its compact preview
     # format deliberately retains the reduced complex source plane.  Produce
@@ -573,7 +610,7 @@ def evaluate_shared_preview(
         preview_state = reduced_preview_view_state(
             tile.view_state,
             np.shape(transformed),
-            factor_xy=(1, 1),
+            factor_xy=evaluation_factor,
             slice_remap=_shared_evaluation_slice_remap(
                 session,
                 tile,
@@ -596,12 +633,11 @@ def evaluate_shared_preview(
                 colormap_lut=session.colormap_lut,
                 canonical_orientation=canonical_orientation,
             )
-        value = attach_montage_tile_level_stats(value, tile, refined=False)
         value = replace(
             value,
             semantic_data=None,
             level_data=getattr(value, "level_data", None),
-            level_stats=getattr(value, "level_stats", None),
+            level_stats=None,
             lod=LodInfo(
                 level=level,
                 factor=max(int(factor_xy[0]), int(factor_xy[1])),
@@ -642,23 +678,26 @@ def evaluate_shared_preview(
             rendered,
             shader_display=bool(shader_display),
         )
-        source = page_route.source
-        source_origin_yx = render_lod.source_origin_yx_for_rendered(
-            session,
-            rendered,
-            source,
+        native_source = page_route.source
+        source = native_source
+        if not analytic_evidence:
+            source_origin_yx = render_lod.source_origin_yx_for_rendered(
+                session,
+                rendered,
+                native_source,
+            )
+            source = reduce_array_display_axes(
+                native_source,
+                (0, 1),
+                factor_xy,
+                source_starts={
+                    0: int(source_origin_yx[0]),
+                    1: int(source_origin_yx[1]),
+                },
+            )
+        source_height, source_width = (
+            int(value) for value in render_lod.canonical_source_tile_shape(session)[:2]
         )
-        reduced_source = reduce_array_display_axes(
-            source,
-            (0, 1),
-            factor_xy,
-            source_starts={
-                0: int(source_origin_yx[0]),
-                1: int(source_origin_yx[1]),
-            },
-        )
-        source_height, source_width = (int(size) for size in np.shape(source)[:2])
-        source_y, source_x = source_origin_yx
         plans = plan_source_grid_pages(
             # The complete-scope preview still has a distinct physical family:
             # its one transform is shared across the cohort rather than owned
@@ -669,12 +708,7 @@ def evaluate_shared_preview(
                 semantic_source_id,
                 ("display-plane", SHARED_PREVIEW_ROUTE),
             ),
-            valid_source_rect_yx=(
-                source_y,
-                source_y + source_height,
-                source_x,
-                source_x + source_width,
-            ),
+            valid_source_rect_yx=(0, source_height, 0, source_width),
             reduction_yx=page_route.reduction_yx,
             stored_page_shape=(256, 256),
             dtype=page_route.dtype,
@@ -688,18 +722,25 @@ def evaluate_shared_preview(
             reducer=page_route.reducer,
             plans=plans,
         )
-        pages = _materialize_shared_preview_pages(reduced_source, plans=plans)
+        pages = _materialize_shared_preview_pages(source, plans=plans)
         histogram = _preview_display_histogram(
             rendered,
-            reduced_source,
-            texture_kind,
-            None,
-        )
-        rough_level_stats = _preview_level_stats_from_native_source(
             source,
-            source_index=int(tile.source_index),
-            mapping=getattr(value, "shader_mapping", None),
+            texture_kind,
+            getattr(value, "histogram_data", None),
         )
+        if analytic_evidence:
+            rough_level_stats = _preview_level_stats_from_analytic_bound(
+                analytic_bound,
+                source_index=int(tile.source_index),
+                mapping=getattr(value, "shader_mapping", None),
+            )
+        else:
+            rough_level_stats = _preview_level_stats_from_native_source(
+                native_source,
+                source_index=int(tile.source_index),
+                mapping=getattr(value, "shader_mapping", None),
+            )
         previews.append(
             (
                 int(tile.montage_index),
@@ -1723,6 +1764,75 @@ def _preview_level_stats_from_native_source(
         values = np.abs(values).astype(np.float32, copy=False)
     return provisional_tile_level_stats(
         values,
+        int(source_index),
+        evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+    )
+
+
+def _shared_preview_has_complete_analytic_evidence(session, tile) -> bool:
+    """Whether this admitted cohort has a proven complete native bound.
+
+    This is deliberately narrower than commuting display LOD. The latter
+    proves pixels may transform reduced display axes; it does not by itself
+    supply an operator norm for bounds. One orthonormal FFT along the montage
+    axis does: every output magnitude is at most the native line L1 norm
+    divided by ``sqrt(N)``. The profiler's FFT/shift/IFFT chain is a phase
+    modulation, so it preserves pointwise magnitude and its complete envelope
+    is the native maximum magnitude. Non-linear shader scales are excluded
+    because a finite lower endpoint cannot conservatively represent log(0).
+    """
+
+    if not preview_pipeline_is_tile_local(session, tile):
+        return False
+    operations = tuple(getattr(getattr(session, "document", None), "enabled_operations", ()) or ())
+    montage_axis = getattr(session, "montage_axis", None)
+    if montage_axis is None:
+        return False
+    if not pipeline_has_complete_native_magnitude_envelope(
+        operations,
+        axis=int(montage_axis),
+    ):
+        return False
+    scale = getattr(getattr(tile, "view_state", None), "scale", None)
+    return getattr(scale, "value", scale) == "linear"
+
+
+def _shared_preview_complete_native_bound(session, tile, native_base) -> float | None:
+    """Return the complete admitted-transform magnitude envelope for a cohort."""
+
+    if not _shared_preview_has_complete_analytic_evidence(session, tile):
+        raise ValueError("analytic preview evidence requires its proven FFT admission")
+    montage_axis = int(session.montage_axis)
+    return pipeline_complete_native_magnitude_envelope(
+        tuple(session.document.enabled_operations),
+        native_base,
+        axis=montage_axis,
+    )
+
+
+def _preview_level_stats_from_analytic_bound(
+    bound,
+    *,
+    source_index: int,
+    mapping=None,
+) -> TileLevelStats | None:
+    """Map a complete complex-magnitude envelope into display coordinates."""
+
+    if bound is None or not np.isfinite(bound):
+        return None
+    bound = max(0.0, float(bound))
+    component = getattr(mapping, "component", ShaderComponent.REAL)
+    scale = getattr(mapping, "scale", ShaderScale.LINEAR)
+    if scale != ShaderScale.LINEAR:
+        raise ValueError("analytic preview evidence requires a linear shader scale")
+    if component == ShaderComponent.ABS:
+        endpoints = np.asarray((0.0, bound), dtype=np.float64)
+    elif component in {ShaderComponent.ANGLE, ShaderComponent.COMPLEX_PHASE}:
+        endpoints = np.asarray((-np.pi, np.pi), dtype=np.float64)
+    else:
+        endpoints = np.asarray((-bound, bound), dtype=np.float64)
+    return provisional_tile_level_stats(
+        endpoints,
         int(source_index),
         evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
     )

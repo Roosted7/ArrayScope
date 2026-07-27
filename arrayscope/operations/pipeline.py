@@ -1133,6 +1133,7 @@ class Minimum:
 @dataclass(frozen=True)
 class CenteredFFT:
     axis: int
+    native_magnitude_envelope_role = "orthonormal_fft"
 
     def apply(self, data):
         return dim_ops.centered_fft(data, self.axis)
@@ -1185,6 +1186,7 @@ class CenteredFFT:
 @dataclass(frozen=True)
 class CenteredIFFT:
     axis: int
+    native_magnitude_envelope_role = "orthonormal_ifft"
 
     def apply(self, data):
         return dim_ops.centered_ifft(data, self.axis)
@@ -1237,6 +1239,7 @@ class CenteredIFFT:
 @dataclass(frozen=True)
 class FFTShift:
     axis: int
+    native_magnitude_envelope_role = "fft_shift"
 
     def apply(self, data):
         return dim_ops.apply_fftshift(data, self.axis)

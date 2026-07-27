@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+import numpy as np
+
 
 class OperationKind(Enum):
     VIEW = "view"
@@ -176,6 +178,75 @@ def pipeline_commutes_for_display_lod(
         if callable(output_dtype):
             dtype = output_dtype(dtype)
     return True
+
+
+def pipeline_has_complete_native_magnitude_envelope(operations, *, axis: int) -> bool:
+    """Whether a pipeline declares a closed-form complete magnitude envelope.
+
+    The declaration is intentionally separate from display-LOD commutation.
+    Commutation proves reduced pixels; this proves native-resolution bounds.
+    Unknown operations and unproved compositions fail closed.
+    """
+
+    roles = tuple(
+        (
+            getattr(operation, "native_magnitude_envelope_role", None),
+            int(getattr(operation, "axis", -1)),
+        )
+        for operation in tuple(operations or ())
+    )
+    axis = int(axis)
+    return roles in {
+        (("orthonormal_fft", axis),),
+        (("orthonormal_ifft", axis),),
+        (
+            ("orthonormal_fft", axis),
+            ("fft_shift", axis),
+            ("orthonormal_ifft", axis),
+        ),
+    }
+
+
+def pipeline_complete_native_magnitude_envelope(
+    operations,
+    native_values,
+    *,
+    axis: int,
+) -> float | None:
+    """Return the declared pipeline's complete native magnitude envelope."""
+
+    operations = tuple(operations or ())
+    axis = int(axis)
+    if not pipeline_has_complete_native_magnitude_envelope(operations, axis=axis):
+        raise ValueError("pipeline has no declared complete native magnitude envelope")
+    values = np.abs(np.asarray(native_values))
+    roles = tuple(
+        getattr(operation, "native_magnitude_envelope_role", None) for operation in operations
+    )
+    if roles == ("orthonormal_fft", "fft_shift", "orthonormal_ifft"):
+        finite = values[np.isfinite(values)]
+        return (
+            None
+            if finite.size == 0
+            else _outward_fft_magnitude_bound(float(np.max(finite)), native_values, axis=axis)
+        )
+    with np.errstate(invalid="ignore", over="ignore"):
+        line_l1 = np.sum(values, axis=axis, dtype=np.float64)
+    finite = np.asarray(line_l1)[np.isfinite(line_l1)]
+    if finite.size == 0:
+        return None
+    bound = float(np.max(finite) / np.sqrt(int(np.shape(native_values)[axis])))
+    return _outward_fft_magnitude_bound(bound, native_values, axis=axis)
+
+
+def _outward_fft_magnitude_bound(bound: float, native_values, *, axis: int) -> float:
+    """Inflate the mathematical envelope for finite-precision FFT roundoff."""
+
+    output_dtype = np.result_type(np.asarray(native_values).dtype, np.complex64)
+    real_dtype = np.empty((), dtype=output_dtype).real.dtype
+    stages = max(1.0, np.log2(max(2, int(np.shape(native_values)[int(axis)]))))
+    margin = max(1.0, abs(float(bound))) * 32.0 * stages * np.finfo(real_dtype).eps
+    return float(np.nextafter(float(bound) + margin, np.inf))
 
 
 def pipeline_supports_reduced_display_lod(operations, base_shape, base_dtype=None) -> bool:

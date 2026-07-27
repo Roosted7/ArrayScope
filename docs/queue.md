@@ -91,8 +91,26 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   closes. Fresh real-Wayland raw traces on both PyQtGraph and WGPU contain one
   `source=preview-cohort` evidence event, identical first-visible/final levels,
   and zero stale-level tiles; four-pair order-balanced T1 ratios were
-  load-neutral (PyQtGraph +0.6%, WGPU +0.4%). The independent progressive
-  contract replay is still **RED** on all five 2026-07-27 field traces: R3
+  load-neutral (PyQtGraph +0.6%, WGPU +0.4%). **Native bounds no longer make
+  the admitted FFT display transform native (2026-07-27):** the shared cohort
+  box-means the display axes before the operation pipeline, while one complete
+  scan of the native inputs derives the orthonormal FFT's conservative L1
+  envelope; no native FFT or sparse evidence sample runs. The admitted
+  FFT/shift/IFFT profile chain uses its exact phase-modulation magnitude
+  envelope. The ladder's commuting tile-local predicate, exact operation
+  shape/axis, and linear shader scale are executable preconditions, so
+  display-axis FFT cannot enter this route and an unproved chain keeps the
+  transform-once-native route. On the warm 336×336×60 L5 FFT cohort, 18
+  fully order-balanced interleaved Weston passes measured **42.90 ms median**,
+  versus the recorded 22.64 ms before native evidence and 108.14 ms for the
+  full-native transform: 60.3% below the full-native route, recovering 76.3%
+  of the correctness-fix cost without a second transform. The same process
+  measured 21.81 and 131.04 ms for those reference revisions. On the bundled
+  336×336×272 NIfTI, the envelope and true FFT magnitude maximum were both
+  340233.619; its symmetric real-component window was 1.495× the exact span.
+  On the first 60 planes they were both 98878.992 and 1.577×. The independent
+  progressive contract replay is still **RED** on all five 2026-07-27 field
+  traces: R3
   exposes eight frozen/inactive evidence runs across both backends, and R1
   fires 15 (WGPU FFT) and 11 (WGPU scalar) snapshots of production below the
   round's target floor — level 0 uploads of +176, +128 and +256 in rounds that
