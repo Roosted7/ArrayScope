@@ -24,6 +24,11 @@ TRACE_SCHEMA_VERSION = 1
 # the workload; emit sites cap their own collection fields (see the `stall`
 # event's `tile_rows`).
 DEFAULT_RING_EVENTS = 8192
+# A file-backed trace is profiling evidence, not the crash-safe flight
+# recorder (the bounded ring owns that job).  Batch JSONL writes so a traced
+# montage commit does not turn hundreds of lifecycle edges into hundreds of
+# synchronous GUI-thread filesystem writes.  Close still publishes every row.
+LIVE_SINK_BUFFER_BYTES = 64 * 1024
 
 
 def _encode(event: dict[str, object]) -> str:
@@ -80,7 +85,11 @@ class TraceBus:
         if path is not None:
             output = Path(path)
             output.parent.mkdir(parents=True, exist_ok=True)
-            handle = output.open("a" if append else "w", encoding="utf-8", buffering=1)
+            handle = output.open(
+                "a" if append else "w",
+                encoding="utf-8",
+                buffering=LIVE_SINK_BUFFER_BYTES,
+            )
         limit = max(0, int(ring_events))
         with self._lock:
             self._sequence = 0

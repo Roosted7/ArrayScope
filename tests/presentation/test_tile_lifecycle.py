@@ -15,6 +15,7 @@ from arrayscope.presentation import (
     ReleaseClaim,
     Semantic,
     TileLifecycle,
+    TilePayloadRef,
     TileTarget,
 )
 
@@ -481,6 +482,58 @@ def test_repeated_identical_presentation_confirmation_is_not_a_new_ack(monkeypat
     acknowledgements = [fields for kind, fields in events if kind == "backend_ack"]
     assert len(acknowledgements) == 1
     assert acknowledgements[0]["identity"] == "payload-v1"
+
+
+def test_lifecycle_trace_bounds_rich_page_and_payload_identities(monkeypatch, lc):
+    """Live JSONL tracing must not serialize a montage semantic graph per tile."""
+
+    from arrayscope.presentation import tile_lifecycle
+
+    PageSetKey = namedtuple("PageSetKey", "source_id tile_id level_xy reducer plans")
+    level_key = PageSetKey(
+        source_id=("montage-tile", ("semantic-graph",) * 1_000),
+        tile_id=7,
+        level_xy=(5, 5),
+        reducer="mean",
+        plans=tuple(range(3)),
+    )
+    payload = TilePayloadRef(
+        source_id=("montage-tile", ("semantic-graph",) * 1_000),
+        quality="fallback",
+        lod_level=5,
+        source_index=7,
+    )
+    events = []
+    monkeypatch.setattr(
+        tile_lifecycle,
+        "emit_trace",
+        lambda kind, **fields: events.append((kind, fields)),
+    )
+    monkeypatch.setattr(tile_lifecycle, "trace_enabled", lambda: True)
+
+    lc.retarget({7: TileTarget(7, 7, ("montage-tile", 7), 0)})
+    lc.level_claimed(7, level_key, ClaimOwner.PREVIEW)
+    lc.level_resident(7, level_key)
+    lc.fallback_ready(7, payload)
+
+    lifecycle = [fields for kind, fields in events if kind == "lifecycle"]
+    resident = next(fields for fields in lifecycle if fields["edge"] == "level_resident")
+    fallback = next(fields for fields in lifecycle if fields["edge"] == "fallback_ready")
+
+    assert resident["level_key"] == {
+        "type": "PageSetKey",
+        "tile_id": 7,
+        "level_xy": [5, 5],
+        "reducer": "mean",
+        "page_count": 3,
+    }
+    assert fallback["payload_source"] == {
+        "type": "tuple",
+        "count": 2,
+        "head": ["montage-tile"],
+    }
+    assert len(repr(resident["level_key"])) < 200
+    assert len(repr(fallback["payload_source"])) < 200
 
 
 # -- event views: load intent, requests, skip, stage bindings ----------

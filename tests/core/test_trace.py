@@ -24,6 +24,22 @@ def test_trace_bus_writes_flat_jsonl_and_bounds_ring(tmp_path):
     assert [event["sequence"] for event in snapshot] == [6, 7, 8]
 
 
+def test_live_trace_sink_batches_rows_until_close(tmp_path):
+    """A live evidence sink must not force one GUI-thread write per event."""
+
+    from arrayscope.core.trace import TraceBus
+
+    path = tmp_path / "trace.jsonl"
+    bus = TraceBus()
+    bus.configure(path, ring_events=0)
+    bus.emit("lifecycle", edge="fallback_ready", tile=7)
+
+    assert path.read_text() == ""
+
+    bus.close()
+    assert len(path.read_text().splitlines()) == 1
+
+
 def test_trace_ring_only_bus_dumps_complete_parseable_jsonl(tmp_path):
     """The ring-only bus (production's watchdog default) encodes at dump."""
 

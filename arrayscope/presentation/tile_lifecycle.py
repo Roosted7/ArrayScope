@@ -726,7 +726,7 @@ class TileLifecycle:
                 "backend_ack",
                 tile=int(tile),
                 source_index=int(ref.source_index),
-                identity=ref.acknowledged_identity,
+                identity=_trace_reference(ref.acknowledged_identity),
                 quality=str(ref.quality),
                 level=int(ref.lod_level),
                 accepted=bool(tile in confirmed),
@@ -1024,7 +1024,7 @@ class TileLifecycle:
             "backend_ack",
             tile=int(rec.tile_number),
             source_index=None if rec.target is None else int(rec.target.source_index),
-            identity=payload_identity,
+            identity=_trace_reference(payload_identity),
             quality=str(rec.presented_quality),
             level=rec.presented_level,
             accepted=True,
@@ -1829,10 +1829,102 @@ def _payload_refs_match(left: TilePayloadRef | None, right: TilePayloadRef | Non
     )
 
 
+_UNTRACEABLE = object()
+_TRACE_REFERENCE_FIELDS = (
+    "tile_id",
+    "tile_number",
+    "source_index",
+    "level",
+    "level_xy",
+    "rung",
+    "quality",
+    "reducer",
+    "representation",
+    "texture_kind",
+)
+_TRACE_REFERENCE_FIELD_NAMES = frozenset({"identity", "level_key", "task_key", "stage_key"})
+
+
+def _trace_literal(value):
+    """Return one small JSON literal, or a sentinel for a rich value."""
+
+    if isinstance(value, Enum):
+        return _trace_literal(value.value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (tuple, list)) and len(value) <= 4:
+        items = tuple(_trace_literal(item) for item in value)
+        if all(item is not _UNTRACEABLE for item in items):
+            return list(items)
+    return _UNTRACEABLE
+
+
+def _trace_reference(value):
+    """Bound a diagnostic identity without erasing its useful coordinates.
+
+    Montage source/page identities contain the full semantic graph.  Passing
+    those objects to the line-buffered JSONL sink makes every lifecycle edge
+    serialize that graph synchronously on the GUI thread.  Trace consumers
+    need the edge's tile/LOD/quality coordinates, not a repeated object dump.
+    Primitive legacy identities remain unchanged.
+    """
+
+    literal = _trace_literal(value)
+    if literal is not _UNTRACEABLE:
+        return literal
+
+    summary: dict[str, object] = {"type": type(value).__name__}
+    if isinstance(value, (tuple, list)) and not hasattr(value, "_fields"):
+        summary["count"] = len(value)
+        head = []
+        for item in value[:3]:
+            item_literal = _trace_literal(item)
+            if item_literal is _UNTRACEABLE:
+                break
+            head.append(item_literal)
+        if head:
+            summary["head"] = head
+        return summary
+    if isinstance(value, Mapping):
+        summary["count"] = len(value)
+        return summary
+
+    for name in _TRACE_REFERENCE_FIELDS:
+        try:
+            field_value = getattr(value, name)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        field_literal = _trace_literal(field_value)
+        if field_literal is not _UNTRACEABLE:
+            summary[name] = field_literal
+
+    plans = getattr(value, "plans", None)
+    if plans is not None and hasattr(plans, "__len__"):
+        summary["page_count"] = len(plans)
+
+    lod = getattr(value, "lod", None)
+    if lod is not None:
+        lod_summary = {}
+        for name in ("level", "factor", "gutter"):
+            try:
+                field_literal = _trace_literal(getattr(lod, name))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if field_literal is not _UNTRACEABLE:
+                lod_summary[name] = field_literal
+        if lod_summary:
+            summary["lod"] = lod_summary
+    return summary
+
+
 def _trace_lifecycle(rec: TileRecord, edge: str, *, payload=None, **fields) -> None:
     if not trace_enabled():
         return
     target = rec.target
+    trace_fields = {
+        key: _trace_reference(value) if key in _TRACE_REFERENCE_FIELD_NAMES else value
+        for key, value in fields.items()
+    }
     emit_trace(
         "lifecycle",
         edge=str(edge),
@@ -1843,8 +1935,10 @@ def _trace_lifecycle(rec: TileRecord, edge: str, *, payload=None, **fields) -> N
         presentation=str(rec.presentation.value),
         presented_quality=str(rec.presented_quality or ""),
         presented_level=rec.presented_level,
-        payload_source=None if payload is None else getattr(payload, "source_id", None),
+        payload_source=None
+        if payload is None
+        else _trace_reference(getattr(payload, "source_id", None)),
         payload_quality=None if payload is None else getattr(payload, "quality", None),
         payload_level=None if payload is None else getattr(payload, "lod_level", None),
-        **fields,
+        **trace_fields,
     )
