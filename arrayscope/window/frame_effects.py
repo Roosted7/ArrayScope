@@ -4890,7 +4890,11 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
         "upsert_cost_fn": (
-            vispy_payload_upload_nbytes
+            # A complete compact preview shares a couple of physical pages
+            # across all logical tiles. Charge its local texture views once by
+            # logical bytes; the ordinary WGPU estimator rounds every tile to a
+            # separate page and would fragment this explicitly atomic cohort.
+            texture_payload_upload_nbytes
             if aggregate_preview is not None
             else wgpu_payload_upload_nbytes
             if capabilities.name == "wgpu"

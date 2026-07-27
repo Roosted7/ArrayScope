@@ -3509,7 +3509,7 @@ def test_pyqtgraph_full_preview_cap_bypass_requires_explicit_aggregate_marker():
     window.img_view.tiledPayloadResident = lambda _payload: True
     wgpu_aggregate = montage_commit.tile_layer_upsert_limits(window, session)
     assert wgpu_aggregate["max_upserts"] == 272
-    assert wgpu_aggregate["upsert_cost_fn"] is montage_commit.vispy_payload_upload_nbytes
+    assert wgpu_aggregate["upsert_cost_fn"] is montage_commit.texture_payload_upload_nbytes
 
 
 def test_pyqtgraph_floor_progress_commits_stay_governed():
