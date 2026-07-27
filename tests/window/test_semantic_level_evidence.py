@@ -339,3 +339,32 @@ def test_semantic_evidence_diagnostics_are_constant_time_progress_truth():
     assert after_first["sampled_pixels_total"] == 12 * 16 * 16
     assert after_first["slab_bytes_total"] == 12 * 16 * 16 * np.dtype(np.float32).itemsize
     assert service._semantic_level_evidence_last_merged == 16
+
+
+def test_preview_coverage_pauses_semantic_sweep_after_one_level_seed():
+    data = np.arange(12 * 16 * 20, dtype=np.float32).reshape(12, 16, 20)
+    session = _session(data)
+    session.first_pass_quality = "preview"
+    session.scheduling_policy.retarget("preview-pass", (0,), progressive=True)
+    service, kernel = _service(session)
+
+    service._schedule_semantic_level_evidence(session)
+    first = kernel.run_next()
+
+    progress = session.semantic_level_evidence_progress
+    assert first["max_items"] == 16
+    assert len(progress.covered_sources) == 16
+    assert progress.blocking_reason == "preview-coverage-seeded"
+    assert kernel.tasks == []
+
+    _close_coverage_phase(session)
+    session.display_committed = True
+    service._schedule_semantic_level_evidence(session)
+
+    assert len(kernel.tasks) == 1
+    assert kernel.tasks[0]["lane"] == Lane.HISTOGRAM_REFINEMENT
+    while kernel.tasks:
+        kernel.run_next()
+
+    assert progress.covered_sources == set(range(20))
+    assert progress.blocking_reason == "ready"

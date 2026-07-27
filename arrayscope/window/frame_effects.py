@@ -2811,6 +2811,12 @@ class FramePipelineEffects:
             on_refinement_replan=lambda: renderer.request_montage_replan(session),
         )
         session.display_committed = bool(session.lifecycle.presented_tiles)
+        if phase_closed:
+            # CPU-windowed preview admission intentionally pauses semantic
+            # evidence after one provisional level batch. The physical ACK is
+            # the edge that turns the rest into histogram refinement, so wake
+            # that owner here instead of letting it compete with preview.
+            renderer._schedule_semantic_level_evidence(session)
         semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
         semantic_evidence_waiting = bool(
             semantic_progress is not None

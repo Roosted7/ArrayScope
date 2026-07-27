@@ -813,6 +813,23 @@ class LevelStatsService:
         progress = getattr(session, "semantic_level_evidence_progress", None)
         if target is None or progress is None or progress.inflight_generation is not None:
             return
+        # A CPU-windowed preview needs one honest refined seed before its
+        # first atlas can choose levels, but the remaining full-population
+        # sweep is refinement. Letting every continuation retain
+        # DISPLAY_PREVIEW/INTERACTIVE priority made those source scans run
+        # alongside the already-ready shared preview batch and delayed its
+        # only worker task by hundreds of milliseconds. Once one blocking
+        # batch covers the provisional level source, hold the continuation
+        # until the acknowledged preview closes COVERAGE.
+        preview_seeded = bool(
+            session.scheduling_policy.verdict.coverage_open
+            and str(getattr(session, "first_pass_quality", "") or "") == "preview"
+            and len(progress.covered_sources)
+            >= min(int(target.target_population), int(target.blocking_batch_limit))
+        )
+        if preview_seeded:
+            progress.blocking_reason = "preview-coverage-seeded"
+            return
         progress.current_batch_limit = self._semantic_level_evidence_batch_limit(session, target)
         if len(progress.covered_sources) >= target.target_population:
             progress.blocking_reason = "ready"
