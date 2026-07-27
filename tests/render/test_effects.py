@@ -605,6 +605,35 @@ def test_shared_preview_slices_the_reduced_volume_without_per_tile_slab_plans(mo
     assert len(previews) == 2
 
 
+def test_shared_preview_plans_only_its_selected_page_identity(monkeypatch):
+    session = _session()
+    tiles = session.plan.tiles[:2]
+    original = effects.plan_source_grid_pages
+    planned_content_keys = []
+
+    def capture(*args, **kwargs):
+        planned_content_keys.append(kwargs["content_key"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(effects, "plan_source_grid_pages", capture)
+    monkeypatch.setattr(render_lod, "plan_source_grid_pages", capture)
+
+    previews = effects.evaluate_shared_preview(
+        session,
+        tiles[0],
+        tiles,
+        demand=_demand(0),
+        level=2,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert len(previews) == 2
+    assert len(planned_content_keys) == len(tiles)
+    assert all(key[-1][-1] == effects.SHARED_PREVIEW_ROUTE for key in planned_content_keys)
+
+
 def test_reduced_preview_base_samples_display_axes_before_operation_input():
     session = _session()
     demand = _demand(1)

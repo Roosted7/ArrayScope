@@ -232,6 +232,56 @@ def component_for_rendered(rendered: RenderedTile, *, shader_display: bool = Tru
     return str(getattr(texture_kind, "value", texture_kind))
 
 
+@dataclass(frozen=True)
+class RenderedPageRoute:
+    """Format and reduction identity before a caller chooses page geometry."""
+
+    source: np.ndarray
+    level_xy: tuple[int, int]
+    reduction_yx: tuple[int, int]
+    reducer: str
+    dtype: str
+    representation: str
+
+
+def page_route_for_rendered(
+    rendered: RenderedTile,
+    *,
+    demand,
+    level: int,
+    shader_display: bool = True,
+) -> RenderedPageRoute:
+    """Derive the canonical page format without planning a page family.
+
+    Most rendered values use the ordinary per-plane source grid, while the
+    complete-scope preview deliberately chooses a separate shared route. Both
+    need identical reducer/format derivation, but only the selected identity
+    family should pay to decompose its source extent into physical pages.
+    """
+
+    source = canonical_value_source_for_rendered(rendered, shader_display=shader_display)
+    reducer, dtype, representation = _reducer_format_for_rendered(rendered, source)
+    factor_x, factor_y = factor_xy_for_level(demand, int(level))
+    level_xy = (
+        int(factor_x).bit_length() - 1,
+        int(factor_y).bit_length() - 1,
+    )
+    reduction_yx = (level_xy[1], level_xy[0])
+    reducer, dtype, representation = _page_route_format(
+        source,
+        reduction_yx=reduction_yx,
+        reduced_format=(reducer, dtype, representation),
+    )
+    return RenderedPageRoute(
+        source=source,
+        level_xy=level_xy,
+        reduction_yx=reduction_yx,
+        reducer=reducer,
+        dtype=dtype,
+        representation=representation,
+    )
+
+
 def page_set_key_for_rendered(
     rendered: RenderedTile, *, demand, level: int, semantic_source_id, shader_display: bool = True
 ) -> LodPageSetKey:
@@ -245,31 +295,28 @@ def page_set_key_for_rendered(
     resident levels for tiles that have not been rendered yet.
     """
 
-    source = canonical_value_source_for_rendered(rendered, shader_display=shader_display)
-    reducer, dtype, representation = _reducer_format_for_rendered(rendered, source)
-    factor_x, factor_y = factor_xy_for_level(demand, int(level))
-    reduction_yx = (int(factor_y).bit_length() - 1, int(factor_x).bit_length() - 1)
-    reducer, dtype, representation = _page_route_format(
-        source,
-        reduction_yx=reduction_yx,
-        reduced_format=(reducer, dtype, representation),
+    route = page_route_for_rendered(
+        rendered,
+        demand=demand,
+        level=int(level),
+        shader_display=shader_display,
     )
-    height, width = (int(value) for value in np.shape(source)[:2])
+    height, width = (int(value) for value in np.shape(route.source)[:2])
     content_key = ("src-anchored", semantic_source_id, ("display-plane",))
     plans = plan_source_grid_pages(
         content_key=content_key,
         valid_source_rect_yx=(0, height, 0, width),
-        reduction_yx=reduction_yx,
+        reduction_yx=route.reduction_yx,
         stored_page_shape=(256, 256),
-        dtype=dtype,
-        representation=representation,
-        reducer=reducer,
+        dtype=route.dtype,
+        representation=route.representation,
+        reducer=route.reducer,
     )
     return LodPageSetKey(
         source_id=semantic_source_id,
         tile_id=int(rendered.tile.source_index),
-        level_xy=(int(factor_x).bit_length() - 1, int(factor_y).bit_length() - 1),
-        reducer=reducer,
+        level_xy=route.level_xy,
+        reducer=route.reducer,
         plans=plans,
     )
 

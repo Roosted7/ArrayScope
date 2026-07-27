@@ -622,18 +622,17 @@ def evaluate_shared_preview(
             quality="preview",
         )
         semantic_source_id = session.tile_semantic_source_id(tile.source_index)
-        format_key = render_lod.page_set_key_for_rendered(
+        page_route = render_lod.page_route_for_rendered(
             rendered,
             demand=demand,
             level=level,
-            semantic_source_id=semantic_source_id,
             shader_display=bool(shader_display),
         )
-        source, _histogram, texture_kind = render_lod.texture_source_for_rendered(
+        _source, _histogram, texture_kind = render_lod.texture_source_for_rendered(
             rendered,
             shader_display=bool(shader_display),
         )
-        template_plan = format_key.plans[0]
+        source = page_route.source
         source_height, source_width = (
             int(value) for value in render_lod.canonical_source_tile_shape(session)[:2]
         )
@@ -648,17 +647,17 @@ def evaluate_shared_preview(
                 ("display-plane", SHARED_PREVIEW_ROUTE),
             ),
             valid_source_rect_yx=(0, source_height, 0, source_width),
-            reduction_yx=template_plan.reduction_yx,
-            stored_page_shape=template_plan.stored_page_shape,
-            dtype=template_plan.key.dtype,
-            representation=template_plan.key.representation,
-            reducer=template_plan.reducer,
+            reduction_yx=page_route.reduction_yx,
+            stored_page_shape=(256, 256),
+            dtype=page_route.dtype,
+            representation=page_route.representation,
+            reducer=page_route.reducer,
         )
         key = render_lod.LodPageSetKey(
             source_id=semantic_source_id,
             tile_id=int(tile.source_index),
-            level_xy=format_key.level_xy,
-            reducer=format_key.reducer,
+            level_xy=page_route.level_xy,
+            reducer=page_route.reducer,
             plans=plans,
         )
         pages = _materialize_shared_preview_pages(source, plans=plans)
@@ -1886,18 +1885,17 @@ def _evaluate_tile_reduced_input_preview(
         level_stats=getattr(value, "level_stats", None),
         quality="preview",
     )
-    format_key = render_lod.page_set_key_for_rendered(
+    page_route = render_lod.page_route_for_rendered(
         rendered,
         demand=demand,
         level=int(level),
-        semantic_source_id=semantic_source_id,
         shader_display=bool(shader_display),
     )
-    source, _histogram, texture_kind = render_lod.texture_source_for_rendered(
+    _source, _histogram, texture_kind = render_lod.texture_source_for_rendered(
         rendered,
         shader_display=bool(shader_display),
     )
-    template_plan = format_key.plans[0]
+    source = page_route.source
     native_shape = tuple(int(size) for size in render_lod.canonical_source_tile_shape(session)[:2])
     anchor_fn = getattr(session, "payload_source_anchor_for_rendered", None)
     if callable(anchor_fn):
@@ -1926,17 +1924,17 @@ def _evaluate_tile_reduced_input_preview(
             ("display-plane", _reduced_preview_route(factor_xy)),
         ),
         valid_source_rect_yx=valid_source_rect_yx,
-        reduction_yx=template_plan.reduction_yx,
-        stored_page_shape=template_plan.stored_page_shape,
-        dtype=template_plan.key.dtype,
-        representation=template_plan.key.representation,
-        reducer=template_plan.reducer,
+        reduction_yx=page_route.reduction_yx,
+        stored_page_shape=(256, 256),
+        dtype=page_route.dtype,
+        representation=page_route.representation,
+        reducer=page_route.reducer,
     )
     key = render_lod.LodPageSetKey(
         source_id=semantic_source_id,
         tile_id=int(tile.source_index),
-        level_xy=format_key.level_xy,
-        reducer=format_key.reducer,
+        level_xy=page_route.level_xy,
+        reducer=page_route.reducer,
         plans=plans,
     )
     pages = _materialize_shared_preview_pages(source, plans=plans)
