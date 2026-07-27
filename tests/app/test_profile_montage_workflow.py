@@ -1345,7 +1345,7 @@ def test_profile_montage_build_holds_intermediate_fit_range_signal():
 
 
 def _passing_r8_phase_record(*, backend="wgpu"):
-    evidence_quality = 1 if backend == "wgpu" else 3
+    evidence_quality = 1 if backend == "wgpu" else 2
     record = {
         "phase": "raw_full_tiled_montage",
         "backend": backend,

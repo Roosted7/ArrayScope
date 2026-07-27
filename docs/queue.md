@@ -84,7 +84,14 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   once instead of rebuilding the complete visible lookup 272 times. The
   optional JSONL oracle is buffered and its rich identity fields are bounded,
   so evidence collection no longer adds hundreds of synchronous writes before
-  T1; the crash-oriented trace ring is unchanged. The independent progressive
+  T1; the crash-oriented trace ring is unchanged. **Round-level ownership
+  recovered 2026-07-27:** preview admission now reserves the one round source,
+  the complete cohort installs one 272/272 decision, and the legacy semantic
+  source-slab/FFT sweep runs only as the no-preview fallback after coverage
+  closes. Fresh real-Wayland raw traces on both PyQtGraph and WGPU contain one
+  `source=preview-cohort` evidence event, identical first-visible/final levels,
+  and zero stale-level tiles; four-pair order-balanced T1 ratios were
+  load-neutral (PyQtGraph +0.6%, WGPU +0.4%). The independent progressive
   contract replay is still **RED** on all five 2026-07-27 field traces: R3
   exposes eight frozen/inactive evidence runs across both backends, and R1
   fires 15 (WGPU FFT) and 11 (WGPU scalar) snapshots of production below the

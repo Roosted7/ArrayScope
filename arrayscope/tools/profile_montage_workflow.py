@@ -9287,7 +9287,11 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         target="finite non-empty histogram data bounds",
     )
     shader_backend = str(record.get("backend", "")) == "wgpu"
-    required_evidence_quality = 1 if shader_backend else 3
+    # PyQtGraph's settled round source may come from the complete preview
+    # cohort (protocol quality 2) or from the no-preview semantic fallback
+    # (quality 3). Requiring quality 3 here encoded the retired source-slab
+    # implementation, not the R3 contract.
+    required_evidence_quality = 1 if shader_backend else 2
     require(
         "first_visible_levels_semantic",
         not bool(record.get("first_visible_levels_default", True)),
@@ -9326,7 +9330,7 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         target=(
             "rough-or-better evidence before first shader-renderer pixels"
             if required_evidence_quality == 1
-            else "refined evidence before first PyQtGraph pixels"
+            else "complete round-owned target-or-better evidence before first PyQtGraph pixels"
         ),
     )
     predecessor_tiles = int(record.get("presentation_predecessor_tile_count", 0) or 0)

@@ -518,7 +518,12 @@ def test_evaluate_shared_preview_fans_out_display_only_payloads():
         assert shader_mapping is not None
         assert texture_kind is not None
         assert level_data is not None
-        assert level_stats is None
+        assert level_stats is not None
+        assert int(level_stats.source_index) == int(tile_number)
+        assert level_stats.bounds == (
+            float(np.min(_stored_preview_values(pages))),
+            float(np.max(_stored_preview_values(pages))),
+        )
         np.testing.assert_array_equal(
             _stored_preview_values(pages),
             np.asarray(session.document.base_data)[::2, ::2, int(tile_number)],

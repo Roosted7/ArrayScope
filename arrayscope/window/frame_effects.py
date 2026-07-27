@@ -22,10 +22,7 @@ from arrayscope.display.model.frame import (
     display_tile_payload_can_commit_frame,
     display_tile_payload_has_semantics,
 )
-from arrayscope.display.model.montage_levels import (
-    MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
-    LevelEvidenceQuality,
-)
+from arrayscope.display.model.montage_levels import LevelEvidenceQuality
 from arrayscope.display.model.presentation_generation import levels_match
 from arrayscope.display.model.tile_identity import (
     acknowledged_identity_satisfies_target,
@@ -877,6 +874,10 @@ class FramePipelineEffects:
         tile = self._tile_for_step(step)
         if tile is None or not self._session_is_current(intent):
             return
+        if step.rung == Rung.FLOOR and not str(
+            getattr(self.session, "round_level_evidence_source", "") or ""
+        ):
+            self.renderer._expect_preview_cohort_level_evidence(self.session)
         tile_number = int(tile.montage_index)
         if self._step_produces_page_payload(step, tile):
             if step.rung == Rung.FLOOR and render_effects.can_evaluate_reduced_preview(
@@ -1675,9 +1676,8 @@ class FramePipelineEffects:
         session = self.session
         if not self._session_is_current():
             return False
-        rows = (
-            payload if _looks_like_shared_preview_rows(payload) else ((int(tile_number), *payload),)
-        )
+        shared_preview_cohort = _looks_like_shared_preview_rows(payload)
+        rows = payload if shared_preview_cohort else ((int(tile_number), *payload),)
         quality = str(
             quality or ("exact" if step is not None and step.rung == Rung.DESIRED else "preview")
         )
@@ -1736,7 +1736,32 @@ class FramePipelineEffects:
                 )
                 if rendered is not None:
                     first_pass_rendered.append(rendered)
-        if len(first_pass_rendered) > 1:
+        if is_preview:
+            expected_sources = {
+                int(source)
+                for source in tuple(getattr(session, "level_expected_indices", ()) or ())
+            }
+            cohort_rendered = tuple(first_pass_rendered)
+            cohort_sources = {int(rendered.tile.source_index) for rendered in cohort_rendered}
+            if cohort_sources != expected_sources and len(session.display_tile_payloads) >= len(
+                expected_sources
+            ):
+                by_source = {}
+                for current_tile, display_payload in tuple(session.display_tile_payloads.items()):
+                    rendered = self.renderer._rendered_tile_for_current_payload(
+                        session,
+                        int(current_tile),
+                        display_payload,
+                    )
+                    if rendered is not None:
+                        by_source[int(rendered.tile.source_index)] = rendered
+                if frozenset(by_source) == frozenset(expected_sources):
+                    cohort_rendered = tuple(by_source[source] for source in expected_sources)
+            self.renderer._admit_preview_cohort_level_evidence(
+                session,
+                cohort_rendered,
+            )
+        elif len(first_pass_rendered) > 1:
             self.renderer._admit_first_pass_level_evidence_batch(
                 session,
                 first_pass_rendered,
@@ -4625,12 +4650,9 @@ def tile_layer_first_pixels_wait_for_level_source(
 
     Explicit user levels change the window choice, not the semantic histogram
     source. Every first tiled frame still needs rough evidence for a shader
-    backend. A CPU-windowed backend may use the full refined semantic
-    population, an honestly ranked refined subset covering every required
-    first-pixel tile, or — for scopes larger than one evidence batch — a
-    provisional refined first batch; the owned full-population producer then
-    improves whichever source unblocked the frame, and the settled-metadata
-    refresh publishes the one refined update.
+    backend. A CPU-windowed backend needs the complete round-owned population:
+    its levels are baked into pixels and cannot be repaired by convergence
+    after the first commit.
     """
 
     if not bool(first_display_commit):
@@ -4645,67 +4667,14 @@ def tile_layer_first_pixels_wait_for_level_source(
     )
     if shader_windowing:
         return not has_rough_source
-    if bool(
+    complete_round_source = bool(
         has_rough_source
-        and bool(getattr(level_stats, "refined", False))
-        and getattr(level_stats, "rank", None) == LevelSourceRank.MONTAGE_SAMPLED_FULL
-    ):
-        return False
-    if has_rough_source:
-        plan_tiles = {
-            int(getattr(tile, "montage_index", offset)): tile
-            for offset, tile in enumerate(
-                tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-            )
-        }
-        required = getattr(session, "required_tile_numbers", None)
-        if not callable(required):
-            raise RuntimeError("live frame session has no required-tile owner")
-        required_sources = {
-            int(plan_tiles[int(tile_number)].source_index)
-            for tile_number in tuple(required())
-            if int(tile_number) in plan_tiles
-        }
-        covered_sources = {
-            int(source) for source in tuple(getattr(level_stats, "source_indices", ()) or ())
-        }
-        summary_is_refined = bool(getattr(level_stats, "refined", False))
-        if summary_is_refined and required_sources and required_sources <= covered_sources:
-            return False
-        # Preview planes contribute rough evidence for the whole scope before
-        # the CPU backend can publish its first frame.  Once that happens the
-        # aggregate summary is intentionally mixed, so its all-source
-        # ``refined`` flag can no longer express that the semantic evidence
-        # owner completed the blocking first batch.  That owner's
-        # generation-bound covered set is the per-source truth.  Consulting it
-        # closes a circular wait: the remaining semantic refinement is parked
-        # behind preview acknowledgement, while acknowledgement otherwise
-        # waits for the remaining refinement.
-        semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
-        refined_sources = {
-            int(source) for source in tuple(getattr(semantic_progress, "covered_sources", ()) or ())
-        }
-        blocking_source_count = min(
-            len(required_sources),
-            MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
-        )
-        if required_sources and len(refined_sources & required_sources) >= blocking_source_count:
-            return False
-        # Provisional first-batch acceptance: a large cold scope must not hold
-        # every already-evaluated floor hostage to the full evidence sweep
-        # (272-source montage entry: ~7 s of black window, 2026-07-18
-        # dossier). One refined batch is an honest provisional window for the
-        # whole frame — rank stays MONTAGE_VISIBLE_SUBSET, and the tracker's
-        # monotonic improvement plus the settled-metadata refresh deliver the
-        # single refined re-window when the population completes. Scopes at or
-        # below one batch keep exact pre-existing semantics.
-        if (
-            summary_is_refined
-            and required_sources
-            and len(covered_sources & required_sources) >= blocking_source_count
-        ):
-            return False
-    return True
+        and getattr(level_stats, "rank", None)
+        in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}
+        and int(getattr(level_stats, "evidence_quality", 0) or 0)
+        >= int(LevelEvidenceQuality.ROUGH_TARGET)
+    )
+    return not complete_round_source
 
 
 def preview_payload_parts(preview):

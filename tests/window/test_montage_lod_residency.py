@@ -2989,6 +2989,7 @@ def test_shared_preview_worker_rows_admit_as_checked_canonical_pages():
     renderer = _RungPrepareRenderer()
     renderer._rendered_tile_for_current_payload = lambda *_args, **_kwargs: None
     renderer._admit_first_pass_level_evidence_batch = lambda *_args, **_kwargs: None
+    renderer._admit_preview_cohort_level_evidence = lambda *_args, **_kwargs: None
     frame_effects = FramePipelineEffects(renderer, session)
     ensure_calls = []
     original_ensure_floor_payloads = session._ensure_floor_payloads

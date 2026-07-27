@@ -1668,13 +1668,13 @@ def test_pyqtgraph_first_pixels_wait_for_complete_semantic_source():
     )
 
     assert tile_layer_first_pixels_wait_for_level_source(window, session, True, partial) is True
-    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, complete) is True
+    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, complete) is False
     assert (
         tile_layer_first_pixels_wait_for_level_source(window, session, True, sampled_full) is False
     )
 
 
-def test_pyqtgraph_first_pixels_accept_refined_required_subset_honestly():
+def test_pyqtgraph_first_pixels_reject_refined_required_subset():
     from arrayscope.core.window_levels import LevelSourceRank
     from arrayscope.display.model.montage_levels import (
         LevelEvidenceQuality,
@@ -1716,17 +1716,11 @@ def test_pyqtgraph_first_pixels_accept_refined_required_subset_honestly():
     )
 
     assert tile_layer_first_pixels_wait_for_level_source(window, session, True, missing_required)
-    assert not tile_layer_first_pixels_wait_for_level_source(window, session, True, required_subset)
+    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, required_subset)
 
 
-def test_pyqtgraph_current_predicate_accepts_partial_refined_first_batch():
-    """Characterize the partial-evidence acceptance that violates R3.
-
-    272-source montage entry held every evaluated floor behind the full
-    refined sweep (~7 s black window, 2026-07-18 dossier). The current
-    predicate accepts one refined batch for the whole frame even though the
-    test supplies no bounds for the remaining presented tiles.
-    """
+def test_pyqtgraph_first_pixels_require_complete_round_level_evidence():
+    """R3: no partial source may authorize the first CPU-baked tile."""
 
     from arrayscope.core.window_levels import LevelSourceRank
     from arrayscope.display.model.montage_levels import (
@@ -1753,40 +1747,39 @@ def test_pyqtgraph_current_predicate_accepts_partial_refined_first_batch():
         required_tile_numbers=lambda: tuple(range(tile_count)),
     )
     expected = frozenset(range(tile_count))
-    batch = int(MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH)
 
     def summary(count, *, refined):
         return MontageLevelStats(
             bounds=(0.0, 1.0),
             source_indices=frozenset(range(count)),
             expected_indices=expected,
-            rank=LevelSourceRank.MONTAGE_VISIBLE_SUBSET,
+            rank=(
+                LevelSourceRank.MONTAGE_COMPLETE
+                if count == tile_count
+                else LevelSourceRank.MONTAGE_VISIBLE_SUBSET
+            ),
             refined=refined,
             evidence_quality=(
                 LevelEvidenceQuality.REFINED if refined else LevelEvidenceQuality.ROUGH_TARGET
             ),
         )
 
-    assert (
-        tile_layer_first_pixels_wait_for_level_source(
-            window, session, True, summary(batch - 1, refined=True)
-        )
-        is True
+    batch = int(MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH)
+    assert tile_layer_first_pixels_wait_for_level_source(
+        window, session, True, summary(batch - 1, refined=True)
     )
-    assert (
-        tile_layer_first_pixels_wait_for_level_source(
-            window, session, True, summary(batch, refined=False)
-        )
-        is True
+    assert tile_layer_first_pixels_wait_for_level_source(
+        window, session, True, summary(batch, refined=False)
     )
-    assert (
-        tile_layer_first_pixels_wait_for_level_source(
-            window, session, True, summary(batch, refined=True)
-        )
-        is False
+    assert tile_layer_first_pixels_wait_for_level_source(
+        window, session, True, summary(batch, refined=True)
+    )
+    assert not tile_layer_first_pixels_wait_for_level_source(
+        window, session, True, summary(tile_count, refined=False)
     )
 
 
+<<<<<<< HEAD
 def test_pyqtgraph_current_predicate_accepts_partial_seed_with_mixed_preview_evidence():
     """Characterize partial-seed acceptance; it is not an R3 containment proof.
 
@@ -1804,6 +1797,23 @@ def test_pyqtgraph_current_predicate_accepts_partial_seed_with_mixed_preview_evi
     half -- accepting a partial seed as the round window -- which R3 forbids
     on its own terms, with or without the deadlock.
     """
+||||||| parent of 8f622a1e (perf(render): own round levels from preview cohort)
+def test_pyqtgraph_current_predicate_accepts_partial_seed_with_mixed_preview_evidence():
+    """Characterize partial-seed acceptance; it is not an R3 containment proof.
+
+    A field-scale CPU preview admits rough evidence for every tile while the
+    semantic evidence owner samples its first blocking batch.  The aggregate
+    summary is consequently mixed (and therefore not globally ``refined``),
+    even though the producer has covered the exact 16-source threshold that
+    currently authorizes the provisional first frame. Waiting on the aggregate's
+    all-sources flag deadlocks: the producer intentionally parks its remaining
+    refinement behind preview acknowledgement, while acknowledgement waits on
+    this predicate.
+    """
+=======
+def test_pyqtgraph_rejects_partial_seed_with_mixed_preview_evidence():
+    """R3: a side-sweep seed cannot stand in for the round-owned decision."""
+>>>>>>> 8f622a1e (perf(render): own round levels from preview cohort)
 
     from arrayscope.core.window_levels import LevelSourceRank
     from arrayscope.display.model.montage_levels import (
@@ -1844,16 +1854,11 @@ def test_pyqtgraph_current_predicate_accepts_partial_seed_with_mixed_preview_evi
         evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
     )
 
-    assert not tile_layer_first_pixels_wait_for_level_source(window, session, True, mixed)
+    assert tile_layer_first_pixels_wait_for_level_source(window, session, True, mixed)
 
 
-def test_first_cpu_histogram_currently_publishes_partial_refined_batch():
-    """Characterize publication of a partial source as the round window.
-
-    The first CPU pixels are windowed with the refined first batch, so the
-    widgets must carry that same source; sub-batch or rough-only coverage
-    stays unpublished.
-    """
+def test_first_cpu_histogram_publishes_only_complete_round_evidence():
+    """R3: PyQtGraph metadata and baked pixels share one complete source."""
 
     import numpy as np
 
@@ -1902,9 +1907,8 @@ def test_first_cpu_histogram_currently_publishes_partial_refined_batch():
         return result, published
 
     result, published = publish_with(batch, quality=LevelEvidenceQuality.REFINED)
-    assert result is True
-    assert len(published) == 1
-    assert published[0]["levels"] == (0.0, float(batch))
+    assert result is False
+    assert published == []
 
     result, published = publish_with(batch - 1, quality=LevelEvidenceQuality.REFINED)
     assert result is False
@@ -1913,6 +1917,11 @@ def test_first_cpu_histogram_currently_publishes_partial_refined_batch():
     result, published = publish_with(batch, quality=LevelEvidenceQuality.ROUGH_TARGET)
     assert result is False
     assert published == []
+
+    result, published = publish_with(272, quality=LevelEvidenceQuality.ROUGH_TARGET)
+    assert result is True
+    assert len(published) == 1
+    assert published[0]["levels"] == (0.0, 272.0)
 
 
 def test_shader_first_pixels_wait_for_rough_source_but_not_complete_source():

@@ -13,6 +13,7 @@ from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.model.montage_levels import (
     AGGREGATE_SAMPLE_LIMIT,
     MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
+    PROVISIONAL_TILE_SAMPLE_LIMIT,
     REFINED_TILE_SAMPLE_LIMIT,
     LevelEvidenceQuality,
     MontageLevelStats,
@@ -412,13 +413,49 @@ class LevelStatsService:
 
         if not bool(getattr(session, "shader_display", False)):
             return False
-        if not session.note_first_pass_quality(quality):
+        if not session.note_first_pass_quality(quality) and not session.first_pass_accepts_quality(
+            quality
+        ):
             return False
         evidence_quality = (
             LevelEvidenceQuality.ROUGH_PREVIEW
             if str(quality) == "preview"
             else LevelEvidenceQuality.ROUGH_TARGET
         )
+        if (
+            str(getattr(session, "round_level_evidence_source", "") or "") == "preview-cohort"
+            and str(quality) == "exact"
+        ):
+            source_index = int(rendered.tile.source_index)
+            stats = getattr(rendered, "level_stats", None)
+            if stats is None:
+                level_data = getattr(rendered, "level_data", None)
+                if level_data is not None:
+                    stats = provisional_tile_level_stats(
+                        level_data,
+                        source_index,
+                        evidence_quality=evidence_quality,
+                    )
+            if stats is None:
+                return False
+            stats = tile_level_stats_with_quality(
+                stats,
+                evidence_quality,
+                source_index=source_index,
+            )
+            tracker = self._montage_level_tracker()
+            tracker.ensure_expected(
+                session.level_key,
+                self._montage_level_expected_indices(session),
+            )
+            improved = tracker.widen_from_stats(session.level_key, stats)
+            if improved:
+                widened = tracker.source_stats(session.level_key, source_index)
+                self._remember_montage_source_level_stats(session.level_key, widened)
+            return bool(
+                improved
+                or tracker.has_source_quality(session.level_key, source_index, evidence_quality)
+            )
         return bool(
             self._update_montage_level_bounds_from_prepared(
                 session.level_key,
@@ -463,6 +500,121 @@ class LevelStatsService:
             )
         return int(admitted)
 
+    def _admit_preview_cohort_level_evidence(self, session, rendered_items) -> int:
+        """Install one complete preview cohort as the round-level decision.
+
+        The preview worker has already evaluated the operation pipeline and
+        prepared per-tile level statistics.  This owner consumes that immutable
+        result once; it never re-reads source slabs or schedules a second FFT.
+        An incomplete cohort remains an explicit coverage dependency and is
+        never exposed as a partial round window.
+        """
+
+        if not self._frame_session_is_current(session):
+            return 0
+        if not session.note_first_pass_quality("preview"):
+            return 0
+        if not self._expect_preview_cohort_level_evidence(session):
+            return 0
+        target = session.semantic_level_evidence_target
+        progress = session.semantic_level_evidence_progress
+        expected = target.expected_sources
+
+        rows = tuple(rendered_items or ())
+        stats_by_source = {}
+        rendered_by_source = {}
+        for rendered in rows:
+            source_index = int(rendered.tile.source_index)
+            stats = getattr(rendered, "level_stats", None)
+            if stats is None or source_index in stats_by_source:
+                continue
+            stats_by_source[source_index] = tile_level_stats_with_quality(
+                stats,
+                LevelEvidenceQuality.ROUGH_TARGET,
+                source_index=source_index,
+            )
+            rendered_by_source[source_index] = rendered
+        if frozenset(stats_by_source) != frozenset(expected):
+            return 0
+
+        ordered_stats = tuple(stats_by_source[source] for source in sorted(expected))
+        tracker = self._montage_level_tracker()
+        tracker.install_cohort(
+            session.level_key,
+            ordered_stats,
+            expected_indices=expected,
+        )
+        for stats in ordered_stats:
+            self._remember_montage_source_level_stats(session.level_key, stats)
+        progress.cursor = int(target.target_population)
+        for source_index in expected:
+            progress.record_covered(source_index)
+        progress.completed_batches = 1
+        progress.sampled_pixels_total = sum(
+            int(np.asarray(stats.sample).size) for stats in ordered_stats
+        )
+        progress.slab_bytes_total = sum(
+            montage_commit.rendered_tile_nbytes(rendered_by_source[source]) for source in expected
+        )
+        progress.inflight_generation = None
+        progress.blocking_reason = "ready"
+        session.round_level_evidence_source = "preview-cohort"
+        self._semantic_level_evidence_last_merged = int(target.target_population)
+
+        from arrayscope.core.trace import emit_trace
+
+        emit_trace(
+            "semantic_level_evidence_batch",
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            source="preview-cohort",
+            batch_sources=int(target.target_population),
+            covered_sources=int(target.target_population),
+            target_sources=int(target.target_population),
+            elapsed_ms=0.0,
+            elapsed_ms_total=0.0,
+            sampled_pixels=int(progress.sampled_pixels_total),
+            sampled_pixels_total=int(progress.sampled_pixels_total),
+            slab_bytes=int(progress.slab_bytes_total),
+            slab_bytes_total=int(progress.slab_bytes_total),
+        )
+        if tracker.cached_histogram_data(session.level_key) is None:
+            self._schedule_montage_histogram_aggregate(session)
+        return int(target.target_population)
+
+    def _expect_preview_cohort_level_evidence(self, session) -> bool:
+        """Claim round-level ownership when a real preview rung is admitted."""
+
+        if not self._frame_session_is_current(session):
+            return False
+        expected = self._montage_level_expected_indices(session)
+        if not expected:
+            return False
+        generation = (
+            int(getattr(session, "session_id", 0) or 0),
+            session.level_key,
+            expected,
+            "preview-cohort",
+        )
+        target = SemanticLevelEvidenceTarget(
+            generation=generation,
+            level_key=session.level_key,
+            expected_sources=expected,
+            pixel_limit=int(PROVISIONAL_TILE_SAMPLE_LIMIT),
+            aggregate_sample_limit=int(AGGREGATE_SAMPLE_LIMIT),
+            blocking_batch_limit=len(expected),
+            background_batch_limit=len(expected),
+        )
+        current_target = getattr(session, "semantic_level_evidence_target", None)
+        if current_target is None or current_target.generation != generation:
+            session.semantic_level_evidence_target = target
+            session.semantic_level_evidence_progress = SemanticLevelEvidenceProgress(
+                target=target,
+                current_batch_limit=len(expected),
+                blocking_reason="waiting-preview-cohort",
+            )
+        session.round_level_evidence_source = "preview-cohort-pending"
+        return True
+
     def _first_pass_level_evidence_complete(self, session) -> bool:
         if not bool(getattr(session, "shader_display", False)):
             return False
@@ -502,6 +654,8 @@ class LevelStatsService:
         histogram/window-level pass without competing with visible rendering.
         """
 
+        if _preview_cohort_owns_cpu_round_levels(self, session):
+            return
         if not session.scheduling_policy.verdict.admits_lane(WorkLane.HISTOGRAM_REFINEMENT):
             return
 
@@ -833,6 +987,20 @@ class LevelStatsService:
     def _schedule_semantic_level_evidence(self, session) -> None:
         if not self._frame_session_is_current(session):
             return
+        round_source = str(getattr(session, "round_level_evidence_source", "") or "")
+        if round_source == "preview-cohort":
+            if self._montage_level_tracker().cached_histogram_data(session.level_key) is None:
+                self._schedule_montage_histogram_aggregate(session)
+            return
+        if round_source == "preview-cohort-pending":
+            if bool(session.scheduling_policy.verdict.coverage_open):
+                return
+            # The preview pass ended without a complete cohort. The existing
+            # semantic-slab owner is the explicit no-preview/incomplete-preview
+            # fallback; start it only after the preview producer is terminal.
+            session.round_level_evidence_source = ""
+            session.semantic_level_evidence_target = None
+            session.semantic_level_evidence_progress = None
         visible_dependency = bool(
             _montage_level_evidence_requires_refined(self, session)
             and not bool(getattr(session, "display_committed", False))
@@ -1017,6 +1185,13 @@ class LevelStatsService:
             progress.blocking_reason = "kernel-admission"
 
     def _schedule_montage_cached_level_stats(self, session) -> None:
+        if _preview_cohort_owns_cpu_round_levels(self, session):
+            getattr(session, "pending_level_tiles", deque()).clear()
+            getattr(session, "pending_level_sources", set()).clear()
+            session.level_scan_remaining_tiles = 0
+            if self._montage_level_tracker().cached_histogram_data(session.level_key) is None:
+                self._schedule_montage_histogram_aggregate(session)
+            return
         if _montage_level_evidence_requires_refined(self, session) and not bool(
             getattr(session, "display_committed", False)
         ):
@@ -1114,6 +1289,8 @@ class LevelStatsService:
     def _queue_montage_level_stats_for_payloads(self, session, payloads) -> int:
         """Request level evidence for a presentation delta without scanning it inline."""
 
+        if _preview_cohort_owns_cpu_round_levels(self, session):
+            return 0
         tracker = self._montage_level_tracker()
         expected = self._montage_level_expected_indices(session)
         tracker.ensure_expected(session.level_key, expected)
@@ -2075,7 +2252,7 @@ class LevelStatsService:
             request_presentation()
 
     def _publish_first_cpu_histogram(self, session) -> bool:
-        """Show semantic evidence while PyQtGraph still waits for final levels."""
+        """Publish the same complete round source PyQtGraph will bake with."""
 
         if bool(getattr(session, "display_committed", False)):
             return False
@@ -2086,24 +2263,17 @@ class LevelStatsService:
         summary = self._montage_level_tracker().summary_for(session.level_key)
         if summary is None:
             return False
-        # A refined first batch is publishable provisional metadata for a cold
-        # scope larger than the batch: it is what unblocks the first CPU
-        # pixels (tile_layer_first_pixels_wait_for_level_source), so the
-        # histogram/levels widgets must carry the same source those pixels
-        # are windowed with. Smaller scopes keep the full-population gate.
-        provisional_first_batch = bool(
-            summary.rank != LevelSourceRank.MONTAGE_SAMPLED_FULL
-            and bool(summary.refined)
-            and summary.expected_indices
-            and len(summary.source_indices)
-            >= min(len(summary.expected_indices), MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH)
+        complete_round_source = bool(
+            summary.rank in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}
+            and int(getattr(summary, "evidence_quality", 0) or 0)
+            >= int(LevelEvidenceQuality.ROUGH_TARGET)
         )
-        if (
-            summary.rank != LevelSourceRank.MONTAGE_SAMPLED_FULL and not provisional_first_batch
-        ) or not self._should_publish_montage_level_metadata(session, summary):
+        if not complete_round_source or not self._should_publish_montage_level_metadata(
+            session, summary
+        ):
             return False
-        source = self._montage_level_source_for_session(session, allow_partial=True)
-        histogram = self._montage_histogram_plot_data_for_session(session, allow_partial=True)
+        source = self._montage_level_source_for_session(session, allow_partial=False)
+        histogram = self._montage_histogram_plot_data_for_session(session, allow_partial=False)
         publish = getattr(image_view, "applyHistogramMetadata", None)
         if source is None or histogram is None or not callable(publish):
             return False
@@ -2124,6 +2294,10 @@ class LevelStatsService:
 
     def _schedule_montage_refined_level_stats(self, session) -> None:
         if not self._frame_session_is_current(session):
+            return
+        if _preview_cohort_owns_cpu_round_levels(self, session):
+            getattr(session, "pending_refined_level_tiles", deque()).clear()
+            getattr(session, "pending_refined_level_sources", set()).clear()
             return
         if not session.scheduling_policy.verdict.admits_lane(WorkLane.HISTOGRAM_REFINEMENT):
             return
@@ -2518,6 +2692,15 @@ def _montage_level_evidence_requires_refined(window, session) -> bool:
             not bool(getattr(session, "display_committed", False))
             or (requested_levels is None and getattr(session, "force_auto", False))
         )
+    )
+
+
+def _preview_cohort_owns_cpu_round_levels(window, session) -> bool:
+    """Whether PyQtGraph must keep the preview cohort's settled round value."""
+
+    return bool(
+        str(getattr(session, "round_level_evidence_source", "") or "") == "preview-cohort"
+        and not image_view_backend_capabilities(window.win.img_view).shader_windowing
     )
 
 

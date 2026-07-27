@@ -245,23 +245,33 @@ The binding assignment:
 | Load shedding (R6) | scheduler | per round |
 | Baking or binding levels into pixels | backend adapter | per tile, **reads** the round value |
 
-One preview-floor altitude repair has landed; one levels error remains in scope:
+Both altitude errors have now been repaired:
 
 - **Preview floor — repaired.** `render.lod.selected_lod_factor()` chooses the
   preview floor from the round demand, stores that one value on the session,
   and the frame runtime passes it through the pipeline to `LodLadder.plan()`.
   The ladder still decides, per tile, whether that tile is *skipped* — that is
   correctly per-tile work (R2) — but evaluation and rung planning now read the
-  round floor unchanged rather than re-deriving it.
-- **Too low.** The round levels are currently resolved by a batched sweep over
-  *source slabs*, two at a time, running beside the tile pipeline and competing
-  with it for workers. A single round-scoped value is being assembled from
-  ~136 independent worker results. It must become one round-owned decision,
-  and it should be derived from the preview cohort — those tiles already
-  contain the round's data at reduced resolution, which is exactly and cheaply
-  the evidence the window needs. The separate source-slab sweep re-reads and
-  re-evaluates the data (including re-running the FFT) to learn something the
-  preview pass has already computed.
+  round floor unchanged rather than re-deriving it. It is not finished: the
+  floor is still recomputed per planning pass rather than pinned to a round,
+  which R2b above records as blocked on a round identity.
+- **Round levels — repaired.** `LevelStatsService` claims the decision when a
+  preview rung is admitted, then installs the complete preview cohort as one
+  tracker revision. The cohort rows carry worker-prepared bounds and samples,
+  so no source-slab scan or repeated operation/FFT runs beside that preview.
+  PyQtGraph holds its first bake until the complete round source exists and
+  keeps that value for the round. WGPU may widen the installed value from
+  current-round target evidence, but does so before the corresponding tile is
+  marked dirty. Pipelines with no usable preview cohort retain the semantic
+  source-slab owner as an explicit fallback after coverage closes.
+
+  That fallback deliberately parks while coverage is open, which is the shape
+  of the regression reverted in `61bb5f1a` — and is only safe for the opposite
+  reason. The reverted park held levels at a seed batch *while tiles were being
+  presented*; this one runs only in the `preview-cohort-pending` window, whose
+  whole premise is that nothing has been baked yet. **The park is legal exactly
+  as long as that premise holds**, so it is pinned by test rather than left to
+  inspection.
 
 A backend adapter may decide *how* to apply a value (bake vs bind). It may
 never decide *what* the value is, and it may never be the place a round-level

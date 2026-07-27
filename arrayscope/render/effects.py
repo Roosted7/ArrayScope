@@ -594,6 +594,7 @@ def evaluate_shared_preview(
                 colormap_lut=session.colormap_lut,
                 canonical_orientation=canonical_orientation,
             )
+        value = attach_montage_tile_level_stats(value, tile, refined=False)
         value = replace(
             value,
             semantic_data=None,
@@ -1625,7 +1626,18 @@ def attach_montage_tile_level_stats(display_image, tile, *, refined: bool = Fals
     )
     if stats is not None:
         return replace(display_image, level_stats=stats)
-    return display_image
+    return replace(
+        display_image,
+        level_stats=TileLevelStats(
+            source_index=int(tile.source_index),
+            bounds=None,
+            sample=np.asarray((), dtype=np.float32),
+            refined=bool(refined),
+            evidence_quality=(
+                LevelEvidenceQuality.REFINED if refined else LevelEvidenceQuality.ROUGH_TARGET
+            ),
+        ),
+    )
 
 
 def chunk_level_stats_for_pages(pages, *, source_index: int, mapping=None) -> TileLevelStats | None:

@@ -184,6 +184,83 @@ class MontageLevelTracker:
                 self._sample_accumulators.pop(key, None)
         return self.stats_for(key) if aggregate else None
 
+    def install_cohort(
+        self,
+        key: object,
+        tile_stats: Iterable[TileLevelStats],
+        *,
+        expected_indices: Iterable[int],
+    ) -> MontageLevelStats:
+        """Install one complete round cohort as a single observable decision.
+
+        The preview worker returns all of its tile statistics together.  Build
+        the replacement map off to the side, validate exact population
+        coverage, then advance the tracker revision once.  Consumers can
+        therefore observe either the predecessor or the complete round source,
+        never a GUI-loop accumulation of per-tile preview results.
+        """
+
+        expected = frozenset(int(index) for index in expected_indices)
+        rows = tuple(tile_stats)
+        by_source = {int(stats.source_index): stats for stats in rows}
+        if len(by_source) != len(rows):
+            raise ValueError("round level cohort repeats a source")
+        if frozenset(by_source) != expected:
+            missing = tuple(sorted(expected - frozenset(by_source)))
+            extra = tuple(sorted(frozenset(by_source) - expected))
+            raise ValueError(
+                "round level cohort does not match its expected population: "
+                f"missing={missing}, extra={extra}"
+            )
+
+        installed = {source_index: by_source[source_index] for source_index in sorted(expected)}
+        self._expected[key] = expected
+        self._tiles[key] = installed
+        self._sample_accumulators.pop(key, None)
+        self._invalidate(key)
+        return self._stats_for_expected(key, expected)
+
+    def widen_from_stats(self, key: object, tile_stats: TileLevelStats) -> bool:
+        """Merge one shader-frame source without narrowing prior coverage."""
+
+        source_index = int(tile_stats.source_index)
+        previous = self._tiles.get(key, {}).get(source_index)
+        candidate = tile_stats
+        if previous is not None:
+            previous_bounds = normalize_bounds(previous.bounds)
+            candidate_bounds = normalize_bounds(candidate.bounds)
+            if previous_bounds is not None:
+                bounds = previous_bounds
+                if candidate_bounds is not None:
+                    bounds = normalize_bounds(
+                        (
+                            min(previous_bounds[0], candidate_bounds[0]),
+                            max(previous_bounds[1], candidate_bounds[1]),
+                        )
+                    )
+                sample = _merge_incremental_samples(
+                    np.asarray(previous.sample),
+                    np.asarray(candidate.sample),
+                    REFINED_TILE_SAMPLE_LIMIT,
+                )
+                quality = max(
+                    _coerce_evidence_quality(previous.evidence_quality),
+                    _coerce_evidence_quality(candidate.evidence_quality),
+                )
+                candidate = TileLevelStats(
+                    source_index=source_index,
+                    bounds=bounds,
+                    sample=sample,
+                    refined=bool(quality >= LevelEvidenceQuality.REFINED),
+                    evidence_quality=quality,
+                )
+        if not _tile_stats_is_improvement(candidate, previous):
+            return False
+        self._tiles.setdefault(key, {})[source_index] = candidate
+        self._sample_accumulators.pop(key, None)
+        self._invalidate(key)
+        return True
+
     def record_vacuous_source(self, key: object, source_index: int) -> None:
         """Record refined evidence for a source with no finite values.
 

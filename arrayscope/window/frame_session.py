@@ -726,6 +726,10 @@ class FrameSession:
     histogram_metadata_pending: bool = False
     semantic_level_evidence_target: SemanticLevelEvidenceTarget | None = None
     semantic_level_evidence_progress: SemanticLevelEvidenceProgress | None = None
+    # LevelStatsService owns this per-round choice. ``preview-cohort-pending``
+    # means a real preview pass is still producing the one complete source;
+    # ``preview-cohort`` means that source was installed atomically.
+    round_level_evidence_source: str = ""
     first_pass_quality: str | None = None
     first_pass_histogram_published: bool = False
     pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)
@@ -1888,6 +1892,7 @@ class FrameSession:
 
         self.semantic_level_evidence_target = None
         self.semantic_level_evidence_progress = None
+        self.round_level_evidence_source = ""
 
     def semantic_level_evidence_diagnostics(self) -> dict[str, object]:
         """Return constant-time owner progress for traces and diagnostics.

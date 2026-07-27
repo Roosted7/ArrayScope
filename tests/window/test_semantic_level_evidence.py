@@ -1,12 +1,17 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from arrayscope.core.view_state import ViewState
 from arrayscope.core.window_levels import LevelSourceRank
 from arrayscope.display.backend_contract import (
     PYQTGRAPH_CAPABILITIES,
     WGPU_CAPABILITIES,
+)
+from arrayscope.display.model.montage_levels import (
+    LevelEvidenceQuality,
+    TileLevelStats,
 )
 from arrayscope.display.montage import make_montage_plan
 from arrayscope.kernel import Lane, Priority
@@ -171,6 +176,146 @@ def test_semantic_owner_covers_full_population_without_admitting_offscreen_tiles
     assert session.rendered_tiles == {}
     assert session.display_tile_payloads == {}
     assert session.lifecycle.presented_tiles == frozenset()
+
+
+@pytest.mark.parametrize("capabilities", [PYQTGRAPH_CAPABILITIES, WGPU_CAPABILITIES])
+def test_preview_cohort_atomically_owns_round_levels_without_source_sweep(capabilities):
+    data = np.arange(8 * 10 * 20, dtype=np.float32).reshape(8, 10, 20)
+    session = _session(data)
+    service, kernel = _service(session, capabilities=capabilities)
+    rendered = tuple(
+        SimpleNamespace(
+            tile=SimpleNamespace(source_index=source_index),
+            level_stats=TileLevelStats(
+                source_index=source_index,
+                bounds=(float(source_index), float(source_index + 1)),
+                sample=np.asarray([source_index, source_index + 1], dtype=np.float32),
+                evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+            ),
+            image=np.asarray([[source_index]], dtype=np.float32),
+            histogram_data=None,
+            semantic_data=None,
+            semantic_histogram_data=None,
+            level_data=None,
+        )
+        for source_index in range(20)
+    )
+    tracker = service._montage_level_tracker()
+    tracker.ensure_expected(session.level_key, range(20))
+    tracker.update_from_stats(
+        session.level_key,
+        TileLevelStats(
+            source_index=19,
+            bounds=(999.0, 1000.0),
+            sample=np.asarray([999.0, 1000.0], dtype=np.float32),
+            refined=True,
+            evidence_quality=LevelEvidenceQuality.REFINED,
+        ),
+        aggregate=False,
+    )
+
+    admitted = service._admit_preview_cohort_level_evidence(session, rendered)
+
+    summary = tracker.summary_for(session.level_key)
+    diagnostics = session.semantic_level_evidence_diagnostics()
+    assert admitted == 20
+    assert session.round_level_evidence_source == "preview-cohort"
+    assert summary.rank == LevelSourceRank.MONTAGE_COMPLETE
+    assert summary.bounds == (0.0, 20.0)
+    assert summary.evidence_quality == LevelEvidenceQuality.ROUGH_TARGET
+    assert diagnostics["covered_source_count"] == 20
+    assert diagnostics["target_population"] == 20
+    assert diagnostics["pending_batches"] == 0
+    assert diagnostics["completed_batches"] == 1
+    assert diagnostics["source_batch_limit"] == 20
+    assert diagnostics["pixel_limit"] == 512
+    assert diagnostics["blocking_reason"] == "ready"
+    assert not any(task["scope"] == "montage:semantic-level-evidence" for task in kernel.tasks)
+
+    service._schedule_semantic_level_evidence(session)
+    assert not any(task["scope"] == "montage:semantic-level-evidence" for task in kernel.tasks)
+
+
+def test_admitted_preview_claim_prevents_source_sweep_race():
+    data = np.arange(8 * 10 * 20, dtype=np.float32).reshape(8, 10, 20)
+    session = _session(data)
+    session.scheduling_policy.retarget("preview-pass", (0,), progressive=True)
+    service, kernel = _service(session, capabilities=PYQTGRAPH_CAPABILITIES)
+
+    assert service._expect_preview_cohort_level_evidence(session)
+    service._schedule_semantic_level_evidence(session)
+
+    diagnostics = session.semantic_level_evidence_diagnostics()
+    assert session.round_level_evidence_source == "preview-cohort-pending"
+    assert diagnostics["target_population"] == 20
+    assert diagnostics["covered_source_count"] == 0
+    assert diagnostics["pending_batches"] == 1
+    assert diagnostics["blocking_reason"] == "waiting-preview-cohort"
+    assert not any(task["scope"] == "montage:semantic-level-evidence" for task in kernel.tasks)
+
+    _close_coverage_phase(session)
+    service._schedule_semantic_level_evidence(session)
+    assert session.round_level_evidence_source == ""
+    assert any(task["scope"] == "montage:semantic-level-evidence" for task in kernel.tasks)
+
+
+def test_wgpu_target_evidence_only_widens_preview_cohort_before_commit():
+    data = np.arange(8 * 10 * 20, dtype=np.float32).reshape(8, 10, 20)
+    session = _session(data)
+    session.shader_display = True
+    service, _kernel = _service(session, capabilities=WGPU_CAPABILITIES)
+    cohort = tuple(
+        SimpleNamespace(
+            tile=SimpleNamespace(source_index=source_index),
+            level_stats=TileLevelStats(
+                source_index=source_index,
+                bounds=(float(source_index), float(source_index + 1)),
+                sample=np.asarray([source_index, source_index + 1], dtype=np.float32),
+                evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+            ),
+            image=np.asarray([[source_index]], dtype=np.float32),
+            histogram_data=None,
+            semantic_data=None,
+            semantic_histogram_data=None,
+            level_data=None,
+        )
+        for source_index in range(20)
+    )
+    assert service._admit_preview_cohort_level_evidence(session, cohort) == 20
+
+    target = SimpleNamespace(
+        tile=SimpleNamespace(source_index=5),
+        level_stats=TileLevelStats(
+            source_index=5,
+            bounds=(-10.0, 5.5),
+            sample=np.asarray([-10.0, 5.5], dtype=np.float32),
+            evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+        ),
+        level_data=None,
+    )
+    assert service._admit_first_pass_level_evidence(session, target, quality="exact")
+
+    summary = service._montage_level_tracker().summary_for(session.level_key)
+    source = service._montage_level_tracker().source_stats(session.level_key, 5)
+    assert source.bounds == (-10.0, 6.0)
+    assert summary.bounds == (-10.0, 20.0)
+    assert session.semantic_level_evidence_diagnostics()["covered_source_count"] == 20
+
+    vacuous_target = SimpleNamespace(
+        tile=SimpleNamespace(source_index=5),
+        level_stats=TileLevelStats(
+            source_index=5,
+            bounds=None,
+            sample=np.asarray((), dtype=np.float32),
+            refined=True,
+            evidence_quality=LevelEvidenceQuality.REFINED,
+        ),
+        level_data=None,
+    )
+    assert service._admit_first_pass_level_evidence(session, vacuous_target, quality="exact")
+    source = service._montage_level_tracker().source_stats(session.level_key, 5)
+    assert source.bounds == (-10.0, 6.0)
+    assert service._montage_level_tracker().summary_for(session.level_key).bounds == (-10.0, 20.0)
 
 
 def test_single_slice_wgpu_arms_refined_semantic_evidence_owner():
