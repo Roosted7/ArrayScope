@@ -191,6 +191,32 @@ If a backend cannot preview a dtype, that is a gap to close, not a fallback to
 ship. Until it is closed, the pipeline must not silently degrade into an
 unbatched full-quality first pass.
 
+### The preview pass does not depend on reduced *input*
+
+Whether the operation pipeline can consume reduced input is a question about
+**how cheaply a preview tile is produced**. It is not a question about whether
+the round has a preview pass. Those are separate, and conflating them is how
+whole pipelines lost their first pass.
+
+The pass exists to put a *complete* image on screen quickly. That value comes
+from the ordering — every tile at `P` before any tile at `T` — and it survives
+even when producing a coarse tile costs exactly what the target costs. A round
+that cannot reduce its input must still run the preview pass, served by
+evaluating natively and reducing the **output** for a cheap upload or bake.
+
+This is not double work, because R2 already forbids it from being double work.
+A native evaluation sits at level 0, which satisfies every floor the round has;
+the target pass must therefore **skip** that tile and re-present from what is
+already resident rather than evaluate it again. One evaluation, presented
+coarse first and refined after — the preview cost is the extra presentation,
+not an extra computation.
+
+> Observed violation: `reduced_input_available == False` removed the FLOOR rung
+> entirely, so an operation change or a source reload with any non-narrowable
+> operation active jumped straight to target quality. The ladder already
+> supports this case — `RungStep.reduce_from_native` exists precisely for it —
+> but the admission gate refused the rung the step was built to serve.
+
 > Observed violation: PyQtGraph complex (FFT) has no preview atlas
 > ("reduced RGB payload format" absent), so its first and only pass runs at
 > target level over every tile — the "starts at too high a quality" and
