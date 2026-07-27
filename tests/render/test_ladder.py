@@ -328,12 +328,6 @@ _REFUSAL_CASES = (
         2,
     ),
     (
-        "no_reduced_input",
-        LadderPolicy(reduced_input_available=False),
-        TileLodState(tile_number=0, floor_available=False),
-        2,
-    ),
-    (
         "already_covered",
         LadderPolicy(),
         TileLodState(tile_number=0, resident_levels=(4,), presented_level=4),
@@ -379,33 +373,27 @@ def test_coarse_rung_refusal_names_the_gate_that_actually_fired():
 
     assert reason_for("native_only") == ladder_module.COARSE_RUNG_NATIVE_ONLY
     assert reason_for("preview_not_allowed") == ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED
-    assert reason_for("no_reduced_input") == ladder_module.COARSE_RUNG_NO_REDUCED_INPUT
     assert reason_for("already_covered") == ladder_module.COARSE_RUNG_ALREADY_COVERED
     assert reason_for("cold_tile_gets_one") == ladder_module.COARSE_RUNG_PLANNED
     # A retained floor still earns a coarse rung with no reduced input at all.
     assert reason_for("retained_floor_without_reduced_input") == ladder_module.COARSE_RUNG_PLANNED
 
 
-def test_measured_fft_state_is_refused_for_no_reduced_input_not_allow_preview():
-    """The montage-axis FFT case, as measured on the 272-tile stage.
+def test_non_reducible_pipeline_keeps_its_native_output_preview_pass():
+    """Progressive contract R4: reduced input is not preview admission.
 
-    `allow_preview` is True and the tile is genuinely blank; the ladder still
-    plans nothing coarse because `reduced_input_available` is False (the FFT is
-    not tile-local). Both candidates that were guessed from the source —
-    `allow_preview` and the `preview_level < finest_available()` collapse — are
-    downstream of this one, which is why the plan carries no `rung=0` either.
+    A genuinely non-reducible pipeline evaluates natively for FLOOR and
+    reduces only the output.  That native result is finer than both round
+    floors, so R2 requires the later target pass to reuse it.
     """
 
     ladder = LodLadder(LadderPolicy(reduced_input_available=False))
     state = TileLodState(tile_number=0, allow_preview=True, floor_available=False)
 
-    from arrayscope.render import ladder as ladder_module
-
     steps = plan_tile(ladder, state, demand(2))
-    assert [step.rung for step in steps] == [Rung.DESIRED]
-    assert (
-        ladder.coarse_rung_refusal(state, demand(2)) == ladder_module.COARSE_RUNG_NO_REDUCED_INPUT
-    )
+    assert [step.rung for step in steps] == [Rung.FLOOR, Rung.DESIRED]
+    assert all(step.reduce_from_native for step in steps)
+    assert ladder.coarse_rung_refusal(state, demand(2)) == ""
 
 
 def test_raw_montage_has_one_coarse_rung_then_refines():

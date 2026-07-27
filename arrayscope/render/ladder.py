@@ -117,7 +117,6 @@ class LadderPolicy:
 COARSE_RUNG_NATIVE_ONLY = "native-only policy: no coarse rung exists"
 COARSE_RUNG_DISABLED = "coarse rung disabled by measured delivery policy"
 COARSE_RUNG_PREVIEW_NOT_ALLOWED = "allow_preview false: tile is covered or too few missing"
-COARSE_RUNG_NO_REDUCED_INPUT = "no reduced input and no retained floor"
 COARSE_RUNG_ALREADY_COVERED = "tile already has committable coverage"
 COARSE_RUNG_LANE_NOT_ADMITTED = "scheduling verdict does not admit the coarse lane"
 COARSE_RUNG_PLANNED = ""
@@ -153,8 +152,6 @@ class LodLadder:
             return COARSE_RUNG_DISABLED
         if not bool(state.allow_preview):
             return COARSE_RUNG_PREVIEW_NOT_ALLOWED
-        if not (policy.reduced_input_available or state.floor_available):
-            return COARSE_RUNG_NO_REDUCED_INPUT
         blank = (
             state.presented_level is None
             and state.ready_level is None
@@ -240,7 +237,6 @@ class LodLadder:
             bool(policy.coarse_rung_enabled)
             and bool(state.allow_preview)
             and preview_target_has_finer_followup
-            and (policy.reduced_input_available or state.floor_available)
         )
         # 1) FLOOR — the one coarse rung, only while the tile is blank.
         if presented is None and ready is None and not resident and cheap_pre_native:
@@ -249,7 +245,12 @@ class LodLadder:
                     tile_number=state.tile_number,
                     rung=Rung.FLOOR,
                     level=preview_level,
-                    reduce_from_native=False,
+                    # Reduced input is only the cheap numeric route.  Opaque
+                    # pipelines still own a preview pass: evaluate once at
+                    # native quality, retain that level-0 source, and reduce
+                    # its output for the FLOOR presentation.  R2 then lets the
+                    # target pass re-present the retained native result.
+                    reduce_from_native=not policy.reduced_input_available,
                     lane=Lane.DISPLAY_PREVIEW,
                     priority=Priority.INTERACTIVE,
                     reason=(
@@ -396,7 +397,6 @@ __all__ = [
     "COARSE_RUNG_ENABLED_DEFAULT",
     "COARSE_RUNG_LANE_NOT_ADMITTED",
     "COARSE_RUNG_NATIVE_ONLY",
-    "COARSE_RUNG_NO_REDUCED_INPUT",
     "COARSE_RUNG_PLANNED",
     "COARSE_RUNG_PREVIEW_NOT_ALLOWED",
     "LadderPolicy",

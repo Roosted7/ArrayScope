@@ -490,7 +490,9 @@ def evaluate_preview_tile(
     if not can_evaluate_preview(session, tile):
         return None
     level = preview_evaluation_level(session, demand) if level is None else int(level)
-    if can_evaluate_reduced_preview(session, tile):
+    if can_evaluate_reduced_preview(session, tile) and preview_pipeline_is_tile_local(
+        session, tile
+    ):
         return _evaluate_tile_reduced_input_preview(
             session,
             tile,
@@ -515,6 +517,7 @@ def evaluate_preview_tile(
         stage_cache=stage_cache,
         stage_materializer=stage_materializer,
         warm_canonical_plane=bool(warm_canonical_plane),
+        carry_native_rendered=True,
     )
 
 
@@ -2206,6 +2209,7 @@ def _evaluate_tile_native_output_preview(
     stage_materializer=None,
     warm_canonical_plane: bool = False,
     carry_full_native_residency: bool = False,
+    carry_native_rendered: bool = False,
 ):
     level = preview_evaluation_level(session, demand) if level is None else int(level)
     result = _evaluate_native_tile_result(
@@ -2271,7 +2275,7 @@ def _evaluate_tile_native_output_preview(
         )
         if plane is not None:
             residency_source = plane
-    return (
+    payload = (
         key,
         pages,
         None,
@@ -2281,6 +2285,12 @@ def _evaluate_tile_native_output_preview(
         rough_level_stats,
         residency_source,
     )
+    if not carry_native_rendered:
+        return payload
+    # Keep the exact evaluation behind the coarse presentation.  The target
+    # rung materializes/re-presents from this RenderedTile instead of invoking
+    # the operation pipeline a second time.
+    return (*payload, rendered)
 
 
 def _native_preview_axis_region(

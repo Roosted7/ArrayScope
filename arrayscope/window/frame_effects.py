@@ -1616,6 +1616,7 @@ class FramePipelineEffects:
                 level_data,
                 level_stats,
                 native_residency_data,
+                native_rendered,
             ) = preview_row_parts(row)
             admitted = session.admit_preview_plane(
                 tile_number,
@@ -1631,6 +1632,8 @@ class FramePipelineEffects:
             )
             if not admitted:
                 continue
+            if native_rendered is not None:
+                session.remember_native_preview_result(native_rendered)
             admitted_any = True
             admitted_tiles.append(int(tile_number))
             admitted_keys[int(tile_number)] = key
@@ -4738,7 +4741,7 @@ def preview_payload_parts(preview):
 def preview_row_parts(row):
     if len(row) == 4:
         tile_number, key, plane, histogram = row
-        return int(tile_number), key, plane, histogram, None, None, None, None, None
+        return int(tile_number), key, plane, histogram, None, None, None, None, None, None
     if len(row) == 8:
         (
             tile_number,
@@ -4760,8 +4763,11 @@ def preview_row_parts(row):
             level_data,
             level_stats,
             None,
+            None,
         )
     if len(row) == 9:
+        return (int(row[0]), *row[1:], None)
+    if len(row) == 10:
         return (int(row[0]), *row[1:])
     raise ValueError(f"unexpected shared preview payload shape: {len(row)}")
 
@@ -5080,8 +5086,12 @@ def _looks_like_shared_preview_rows(payload) -> bool:
     return bool(
         isinstance(payload, tuple)
         and payload
-        and isinstance(payload[0], tuple)
-        and len(payload[0]) in {4, 8, 9}
+        and all(
+            isinstance(row, tuple)
+            and len(row) in {4, 8, 9, 10}
+            and isinstance(row[0], (int, np.integer))
+            for row in payload
+        )
     )
 
 

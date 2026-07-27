@@ -176,6 +176,15 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   measured pass completed atomically.
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
+  **Non-reducible pipelines keep the pass (2026-07-27):** FLOOR no longer
+  depends on reduced-input admission. It evaluates once natively, reduces the
+  output for preview presentation, and retains the exact result so target
+  refinement performs zero additional evaluations. On a real-Wayland
+  displayed-axis `FFTShift` over the 336×336×272 NIfTI, R4 changed red→green
+  on both maintained backends: WGPU reached 272/272 preview ACKs in 2452 ms
+  and PyQtGraph in 3178 ms, versus no preview ACKs on the parent. Target
+  settlement remained beyond 5 s on both and the standing R1/R2 failures did
+  not increase ([evidence](redesign/unconditional-native-output-preview-2026-07-27.md)).
 - **PyQtGraph full complex montage presentation is broken — OPEN.** Short
   prefixes are sufficient; do not hide it behind a long watchdog. The
   target-only full FFT action failed to return before an 8 s process guard and

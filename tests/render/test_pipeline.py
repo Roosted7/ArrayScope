@@ -381,7 +381,7 @@ def test_interactive_opaque_desired_rung_defers_reduce_from_native_work():
 
     assert pipeline.retarget(intent(interactive=False, target_level=1), demand(1), scope(0)) == 1
     drain(kernel)
-    assert effects.evaluated == [(0, 2, 1)]
+    assert effects.evaluated == [(0, 0, 4)]
 
 
 def test_interactive_retained_native_source_is_correctness_work():
@@ -393,7 +393,7 @@ def test_interactive_retained_native_source_is_correctness_work():
     assert pipeline.retarget(intent(interactive=True, target_level=1), demand(1), scope(0)) == 1
     drain(kernel)
 
-    assert effects.evaluated == [(0, 2, 1)]
+    assert effects.evaluated == [(0, 0, 4)]
     assert pipeline.counters.interactive_native_deferred == 0
 
 
@@ -771,16 +771,14 @@ def test_committed_rung_evaluation_is_not_counted_as_discarded():
     assert all(int(row["discarded"]) == 0 for row in pipeline.rung_timings.rows())
 
 
-def test_plan_reports_why_tiles_got_no_coarse_rung():
-    """A plan of pure DESIRED steps must name the gate, not just omit rungs."""
-
-    from arrayscope.render import ladder as ladder_module
+def test_non_reducible_plan_reports_admitted_coarse_rungs():
+    """R4 admits FLOOR even when its numeric route starts at native input."""
 
     _kernel, _effects, pipeline = make_pipeline(tiles=2, reduced_input_available=False)
     pipeline.retarget(intent(target_level=2), demand(2), scope(0, 1, missing=2))
 
-    assert [rung for _tile, rung, _level in pipeline.last_plan_steps] == [2, 2]
-    assert pipeline.last_coarse_rung_refusals == ((ladder_module.COARSE_RUNG_NO_REDUCED_INPUT, 2),)
+    assert pipeline.last_plan_steps == ((0, 0, 4), (1, 0, 4))
+    assert pipeline.last_coarse_rung_refusals == ()
 
 
 def test_tiles_that_got_a_coarse_rung_are_not_reported_as_refused():
@@ -850,7 +848,7 @@ def test_coarse_rung_gate_history_survives_the_plan_that_converges():
     _kernel, _effects, pipeline = make_pipeline(tiles=1, reduced_input_available=False)
     pipeline.retarget(intent(target_level=2), demand(2), scope(0, missing=1))
     cold = dict(pipeline.coarse_rung_refusals())
-    assert cold == {ladder_module.COARSE_RUNG_NO_REDUCED_INPUT: 1}
+    assert cold == {}
 
     # Converged replan: the tile is covered, so the reason changes.
     effects_states = pipeline.effects.states
@@ -863,7 +861,6 @@ def test_coarse_rung_gate_history_survives_the_plan_that_converges():
         (ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED, 1),
     )
     history = dict(pipeline.coarse_rung_refusals())
-    assert history[ladder_module.COARSE_RUNG_NO_REDUCED_INPUT] == 1
     assert history[ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED] == 1
 
 
@@ -903,4 +900,4 @@ def test_same_plan_admits_everything_once_the_interaction_ends():
     drain(kernel)
 
     assert submitted == 3
-    assert len(effects.evaluated) == 3
+    assert effects.evaluated == [(0, 0, 4), (1, 0, 4), (2, 0, 4)]

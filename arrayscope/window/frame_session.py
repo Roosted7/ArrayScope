@@ -2005,6 +2005,22 @@ class FrameSession:
         self.lifecycle.evaluation_completed(index)
         self.mark_tile_state(rendered.tile, MontageTileState.LOADING)
 
+    def remember_native_preview_result(self, rendered: RenderedTile) -> None:
+        """Retain FLOOR's exact evaluation without presenting it yet.
+
+        A non-reducible pipeline produces its coarse FLOOR pixels by reducing
+        a native result.  That result is already the finest semantic source
+        this round can need, but ``mark_materialized`` would immediately
+        replace the preview with an exact wrapper.  Retain only the source
+        here; the ordinary DESIRED rung then materializes or re-presents from
+        it after preview coverage closes.
+        """
+
+        index = int(rendered.tile.montage_index)
+        self.rendered_tiles[index] = rendered
+        self.stage_fan_in.tile_stage_keys.pop(index, None)
+        self.stage_fan_in.detach_unbound_requests()
+
     def mark_presented(self, tile_numbers) -> None:
         # Collect level-scope additions and apply them once at the end:
         # extending the frozenset per presented tile makes a full-montage

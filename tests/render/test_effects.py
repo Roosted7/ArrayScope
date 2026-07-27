@@ -1091,6 +1091,45 @@ def test_display_axis_fft_is_not_admitted_to_the_coarse_ladder():
         )
 
 
+@pytest.mark.parametrize("shader_display", [True, False], ids=["wgpu", "pyqtgraph"])
+def test_non_reducible_preview_evaluates_once_and_carries_exact_result(monkeypatch, shader_display):
+    """R4/R2: native-output FLOOR owns one evaluation on both backends."""
+
+    data = np.arange(16 * 16 * 4, dtype=np.float32).reshape(16, 16, 4)
+    session = _session(data)
+    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=0),))
+    session.shader_display = shader_display
+    tile = session.plan.tiles[0]
+    calls = 0
+    evaluate_native = effects._evaluate_native_tile_result
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return evaluate_native(*args, **kwargs)
+
+    monkeypatch.setattr(effects, "_evaluate_native_tile_result", counted)
+    payload = effects.evaluate_preview_tile(
+        session,
+        tile,
+        demand=_demand(1),
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        level=2,
+        cancellation_token=None,
+        shader_display=shader_display,
+        evaluation_context=None,
+    )
+
+    assert effects.preview_pipeline_is_tile_local(session, tile) is False
+    assert calls == 1
+    assert len(payload) == 9
+    key, pages, *_metadata, rendered = payload
+    assert key.level_xy == (2, 2)
+    assert pages
+    assert isinstance(rendered, RenderedTile)
+    assert rendered.tile == tile
+
+
 def test_raw_and_pointwise_pipelines_stay_coarse_ladder_admissible():
     session = _session()
     tile = session.plan.tiles[0]

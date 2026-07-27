@@ -6199,6 +6199,39 @@ def test_cold_desired_direct_source_produces_page_payload():
     assert effects._step_produces_page_payload(step, tile)
 
 
+@pytest.mark.parametrize("shader_display", [True, False], ids=["wgpu", "pyqtgraph"])
+def test_native_preview_result_makes_target_pass_evaluation_free(monkeypatch, shader_display):
+    """R2: FLOOR's native result serves target refinement on both backends."""
+
+    session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    session.shader_display = shader_display
+    rendered = session.rendered_tiles.pop(0)
+    session.dirty_payloads.clear()
+    session.remember_native_preview_result(rendered)
+    _settle_first_pixels(session)
+    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.DESIRED,
+        level=2,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="target after native-output floor",
+    )
+
+    def duplicate_evaluation(*_args, **_kwargs):
+        raise AssertionError("target pass re-evaluated FLOOR's retained native result")
+
+    monkeypatch.setattr(render_effects, "evaluate_target_tile", duplicate_evaluation)
+
+    assert effects.prepare_rung(_pipeline_intent_for(session), step)
+    work = effects.evaluate_rung(_pipeline_intent_for(session), step)
+    result = work()
+    assert result[0] == "materialized"
+    assert session.rendered_tiles[0] is rendered
+
+
 def test_completed_evaluation_keeps_claim_until_gui_delivery():
     """A worker-complete task is still owned until its callback is drained."""
 
