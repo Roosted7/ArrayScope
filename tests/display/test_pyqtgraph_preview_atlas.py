@@ -14,8 +14,14 @@ from arrayscope.display.model.frame import (
     TilePresentationDelta,
 )
 from arrayscope.display.pyramid import materialize_lod_page, plan_source_grid_pages
-from arrayscope.display.shader_mapping import ShaderMapping
-from arrayscope.gpu.keys import SCALAR_R32F
+from arrayscope.display.shader_mapping import (
+    ShaderComponent,
+    ShaderDisplayMode,
+    ShaderMapping,
+    cpu_display_rgba,
+    default_phase_lut,
+)
+from arrayscope.gpu.keys import COMPLEX_RG32F, SCALAR_R32F
 
 
 class _Owner:
@@ -85,6 +91,48 @@ def _preview_payload(tile_number: int) -> DisplayTilePayload:
         source_shape=(8, 8),
         lod=lod,
         shader_mapping=ShaderMapping(),
+        quality="preview",
+        page_backing=PageBackedPresentation(plans, pages, (0, 8, 0, 8), lod),
+    )
+
+
+def _complex_preview_payload(tile_number: int) -> DisplayTilePayload:
+    phase = np.float32((tile_number % 16) * (2.0 * np.pi / 16.0) - np.pi)
+    magnitude = np.float32(tile_number + 1)
+    native = np.full(
+        (8, 8),
+        magnitude * np.exp(np.complex64(1j) * phase),
+        dtype=np.complex64,
+    )
+    plans = plan_source_grid_pages(
+        content_key=(("complex-preview-atlas", tile_number), None),
+        valid_source_rect_yx=(0, 8, 0, 8),
+        reduction_yx=(2, 2),
+        stored_page_shape=(256, 256),
+        dtype="complex64",
+        representation=COMPLEX_RG32F,
+        reducer="mean",
+    )
+    pages = tuple(
+        materialize_lod_page(native, source_origin_yx=(0, 0), plan=plan) for plan in plans
+    )
+    lod = LodInfo(level=2, factor=4, source_shape=(8, 8), texture_shape=(2, 2), gutter=0)
+    mapping = ShaderMapping(
+        component=ShaderComponent.ABS,
+        display_mode=ShaderDisplayMode.PHASE_COLOR,
+        lut_data=default_phase_lut(),
+    )
+    return DisplayTilePayload(
+        tile_number=tile_number,
+        source_index=tile_number,
+        image=pages[0].values,
+        histogram_data=np.abs(pages[0].values),
+        source_id=("complex-preview", tile_number),
+        texture_data=pages[0].values,
+        semantic_data=None,
+        source_shape=(8, 8),
+        lod=lod,
+        shader_mapping=mapping,
         quality="preview",
         page_backing=PageBackedPresentation(plans, pages, (0, 8, 0, 8), lod),
     )
@@ -174,6 +222,50 @@ def test_large_raw_preview_is_one_compact_physical_item_with_per_tile_truth(qt_a
     assert raster.pixelColor(4, 4).alpha() == 255
     assert raster.pixelColor(8, 4).alpha() == 0, "montage gaps stay physically empty"
     assert raster.pixelColor(13, 4).alpha() == 255
+
+
+def test_large_complex_preview_is_cpu_composited_at_round_levels_and_rewindowable(qt_app):
+    count = 272
+    owner = _Owner()
+    layer = _layer(owner)
+    layer.set_lookup_table(default_phase_lut())
+    payloads = {tile: _complex_preview_payload(tile) for tile in range(count)}
+    levels = (0.0, float(count + 1))
+
+    stats = layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=_geometry(count),
+        levels=levels,
+        rgb_already_windowed=False,
+        dirty_tiles=tuple(payloads),
+        tile_payloads=payloads,
+        tile_delta=_delta(payloads, active=range(count)),
+    )
+
+    assert stats.committed_upserts == tuple(range(count))
+    assert len(owner.preview_items) == 1
+    assert owner.tile_items == {}
+    item = owner.preview_items[0]
+    sample_tile = count // 2
+    sample_part = item.tiles[sample_tile].parts[0]
+    sample_x = int(sample_part.source_rect[0])
+    sample_y = int(sample_part.source_rect[1])
+    expected = cpu_display_rgba(payloads[sample_tile].texture_data, item.mapping)[0, 0]
+    before = item._images[sample_part.page_index].pixelColor(sample_x, sample_y)
+    assert (before.red(), before.green(), before.blue(), before.alpha()) == tuple(expected)
+    rows = layer.tile_truth_physical_rows()
+    assert {row["physical_texture_kind"] for row in rows.values()} == {"complex_rg32f"}
+    assert {row["physical_mapping_mode"] for row in rows.values()} == {"cpu_rgb_from_complex_atlas"}
+    assert all(row["physical_levels"] == levels for row in rows.values())
+
+    wider_levels = (0.0, 2.0 * levels[1])
+    level_stats = layer.update_levels(wider_levels)
+    expected_wider = cpu_display_rgba(payloads[sample_tile].texture_data, item.mapping)[0, 0]
+    after = item._images[sample_part.page_index].pixelColor(sample_x, sample_y)
+    assert level_stats.items_updated == 0
+    assert (after.red(), after.green(), after.blue(), after.alpha()) == tuple(expected_wider)
+    assert after != before
 
 
 def test_exact_item_replaces_only_its_atlas_member_after_success(qt_app):

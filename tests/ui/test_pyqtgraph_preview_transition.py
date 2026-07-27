@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
@@ -13,7 +14,11 @@ from tests.ui.helpers import (
 )
 
 
-def test_single_slice_to_full_montage_presents_around_retained_exact_tile(qtbot):
+@pytest.mark.parametrize("complex_fft", [False, True], ids=("scalar", "complex-fft"))
+def test_single_slice_to_full_montage_presents_around_retained_exact_tile(
+    qtbot,
+    complex_fft,
+):
     """A retained single slice is the physical complement of the preview atlas.
 
     The field reproduction enters a 272-tile montage from an already-settled
@@ -62,12 +67,33 @@ def test_single_slice_to_full_montage_presents_around_retained_exact_tile(qtbot)
             preview_is_physically_complete,
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
+        if complex_fft:
+            previous_session_id = int(win.renderer._frame_session.session_id)
+            assert win.request_operation("centered_fft", 2)
+            qtbot.waitUntil(
+                preview_is_physically_complete,
+                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+            )
 
         rows = win.img_view.tileTruthPhysicalRows()
         storage_modes = {str(row.get("physical_storage_mode", "")) for row in rows.values()}
         assert set(rows) == set(range(272))
         assert "compact_preview_atlas" in storage_modes
-        assert "image_item" in storage_modes
+        if not complex_fft:
+            assert "image_item" in storage_modes
+        atlas_rows = {
+            tile: row
+            for tile, row in rows.items()
+            if row.get("physical_storage_mode") == "compact_preview_atlas"
+        }
+        assert atlas_rows
+        assert {str(row.get("physical_texture_kind", "")) for row in atlas_rows.values()} == (
+            {"complex_rg32f"} if complex_fft else {"scalar_r32f"}
+        )
+        if complex_fft:
+            assert {str(row.get("physical_mapping_mode", "")) for row in atlas_rows.values()} == {
+                "cpu_rgb_from_complex_atlas"
+            }
         assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
     finally:
         win.close()

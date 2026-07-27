@@ -64,7 +64,8 @@ contract).
 Safe to pick up alongside the numbered queue; each is self-contained.
 
 - **ADR 0059 exclusive dynamic preview-first — RAW + WGPU FFT MEDIAN GATES DONE
-  2026-07-27; PyQtGraph complex preview explicitly deferred; product default.**
+  2026-07-27; PyQtGraph complex preview correctness pass DONE, latency RED;
+  product default.**
   Root cause was the successor rule itself: a FLOOR-backed `DESIRED` task still
   used `DISPLAY_PREVIEW`, so phase-only experiments delayed ACK while target
   evaluation consumed coverage workers. Target work now stays on
@@ -105,27 +106,30 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   no-progress cycles: mixed exact/rough level evidence now publishes from its
   per-source covered set, and a compact preview now accepts a physically
   current retained exact slice as the complement of its 271 reduced tiles.
-  PyQtGraph complex reduced RGB is explicitly deferred
-  (`pyqtgraph-composited-rgb-format-deferred`); the final bounded A/B recheck
-  reached 36/28 presented tiles of 272 and no T1/T2, matching the pre-existing
-  full-complex completion defect rather than hiding it as target-only success.
+  PyQtGraph complex preview now retains compact reduced `complex64` pages and
+  CPU-composites their derived RGBA8888 atlas through the round levels. A
+  272-tile real-Wayland run acknowledged every level-5 preview identity before
+  any level-2 target identity and reached physical preview coverage in
+  4175 ms. The atlas build held the GUI for 2985 ms, so R5 and the two-second
+  T1 gate remain red; this correctness slice does not claim the later
+  performance pass.
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
 - **PyQtGraph full complex montage presentation is broken — OPEN.** Short
   prefixes are sufficient; do not hide it behind a long watchdog. The
   target-only full FFT action failed to return before an 8 s process guard and
   emitted no phase row; an immediately preceding bounded run reached only
-  62/272 exact ACKs by its five-second failure. Reduced-rung admission correctly
-  refuses CPU-composited RGB, so this is the exact path's growing-set
-  republication/mapping cost, not a preview retry. Fix the whole-set
+  62/272 exact ACKs by its five-second failure. The reduced complex preview is
+  now present, so this is the exact path's growing-set
+  republication/mapping cost, not a missing preview. Fix the whole-set
   republication/mapping owner; gate on bounded commit and ACK counters plus a
   full 272-tile completion within 5 s, never a widened timeout.
 - **A ladder rung exception retries without bound — OPEN, separate from ADR
-  0059 ordering.** The PyQtGraph RGB-format failure admitted 18,314 preview
-  tasks and raised 17,538 times because `_on_rung_error` replanned the same
-  target. Make a rung failure terminal for that target with a named outcome,
-  analogous to the commit-path `raised` outcome below; do not fold it into a
-  coarse-ordering change.
+  0059 ordering.** The former PyQtGraph RGB-format trigger is removed by the
+  reduced complex preview format, but the generic failure policy still replans
+  the same target. Make a rung failure terminal for that target with a named
+  outcome, analogous to the commit-path `raised` outcome below; do not fold it
+  into a coarse-ordering change.
 - **An exception on the presentation-commit path is laundered into an
   anonymous stall — DONE 2026-07-26.** Found while root-causing the 272-tile
   FFT montage stall; a `RuntimeError` from page-pool exhaustion and an

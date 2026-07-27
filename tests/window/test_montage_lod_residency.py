@@ -7183,8 +7183,8 @@ def test_montage_axis_fft_with_known_display_axes_reaches_the_coarse_ladder():
     assert _reduced_input_coarse_rung_available(session, seed) is True
 
     session.shader_display = False
-    assert render_effects.can_evaluate_reduced_preview(session, seed) is False
-    assert _reduced_input_coarse_rung_available(session, seed) is False
+    assert render_effects.can_evaluate_reduced_preview(session, seed) is True
+    assert _reduced_input_coarse_rung_available(session, seed) is True
 
     session.rgb = False
     assert _reduced_input_coarse_rung_available(session, seed) is True

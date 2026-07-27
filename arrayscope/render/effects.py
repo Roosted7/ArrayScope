@@ -557,8 +557,14 @@ def evaluate_shared_preview(
         cancellation_token=cancellation_token,
     )
     previews = []
-    shader_preview = bool(shader_display) or (
-        not bool(getattr(session, "rgb", False)) and not np.iscomplexobj(transformed)
+    # PyQtGraph CPU-composites its final complex tiles, but its compact preview
+    # format deliberately retains the reduced complex source plane.  Produce
+    # the shader-style value payload here for both backends; PyQtGraph bakes
+    # that plane through the round mapping when it builds the Qt preview atlas.
+    shader_preview = (
+        bool(shader_display)
+        or np.iscomplexobj(transformed)
+        or not bool(getattr(session, "rgb", False))
     )
     for tile in tuple(tiles or ()):
         _check_preview_cancelled(cancellation_token)
@@ -1003,18 +1009,11 @@ def can_evaluate_preview(session, tile) -> bool:
 def display_output_is_composited_rgb(session) -> bool:
     """Whether this session's display payload is a CPU-composited RGB plane.
 
-    A canonical live LOD page carries scalar or complex source values, and
-    ``render.lod._reducer_format_for_rendered`` raises for anything else. A
-    complex view on a CPU-mapping backend (PyQtGraph) composites phase/colour
-    on the CPU and hands the backend an ``(h, w, 3)`` plane, which is neither.
-    wgpu keeps the complex values in the payload and maps them in the shader,
-    which is why this only bites the CPU-mapped backends -- and why an
-    ADR 0059 validation run on wgpu alone could not see it.
-
-    Conservative on purpose: a complex view whose mapping happens to reduce to
-    a scalar magnitude is declined here too, and falls back to the native
-    output rung exactly as it did before ADR 0059. Narrowing that needs the
-    format lookup to report "not expressible" instead of raising.
+    Final PyQtGraph complex tiles still have this shape.  Reduced previews no
+    longer do: they retain a complex source atlas and let the backend bake its
+    derived RGB pages through the round levels.  This predicate remains useful
+    to describe the final-output contract, but it is not a preview-admission
+    rejection.
     """
 
     return bool(getattr(session, "rgb", False)) and not bool(
@@ -1024,8 +1023,6 @@ def display_output_is_composited_rgb(session) -> bool:
 
 def can_evaluate_reduced_preview(session, tile) -> bool:
     if not can_evaluate_preview(session, tile):
-        return False
-    if display_output_is_composited_rgb(session):
         return False
     document = getattr(session, "document", None)
     base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
@@ -1838,7 +1835,7 @@ def _evaluate_tile_reduced_input_preview(
         final_region_for_request(transformed.shape, request),
     )
     canonical_orientation = bool(getattr(session, "canonical_orientation", False))
-    if bool(shader_display):
+    if bool(shader_display) or np.iscomplexobj(slab):
         value = make_shader_image_from_slab(
             slab,
             request,
@@ -2177,7 +2174,10 @@ def _preview_claim_component(session, *, shader_display: bool) -> str:
     if bool(shader_display):
         return str(TexturePlaneKind.COMPLEX_RG32F.value)
     if not bool(shader_display) and bool(getattr(session, "rgb", False)):
-        return str(TexturePlaneKind.RGB8.value)
+        # The final PyQtGraph tile is CPU-composited RGB, but the preview
+        # claim names the retained reduced source format consumed by the
+        # compact atlas, not that later derived display plane.
+        return str(TexturePlaneKind.COMPLEX_RG32F.value)
     return "scalar"
 
 

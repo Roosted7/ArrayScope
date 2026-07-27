@@ -5632,12 +5632,7 @@ def _run_phase(
             ),
         )
     )
-    pyqtgraph_rgb_preview_deferred = bool(
-        str(backend) == "pyqtgraph" and str(phase) == "fft_full_tiled_montage"
-    )
-    record["coarse_target_preview_exemption"] = (
-        "pyqtgraph-composited-rgb-format-deferred" if pyqtgraph_rgb_preview_deferred else None
-    )
+    record["coarse_target_preview_exemption"] = None
     coarse_rung_enabled = bool(
         getattr(
             win.renderer,
@@ -5650,7 +5645,6 @@ def _run_phase(
     record["coarse_target_preview_required"] = bool(
         str(phase) in {"raw_full_tiled_montage", "fft_full_tiled_montage"}
         and coarse_rung_enabled
-        and not pyqtgraph_rgb_preview_deferred
     )
     return record
 

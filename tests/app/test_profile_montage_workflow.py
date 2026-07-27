@@ -2231,14 +2231,14 @@ def test_r8_certification_requires_supported_enabled_preview_to_exist():
     assert "coarse_preview_pass_present" in failures
 
 
-def test_r8_certification_currently_exempts_deferred_pyqtgraph_complex_preview():
+def test_r8_certification_requires_pyqtgraph_complex_preview():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
     record = _passing_r8_phase_record(backend="pyqtgraph")
     record.update(
         phase="fft_full_tiled_montage",
-        coarse_target_preview_required=False,
-        coarse_target_preview_exemption="pyqtgraph-composited-rgb-format-deferred",
+        coarse_target_preview_required=True,
+        coarse_target_preview_exemption=None,
         coarse_target_order_applicable=False,
         coarse_target_order_status="no-preview-pass",
         coarse_target_ack_ordered=None,
@@ -2251,7 +2251,7 @@ def test_r8_certification_currently_exempts_deferred_pyqtgraph_complex_preview()
     result = _r8_certification(record)
 
     failures = {failure["gate"] for failure in result["r8_gate_failures"]}
-    assert "coarse_preview_pass_present" not in failures
+    assert "coarse_preview_pass_present" in failures
     assert "coarse_ack_pass_precedes_target_ack" not in failures
     assert "coarse_tasks_finish_before_target_starts" not in failures
 

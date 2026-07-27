@@ -17,7 +17,7 @@ from arrayscope.display.pyramid import (
     materialize_lod_page,
     plan_source_grid_pages,
 )
-from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping
+from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping, TexturePlaneKind
 from arrayscope.display.source_anchoring import SourceAnchoring
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import (
@@ -695,6 +695,33 @@ def test_montage_axis_fft_is_admitted_only_through_cacheable_shared_stage():
     # cacheable and the tile requests prove they share one real-document
     # reduced region. This is stricter than merely asking whether it commutes.
     assert effects.preview_pipeline_is_tile_local(session, tile) is True
+
+
+def test_pyqtgraph_shared_fft_preview_retains_reduced_complex_source_format():
+    data = np.arange(8 * 10 * 8, dtype=np.float32).reshape(8, 10, 8)
+    session = _session(data)
+    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    session.rgb = True
+    session.shader_display = False
+    session.lod_preview_level = 2
+
+    rows = effects.evaluate_shared_preview(
+        session,
+        session.plan.tiles[0],
+        session.plan.tiles,
+        demand=_demand(1),
+        level=2,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert rows
+    for _tile_number, _key, pages, histogram, mapping, texture_kind, *_rest in rows:
+        assert texture_kind == TexturePlaneKind.COMPLEX_RG32F
+        assert np.iscomplexobj(_stored_preview_values(pages))
+        assert histogram is not None
+        assert mapping is not None
 
 
 def test_display_axis_fft_is_not_admitted_to_the_coarse_ladder():
@@ -1419,17 +1446,13 @@ def test_present_tile_delta_reports_applied_when_the_presenter_succeeded():
     assert applied is True
 
 
-def test_cpu_composited_rgb_display_declines_the_reduced_coarse_rung():
-    """A complex montage on a CPU-mapping backend freezes without this.
+def test_cpu_composited_rgb_display_retains_complex_reduced_coarse_rung():
+    """The preview route bypasses PyQtGraph's final CPU-RGB payload shape.
 
-    `render.lod._reducer_format_for_rendered` accepts scalar or complex source
-    values; PyQtGraph composites a complex view into an (h, w, 3) display plane,
-    which is neither, so forming a canonical page key for it raises. The rung
-    fails, the pipeline replans it, and it fails again: a real session logged
-    18314 admissions against 773 completions, and one 32-tile profile run
-    raised 2110 times before this guard existed. wgpu keeps the complex values
-    in the payload and maps them in the shader, which is why validating
-    ADR 0059 on wgpu alone could not see it.
+    This deliberately replaces the former deferred-behavior assertion.  The
+    compact preview atlas now retains reduced complex source pages and performs
+    CPU composition at the round levels, so a CPU-mapped complex view remains
+    eligible for the same reduced coarse rung as the shader backend.
     """
 
     session = _session()
@@ -1443,10 +1466,11 @@ def test_cpu_composited_rgb_display_declines_the_reduced_coarse_rung():
     assert effects.display_output_is_composited_rgb(session) is False
     assert effects.can_evaluate_reduced_preview(session, tile) is True
 
-    # CPU-mapped complex (PyQtGraph): the payload is a composited RGB plane.
+    # CPU-mapped complex (PyQtGraph): final output is composited RGB, while the
+    # preview payload remains a reduced complex plane.
     session.shader_display = False
     assert effects.display_output_is_composited_rgb(session) is True
-    assert effects.can_evaluate_reduced_preview(session, tile) is False
+    assert effects.can_evaluate_reduced_preview(session, tile) is True
 
     # Scalar data on the same CPU-mapping backend is unaffected.
     session.rgb = False

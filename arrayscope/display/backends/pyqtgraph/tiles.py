@@ -63,6 +63,7 @@ class _PreviewAtlasTile:
     physical_quality: str
     raw_shape: tuple[int, ...]
     raw_dtype: str
+    raw_texture_kind: TexturePlaneKind
     real_plane_identity: object
     imag_plane_identity: object
 
@@ -76,12 +77,14 @@ class _CompactPreviewAtlasItem(QtWidgets.QGraphicsObject):
         tiles: Mapping[int, _PreviewAtlasTile],
         *,
         mapping: ShaderMapping,
+        phase_vector: bool = False,
     ):
         super().__init__()
         self._raw_pages = tuple(np.ascontiguousarray(page) for page in raw_pages)
         self._tiles = {int(tile): state for tile, state in dict(tiles).items()}
         self._active_tiles = set(self._tiles)
         self._mapping = mapping
+        self._phase_vector = bool(phase_vector)
         self._images: tuple[QtGui.QImage, ...] = ()
         self._bounding_rect = _preview_atlas_bounding_rect(self._tiles.values())
         self._rebuild_images()
@@ -143,7 +146,11 @@ class _CompactPreviewAtlasItem(QtWidgets.QGraphicsObject):
     def _rebuild_images(self) -> None:
         images: list[QtGui.QImage] = []
         for page in self._raw_pages:
-            rgba = np.ascontiguousarray(cpu_display_rgba(page, self._mapping))
+            rgba = _compact_preview_page_rgba(
+                page,
+                self._mapping,
+                phase_vector=self._phase_vector,
+            )
             height, width = (int(value) for value in rgba.shape[:2])
             image = QtGui.QImage(
                 rgba.data,
@@ -203,7 +210,7 @@ def _pack_preview_pages(
     *,
     extent: int = PYQTGRAPH_PREVIEW_ATLAS_PAGE_EXTENT,
 ) -> tuple[tuple[np.ndarray, ...], dict[object, tuple[int, int, int]]]:
-    """Shelf-pack small scalar pages into a few fixed-size CPU atlas planes."""
+    """Shelf-pack homogeneous reduced scalar or complex pages into CPU atlases."""
 
     extent = int(extent)
     if extent <= 0:
@@ -215,8 +222,8 @@ def _pack_preview_pages(
     dtype = None
     for key, source in pages:
         values = np.asarray(source)
-        if values.ndim != 2 or np.iscomplexobj(values):
-            raise ValueError("compact PyQtGraph preview atlas requires scalar 2D pages")
+        if values.ndim != 2:
+            raise ValueError("compact PyQtGraph preview atlas requires scalar or complex 2D pages")
         height, width = (int(value) for value in values.shape)
         if height <= 0 or width <= 0 or height > extent or width > extent:
             raise ValueError("preview page does not fit the compact atlas extent")
@@ -253,13 +260,47 @@ def _compact_preview_mapping(
         getattr(payload, "shader_mapping", None) for payload in payloads.values()
     )
     mapping = ShaderMapping() if mapping is None else mapping
-    if mapping.display_mode is not ShaderDisplayMode.SCALAR:
-        raise ValueError(
-            "PyQtGraph complex/RGB aggregate preview is deferred: its CPU-composited "
-            "display plane needs a reduced RGB payload format"
-        )
     mapping = replace(mapping, levels=(float(levels[0]), float(levels[1])))
     return shader_mapping_with_lut(mapping, lookup_table)
+
+
+def _complex_preview_uses_phase_vector(payload: DisplayTilePayload) -> bool:
+    if getattr(payload, "texture_kind", None) is not TexturePlaneKind.COMPLEX_RG32F:
+        return False
+    backing = payload.page_backing
+    plans = tuple(getattr(backing, "requested_plans", ()) or ())
+    return bool(plans and all(plan.reducer == REDUCER_PHASE_VECTOR for plan in plans))
+
+
+def _phase_vector_cpu_rgba(values: np.ndarray, mapping: ShaderMapping) -> np.ndarray:
+    """Map circular-resultant complex pages exactly like the direct CPU path."""
+
+    phase_mapping = replace(mapping, levels=(-np.pi, np.pi))
+    rgba = np.ascontiguousarray(cpu_display_rgba(values, phase_mapping))
+    coherence = np.clip(np.abs(values), 0.0, 1.0).astype(np.float32, copy=False)
+    rgba[..., :3] = np.clip(
+        rgba[..., :3].astype(np.float32) * coherence[..., np.newaxis],
+        0.0,
+        255.0,
+    ).astype(np.uint8)
+    return rgba
+
+
+def _compact_preview_page_rgba(
+    values: np.ndarray,
+    mapping: ShaderMapping,
+    *,
+    phase_vector: bool,
+) -> np.ndarray:
+    """Bake one reduced atlas source page through the round's mapping."""
+
+    if (
+        bool(phase_vector)
+        and mapping.display_mode is ShaderDisplayMode.PHASE_COLOR
+        and mapping.component in {ShaderComponent.ANGLE, ShaderComponent.COMPLEX_PHASE}
+    ):
+        return _phase_vector_cpu_rgba(values, mapping)
+    return np.ascontiguousarray(cpu_display_rgba(values, mapping))
 
 
 def _build_compact_preview_item(
@@ -274,14 +315,19 @@ def _build_compact_preview_item(
     payloads = {int(tile): payload for tile, payload in dict(payloads).items()}
     page_rows: list[tuple[object, np.ndarray]] = []
     pages_by_tile_key: dict[tuple[int, object], object] = {}
+    texture_kinds: set[TexturePlaneKind] = set()
+    phase_vector_modes: set[bool] = set()
     for tile_number, payload in payloads.items():
         if str(getattr(payload, "quality", "exact") or "exact") != "preview":
             raise ValueError("compact preview transaction contains target-quality payload")
-        if getattr(payload, "texture_kind", None) is not TexturePlaneKind.SCALAR_R32F:
-            raise ValueError(
-                "PyQtGraph complex/RGB aggregate preview is deferred: its CPU-composited "
-                "display plane needs a reduced RGB payload format"
-            )
+        texture_kind = getattr(payload, "texture_kind", None)
+        if texture_kind not in {
+            TexturePlaneKind.SCALAR_R32F,
+            TexturePlaneKind.COMPLEX_RG32F,
+        }:
+            raise ValueError("compact preview requires scalar or complex reduced source pages")
+        texture_kinds.add(texture_kind)
+        phase_vector_modes.add(_complex_preview_uses_phase_vector(payload))
         backing = getattr(payload, "page_backing", None)
         resolved = getattr(backing, "resolved_page_set", None)
         if backing is None or resolved is None:
@@ -293,6 +339,10 @@ def _build_compact_preview_item(
             pages_by_tile_key[atlas_key] = page
             page_rows.append((atlas_key, np.asarray(page.values)))
 
+    if len(texture_kinds) != 1:
+        raise ValueError("compact preview transaction must use one reduced source format")
+    if len(phase_vector_modes) != 1:
+        raise ValueError("compact complex preview transaction mixes reducer semantics")
     raw_pages, placements = _pack_preview_pages(tuple(page_rows))
     tiles: dict[int, _PreviewAtlasTile] = {}
     for tile_number, payload in payloads.items():
@@ -399,11 +449,17 @@ def _build_compact_preview_item(
             physical_quality="preview",
             raw_shape=tuple(int(value) for value in raw.shape),
             raw_dtype=str(raw.dtype),
+            raw_texture_kind=next(iter(texture_kinds)),
             real_plane_identity=plane_identity_record(real_plane),
             imag_plane_identity=plane_identity_record(imag_plane),
         )
     mapping = _compact_preview_mapping(payloads, levels=levels, lookup_table=lookup_table)
-    return _CompactPreviewAtlasItem(raw_pages, tiles, mapping=mapping)
+    return _CompactPreviewAtlasItem(
+        raw_pages,
+        tiles,
+        mapping=mapping,
+        phase_vector=next(iter(phase_vector_modes)),
+    )
 
 
 @dataclass(frozen=True)
@@ -598,16 +654,7 @@ def _map_complex_cpu_payload(
         # hue spans the canonical phase range rather than the amplitude level
         # window.  Opposed/all-zero bins therefore stay visibly undefined
         # (black) on both backends instead of acquiring an arbitrary hue.
-        phase_mapping = replace(mapping, levels=(-np.pi, np.pi))
-        rgba = cpu_display_rgba(values, phase_mapping)
-        coherence = np.clip(np.abs(values), 0.0, 1.0).astype(np.float32, copy=False)
-        display = np.ascontiguousarray(
-            np.clip(
-                rgba[..., :3].astype(np.float32) * coherence[..., np.newaxis],
-                0.0,
-                255.0,
-            ).astype(np.uint8)
-        )
+        display = np.ascontiguousarray(_phase_vector_cpu_rgba(values, mapping)[..., :3])
     else:
         display = np.ascontiguousarray(cpu_display_rgba(values, mapping)[..., :3])
     return replace(
@@ -828,13 +875,17 @@ class MontageTileLayer:
             for tile_number in atlas.active_tiles:
                 state = atlas.tiles[int(tile_number)]
                 rows[int(tile_number)] = {
-                    "physical_texture_kind": TexturePlaneKind.SCALAR_R32F.value,
+                    "physical_texture_kind": state.raw_texture_kind.value,
                     "physical_storage_mode": "compact_preview_atlas",
                     "physical_texture_dtype": state.raw_dtype,
                     "physical_texture_shape": state.raw_shape,
                     "physical_real_plane_identity": state.real_plane_identity,
                     "physical_imag_plane_identity": state.imag_plane_identity,
-                    "physical_mapping_mode": "scalar_levels",
+                    "physical_mapping_mode": (
+                        "cpu_rgb_from_complex_atlas"
+                        if state.raw_texture_kind is TexturePlaneKind.COMPLEX_RG32F
+                        else "scalar_levels"
+                    ),
                     "physical_component_mode": atlas.mapping.component.value,
                     "physical_levels": tuple(float(value) for value in atlas.mapping.levels),
                     "physical_acknowledged_identity": state.acknowledged_identity,
@@ -1676,23 +1727,12 @@ class MontageTileLayer:
                 presented_identities=self._presented_identities(),
                 committed_upserts=(),
             )
-        try:
-            candidate = _build_compact_preview_item(
-                candidate_payloads,
-                layout=layout,
-                levels=levels,
-                lookup_table=self._lookup_table,
-            )
-        except ValueError as exc:
-            reason = str(exc)
-            if "complex/RGB aggregate preview is deferred" not in reason:
-                raise
-            self._preview_atlas_decline_reason = "reduced-rgb-preview-format-deferred"
-            return TileLayerUpdateStats(
-                presented_tiles=self._physically_presented_tiles(),
-                presented_identities=self._presented_identities(),
-                committed_upserts=(),
-            )
+        candidate = _build_compact_preview_item(
+            candidate_payloads,
+            layout=layout,
+            levels=levels,
+            lookup_table=self._lookup_table,
+        )
 
         add_item = getattr(self.layer_owner, "add_montage_preview_item", None)
         if not callable(add_item):
