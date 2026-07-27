@@ -22,24 +22,31 @@ def _snapshot(
     covered=None,
     population=10,
     level_updates=0,
+    uploads=None,
 ):
     if covered is None:
         covered = max(presented, population)
+    montage = {
+        "session_id": session_id,
+        "tile_lod_resident_tile_levels": [[level, count] for level, count in levels],
+        "tile_lod_applied_level": levels[0][0] if levels else 0,
+        "tile_lod_desired_factor": 2**target_level,
+        "tile_lod_ladder_floor_level": preview_level,
+        "presented_tiles": presented,
+        "visible_tiles": population,
+        "semantic_evidence_blocking_reason": "ready",
+        "semantic_evidence_covered_source_count": covered,
+        "semantic_evidence_target_population": population,
+    }
+    if uploads is not None:
+        montage["wgpu_uploads_by_level"] = [
+            {"level": level, "uploads": count, "representation": "scalar_r32f", "bytes": count * 16}
+            for level, count in sorted(uploads.items())
+        ]
     return {
         "event": "snapshot",
         "diagnostics": {
-            "montage": {
-                "session_id": session_id,
-                "tile_lod_resident_tile_levels": [[level, count] for level, count in levels],
-                "tile_lod_applied_level": levels[0][0] if levels else 0,
-                "tile_lod_desired_factor": 2**target_level,
-                "tile_lod_ladder_floor_level": preview_level,
-                "presented_tiles": presented,
-                "visible_tiles": population,
-                "semantic_evidence_blocking_reason": "ready",
-                "semantic_evidence_covered_source_count": covered,
-                "semantic_evidence_target_population": population,
-            },
+            "montage": montage,
             "montage_timing": {"tile_layer_level_updates": level_updates},
         },
     }
@@ -72,43 +79,95 @@ def test_empty_synthetic_sequence_fails_closed():
 
 
 @pytest.mark.parametrize(
-    ("snapshots", "expected_index", "expected_levels"),
+    "snapshots",
     [
-        ([_snapshot([(0, 11), (2, 39), (5, 222)])], 1, (0, 2, 5)),
-        (
-            [
-                _snapshot(
-                    [(0, 15), (1, 31), (4, 2)],
-                    target_level=1,
-                    preview_level=4,
-                )
-            ],
-            1,
-            (0, 1, 4),
-        ),
-        (
-            [
-                _snapshot([(2, 4), (5, 6)]),
-                _snapshot([(0, 1), (2, 4), (5, 5)]),
-            ],
-            2,
-            (0, 2, 5),
-        ),
-        ([_snapshot([(0, 1), (2, 9)])], 1, (0, 2)),
+        [
+            _snapshot([(0, 11), (2, 39), (5, 222)], uploads={0: 4, 2: 10, 5: 30}),
+            _snapshot([(0, 11), (2, 60), (5, 201)], uploads={0: 4, 2: 40, 5: 30}),
+        ],
+        [
+            _snapshot([(0, 15), (1, 31), (4, 2)], target_level=1, preview_level=4, uploads={0: 9}),
+            _snapshot(
+                [(0, 15), (1, 35)], target_level=1, preview_level=4, uploads={0: 9, 1: 20, 4: 6}
+            ),
+        ],
+        [
+            _snapshot([(6, 8), (2, 2)], uploads={2: 2}),
+            _snapshot([(6, 4), (5, 4), (2, 2)], uploads={2: 2, 5: 12}),
+        ],
     ],
     ids=[
-        "fft-three-levels",
-        "scalar-three-levels",
-        "retained-third-level",
-        "wrong-two-level-pair",
+        "retained-finer-tiles-are-free-reuse",
+        "three-visible-levels-but-only-floor-production",
+        "coarse-free-reuse-rung-before-preview",
     ],
 )
-def test_illegal_level_sequences_fail_r1(snapshots, expected_index, expected_levels):
+def test_visible_level_mixtures_are_legal_when_production_stays_on_the_floors(snapshots):
+    """R1 bounds production, not residency.
+
+    Every sequence here shows three or more distinct levels at once, which the
+    contract explicitly permits: a tile retained finer than the target floor,
+    or a coarse tile displayed for free before the preview pass, both cost
+    nothing to show and must never be re-produced. Only uploads outside the
+    round's two floors are violations.
+    """
+
+    assert check_progressive_render_snapshots(snapshots) == ()
+
+
+@pytest.mark.parametrize(
+    ("snapshots", "expected_index", "expected_fragment"),
+    [
+        (
+            [
+                _snapshot([(1, 44)], target_level=1, preview_level=4, uploads={1: 44}),
+                _snapshot(
+                    [(0, 6), (1, 44)], target_level=1, preview_level=4, uploads={0: 176, 1: 44}
+                ),
+            ],
+            2,
+            "level 0: +176",
+        ),
+        (
+            [
+                _snapshot([(5, 10)], uploads={5: 10}),
+                _snapshot([(3, 5), (5, 5)], uploads={3: 5, 5: 10}),
+            ],
+            2,
+            "third rung",
+        ),
+    ],
+    ids=["produced-finer-than-target-floor", "produced-third-rung-between-floors"],
+)
+def test_production_outside_the_round_floors_fails_r1(snapshots, expected_index, expected_fragment):
     violations = check_progressive_render_snapshots(snapshots)
 
-    assert [(item.rule, item.snapshot_index, item.levels) for item in violations] == [
-        ("R1", expected_index, expected_levels)
-    ]
+    assert [(item.rule, item.snapshot_index) for item in violations] == [("R1", expected_index)]
+    assert expected_fragment in violations[0].description
+
+
+def test_r1_is_not_checked_without_per_level_upload_counters(tmp_path):
+    """A clean R1 column on a PyQtGraph trace means "not checked", not "passed".
+
+    Residency alone cannot separate production from a page-cache arrival, so
+    the oracle must refuse to guess rather than report a false PASS.
+    """
+
+    trace = tmp_path / "no-uploads.jsonl"
+    trace.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in [_snapshot([(0, 5), (2, 5)]), _snapshot([(0, 5), (2, 5)])]
+        ),
+        encoding="utf-8",
+    )
+
+    result = replay_progressive_render_trace(trace)
+
+    assert result.r1_verifiable is False
+    assert [item for item in result.violations if item.rule == "R1"] == []
+    assert "n/a" in format_progressive_render_summary([result])
+    assert "R1 UNVERIFIABLE" in format_progressive_render_violations(result)
 
 
 def test_frozen_evidence_during_growing_fill_fails_once():
@@ -194,34 +253,41 @@ def test_superseded_inactive_round_without_later_evidence_is_not_mislabeled():
     assert check_progressive_render_snapshots(snapshots) == ()
 
 
+_OFF_FLOOR_PRODUCTION = (
+    _snapshot([(2, 39), (5, 222)], uploads={2: 39, 5: 222}),
+    _snapshot([(0, 11), (2, 39), (5, 222)], uploads={0: 11, 2: 39, 5: 222}),
+)
+
+
 def test_replay_and_formatters_report_snapshot_index_and_markdown_table(tmp_path):
-    path = tmp_path / "three-levels.jsonl"
-    records = [{"event": "start"}, _snapshot([(0, 11), (2, 39), (5, 222)])]
+    path = tmp_path / "off-floor-production.jsonl"
+    records = [{"event": "start"}, *_OFF_FLOOR_PRODUCTION]
     path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
 
     result = replay_progressive_render_trace(path)
 
     assert not result.passed
+    assert result.r1_verifiable is True
     assert (
-        "FAIL R1 snapshot 1 levels={0, 2, 5} counts={0:11, 2:39, 5:222}"
+        "FAIL R1 snapshot 2 levels={0, 2, 5} counts={0:11, 2:39, 5:222}"
         in format_progressive_render_violations(result)
     )
     summary = format_progressive_render_summary([result])
     assert "| Trace | Snapshots | R1 | R3 | Verdict |" in summary
-    assert "| `three-levels.jsonl` | 1 | 1 | 0 | FAIL |" in summary
+    assert "| `off-floor-production.jsonl` | 2 | 1 | 0 | FAIL |" in summary
 
 
 def test_summary_cli_returns_nonzero_for_contract_violation(tmp_path, capsys):
-    path = tmp_path / "three-levels.jsonl"
+    path = tmp_path / "off-floor-production.jsonl"
     path.write_text(
-        json.dumps(_snapshot([(0, 11), (2, 39), (5, 222)])) + "\n",
+        "".join(json.dumps(record) + "\n" for record in _OFF_FLOOR_PRODUCTION),
         encoding="utf-8",
     )
 
     exit_code = main(["--summary", str(path)])
 
     assert exit_code == 1
-    assert "| `three-levels.jsonl` | 1 | 1 | 0 | FAIL |" in capsys.readouterr().out
+    assert "| `off-floor-production.jsonl` | 2 | 1 | 0 | FAIL |" in capsys.readouterr().out
 
 
 def test_replay_rejects_empty_trace(tmp_path):

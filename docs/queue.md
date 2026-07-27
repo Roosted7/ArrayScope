@@ -84,10 +84,14 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   optional JSONL oracle is buffered and its rich identity fields are bounded,
   so evidence collection no longer adds hundreds of synchronous writes before
   T1; the crash-oriented trace ring is unchanged. The independent progressive
-  contract replay is still **RED** on all five 2026-07-27 field traces: R1
-  fires 5–55 snapshots per trace, and R3 exposes eight frozen/inactive evidence
-  runs across both backends. This blocks contract acceptance without
-  reclassifying the latency gates.
+  contract replay is still **RED** on all five 2026-07-27 field traces: R3
+  exposes eight frozen/inactive evidence runs across both backends, and R1
+  fires 15 (WGPU FFT) and 11 (WGPU scalar) snapshots of production below the
+  round's target floor — level 0 uploads of +176, +128 and +256 in rounds that
+  demanded level 1 or 2. R1 reads `n/a` on the three PyQtGraph traces: they
+  carry no per-level upload counters, so production cannot be told from a page
+  cache arrival and the rule is unchecked rather than satisfied. This blocks
+  contract acceptance without reclassifying the latency gates.
   Final-tip low-load AC trace-ACK T1/T2/B medians: WGPU raw
   **972/3874/2130 ms (6/6/3 passes)**, WGPU FFT
   **948/6118/4795 ms (6/5 observed/3 independent processes)**, and PyQtGraph

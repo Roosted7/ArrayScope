@@ -28,6 +28,10 @@ class ProgressiveRenderOracleResult:
     path: str
     snapshot_count: int
     violations: tuple[ProgressiveRenderViolation, ...]
+    #: False when the trace carries no per-level upload counters, so R1 could
+    #: not be evaluated at all. A clean R1 column on such a trace means
+    #: "not checked", never "satisfied".
+    r1_verifiable: bool = True
 
     @property
     def passed(self) -> bool:
@@ -48,6 +52,9 @@ class _Snapshot:
     evidence_covered: int
     evidence_population: int
     level_updates: int
+    #: Cumulative uploads per LOD level. WGPU only -- empty elsewhere, which
+    #: makes R1 unverifiable rather than satisfied.
+    uploads_by_level: dict[int, int]
 
 
 def replay_progressive_render_trace(path: str | Path) -> ProgressiveRenderOracleResult:
@@ -61,6 +68,7 @@ def replay_progressive_render_trace(path: str | Path) -> ProgressiveRenderOracle
         path=str(path),
         snapshot_count=len(snapshots),
         violations=check_progressive_render_snapshots(snapshots),
+        r1_verifiable=r1_is_verifiable(snapshots),
     )
 
 
@@ -82,7 +90,7 @@ def check_progressive_render_snapshots(
     )
     if not normalized:
         raise ValueError("progressive render snapshot sequence is empty")
-    violations = [violation for snapshot in normalized if (violation := _check_r1(snapshot))]
+    violations = list(_check_r1(normalized))
     violations.extend(_check_r3(normalized))
     return tuple(sorted(violations, key=lambda item: (item.snapshot_index, item.rule)))
 
@@ -91,6 +99,11 @@ def format_progressive_render_violations(result: ProgressiveRenderOracleResult) 
     """Format the detailed, line-oriented verdict for one trace."""
 
     lines = [f"{Path(result.path).name}: {result.snapshot_count} snapshots"]
+    if not result.r1_verifiable:
+        lines.append(
+            "R1 UNVERIFIABLE: no per-level upload counters in this trace "
+            "(production cannot be told from cache arrival)"
+        )
     if result.passed:
         lines.append("PASS: no R1/R3 violations")
     for violation in result.violations:
@@ -115,47 +128,79 @@ def format_progressive_render_summary(
     for result in results:
         r1_count = sum(violation.rule == "R1" for violation in result.violations)
         r3_count = sum(violation.rule == "R3" for violation in result.violations)
+        r1_cell = str(r1_count) if result.r1_verifiable else "n/a"
         verdict = "PASS" if result.passed else "FAIL"
         name = Path(result.path).name.replace("|", "\\|")
-        lines.append(
-            f"| `{name}` | {result.snapshot_count} | {r1_count} | {r3_count} | {verdict} |"
-        )
+        lines.append(f"| `{name}` | {result.snapshot_count} | {r1_cell} | {r3_count} | {verdict} |")
+    if not all(result.r1_verifiable for result in results):
+        lines.append("")
+        lines.append("`n/a` = no per-level upload counters in the trace; R1 was not checked.")
     return "\n".join(lines)
 
 
-def _check_r1(snapshot: _Snapshot) -> ProgressiveRenderViolation | None:
-    levels = set(snapshot.levels)
-    if len(levels) > 2:
-        return ProgressiveRenderViolation(
-            rule="R1",
-            snapshot_index=snapshot.index,
-            levels=snapshot.levels,
-            level_counts=snapshot.level_counts,
-            description="more than two resident/presented LOD levels are on screen",
+def _check_r1(snapshots: Sequence[_Snapshot]) -> tuple[ProgressiveRenderViolation, ...]:
+    """Flag PRODUCTION at a level outside the round's two floors.
+
+    R1 bounds production, not residency. The instantaneous visible level set is
+    deliberately unconstrained: a tile retained finer than the target floor, or
+    a coarse tile shown for free before the preview pass, are both legal and
+    common (R2). Asserting "at most two levels on screen" would reject the
+    free-reuse rung that the contract requires -- across the recorded traces it
+    fires on 142 snapshots, 114 of which are legal reuse.
+
+    Production is only observable through the cumulative per-level upload
+    counters, which exist on WGPU alone. Growth in a resident level count
+    cannot serve as a substitute: a tile arriving from the pyramid or page
+    cache raises the count without producing anything. So on backends with no
+    upload counters this rule is unverifiable from a snapshot trace, and is
+    reported as such rather than guessed at.
+    """
+
+    violations: list[ProgressiveRenderViolation] = []
+    for previous, current in pairwise(snapshots):
+        if current.session_id != previous.session_id:
+            continue
+        if not current.uploads_by_level or not previous.uploads_by_level:
+            continue
+        floors = {current.target_level}
+        if current.preview_level is not None:
+            floors.add(current.preview_level)
+        produced = {
+            level: count - previous.uploads_by_level.get(level, 0)
+            for level, count in current.uploads_by_level.items()
+            if count > previous.uploads_by_level.get(level, 0)
+        }
+        offenders = {level: count for level, count in produced.items() if level not in floors}
+        if not offenders:
+            continue
+        detail = ", ".join(f"level {level}: +{count}" for level, count in sorted(offenders.items()))
+        finer = [level for level in offenders if level < current.target_level]
+        note = (
+            " (finer than the target floor -- quality the round never asked for; "
+            "speculative native warming lands here too and is not distinguishable "
+            "until uploads carry their purpose)"
+            if finer
+            else " (a third rung between the preview and target floors)"
         )
-    if len(levels) != 2:
-        return None
-    if snapshot.preview_level is None:
-        return ProgressiveRenderViolation(
-            rule="R1",
-            snapshot_index=snapshot.index,
-            levels=snapshot.levels,
-            level_counts=snapshot.level_counts,
-            description="two on-screen levels exist in a round with no preview level",
+        violations.append(
+            ProgressiveRenderViolation(
+                rule="R1",
+                snapshot_index=current.index,
+                levels=current.levels,
+                level_counts=current.level_counts,
+                description=(
+                    f"uploads produced outside the round floors "
+                    f"{_format_levels(tuple(sorted(floors)))}: {detail}{note}"
+                ),
+            )
         )
-    expected = {snapshot.target_level, snapshot.preview_level}
-    if levels != expected:
-        return ProgressiveRenderViolation(
-            rule="R1",
-            snapshot_index=snapshot.index,
-            levels=snapshot.levels,
-            level_counts=snapshot.level_counts,
-            description=(
-                "two on-screen levels are not the round preview/target pair "
-                f"{_format_levels(tuple(sorted(expected)))}"
-            ),
-        )
-    return None
+    return tuple(violations)
+
+
+def r1_is_verifiable(snapshots: Sequence[_Snapshot]) -> bool:
+    """Whether this trace carries the per-level upload counters R1 needs."""
+
+    return any(snapshot.uploads_by_level for snapshot in snapshots)
 
 
 def _check_r3(snapshots: Sequence[_Snapshot]) -> tuple[ProgressiveRenderViolation, ...]:
@@ -321,7 +366,29 @@ def _snapshot_from_mapping(mapping: dict[str, object], *, index: int) -> _Snapsh
             field="tile_layer_level_updates",
             index=index,
         ),
+        uploads_by_level=_uploads_by_level(
+            montage.get("wgpu_uploads_by_level"), snapshot_index=index
+        ),
     )
+
+
+def _uploads_by_level(value: object, *, snapshot_index: int) -> dict[int, int]:
+    if value is None:
+        return {}
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"snapshot {snapshot_index} wgpu_uploads_by_level is not a sequence")
+    uploads: dict[int, int] = {}
+    for row in value:
+        if not isinstance(row, dict):
+            raise ValueError(f"snapshot {snapshot_index} has an invalid upload-by-level row")
+        level = _optional_int(row.get("level"))
+        count = _optional_int(row.get("uploads"))
+        if level is None or count is None or level < 0 or count < 0:
+            raise ValueError(f"snapshot {snapshot_index} has an invalid upload-by-level value")
+        # One level can appear once per representation; the round's production
+        # at that level is their sum.
+        uploads[level] = uploads.get(level, 0) + count
+    return uploads
 
 
 def _resident_level_counts(value: object, *, snapshot_index: int) -> tuple[tuple[int, int], ...]:
