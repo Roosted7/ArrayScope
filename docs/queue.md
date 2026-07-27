@@ -91,8 +91,21 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   round's target floor — level 0 uploads of +176, +128 and +256 in rounds that
   demanded level 1 or 2. R1 reads `n/a` on the three PyQtGraph traces: they
   carry no per-level upload counters, so production cannot be told from a page
-  cache arrival and the rule is unchecked rather than satisfied. This blocks
-  contract acceptance without reclassifying the latency gates.
+  cache arrival and the rule is unchecked rather than satisfied.
+  **The latency gates are now reclassified (2026-07-27).** `_r8_certification`
+  keeps only correctness gates and the profiler's exit status requires an
+  in-process R1–R5/R7 verdict; medians, heartbeat gaps and coarse/target
+  ordering stay in the record as diagnostics and no longer decide success, and
+  the PyQtGraph-complex R4 exemption is gone. Real-NIfTI headless Weston:
+  PyQtGraph raw red R1/R5 at 272/272; PyQtGraph FFT red R1/R5, 272/272
+  presented but unsettled at 5 s, **R4 now green** after the complex-preview
+  atlas landed; WGPU raw red R1/R5 at 272/272 with off-floor physical uploads;
+  WGPU FFT red R1/R5 at 113/272 with off-floor uploads and duplicate per-pass
+  production. R2b and R6 are reported **unverifiable**, not green — R2b for the
+  missing round identity, R6 because one settled phase cannot exercise
+  sustained-input shedding. Note the R1 rule verdict is uninformative until the
+  round identity lands: `authoritative_round_identity_present` fails on every
+  run, so read the per-gate names rather than the rule roll-up.
   Final-tip low-load AC trace-ACK T1/T2/B medians: WGPU raw
   **972/3874/2130 ms (6/6/3 passes)**, WGPU FFT
   **948/6118/4795 ms (6/5 observed/3 independent processes)**, and PyQtGraph
