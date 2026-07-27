@@ -730,6 +730,60 @@ def test_pyqtgraph_shared_fft_preview_retains_reduced_complex_source_format():
         assert mapping is not None
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "R3 exposure: round levels are summarized from the reduced preview "
+        "pages, and that reduction point-samples rather than averaging, so an "
+        "extreme that misses the stride grid is absent from the round window "
+        "and every target tile carrying it is clipped"
+    ),
+)
+def test_preview_cohort_level_evidence_contains_the_native_extremes():
+    """Round levels from the preview cohort must still contain what is drawn.
+
+    Round levels now come from the preview cohort rather than a source-slab
+    sweep, and `chunk_level_stats_for_pages` summarizes the *materialized
+    reduced pages*. Those pages are point-sampled: the page key reports
+    ``reducer="mean"``, but a value that lands off the level's stride grid is
+    dropped rather than averaged in.
+
+    So a lone extreme survives only if it happens to sit on the grid. Off it,
+    the cohort reports a window that does not contain the native range, and
+    PyQtGraph keeps that window for the whole round -- exactly the clipping R3
+    forbids. FFT is the realistic case: k-space is one very sharp DC peak on an
+    otherwise dim field, so missing that single sample mis-scales the montage.
+
+    Expected behavior: the cohort's bounds contain the native range regardless
+    of where the extreme falls. Fixing this means summarizing the pre-reduction
+    slab, or using an extreme-preserving reduction for evidence.
+    """
+
+    data = np.zeros((16, 16, 3), dtype=np.float32)
+    data[9, 9, :] = 1000.0  # deliberately OFF the level-2 stride grid
+    session = _session(data)
+    session.lod_preview_level = 2
+
+    rows = effects.evaluate_shared_preview(
+        session,
+        session.plan.tiles[0],
+        session.plan.tiles,
+        demand=_demand(0),
+        level=2,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+
+    assert rows
+    stats = rows[0][6]
+    assert stats is not None, "preview cohort must carry level evidence"
+    assert max(stats.bounds) >= 1000.0, (
+        f"cohort bounds {stats.bounds} exclude the native maximum 1000.0, "
+        "so every target tile carrying it is clipped"
+    )
+
+
 def test_pyqtgraph_per_tile_fft_preview_also_retains_the_complex_source_format():
     """The per-tile reduced route carries the same storm-safety invariant.
 

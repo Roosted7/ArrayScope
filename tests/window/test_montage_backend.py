@@ -1779,41 +1779,21 @@ def test_pyqtgraph_first_pixels_require_complete_round_level_evidence():
     )
 
 
-<<<<<<< HEAD
-def test_pyqtgraph_current_predicate_accepts_partial_seed_with_mixed_preview_evidence():
-    """Characterize partial-seed acceptance; it is not an R3 containment proof.
-
-    A field-scale CPU preview admits rough evidence for every tile while the
-    semantic evidence owner samples its first blocking batch.  The aggregate
-    summary is consequently mixed (and therefore not globally ``refined``),
-    even though the producer has covered the exact 16-source threshold that
-    currently authorizes the provisional first frame.
-
-    The deadlock this predicate was originally written against no longer
-    exists: the producer used to park its remaining refinement behind preview
-    acknowledgement while acknowledgement waited on this predicate, and that
-    park was removed in ``61bb5f1a`` because it held the montage at seed-batch
-    levels for a whole fill. What is characterized here is only the surviving
-    half -- accepting a partial seed as the round window -- which R3 forbids
-    on its own terms, with or without the deadlock.
-    """
-||||||| parent of 8f622a1e (perf(render): own round levels from preview cohort)
-def test_pyqtgraph_current_predicate_accepts_partial_seed_with_mixed_preview_evidence():
-    """Characterize partial-seed acceptance; it is not an R3 containment proof.
-
-    A field-scale CPU preview admits rough evidence for every tile while the
-    semantic evidence owner samples its first blocking batch.  The aggregate
-    summary is consequently mixed (and therefore not globally ``refined``),
-    even though the producer has covered the exact 16-source threshold that
-    currently authorizes the provisional first frame. Waiting on the aggregate's
-    all-sources flag deadlocks: the producer intentionally parks its remaining
-    refinement behind preview acknowledgement, while acknowledgement waits on
-    this predicate.
-    """
-=======
 def test_pyqtgraph_rejects_partial_seed_with_mixed_preview_evidence():
-    """R3: a side-sweep seed cannot stand in for the round-owned decision."""
->>>>>>> 8f622a1e (perf(render): own round levels from preview cohort)
+    """R3: a side-sweep seed cannot stand in for the round-owned decision.
+
+    This assertion is inverted from what it pinned for most of its life. A
+    field-scale CPU preview admits rough evidence for every tile while a
+    side sweep samples its first blocking batch, and the predicate used to
+    *accept* that partial seed as the round window -- which is how a montage
+    came to be baked against 32 of 272 sources.
+
+    Two changes retired that. The producer's park behind preview
+    acknowledgement went in ``61bb5f1a``, and the round levels now come from
+    the complete preview cohort rather than a side sweep, so there is no
+    longer a deadlock to trade containment for. A partial seed is now simply
+    refused.
+    """
 
     from arrayscope.core.window_levels import LevelSourceRank
     from arrayscope.display.model.montage_levels import (
