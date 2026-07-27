@@ -1531,6 +1531,7 @@ class FramePipelineEffects:
 
     def _admit_ready_payloads(self, rows) -> bool:
         replan_needed = False
+        reduced_groups = {}
         for row in tuple(rows or ()):
             if not isinstance(row, tuple) or len(row) != 2:
                 continue
@@ -1559,8 +1560,27 @@ class FramePipelineEffects:
                 int(step.level),
                 claim_identity,
             )
-            admitted = self._admit_reduced_display_payload(step, int(step.tile_number), payload)
-            if not admitted or step.rung == Rung.FLOOR:
+            if not isinstance(payload, tuple):
+                admitted = self._admit_reduced_display_payload(
+                    step,
+                    int(step.tile_number),
+                    payload,
+                )
+                if not admitted or step.rung == Rung.FLOOR:
+                    replan_needed = True
+                continue
+            group_key = (int(step.rung), int(step.level))
+            reduced_groups.setdefault(group_key, []).append((step, int(step.tile_number), payload))
+
+        for (rung, _level), group in reduced_groups.items():
+            step = group[0][0]
+            payload_rows = tuple((tile_number, *payload) for _step, tile_number, payload in group)
+            admitted = self._admit_reduced_display_payload(
+                step,
+                int(group[0][1]),
+                payload_rows,
+            )
+            if not admitted or rung == int(Rung.FLOOR):
                 replan_needed = True
         return bool(replan_needed)
 
@@ -5028,7 +5048,7 @@ def _looks_like_shared_preview_rows(payload) -> bool:
         isinstance(payload, tuple)
         and payload
         and isinstance(payload[0], tuple)
-        and len(payload[0]) in {4, 8}
+        and len(payload[0]) in {4, 8, 9}
     )
 
 

@@ -480,9 +480,8 @@ def test_preview_level_tracks_coarser_viewport_demand():
 
     assert session.lod_policy_decision.demand.desired_level >= 5
     assert session.lod_preview_level == session.lod_policy_decision.demand.desired_level + 2
-    screen_pixels_per_preview_texel = (
-        2**session.lod_preview_level
-        / max(session.lod_policy_decision.demand.source_texels_per_pixel_xy)
+    screen_pixels_per_preview_texel = 2**session.lod_preview_level / max(
+        session.lod_policy_decision.demand.source_texels_per_pixel_xy
     )
     assert 3.0 <= screen_pixels_per_preview_texel <= 6.0
     assert (
@@ -3006,11 +3005,20 @@ def test_shared_preview_worker_rows_admit_as_checked_canonical_pages():
 
     assert rows
     assert all(all(isinstance(page, MaterializedLodPage) for page in row[2]) for row in rows)
-    assert frame_effects._admit_reduced_display_payload(
-        None,
-        int(rows[0][0]),
-        rows,
-        quality="preview",
+    steps = tuple(
+        RungStep(
+            tile_number=int(row[0]),
+            rung=Rung.FLOOR,
+            level=1,
+            reduce_from_native=False,
+            lane=Lane.DISPLAY_PREVIEW,
+            priority=Priority.VISIBLE_IMAGE,
+            reason="shared preview batch",
+        )
+        for row in rows
+    )
+    assert frame_effects._admit_ready_payloads(
+        tuple((step, tuple(row[1:])) for step, row in zip(steps, rows, strict=True))
     )
     assert ensure_calls == [(0, 1)]
 
