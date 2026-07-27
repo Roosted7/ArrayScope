@@ -1203,9 +1203,7 @@ class FramePipelineEffects:
             return
         verdict = self.session.scheduling_policy.verdict
         batch_steps = tuple(
-            row[0]
-            for row in tuple(batch.upserts or ())
-            if isinstance(row, tuple) and len(row) == 2
+            row[0] for row in tuple(batch.upserts or ()) if isinstance(row, tuple) and len(row) == 2
         )
         batch_tiles = tuple(int(step.tile_number) for step in batch_steps)
         required = tuple(int(tile) for tile in verdict.required_tiles)
@@ -1216,10 +1214,7 @@ class FramePipelineEffects:
             and len(batch_tiles) == len(set(batch_tiles))
             and set(batch_tiles) == set(required)
             and all(
-                str(
-                    getattr(self.session.display_tile_payloads.get(int(tile)), "quality", "")
-                    or ""
-                )
+                str(getattr(self.session.display_tile_payloads.get(int(tile)), "quality", "") or "")
                 in {"preview", "fallback"}
                 for tile in required
             )
@@ -1651,6 +1646,7 @@ class FramePipelineEffects:
         upserted = False
         admitted_any = False
         visible_previews = 0
+        admitted_tiles = []
         for row in tuple(rows or ()):
             (
                 tile_number,
@@ -1678,7 +1674,14 @@ class FramePipelineEffects:
             if not admitted:
                 continue
             admitted_any = True
-            session._ensure_floor_payloads((tile_number,))
+            admitted_tiles.append(int(tile_number))
+        # A complete shared preview owns one result for the whole required
+        # scope. Build its display payloads with the same scope shape:
+        # ensure_floor_payloads constructs the visible-tile lookup once per
+        # call, so invoking it per row turns 272 tiny planes into 272 full-set
+        # scans before the first commit.
+        session._ensure_floor_payloads(admitted_tiles)
+        for tile_number in admitted_tiles:
             display_payload = session.display_tile_payloads.get(int(tile_number))
             if display_payload is not None:
                 rendered = self.renderer._rendered_tile_for_current_payload(
@@ -4477,9 +4480,7 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
 
 def _complete_aggregate_preview_scope(window, session) -> tuple[int, ...] | None:
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    minimum_tiles = int(
-        getattr(capabilities, "compact_preview_aggregate_min_tiles", 0) or 0
-    )
+    minimum_tiles = int(getattr(capabilities, "compact_preview_aggregate_min_tiles", 0) or 0)
     if minimum_tiles <= 0:
         return None
     verdict = getattr(getattr(session, "scheduling_policy", None), "verdict", None)

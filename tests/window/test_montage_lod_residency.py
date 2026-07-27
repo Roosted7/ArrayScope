@@ -2979,6 +2979,14 @@ def test_shared_preview_worker_rows_admit_as_checked_canonical_pages():
     renderer._rendered_tile_for_current_payload = lambda *_args, **_kwargs: None
     renderer._admit_first_pass_level_evidence = lambda *_args, **_kwargs: None
     frame_effects = FramePipelineEffects(renderer, session)
+    ensure_calls = []
+    original_ensure_floor_payloads = session._ensure_floor_payloads
+
+    def ensure_floor_payloads(tile_numbers, *, max_count=None):
+        ensure_calls.append(tuple(int(tile) for tile in tile_numbers))
+        return original_ensure_floor_payloads(tile_numbers, max_count=max_count)
+
+    session._ensure_floor_payloads = ensure_floor_payloads
 
     assert rows
     assert all(all(isinstance(page, MaterializedLodPage) for page in row[2]) for row in rows)
@@ -2988,6 +2996,7 @@ def test_shared_preview_worker_rows_admit_as_checked_canonical_pages():
         rows,
         quality="preview",
     )
+    assert ensure_calls == [(0, 1)]
 
     for tile_number, key, pages, *_rest in rows:
         assert cache.exact_pages(key.plans) is not None
