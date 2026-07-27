@@ -87,12 +87,35 @@ not.
 ## R2b — The floors are one number each per round
 
 A round has **one** preview floor and **one** target floor, chosen once, before
-any tile of that round is scheduled.
+any tile of that round is scheduled, and **fixed for the life of that round**.
 
-Per-tile derivation of either floor is forbidden. Two tiles in the same round
-must never land on different preview levels because their individual demand or
-retention state differed. Retention affects whether a tile is *skipped* (R2);
-it never affects what the floor *is*.
+Per-tile derivation of either floor is forbidden. Retention affects whether a
+tile is *skipped* (R2); it never affects what the floor *is*.
+
+Two corrections to an earlier reading of this rule, both established by
+measurement rather than inspection:
+
+- **The risk is temporal, not spatial.** An earlier draft said two tiles in the
+  same round must not land on different floors "because their individual demand
+  or retention state differed". That mechanism does not exist: one planning
+  pass hands every tile the same demand and policy, so a single pass cannot
+  produce heterogeneous floors. What R2b actually forbids is the floor *moving*
+  between planning passes that belong to the same round.
+- **A session is not a round.** Session identity is not a usable round key in
+  either direction. Across the recorded traces one session spans up to 14
+  distinct view scales, and elsewhere 25 sessions cover 14 scales — sessions
+  are sometimes coarser than rounds and sometimes finer. The floor legitimately
+  tracks the continuous viewport scale, so it changes whenever the view target
+  changes; observing a floor change inside one session is therefore **not**
+  evidence of a violation, and it was misread as one before this note.
+
+**There is no round identity in the code today.** The pipeline has sessions,
+demands, generations and admission epochs, but nothing that names "one settled
+view target" as a thing a floor can be pinned to. Until that exists, R2b cannot
+be enforced by a test and the oracle cannot key on it — which is why the R1
+replay uses session plus both floors as a conservative proxy for a round
+boundary. Establishing that identity is a prerequisite for the rest of R2b, not
+a detail of it.
 
 ## R3 — Levels never clip what is drawn
 
