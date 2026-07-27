@@ -1788,6 +1788,61 @@ def test_pyqtgraph_first_pixels_accept_provisional_refined_first_batch():
     )
 
 
+def test_pyqtgraph_first_pixels_accept_refined_seed_with_mixed_preview_evidence():
+    """Rough preview rows cannot hide the refined first-frame seed.
+
+    A field-scale CPU preview admits rough evidence for every tile while the
+    semantic evidence owner samples its first blocking batch.  The aggregate
+    summary is consequently mixed (and therefore not globally ``refined``),
+    even though the producer has covered the exact 16-source threshold that
+    authorizes the provisional first frame.  Waiting on the aggregate's
+    all-sources flag deadlocks: the producer intentionally parks its remaining
+    refinement behind preview acknowledgement, while acknowledgement waits on
+    this predicate.
+    """
+
+    from arrayscope.core.window_levels import LevelSourceRank
+    from arrayscope.display.model.montage_levels import (
+        MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
+        LevelEvidenceQuality,
+        MontageLevelStats,
+    )
+    from arrayscope.window.frame_effects import (
+        tile_layer_first_pixels_wait_for_level_source,
+    )
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")
+        )
+    )
+    window.win = window
+    tile_count = 50
+    batch = int(MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH)
+    session = SimpleNamespace(
+        plan=SimpleNamespace(
+            tiles=tuple(
+                SimpleNamespace(montage_index=number, source_index=100 + number)
+                for number in range(tile_count)
+            )
+        ),
+        required_tile_numbers=lambda: tuple(range(tile_count)),
+        semantic_level_evidence_progress=SimpleNamespace(
+            covered_sources=set(range(100, 100 + batch))
+        ),
+    )
+    mixed = MontageLevelStats(
+        bounds=(0.0, 1.0),
+        source_indices=frozenset(range(100, 100 + tile_count)),
+        expected_indices=frozenset(range(100, 100 + tile_count)),
+        rank=LevelSourceRank.MONTAGE_COMPLETE,
+        refined=False,
+        evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+    )
+
+    assert not tile_layer_first_pixels_wait_for_level_source(window, session, True, mixed)
+
+
 def test_first_cpu_histogram_publishes_provisional_refined_first_batch():
     """The provisional window source publishes to the histogram/levels widgets.
 

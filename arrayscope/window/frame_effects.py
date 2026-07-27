@@ -4649,7 +4649,7 @@ def tile_layer_first_pixels_wait_for_level_source(
         and getattr(level_stats, "rank", None) == LevelSourceRank.MONTAGE_SAMPLED_FULL
     ):
         return False
-    if has_rough_source and bool(getattr(level_stats, "refined", False)):
+    if has_rough_source:
         plan_tiles = {
             int(getattr(tile, "montage_index", offset)): tile
             for offset, tile in enumerate(
@@ -4667,7 +4667,31 @@ def tile_layer_first_pixels_wait_for_level_source(
         covered_sources = {
             int(source) for source in tuple(getattr(level_stats, "source_indices", ()) or ())
         }
-        if required_sources and required_sources <= covered_sources:
+        summary_is_refined = bool(getattr(level_stats, "refined", False))
+        if summary_is_refined and required_sources and required_sources <= covered_sources:
+            return False
+        # Preview planes contribute rough evidence for the whole scope before
+        # the CPU backend can publish its first frame.  Once that happens the
+        # aggregate summary is intentionally mixed, so its all-source
+        # ``refined`` flag can no longer express that the semantic evidence
+        # owner completed the blocking first batch.  That owner's
+        # generation-bound covered set is the per-source truth.  Consulting it
+        # closes a circular wait: the remaining semantic refinement is parked
+        # behind preview acknowledgement, while acknowledgement otherwise
+        # waits for the remaining refinement.
+        semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
+        refined_sources = {
+            int(source)
+            for source in tuple(getattr(semantic_progress, "covered_sources", ()) or ())
+        }
+        blocking_source_count = min(
+            len(required_sources),
+            MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH,
+        )
+        if (
+            required_sources
+            and len(refined_sources & required_sources) >= blocking_source_count
+        ):
             return False
         # Provisional first-batch acceptance: a large cold scope must not hold
         # every already-evaluated floor hostage to the full evidence sweep
@@ -4677,8 +4701,10 @@ def tile_layer_first_pixels_wait_for_level_source(
         # monotonic improvement plus the settled-metadata refresh deliver the
         # single refined re-window when the population completes. Scopes at or
         # below one batch keep exact pre-existing semantics.
-        if required_sources and len(covered_sources & required_sources) >= min(
-            len(required_sources), MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH
+        if (
+            summary_is_refined
+            and required_sources
+            and len(covered_sources & required_sources) >= blocking_source_count
         ):
             return False
     return True
