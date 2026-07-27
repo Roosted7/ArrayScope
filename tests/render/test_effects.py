@@ -914,6 +914,60 @@ def test_shared_fft_analytic_bounds_cover_a_field_scale_native_peak(extreme_valu
         assert stats.bounds[1] >= exact_high
 
 
+@pytest.mark.parametrize(
+    ("distribution", "max_looseness"),
+    [("non-negative", 1.01), ("zero-mean", 1.30)],
+)
+def test_shared_fft_analytic_bounds_stay_tight_enough_to_be_worth_using(
+    distribution,
+    max_looseness,
+):
+    """Containment alone is not enough: a huge window is legal and useless.
+
+    The analytic envelope replaces an exact scan, so it is conservative by
+    construction and every containment test would still pass if it widened to
+    ``(-1e30, 1e30)``. That would satisfy R3 and destroy the image, so the
+    envelope needs an upper bound on its looseness as well as a guarantee of
+    coverage.
+
+    ``max_k|X_k| <= sum_m|x_m| / sqrt(N)`` is exactly attained whenever the DC
+    bin dominates, which is the case for the non-negative magnitude data a
+    montage-axis FFT is usually taken over -- so the realistic case costs no
+    contrast at all. Zero-mean data is the unfavourable direction, where
+    cancellation in the DC bin leaves the bound above the true peak.
+    """
+
+    rng = np.random.default_rng(7)
+    raw = rng.normal(size=(64, 64, 8))
+    data = (np.abs(raw) if distribution == "non-negative" else raw).astype(np.float32)
+    session = _session(data)
+    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    session.shader_display = True
+    session.lod_preview_level = 2
+
+    rows = effects.evaluate_shared_preview(
+        session,
+        session.plan.tiles[0],
+        session.plan.tiles,
+        demand=_demand(0),
+        level=2,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+
+    exact = evaluate_pipeline(data, session.document.enabled_operations)
+    exact_peak = float(np.max(np.abs(exact)))
+    envelope = float(rows[0][-1].bounds[1])
+
+    assert envelope >= exact_peak, "envelope must still contain the true peak"
+    looseness = envelope / exact_peak
+    assert looseness <= max_looseness, (
+        f"{distribution} envelope is {looseness:.3f}x the true peak "
+        f"({envelope:.3f} vs {exact_peak:.3f}); the window is too wide to be useful"
+    )
+
+
 def test_pyqtgraph_per_tile_fft_preview_also_retains_the_complex_source_format():
     """The per-tile reduced route carries the same storm-safety invariant.
 
