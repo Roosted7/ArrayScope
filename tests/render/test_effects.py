@@ -808,6 +808,54 @@ def test_preview_cohort_level_evidence_contains_the_native_extremes(
     assert stats.bounds[1] >= float(np.max(data))
 
 
+@pytest.mark.parametrize("extreme_value", [-1000.0, 1000.0])
+def test_preview_cohort_bounds_survive_above_the_evidence_sample_limit(extreme_value):
+    """The same guarantee, at a scale that defeats a bounded sample.
+
+    The sibling test above uses a 16x16x3 source: 768 display positions, well
+    under ``REFINED_TILE_SAMPLE_LIMIT`` (8192), so every position is visited
+    and any subsampling strategy passes it trivially. That made it unable to
+    fail for the one defect it exists to catch.
+
+    A field source is 336x336 per slice, so a cohort is millions of positions
+    against that same 8192 cap -- three orders of magnitude of subsampling. A
+    lone sharp peak is exactly what falls through, and k-space is precisely a
+    lone sharp peak on an otherwise dim field, so this is the shape of the real
+    data rather than an adversarial one.
+
+    Measured: a bounded-sample implementation reports ``(-0.5, 0.5)`` here for
+    a native maximum of 1000.0 -- a degenerate window padded around an all-zero
+    sample, mis-scaling the montage by three orders of magnitude, while the
+    sibling test stays green.
+    """
+
+    data = np.zeros((336, 336, 8), dtype=np.float32)
+    data[169, 169, :] = extreme_value  # off every coarse grid, one position only
+    session = _session(data)
+    session.lod_preview_level = 2
+
+    rows = effects.evaluate_shared_preview(
+        session,
+        session.plan.tiles[0],
+        session.plan.tiles,
+        demand=_demand(0),
+        level=2,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+
+    assert rows
+    stats = rows[0][-1]
+    assert stats is not None, "preview cohort must carry level evidence"
+    assert stats.bounds[0] <= float(np.min(data)), (
+        f"cohort lower bound {stats.bounds[0]} excludes native minimum {np.min(data)}"
+    )
+    assert stats.bounds[1] >= float(np.max(data)), (
+        f"cohort upper bound {stats.bounds[1]} excludes native maximum {np.max(data)}"
+    )
+
+
 def test_pyqtgraph_per_tile_fft_preview_also_retains_the_complex_source_format():
     """The per-tile reduced route carries the same storm-safety invariant.
 
