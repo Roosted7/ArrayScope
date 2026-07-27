@@ -25,6 +25,21 @@ def demand(level: int, acceptable=None) -> LodDemand:
     )
 
 
+def demand_at_scale(level: int, source_texels_per_pixel: float) -> LodDemand:
+    factor = 2**level
+    return LodDemand(
+        desired_level=level,
+        desired_factor=factor,
+        desired_factor_xy=(factor, factor),
+        acceptable_levels=(max(0, level - 1), level, level + 1),
+        source_texels_per_pixel_xy=(
+            float(source_texels_per_pixel),
+            float(source_texels_per_pixel),
+        ),
+        reason="continuous-scale test demand",
+    )
+
+
 def rungs(steps):
     return [(step.rung, step.level) for step in steps]
 
@@ -32,7 +47,7 @@ def rungs(steps):
 def test_cold_tile_climbs_coarse_then_desired():
     ladder = LodLadder(LadderPolicy(floor_level=4))
     steps = ladder.plan_tile(TileLodState(tile_number=3), demand(1))
-    assert rungs(steps) == [(Rung.FLOOR, 4), (Rung.DESIRED, 1)]
+    assert rungs(steps) == [(Rung.FLOOR, 3), (Rung.DESIRED, 1)]
     assert steps[0].priority == Priority.INTERACTIVE
     assert steps[0].lane == Lane.DISPLAY_PREVIEW
     assert steps[1].lane == Lane.DISPLAY_PREPARATION
@@ -74,23 +89,40 @@ def test_coarse_demand_still_gets_retention_floor_before_target():
 
 
 def test_preview_stays_two_levels_coarser_as_target_moves_coarse():
-    ladder = LodLadder(LadderPolicy(floor_level=4))
+    ladder = LodLadder(LadderPolicy(floor_level=0))
 
-    for target, preview in ((0, 4), (2, 4), (3, 5), (6, 8)):
+    for target, preview in ((0, 2), (2, 4), (3, 5), (6, 8)):
         steps = ladder.plan_tile(TileLodState(tile_number=0), demand(target))
         [floor] = [step for step in steps if step.rung is Rung.FLOOR]
         assert floor.level == preview
         assert floor.level >= target + 2
 
 
-def test_large_montage_spends_two_more_levels_on_preview_latency():
-    ladder = LodLadder(LadderPolicy(floor_level=6))
+def test_preview_level_tracks_smooth_screen_scale_within_three_to_six_pixels():
+    ladder = LodLadder(LadderPolicy(floor_level=0))
 
-    steps = ladder.plan_tile(TileLodState(tile_number=0), demand(2))
+    observed = []
+    for source_texels_per_pixel in (4.0, 5.2, 5.4, 7.58):
+        current_demand = demand_at_scale(2, source_texels_per_pixel)
+        steps = ladder.plan_tile(TileLodState(tile_number=0), current_demand)
+        [floor] = [step for step in steps if step.rung is Rung.FLOOR]
+        screen_pixels_per_preview_texel = (2**floor.level) / source_texels_per_pixel
+        assert 3.0 <= screen_pixels_per_preview_texel <= 6.0
+        assert floor.level >= current_demand.desired_level + 2
+        observed.append(floor.level)
+
+    assert observed == [4, 4, 5, 5]
+
+
+def test_retention_hint_cannot_make_preview_coarser_than_screen_density_cap():
+    ladder = LodLadder(LadderPolicy(floor_level=9))
+    current_demand = demand_at_scale(2, 7.58)
+
+    steps = ladder.plan_tile(TileLodState(tile_number=0), current_demand)
 
     [floor] = [step for step in steps if step.rung is Rung.FLOOR]
-    assert floor.level == 6
-    assert floor.level >= 2 + 2
+    assert floor.level == 5
+    assert (2**floor.level) / 7.58 <= 6.0
 
 
 def test_target_finer_than_retention_floor_gets_one_coarse_rung():
@@ -163,7 +195,7 @@ def test_zoom_out_keeps_presented_finer_level():
 def test_native_demand_ends_exact_without_duplicate_step():
     ladder = LodLadder(LadderPolicy(floor_level=4))
     steps = ladder.plan_tile(TileLodState(tile_number=0), demand(0, acceptable=(0, 1)))
-    assert rungs(steps) == [(Rung.FLOOR, 4), (Rung.DESIRED, 0)]
+    assert rungs(steps) == [(Rung.FLOOR, 2), (Rung.DESIRED, 0)]
     assert all(step.rung != Rung.EXACT for step in steps)  # DESIRED==native
 
 

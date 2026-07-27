@@ -238,7 +238,7 @@ def test_any_missing_preview_blocks_every_target_rung_until_coverage_closes():
     drain(kernel)
 
     assert submitted == 1
-    assert effects.evaluated == [(1, int(Rung.FLOOR), 4)]
+    assert effects.evaluated == [(1, int(Rung.FLOOR), 3)]
     assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
     effects.states[1] = TileLodState(
@@ -354,7 +354,7 @@ def test_interactive_native_demand_defers_cold_native_until_noninteractive_repla
 
     # Native demand plans FLOOR then DESIRED(0); DESIRED waits until the
     # first-pixel rung has had a chance to present.
-    assert effects.evaluated == [(0, 0, 4)]
+    assert effects.evaluated == [(0, 0, 2)]
     assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
     effects.states[0] = TileLodState(
@@ -630,6 +630,38 @@ def test_full_preview_scope_uses_one_worker_and_one_completion_batch():
     assert effects.evaluated == [("preview-batch", tile_count, 4)]
     assert len(effects.batches) == 1
     assert len(effects.batches[0].upserts) == tile_count
+
+
+def test_full_preview_scope_batches_missing_tiles_beside_retained_exact_coverage():
+    tile_count = 272
+    retained = (0, 1)
+    _kernel, _backend, effects, pipeline = make_manual_pipeline(tiles=tile_count)
+    for tile_number in retained:
+        effects.states[tile_number] = TileLodState(
+            tile_number=tile_number,
+            presented_level=2,
+            resident_levels=(2,),
+            presented_quality="exact",
+        )
+    visible = tuple(range(tile_count))
+
+    submitted = pipeline.retarget(
+        intent(),
+        demand(2),
+        scope(*visible, missing=tile_count - len(retained)),
+    )
+
+    assert submitted == 1
+    assert pipeline.counters.tasks_submitted == 1
+    assert not pipeline._pending_admissions
+    assert _backend.run_next()
+    drain(_kernel)
+
+    assert effects.evaluated == [
+        ("preview-batch", tile_count - len(retained), 4),
+    ]
+    assert len(effects.batches) == 1
+    assert len(effects.batches[0].upserts) == tile_count - len(retained)
 
 
 def test_preview_batch_requires_exact_scheduling_verdict_tile_set():

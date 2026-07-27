@@ -259,7 +259,7 @@ class FramePipeline:
                 self.counters.interactive_native_deferred += 1
                 continue
             self._pending_admissions.append((intent, step))
-        if self._submit_preview_batch(admission_generation, verdict):
+        if self._submit_preview_batch(admission_generation, verdict, states):
             submitted += 1
         else:
             submitted += self._drain_pending_admissions(admission_generation)
@@ -434,6 +434,7 @@ class FramePipeline:
         self,
         generation: int,
         verdict: SchedulingVerdict,
+        states: tuple[TileLodState, ...],
     ) -> bool:
         """Submit one complete coarse montage through the ordinary kernel.
 
@@ -460,9 +461,19 @@ class FramePipeline:
         intent = pending[0][0]
         steps = tuple(step for _intent, step in pending)
         tile_numbers = tuple(int(step.tile_number) for step in steps)
+        covered_tiles = {
+            int(state.tile_number)
+            for state in states
+            if (
+                state.presented_level is not None
+                or state.ready_level is not None
+                or bool(state.resident_levels)
+            )
+        }
+        required_tiles = {int(tile) for tile in verdict.required_tiles}
         if (
             len(tile_numbers) != len(set(tile_numbers))
-            or set(tile_numbers) != set(verdict.required_tiles)
+            or set(tile_numbers) | covered_tiles != required_tiles
         ):
             return False
         if len({int(step.level) for step in steps}) != 1:

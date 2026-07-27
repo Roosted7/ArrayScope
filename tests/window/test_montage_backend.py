@@ -3555,6 +3555,8 @@ def test_pyqtgraph_full_preview_cap_bypass_requires_explicit_aggregate_marker():
         tile: SimpleNamespace(quality="preview", image=np.zeros((6, 6), dtype=np.float32))
         for tile in required
     }
+    payloads[0] = SimpleNamespace(quality="exact", image=np.zeros((84, 84), dtype=np.float32))
+    payloads[1] = SimpleNamespace(quality="exact", image=np.zeros((84, 84), dtype=np.float32))
     session = SimpleNamespace(
         scheduling_policy=SimpleNamespace(
             verdict=SchedulingVerdict(3, SchedulingPhase.COVERAGE, required)

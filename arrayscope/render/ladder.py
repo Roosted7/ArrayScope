@@ -45,32 +45,43 @@ from arrayscope.render.progressive_scheduling import SchedulingVerdict
 
 COARSE_RUNG_ENABLED_DEFAULT = True
 COARSE_RUNG_MIN_LEVEL_DELTA = 2
-COARSE_RUNG_LARGE_MONTAGE_TILES = 256
-# A 336² source tile reaches one stored sample at L9. Once a montage is large
-# enough to amortize a complete-scope preview, first coverage values latency
-# over intra-tile detail; target work restores that detail only after ACK.
-COARSE_RUNG_LARGE_MONTAGE_EXTRA_LEVELS = 5
+COARSE_RUNG_MIN_SCREEN_PIXELS_PER_TEXEL = 3.0
+COARSE_RUNG_MAX_SCREEN_PIXELS_PER_TEXEL = 6.0
 
 
 def coarse_rung_level(
     *,
-    desired_level: int,
+    demand: LodDemand,
     retention_level: int,
-    montage_tile_count: int = 0,
 ) -> int:
-    """Return the preview level required by retention and target quality.
+    """Return the preview level required by live screen scale and target quality.
 
     Two LOD levels are four times coarser per axis and sixteen times fewer
-    texels. Retention may choose an even coarser level, but the level always
-    remains relative to the current target, so an already coarse target cannot
-    collapse the two passes.
+    texels. Within that invariant, the preview texel footprint follows the
+    continuous viewport scale: one preview texel spans 3–6 screen pixels on
+    the dominant axis. A retained level is only reusable when it remains
+    inside that screen-space ceiling; tile count never decides image quality.
     """
 
-    desired = max(0, int(desired_level))
+    desired = max(0, int(demand.desired_level))
     retention = max(0, int(retention_level))
-    level = max(retention, desired + COARSE_RUNG_MIN_LEVEL_DELTA)
-    if int(montage_tile_count) >= COARSE_RUNG_LARGE_MONTAGE_TILES:
-        level += COARSE_RUNG_LARGE_MONTAGE_EXTRA_LEVELS
+    level = desired + COARSE_RUNG_MIN_LEVEL_DELTA
+    source_texels_per_pixel = max(
+        (float(value) for value in demand.source_texels_per_pixel_xy),
+        default=0.0,
+    )
+    if source_texels_per_pixel > 0.0:
+        while (
+            (2**level) / source_texels_per_pixel
+            < COARSE_RUNG_MIN_SCREEN_PIXELS_PER_TEXEL
+        ):
+            level += 1
+        retention_footprint = (2**retention) / source_texels_per_pixel
+        if (
+            retention > level
+            and retention_footprint <= COARSE_RUNG_MAX_SCREEN_PIXELS_PER_TEXEL
+        ):
+            level = retention
     return level
 
 
@@ -258,7 +269,7 @@ class LodLadder:
         # montage-axis expansions whose identical reduced region is backed by
         # one cacheable real-document stage.
         preview_level = coarse_rung_level(
-            desired_level=desired,
+            demand=demand,
             retention_level=policy.floor_level,
         )
         preview_target_has_finer_followup = preview_level > desired
@@ -408,9 +419,9 @@ __all__ = [
     "COARSE_RUNG_DISABLED",
     "COARSE_RUNG_ENABLED_DEFAULT",
     "COARSE_RUNG_LANE_NOT_ADMITTED",
-    "COARSE_RUNG_LARGE_MONTAGE_EXTRA_LEVELS",
-    "COARSE_RUNG_LARGE_MONTAGE_TILES",
+    "COARSE_RUNG_MAX_SCREEN_PIXELS_PER_TEXEL",
     "COARSE_RUNG_MIN_LEVEL_DELTA",
+    "COARSE_RUNG_MIN_SCREEN_PIXELS_PER_TEXEL",
     "COARSE_RUNG_NATIVE_ONLY",
     "COARSE_RUNG_NO_REDUCED_INPUT",
     "COARSE_RUNG_PLANNED",

@@ -1207,16 +1207,35 @@ class FramePipelineEffects:
         )
         batch_tiles = tuple(int(step.tile_number) for step in batch_steps)
         required = tuple(int(tile) for tile in verdict.required_tiles)
+        batch_tile_set = set(batch_tiles)
+        required_tile_set = set(required)
+        retained_tiles = tuple(sorted(required_tile_set - batch_tile_set))
+        retained_covered = self.session.lifecycle.first_pixels_presented(retained_tiles)
         if (
             bool(verdict.coverage_open)
             and batch_steps
             and all(step.rung == Rung.FLOOR for step in batch_steps)
             and len(batch_tiles) == len(set(batch_tiles))
-            and set(batch_tiles) == set(required)
+            and batch_tile_set <= required_tile_set
+            and batch_tile_set | set(retained_tiles) == required_tile_set
+            and retained_covered
             and all(
                 str(getattr(self.session.display_tile_payloads.get(int(tile)), "quality", "") or "")
                 in {"preview", "fallback"}
-                for tile in required
+                for tile in batch_tiles
+            )
+            and all(
+                self.session.first_pass_accepts_quality(
+                    str(
+                        getattr(
+                            self.session.display_tile_payloads.get(int(tile)),
+                            "quality",
+                            "",
+                        )
+                        or ""
+                    )
+                )
+                for tile in retained_tiles
             )
         ):
             self.session.aggregate_preview_transaction = (
@@ -4507,7 +4526,8 @@ def _complete_aggregate_preview_scope(window, session) -> tuple[int, ...] | None
         return None
     payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
     if len(required) < minimum_tiles or any(
-        str(getattr(payloads.get(tile), "quality", "") or "") not in {"preview", "fallback"}
+        str(getattr(payloads.get(tile), "quality", "") or "")
+        not in {"preview", "fallback", "exact"}
         for tile in required
     ):
         return None

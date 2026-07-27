@@ -479,7 +479,12 @@ def test_preview_level_tracks_coarser_viewport_demand():
     session._selected_lod_factor()
 
     assert session.lod_policy_decision.demand.desired_level >= 5
-    assert session.lod_preview_level == session.lod_policy_decision.demand.desired_level + 7
+    assert session.lod_preview_level == session.lod_policy_decision.demand.desired_level + 2
+    screen_pixels_per_preview_texel = (
+        2**session.lod_preview_level
+        / max(session.lod_policy_decision.demand.source_texels_per_pixel_xy)
+    )
+    assert 3.0 <= screen_pixels_per_preview_texel <= 6.0
     assert (
         render_effects.preview_evaluation_level(session, session.lod_policy_decision.demand)
         == session.lod_preview_level
@@ -3415,10 +3420,11 @@ def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
     rendered = session.rendered_tiles[0]
     demand = session.lod_policy_decision.demand
     assert demand.desired_level == 0
+    preview_level = render_effects.preview_evaluation_level(session, demand)
     key = page_set_key_for_rendered(
         rendered,
         demand=demand,
-        level=4,
+        level=preview_level,
         semantic_source_id=session.tile_semantic_source_id(0),
     )
     _admit_page_set(pyramid, key, np.asarray(rendered.image))
@@ -3433,7 +3439,7 @@ def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
     assert set(delta.active_tiles) == {0, 1, 2, 3}
     assert set(delta.upserts) == {0, 1, 2, 3}
     assert delta.upserts[0].quality == "preview"
-    assert delta.upserts[0].lod.level == 4
+    assert delta.upserts[0].lod.level == preview_level
     assert {
         tile: (payload.quality, payload.lod.level)
         for tile, payload in delta.upserts.items()

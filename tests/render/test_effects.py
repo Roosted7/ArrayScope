@@ -582,6 +582,37 @@ def test_shared_preview_stays_two_levels_coarser_than_demanded_lod():
     assert {row[1].level_xy for row in previews} == {(3, 3)}
 
 
+def test_full_montage_preview_keeps_spatial_content_at_live_screen_scale():
+    height = width = 336
+    y, x = np.indices((height, width), dtype=np.float32)
+    data = np.stack(tuple(y * 1000.0 + x + offset for offset in (0.0, 1.0, 2.0)), axis=2)
+    session = _session(data)
+    demand = LodDemand(
+        desired_level=2,
+        desired_factor=4,
+        desired_factor_xy=(4, 4),
+        acceptable_levels=(1, 2, 3),
+        source_texels_per_pixel_xy=(7.58, 7.58),
+        reason="captured 272-tile montage scale",
+    )
+
+    previews = effects.evaluate_shared_preview(
+        session,
+        session.plan.tiles[0],
+        session.plan.tiles,
+        demand=demand,
+        cancellation_token=None,
+        shader_display=True,
+        evaluation_context=None,
+    )
+
+    assert {row[1].level_xy for row in previews} == {(5, 5)}
+    for row in previews:
+        values = _stored_preview_values(row[2])
+        assert values.shape == (11, 11)
+        assert float(np.ptp(values)) > 0.0
+
+
 def test_shared_preview_slices_the_reduced_volume_without_per_tile_slab_plans(monkeypatch):
     session = _session()
     tiles = session.plan.tiles[:2]

@@ -595,15 +595,9 @@ def selected_lod_factor(session) -> int:
             or 0
         )
         if base_preview > 0:
-            desired_level = int(
-                getattr(session.lod_policy_decision.demand, "desired_level", 0) or 0
-            )
             session.lod_preview_level = coarse_rung_level(
-                desired_level=desired_level,
+                demand=session.lod_policy_decision.demand,
                 retention_level=base_preview,
-                montage_tile_count=len(
-                    tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-                ),
             )
     else:
         session.lod_policy_decision = native_lod_policy(

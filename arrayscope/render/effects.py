@@ -1188,10 +1188,9 @@ def preview_pipeline_is_tile_local(session, tile) -> bool:
 
 
 def preview_evaluation_level(session, demand) -> int:
-    desired = int(getattr(demand, "desired_level", 0) or 0)
     preview = int(getattr(session, "lod_preview_level", 0) or 0)
     return coarse_rung_level(
-        desired_level=desired,
+        demand=demand,
         retention_level=preview,
     )
 
