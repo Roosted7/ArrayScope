@@ -52,6 +52,25 @@ def test_should_warm_auto_on_linux_display(monkeypatch):
     assert fac._should_warm_wgpu(_settings(ImageRenderingBackendChoice.AUTO)) is True
 
 
+def test_retired_persisted_choice_warms_like_auto(monkeypatch):
+    """ADR 0061: a stale ``vispy`` string is AUTO input, not a non-wgpu pin.
+
+    ``settings=None`` is the file-open path, which reads the persisted value
+    straight from QSettings and never sees ``AppSettingsState``'s migration.
+    Without normalizing here too, a migrated user silently loses the ~2 s
+    device warm and compiles CPU display kernels for a wgpu session.
+    """
+
+    monkeypatch.setattr(fac.platform, "system", lambda: "Linux")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "wayland")
+    stale = types.SimpleNamespace(
+        image_rendering_backend="vispy", texture_codec=TextureCodecChoice.OFF
+    )
+    assert fac._image_backend_choice_value(stale) == ImageRenderingBackendChoice.AUTO.value
+    assert fac._should_warm_wgpu(stale) is True
+    assert fac.cpu_display_backend_likely(stale) is False
+
+
 def test_auto_resolver_prefers_wgpu_and_caches_probe(monkeypatch):
     monkeypatch.setattr(fac, "_auto_resolution_cache", None)
     monkeypatch.setattr(fac.platform, "system", lambda: "Linux")

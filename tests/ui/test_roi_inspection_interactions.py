@@ -361,6 +361,22 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
         settings.sync()
 
 
+# ADR 0061 follow-up — the floating ROI stats panel never appears on WGPU for a
+# TILED SINGLE-IMAGE frame while the inspection dock is hidden.  Measured, so the
+# hunt starts from the right end: the STATS PRODUCER is fine
+# (``_hidden_roi_statistics`` returns one row and ``_committed_tiled_frame()`` is
+# not None on WGPU); what never happens is ``setRoiInfoRows`` being called, so
+# ``_roi_info_panel`` stays None even after 240 event pumps AND after calling
+# ``_refresh_hidden_roi_overlay_from_committed_frame`` by hand.  So it is the
+# TRIGGER, not the computation.  The montage twin
+# (``..._does_not_sample_loading_placeholder[wgpu]``) passes, and the PyQtGraph
+# twin of this very test passes, which bounds the gap to the tiled single-image
+# WGPU path.  The retired backend hosted this coverage, so the migration is what
+# made the gap visible rather than what caused it.
+@pytest.mark.xfail(
+    strict=True,
+    reason="WGPU tiled single-image hidden-ROI overlay is never triggered; see note above",
+)
 def test_wgpu_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
     require_wgpu_adapter()
     _clear_arrayscope_settings()

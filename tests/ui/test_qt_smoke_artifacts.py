@@ -244,7 +244,7 @@ def test_wgpu_backend_hover_bridge_and_screenshot_artifact(qt_app):
         win.img_view.setMontageTileOverlays(
             (MontageTileOverlay(58, 16, 18, 18, "loading", "Loading"),)
         )
-        assert win.img_view.montageOverlayCount() == 1
+        assert win.img_view.montageTileOverlayCount() == 1
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(20.0, 20.0))
         win.img_view.view.scene().sigMouseMoved.emit(scene_pos)
         deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S

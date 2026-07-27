@@ -11,6 +11,7 @@ from arrayscope.app.settings_state import (
     ImageRenderingBackendChoice,
     TextureCodecChoice,
     WgpuPresentMethodChoice,
+    normalize_image_rendering_backend_choice,
 )
 from arrayscope.display.backends.pyqtgraph import PyQtGraphSurface
 
@@ -101,21 +102,23 @@ def wgpu_texture_compression_likely(settings=None) -> bool:
 
 
 def _image_backend_choice_value(settings) -> str:
-    """The configured image-backend choice value, from ``settings`` or QSettings."""
+    """The configured image-backend choice value, from ``settings`` or QSettings.
+
+    Normalized (ADR 0061): a persisted retired choice reads as AUTO here too,
+    so the warm and CPU-kernel decisions migrate with the startup path instead
+    of treating the stale string as an explicit non-wgpu pin.
+    """
 
     choice = getattr(settings, "image_rendering_backend", None)
-    if choice is not None:
-        return getattr(choice, "value", choice)
-    # No settings object at file-open time: read the persisted choice directly.
-    with contextlib.suppress(Exception):
-        from pyqtgraph.Qt import QtCore
+    if choice is None:
+        # No settings object at file-open time: read the persisted choice directly.
+        with contextlib.suppress(Exception):
+            from pyqtgraph.Qt import QtCore
 
-        return str(
-            QtCore.QSettings().value(
+            choice = QtCore.QSettings().value(
                 "image_rendering_backend", ImageRenderingBackendChoice.AUTO.value
             )
-        )
-    return ImageRenderingBackendChoice.AUTO.value
+    return normalize_image_rendering_backend_choice(getattr(choice, "value", choice)).value
 
 
 def _warm_wgpu_backend() -> None:

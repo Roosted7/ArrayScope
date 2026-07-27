@@ -245,14 +245,23 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, backend):
         assert int(getattr(win.renderer, "_frame_session_reuses", 0)) >= 1
 
         # An explicit forced flush may drain pending level refinement once;
-        # the steady state after it must be a true no-op — the backend's
-        # upload record does not change again.
+        # the steady state after it must be a true no-op.  The two maintained
+        # backends SAY that differently, so assert the work, not the record:
+        # PyQtGraph leaves its upload record untouched (nothing to report),
+        # while the page-table backend republishes level/histogram metadata
+        # and therefore mints a fresh record that carries zero work.  Record
+        # identity alone was the retired backend's phrasing of this and is
+        # not the contract.
         win.renderer.commit_frame_session_presentation(win.renderer._frame_session)
         drained_timing = win.img_view.lastImageUploadTiming()
         win.renderer.commit_frame_session_presentation(win.renderer._frame_session)
         settled_timing = win.img_view.lastImageUploadTiming()
 
-        assert settled_timing is drained_timing
+        if settled_timing is not drained_timing:
+            assert settled_timing.tile_layer_texture_uploads == 0
+            assert settled_timing.tile_layer_texture_upload_bytes == 0
+            assert settled_timing.tile_layer_items_updated == 0
+            assert settled_timing.tile_layer_level_updates == 0
         assert _backend_residency_snapshot(win, backend) == first_residency
         assert settled_timing.tile_layer_visible_items == len(first_residency)
     finally:

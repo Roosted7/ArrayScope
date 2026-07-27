@@ -260,7 +260,7 @@ def cpu_reference_tile_image(payload, mapping, *, values=None) -> tuple[np.ndarr
     if kind == "phase_vector":
         # Mode 5: reduced circular-mean pages — hue from phase, intensity is
         # the resultant magnitude already in [0, 1]; levels bypassed
-        # (tiles.py fragment shader, phase_vector branch).
+        # (``map_value``'s ``phase_vector`` branch in gpu/wgpu_executor.py).
         color, _magnitude = apply_phase_lut(values, mapping.lut_data)
         intensity = np.clip(np.abs(values).astype(np.float32), 0.0, 1.0)
         rgb = np.clip(color.astype(np.float32) * intensity[..., np.newaxis], 0.0, 255.0).astype(

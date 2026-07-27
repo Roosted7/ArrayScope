@@ -207,6 +207,33 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   `display_tile_key`) and parity + fallback are pinned in
   `tests/operations/test_cache.py`. The runtime guard and counter stay until
   a release cycle shows the counter at zero.
+- **WGPU retarget-mapping stall on a channel change — two strict xfails, ADR 0061
+  follow-up (2026-07-27).** Migrating the retired backend's coverage to WGPU
+  exposed a stall with no owner (ground rule 11). Retargeting a `COMPLEX_RG32F`
+  payload to display mode `'scalar'` makes `WgpuImageView2D.tiledPayloadResident`
+  raise `NotImplementedError` out of `_wgpu_commit_plan`; `frame_session.
+  _free_retarget_tiles` calls it as a **predicate**, so the throw aborts the whole
+  commit, `handle_ui_exception` swallows it, and the session is left with every
+  tile dirty, **zero** active requests and no event that can resume it (verified
+  stuck for 30 s, not slow). Pre-existing WGPU defect — this branch only made it
+  visible. **Guarding the predicate alone is measured NOT sufficient**, so the
+  real owner is the retarget path that mints a payload whose texture
+  representation and requested display mode disagree. Both cells pass on
+  PyQtGraph. Pinned by `tests/ui/test_montage_interactions.py::
+  test_semantic_montage_transition_never_leaves_old_tiles_visible`
+  (`channel-real-wgpu`, `complex-mode-wgpu`), `strict=True` so the fix un-xfails
+  itself. Watch `render/effects.py:696`'s `ComplexWarning` while fixing.
+- **WGPU hidden-ROI overlay never fires on a tiled single image — one strict
+  xfail, ADR 0061 follow-up (2026-07-27).** With the inspection dock hidden, the
+  floating ROI stats panel never appears on WGPU for a tiled **single-image**
+  frame. Measured to be the **trigger, not the computation**:
+  `_hidden_roi_statistics` returns a row and `_committed_tiled_frame()` is
+  non-None on WGPU, yet `setRoiInfoRows` is never called, so `_roi_info_panel`
+  stays `None` after 240 event pumps *and* after invoking
+  `_refresh_hidden_roi_overlay_from_committed_frame` by hand. The montage twin
+  and the PyQtGraph twin both pass, which bounds the gap to the tiled
+  single-image WGPU path. Pinned by `tests/ui/test_roi_inspection_interactions.py::
+  test_wgpu_hidden_inspection_panel_uses_tiled_frame_payloads` (`strict=True`).
 - **R8 continuity gate vs document-changing stages (adjudication needed).**
   With the fill stall and entry blackout fixed, `profile_montage_workflow`'s
   `fft_full_tiled_montage` historically failed `presentation_continuity` on

@@ -160,7 +160,7 @@ class Harness:
         assert not parked_active, f"parked tiles inside active scope: {sorted(parked_active)}"
         # Semantic-vs-physical agreement: every active payload identity must be
         # the identity acknowledged by the maintained backend's physical row.
-        from arrayscope.display.model.frame import tile_ack_identity
+        from arrayscope.display.model.tile_identity import tile_ack_identity
 
         rows = self.win.img_view.tileTruthPhysicalRows()
         for tile in active:
@@ -170,13 +170,27 @@ class Harness:
             assert rows[tile]["physical_acknowledged_identity"] == tile_ack_identity(payload)
 
     def assert_visual_mapping_matches_residency(self) -> None:
-        """Every physically drawn tile must resolve all named resident pages."""
+        """Every physically drawn tile must resolve all named resident pages.
 
+        Page bindings are the page-table backend's mechanism: WGPU names one
+        per drawn tile, while PyQtGraph draws ImageItems and only reports
+        bindings on the opt-in resident-LOD page route.  Requiring them
+        unconditionally would assert a mechanism the CPU backend does not use;
+        requiring nothing would let an unresolved binding pass.  So: demand
+        bindings where the backend binds pages, and validate every binding that
+        is reported on either backend.
+        """
+
+        from arrayscope.display.backend_contract import image_view_backend_capabilities
+
+        capabilities = image_view_backend_capabilities(self.win.img_view)
+        page_backed = str(capabilities.tile_residency_kind) == "gpu_atlas"
         rows = self.win.img_view.tileTruthPhysicalRows()
         for tile, row in rows.items():
             bindings = tuple(row.get("physical_page_bindings", ()) or ())
-            assert bindings, f"tile {tile} has no physical page bindings"
-            assert all(binding.get("actual_key") is not None for binding in bindings)
+            assert bindings or not page_backed, f"tile {tile} has no physical page bindings"
+            unresolved = [binding for binding in bindings if binding.get("actual_key") is None]
+            assert not unresolved, f"tile {tile} has unresolved page bindings: {unresolved}"
 
     def prepare_image_layer_pixel_sampling(self) -> None:
         """Hide independent composition overlays before sampling image pixels.
