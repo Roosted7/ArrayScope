@@ -849,23 +849,16 @@ class LevelStatsService:
         progress = getattr(session, "semantic_level_evidence_progress", None)
         if target is None or progress is None or progress.inflight_generation is not None:
             return
-        # A CPU-windowed preview needs one honest refined seed before its
-        # first atlas can choose levels, but the remaining full-population
-        # sweep is refinement. Letting every continuation retain
-        # DISPLAY_PREVIEW/INTERACTIVE priority made those source scans run
-        # alongside the already-ready shared preview batch and delayed its
-        # only worker task by hundreds of milliseconds. Once one blocking
-        # batch covers the provisional level source, hold the continuation
-        # until the acknowledged preview closes COVERAGE.
-        preview_seeded = bool(
-            session.scheduling_policy.verdict.coverage_open
-            and str(getattr(session, "first_pass_quality", "") or "") == "preview"
-            and len(progress.covered_sources)
-            >= min(int(target.target_population), int(target.blocking_batch_limit))
-        )
-        if preview_seeded:
-            progress.blocking_reason = "preview-coverage-seeded"
-            return
+        # This sweep used to pause after one seed batch whenever preview
+        # coverage was open, to keep its continuations off the workers the
+        # shared preview batch wanted. That bought ~0.17 s of T1 by holding
+        # the montage at seed-batch levels for the WHOLE fill: every tile
+        # drawn during coverage was windowed against a fraction of the
+        # population, and the levels only converged after the last pass had
+        # already been presented. Displaying tiles under levels that do not
+        # cover them is the defect, not the cost of avoiding it -- the
+        # contention is a scheduling problem and is repaid by sourcing this
+        # evidence from the preview cohort, not by deferring it.
         progress.current_batch_limit = self._semantic_level_evidence_batch_limit(session, target)
         if len(progress.covered_sources) >= target.target_population:
             progress.blocking_reason = "ready"

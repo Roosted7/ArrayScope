@@ -341,7 +341,19 @@ def test_semantic_evidence_diagnostics_are_constant_time_progress_truth():
     assert service._semantic_level_evidence_last_merged == 16
 
 
-def test_preview_coverage_pauses_semantic_sweep_after_one_level_seed():
+def test_open_preview_coverage_never_parks_the_semantic_sweep_mid_population():
+    """An open preview must not freeze levels evidence at its seed batch.
+
+    Tiles are presented THROUGHOUT coverage. If the sweep parks after its
+    first batch and only resumes once the acknowledged preview closes
+    coverage, every tile drawn in between is windowed against a fraction of
+    the population and the levels converge only after the last pass is
+    already on screen -- which is the user-visible "levels update after all
+    rendering passes" defect. The sweep must keep converging while coverage
+    is open, so the levels the montage draws with are always catching up to
+    the tiles it has drawn rather than waiting for them to finish.
+    """
+
     data = np.arange(12 * 16 * 20, dtype=np.float32).reshape(12, 16, 20)
     session = _session(data)
     session.first_pass_quality = "preview"
@@ -354,15 +366,10 @@ def test_preview_coverage_pauses_semantic_sweep_after_one_level_seed():
     progress = session.semantic_level_evidence_progress
     assert first["max_items"] == 16
     assert len(progress.covered_sources) == 16
-    assert progress.blocking_reason == "preview-coverage-seeded"
-    assert kernel.tasks == []
+    # Still inside COVERAGE: a continuation must already be armed.
+    assert progress.blocking_reason != "preview-coverage-seeded"
+    assert kernel.tasks, "semantic sweep parked while preview coverage was open"
 
-    _close_coverage_phase(session)
-    session.display_committed = True
-    service._schedule_semantic_level_evidence(session)
-
-    assert len(kernel.tasks) == 1
-    assert kernel.tasks[0]["lane"] == Lane.HISTOGRAM_REFINEMENT
     while kernel.tasks:
         kernel.run_next()
 

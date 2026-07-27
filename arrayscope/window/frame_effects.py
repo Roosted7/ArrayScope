@@ -2869,10 +2869,11 @@ class FramePipelineEffects:
         )
         session.display_committed = bool(session.lifecycle.presented_tiles)
         if phase_closed:
-            # CPU-windowed preview admission intentionally pauses semantic
-            # evidence after one provisional level batch. The physical ACK is
-            # the edge that turns the rest into histogram refinement, so wake
-            # that owner here instead of letting it compete with preview.
+            # Coverage close reclassifies any remaining evidence batches from
+            # coverage work to refinement, which changes the lane they are
+            # admitted on. Re-arm the owner on that edge so the reclassified
+            # remainder is scheduled promptly; the sweep is never parked
+            # waiting for this edge, it only changes lanes across it.
             renderer._schedule_semantic_level_evidence(session)
         semantic_progress = getattr(session, "semantic_level_evidence_progress", None)
         semantic_evidence_waiting = bool(
