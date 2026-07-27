@@ -374,8 +374,6 @@ def test_inspection_roi_tools_create_stats_and_histogram_artifacts(qt_app):
 
 
 def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
-    from pyqtgraph.Qt import QtCore
-
     _clear_arrayscope_settings()
 
     from arrayscope.window import ArrayScopeWindow
@@ -424,8 +422,6 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
 
         win.dimension_strip.chip(2).slice_edit.setText(":")
         win._on_slice_text_changed(2, ":")
-        QtCore.QThread.msleep(80)
-        _process_events(qt_app, count=30)
 
         assert win.view_state.montage_axis == 2
         # ":" selects every index, which canonicalizes to the unselected
@@ -434,8 +430,12 @@ def test_multi_profile_phase_strip_and_montage_artifacts(qt_app):
         assert win.view_state.montage_indices is None
         assert win.view_state.montage_text is None
         assert win.dimension_strip.chip(2).slice_edit.text() == ":"
-        assert win.img_view.image is not None
-        assert max(win.img_view.image.shape[:2]) > data.shape[1]
+        assert _wait_until(
+            qt_app,
+            lambda: bool(
+                win.img_view.image is not None and max(win.img_view.image.shape[:2]) > data.shape[1]
+            ),
+        )
 
         win.widgets["buttons"]["display"]["live_profile"].setChecked(True)
         win.set_profile_axis(1)
