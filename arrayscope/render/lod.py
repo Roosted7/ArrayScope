@@ -34,6 +34,7 @@ from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,
     LOD_POLICY_RESIDENT,
     LOD_REASON_NATIVE_POLICY,
+    LodDemand,
     LodInfo,
     choose_resident_level,
     factor_xy_for_level,
@@ -63,9 +64,42 @@ from arrayscope.gpu.keys import (
     SCALAR_R32F,
 )
 from arrayscope.presentation import ClaimOwner, LevelPhase
-from arrayscope.render.ladder import coarse_rung_level
 
 PREVIEW_FLOOR_MIN_LEVEL = 4
+PREVIEW_MIN_LEVEL_DELTA = 2
+PREVIEW_MIN_SCREEN_PIXELS_PER_TEXEL = 3.0
+PREVIEW_MAX_SCREEN_PIXELS_PER_TEXEL = 6.0
+
+
+def round_preview_level(
+    *,
+    demand: LodDemand,
+    retention_level: int,
+) -> int:
+    """Choose the one preview floor for a round from viewport demand.
+
+    Two LOD levels are four times coarser per axis and sixteen times fewer
+    texels. Within that policy, the preview texel footprint follows the
+    continuous viewport scale: one preview texel spans 3–6 screen pixels on
+    the dominant axis. A retained level is reusable only while it stays inside
+    that screen-space ceiling; tile count and tile-local state never decide
+    the round floor.
+    """
+
+    desired = max(0, int(demand.desired_level))
+    retention = max(0, int(retention_level))
+    level = desired + PREVIEW_MIN_LEVEL_DELTA
+    source_texels_per_pixel = max(
+        (float(value) for value in demand.source_texels_per_pixel_xy),
+        default=0.0,
+    )
+    if source_texels_per_pixel > 0.0:
+        while (2**level) / source_texels_per_pixel < PREVIEW_MIN_SCREEN_PIXELS_PER_TEXEL:
+            level += 1
+        retention_footprint = (2**retention) / source_texels_per_pixel
+        if retention > level and retention_footprint <= PREVIEW_MAX_SCREEN_PIXELS_PER_TEXEL:
+            level = retention
+    return level
 
 
 def canonical_source_tile_shape(session) -> tuple[int, ...]:
@@ -595,7 +629,7 @@ def selected_lod_factor(session) -> int:
             or 0
         )
         if base_preview > 0:
-            session.lod_preview_level = coarse_rung_level(
+            session.lod_preview_level = round_preview_level(
                 demand=session.lod_policy_decision.demand,
                 retention_level=base_preview,
             )

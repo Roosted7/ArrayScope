@@ -222,14 +222,14 @@ The binding assignment:
 | Load shedding (R6) | scheduler | per round |
 | Baking or binding levels into pixels | backend adapter | per tile, **reads** the round value |
 
-Two specific altitude errors are in scope for the recovery work:
+One preview-floor altitude repair has landed; one levels error remains in scope:
 
-- **Too low.** The preview level is currently computed per tile inside the
-  ladder's `plan()`, from that tile's own demand and retention. A round-level
-  property is being decided tile by tile. It must be lifted to the round planner
-  and passed down. Note the ladder still decides, per tile, whether that tile is
-  *skipped* — that is correctly per-tile work (R2), and it must read the round's
-  floors rather than re-derive them.
+- **Preview floor — repaired.** `render.lod.selected_lod_factor()` chooses the
+  preview floor from the round demand, stores that one value on the session,
+  and the frame runtime passes it through the pipeline to `LodLadder.plan()`.
+  The ladder still decides, per tile, whether that tile is *skipped* — that is
+  correctly per-tile work (R2) — but evaluation and rung planning now read the
+  round floor unchanged rather than re-deriving it.
 - **Too low.** The round levels are currently resolved by a batched sweep over
   *source slabs*, two at a time, running beside the tile pipeline and competing
   with it for workers. A single round-scoped value is being assembled from

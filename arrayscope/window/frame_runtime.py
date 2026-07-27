@@ -384,10 +384,10 @@ class FrameRuntimeMixin:
         intent = self._montage_render_intent(session)
         scope = self._lod_admission_scope(session, intent)
         pipeline = self._frame_pipeline_for_session(session)
-        # The pipeline object survives camera retargets, while the effective
-        # preview level is recomputed from each new target demand. Refresh the
-        # ladder's retention input before every plan so scheduling, evaluation,
-        # residency and prefetch all consume the same session-owned level.
+        # The pipeline object survives camera retargets, while
+        # selected_lod_factor() chooses one preview floor for each new round.
+        # Copy that round-owned value into the ladder policy before planning;
+        # the ladder may decide per-tile skips, but must never derive the floor.
         ladder_policy = getattr(getattr(pipeline, "ladder", None), "policy", None)
         if ladder_policy is not None:
             pipeline.ladder.policy = replace(

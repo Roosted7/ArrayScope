@@ -215,7 +215,13 @@ class FramePipeline:
                     int(state.tile_number): int(state.scheduling_rank) for state in states
                 },
             )
-        steps = self.ladder.plan(states, demand, verdict)
+        preview_level = max(0, int(self.ladder.policy.floor_level))
+        steps = self.ladder.plan(
+            states,
+            demand,
+            verdict,
+            preview_level=preview_level,
+        )
         self.last_plan_states = tuple(
             (
                 int(state.tile_number),

@@ -238,7 +238,7 @@ def test_any_missing_preview_blocks_every_target_rung_until_coverage_closes():
     drain(kernel)
 
     assert submitted == 1
-    assert effects.evaluated == [(1, int(Rung.FLOOR), 3)]
+    assert effects.evaluated == [(1, int(Rung.FLOOR), 4)]
     assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
     effects.states[1] = TileLodState(
@@ -354,7 +354,7 @@ def test_interactive_native_demand_defers_cold_native_until_noninteractive_repla
 
     # Native demand plans FLOOR then DESIRED(0); DESIRED waits until the
     # first-pixel rung has had a chance to present.
-    assert effects.evaluated == [(0, 0, 2)]
+    assert effects.evaluated == [(0, 0, 4)]
     assert effects.scheduling_verdict().phase is SchedulingPhase.COVERAGE
 
     effects.states[0] = TileLodState(

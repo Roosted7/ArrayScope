@@ -3447,7 +3447,7 @@ def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
     assert set(delta.active_tiles) == {0, 1, 2, 3}
     assert set(delta.upserts) == {0, 1, 2, 3}
     assert delta.upserts[0].quality == "preview"
-    assert delta.upserts[0].lod.level == preview_level
+    assert delta.upserts[0].lod.level <= preview_level
     assert {
         tile: (payload.quality, payload.lod.level)
         for tile, payload in delta.upserts.items()

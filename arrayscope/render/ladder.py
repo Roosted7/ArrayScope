@@ -15,10 +15,9 @@ steps into kernel tasks and lifecycle claims.
 
 Rungs (roadmap "unified LOD ladder", ADR 0050/0052/0059 lineage):
 
-    FLOOR    the one coarse preview rung. This branch currently derives its
-             level from demand and retention inside the per-tile ladder; the
-             progressive-render contract requires that choice to move to the
-             round planner. It evaluates reduced display input when available.
+    FLOOR    the one coarse preview rung. Its level is chosen once by the
+             round planner and passed into this per-tile ladder. It evaluates
+             reduced display input when available.
     DESIRED  refinement to the demanded display level.
     EXACT    native resolution. Exact inspection values are ALWAYS computed
              from native data regardless of displayed rung (policy
@@ -46,39 +45,6 @@ from arrayscope.kernel.task import Lane, Priority
 from arrayscope.render.progressive_scheduling import SchedulingVerdict
 
 COARSE_RUNG_ENABLED_DEFAULT = True
-COARSE_RUNG_MIN_LEVEL_DELTA = 2
-COARSE_RUNG_MIN_SCREEN_PIXELS_PER_TEXEL = 3.0
-COARSE_RUNG_MAX_SCREEN_PIXELS_PER_TEXEL = 6.0
-
-
-def coarse_rung_level(
-    *,
-    demand: LodDemand,
-    retention_level: int,
-) -> int:
-    """Return this branch's preview level from screen scale and target quality.
-
-    Two LOD levels are four times coarser per axis and sixteen times fewer
-    texels. Within that current policy, the preview texel footprint follows the
-    continuous viewport scale: one preview texel spans 3–6 screen pixels on
-    the dominant axis. A retained level is only reusable when it remains
-    inside that screen-space ceiling; tile count never decides image quality.
-    """
-
-    desired = max(0, int(demand.desired_level))
-    retention = max(0, int(retention_level))
-    level = desired + COARSE_RUNG_MIN_LEVEL_DELTA
-    source_texels_per_pixel = max(
-        (float(value) for value in demand.source_texels_per_pixel_xy),
-        default=0.0,
-    )
-    if source_texels_per_pixel > 0.0:
-        while (2**level) / source_texels_per_pixel < COARSE_RUNG_MIN_SCREEN_PIXELS_PER_TEXEL:
-            level += 1
-        retention_footprint = (2**retention) / source_texels_per_pixel
-        if retention > level and retention_footprint <= COARSE_RUNG_MAX_SCREEN_PIXELS_PER_TEXEL:
-            level = retention
-    return level
 
 
 class Rung(IntEnum):
@@ -130,7 +96,7 @@ class RungStep:
 
 @dataclass(frozen=True)
 class LadderPolicy:
-    """Tunable ladder policy. Defaults follow ADR 0050 + Plan 04/05 landings.
+    """Tunable ladder policy plus the round-owned preview floor it reads.
 
     TODO(redesign R3): re-derive coarse-level bounds and the DESIRED
     priority from fresh A/B evidence (roadmap X5 queue item 2) before
@@ -209,10 +175,15 @@ class LodLadder:
         state: TileLodState,
         demand: LodDemand,
         verdict: SchedulingVerdict | None = None,
+        *,
+        preview_level: int | None = None,
     ) -> tuple[RungStep, ...]:
         """Return the ordered steps ``state`` still needs to satisfy ``demand``.
 
-        An empty result means the tile is converged for this demand.
+        ``preview_level`` is the round planner's value. Direct unit callers may
+        omit it and use the already-configured policy value; the live pipeline
+        always passes the round value explicitly. An empty result means the
+        tile is converged for this demand.
         """
 
         policy = self.policy
@@ -264,9 +235,9 @@ class LodLadder:
         # The admission predicate permits genuinely tile-local pipelines and
         # montage-axis expansions whose identical reduced region is backed by
         # one cacheable real-document stage.
-        preview_level = coarse_rung_level(
-            demand=demand,
-            retention_level=policy.floor_level,
+        preview_level = max(
+            0,
+            int(policy.floor_level if preview_level is None else preview_level),
         )
         preview_target_has_finer_followup = preview_level > desired
         cheap_pre_native = (
@@ -372,15 +343,26 @@ class LodLadder:
         states,
         demand: LodDemand,
         verdict: SchedulingVerdict | None = None,
+        *,
+        preview_level: int | None = None,
     ) -> tuple[RungStep, ...]:
         """Plan every tile, coarse rungs across tiles before fine rungs.
 
         Cross-tile ordering matters for perceived progress: every visible
         tile should reach FLOOR before any tile spends budget on
-        DESIRED/EXACT (Plan 05 floor-first-fill, generalized).
+        DESIRED/EXACT (Plan 05 floor-first-fill, generalized). The caller's
+        one round preview floor is forwarded unchanged to every tile.
         """
 
-        per_tile = [self.plan_tile(state, demand, verdict) for state in states]
+        per_tile = [
+            self.plan_tile(
+                state,
+                demand,
+                verdict,
+                preview_level=(self.policy.floor_level if preview_level is None else preview_level),
+            )
+            for state in states
+        ]
         ordered: list[RungStep] = []
         for rung in Rung:
             for steps in per_tile:
@@ -415,9 +397,6 @@ __all__ = [
     "COARSE_RUNG_DISABLED",
     "COARSE_RUNG_ENABLED_DEFAULT",
     "COARSE_RUNG_LANE_NOT_ADMITTED",
-    "COARSE_RUNG_MAX_SCREEN_PIXELS_PER_TEXEL",
-    "COARSE_RUNG_MIN_LEVEL_DELTA",
-    "COARSE_RUNG_MIN_SCREEN_PIXELS_PER_TEXEL",
     "COARSE_RUNG_NATIVE_ONLY",
     "COARSE_RUNG_NO_REDUCED_INPUT",
     "COARSE_RUNG_PLANNED",
@@ -427,5 +406,4 @@ __all__ = [
     "Rung",
     "RungStep",
     "TileLodState",
-    "coarse_rung_level",
 ]

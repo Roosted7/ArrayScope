@@ -72,7 +72,7 @@ from arrayscope.operations.source_read import read_base_region
 from arrayscope.operations.stage_cache import StageValue
 from arrayscope.presentation import LevelPhase
 from arrayscope.render import lod as render_lod
-from arrayscope.render.ladder import TileLodState, coarse_rung_level
+from arrayscope.render.ladder import TileLodState
 
 SHARED_PREVIEW_ROUTE = ("shared-transform-preview", 1, "sample-display-axes-before-operations")
 
@@ -1185,11 +1185,10 @@ def preview_pipeline_is_tile_local(session, tile) -> bool:
 
 
 def preview_evaluation_level(session, demand) -> int:
-    preview = int(getattr(session, "lod_preview_level", 0) or 0)
-    return coarse_rung_level(
-        demand=demand,
-        retention_level=preview,
-    )
+    """Read the preview floor already chosen by the round planner."""
+
+    del demand
+    return max(0, int(getattr(session, "lod_preview_level", 0) or 0))
 
 
 def read_reduced_preview_base_and_state(

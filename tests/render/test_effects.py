@@ -562,9 +562,9 @@ def test_shared_preview_uses_the_same_source_alignment_owner_as_per_tile(monkeyp
     assert observed == [True, False]
 
 
-def test_shared_preview_stays_two_levels_coarser_than_demanded_lod():
+def test_shared_preview_uses_round_owned_floor_unchanged():
     session = _session()
-    session.lod_preview_level = 1
+    session.lod_preview_level = 3
     demand = _demand(1)
     tiles = session.plan.tiles[:2]
 
@@ -582,7 +582,7 @@ def test_shared_preview_stays_two_levels_coarser_than_demanded_lod():
     assert {row[1].level_xy for row in previews} == {(3, 3)}
 
 
-def test_full_montage_preview_keeps_spatial_content_at_live_screen_scale():
+def test_full_montage_preview_uses_screen_scale_floor_chosen_for_round():
     height = width = 336
     y, x = np.indices((height, width), dtype=np.float32)
     data = np.stack(tuple(y * 1000.0 + x + offset for offset in (0.0, 1.0, 2.0)), axis=2)
@@ -595,6 +595,7 @@ def test_full_montage_preview_keeps_spatial_content_at_live_screen_scale():
         source_texels_per_pixel_xy=(7.58, 7.58),
         reason="captured 272-tile montage scale",
     )
+    session.lod_preview_level = 5
 
     previews = effects.evaluate_shared_preview(
         session,
@@ -1189,6 +1190,7 @@ def test_tile_lod_states_reads_page_cache_and_preview_floor_residency():
         ),
     )
     session.rendered_tiles[int(tile.montage_index)] = rendered
+    session.lod_preview_level = 3
     preview_level = effects.preview_evaluation_level(session, demand)
     assert preview_level == 3
     level_key = effects.render_lod.page_set_key_for(
