@@ -412,47 +412,6 @@ class FramePipelineEffects:
 
         return evaluate_target
 
-    def evaluate_preview_batch(self, intent, steps):
-        """Return one worker callable for a complete coarse montage scope."""
-
-        if not self._session_is_current(intent):
-            return lambda _token=None: ()
-        session = self.session
-        rows = []
-        for step in tuple(steps or ()):
-            if step.rung != Rung.FLOOR:
-                return lambda _token=None: ()
-            tile = self._tile_for_step(step)
-            if tile is None:
-                return lambda _token=None: ()
-            rows.append((step, tile))
-        if not rows:
-            return lambda _token=None: ()
-        levels = {int(step.level) for step, _tile in rows}
-        if len(levels) != 1:
-            return lambda _token=None: ()
-        demand = getattr(getattr(session, "lod_policy_decision", None), "demand", None)
-        tiles = tuple(tile for _step, tile in rows)
-        seed = tiles[0]
-        level = levels.pop()
-
-        def evaluate_batch(token=None):
-            return render_effects.evaluate_shared_preview(
-                session,
-                seed,
-                tiles,
-                demand=demand,
-                level=level,
-                cancellation_token=token,
-                shader_display=bool(getattr(session, "shader_display", False)),
-                evaluation_context=self.renderer.win._evaluation_context(
-                    ComputeLane.MONTAGE_TILE,
-                    token,
-                ),
-            )
-
-        return evaluate_batch
-
     def tile_states(self, intent, demand, scope: LodAdmissionScope):
         if not self._session_is_current(intent):
             return ()
@@ -1202,47 +1161,6 @@ class FramePipelineEffects:
         replan_needed = self._admit_ready_payloads(batch.upserts)
         if not self._session_is_current():
             return
-        verdict = self.session.scheduling_policy.verdict
-        batch_steps = tuple(
-            row[0] for row in tuple(batch.upserts or ()) if isinstance(row, tuple) and len(row) == 2
-        )
-        batch_tiles = tuple(int(step.tile_number) for step in batch_steps)
-        required = tuple(int(tile) for tile in verdict.required_tiles)
-        batch_tile_set = set(batch_tiles)
-        required_tile_set = set(required)
-        retained_tiles = tuple(sorted(required_tile_set - batch_tile_set))
-        retained_covered = self.session.lifecycle.first_pixels_presented(retained_tiles)
-        if (
-            bool(verdict.coverage_open)
-            and batch_steps
-            and all(step.rung == Rung.FLOOR for step in batch_steps)
-            and len(batch_tiles) == len(set(batch_tiles))
-            and batch_tile_set <= required_tile_set
-            and batch_tile_set | set(retained_tiles) == required_tile_set
-            and retained_covered
-            and all(
-                str(getattr(self.session.display_tile_payloads.get(int(tile)), "quality", "") or "")
-                in {"preview", "fallback"}
-                for tile in batch_tiles
-            )
-            and all(
-                self.session.first_pass_accepts_quality(
-                    str(
-                        getattr(
-                            self.session.display_tile_payloads.get(int(tile)),
-                            "quality",
-                            "",
-                        )
-                        or ""
-                    )
-                )
-                for tile in retained_tiles
-            )
-        ):
-            self.session.aggregate_preview_transaction = (
-                int(verdict.generation),
-                tuple(sorted(required)),
-            )
         if replan_needed:
             # A reduced rung can complete after a newer viewport demand has
             # made its payload inadmissible. Releasing its lifecycle claim is
@@ -1869,8 +1787,14 @@ class FramePipelineEffects:
                         tile_source_ids,
                         tile_numbers=tuple(session.dirty_payloads),
                     )
-                    if reuse_any_lod:
-                        session.mark_ladder_swaps_for_viewport()
+                    # The pipeline retarget already owns the round's LOD
+                    # decision and swap obligations. Re-running the complete
+                    # 272-tile ladder scan inside the first presentation
+                    # callback made a one-item governed target delta take
+                    # 100+ ms before backend admission. Seed only; subsequent
+                    # governed continuations consume the obligations already
+                    # published by the retarget owner.
+            payload_seed_done = perf_counter()
             base_tile_state = session.tile_presentation_state
             fast_drain = persistent_tile_layer_fast_drain_enabled(renderer, session)
             renderer._persistent_tile_layer_fast_drain_last_enabled = bool(fast_drain)
@@ -1883,6 +1807,29 @@ class FramePipelineEffects:
                 capabilities,
                 pending=atomic_successor_pending,
             )
+            limits = tile_layer_upsert_limits(renderer, session)
+            if cpu_atomic_successor or shader_atomic_successor:
+                # Hidden warming bounds GPU uploads; the eventual source-slot
+                # handoff itself is one complete transaction and must not be
+                # built once under the upload cap and then rebuilt unbounded.
+                limits = {}
+            renderer._last_montage_commit_max_upserts = int(
+                dict(limits or {}).get("max_upserts", 0) or 0
+            )
+            renderer._last_montage_commit_unbounded_reason = (
+                "atomic_successor"
+                if cpu_atomic_successor or shader_atomic_successor
+                else "first_cpu_frame"
+                if not bool(getattr(session, "shader_display", False))
+                and not bool(getattr(session, "display_committed", False))
+                else ""
+            )
+            cold_deadline_ms = None
+            renderer._last_montage_pass_budget_ms = None
+            if limits:
+                limits = dict(limits)
+                cold_deadline_ms = limits.pop("cold_deadline_ms", None)
+                renderer._last_montage_pass_budget_ms = limits.pop("pass_budget_ms", None)
             cpu_backend = not bool(capabilities.shader_windowing)
             renderer._last_montage_atomic_successor_pending_before = bool(atomic_successor_pending)
             renderer._last_montage_shader_atomic_successor = bool(shader_atomic_successor)
@@ -1932,7 +1879,11 @@ class FramePipelineEffects:
                 # same acknowledged generation. Register the provisional
                 # source before building the delta, then rebind the current
                 # wrappers without rebuilding or re-uploading pixels.
-                current_level_source = shader_commit_level_source(renderer, session)
+                current_level_source = shader_commit_level_source(
+                    renderer,
+                    session,
+                    rehydrate_max_count=dict(limits or {}).get("max_upserts"),
+                )
                 if current_level_source is not None:
                     current_level_source = (
                         WindowLevelController()
@@ -1967,28 +1918,22 @@ class FramePipelineEffects:
                         source=current_level_source,
                     )
                 if current_levels is not None:
-                    session.bind_payloads_to_level_generation()
-            limits = tile_layer_upsert_limits(renderer, session)
-            if cpu_atomic_successor or shader_atomic_successor:
-                # Hidden warming bounds GPU uploads; the eventual source-slot
-                # handoff itself is one complete transaction and must not be
-                # built once under the upload cap and then rebuilt unbounded.
-                limits = {}
-            renderer._last_montage_commit_max_upserts = int(
-                dict(limits or {}).get("max_upserts", 0) or 0
-            )
-            renderer._last_montage_commit_unbounded_reason = (
-                "atomic_successor"
-                if cpu_atomic_successor or shader_atomic_successor
-                else "first_cpu_frame"
-                if not bool(getattr(session, "shader_display", False))
-                and not bool(getattr(session, "display_committed", False))
-                else ""
-            )
-            cold_deadline_ms = None
-            if limits:
-                limits = dict(limits)
-                cold_deadline_ms = limits.pop("cold_deadline_ms", None)
+                    level_bind_tiles = tuple(
+                        dict.fromkeys(
+                            (
+                                *(int(tile) for tile in dirty_tiles),
+                                *(
+                                    int(tile)
+                                    for tile in getattr(session, "pending_payload_upserts", ())
+                                ),
+                            )
+                        )
+                    )
+                    session.bind_payloads_to_level_generation(
+                        level_bind_tiles,
+                        max_count=dict(limits or {}).get("max_upserts"),
+                    )
+            payload_level_done = perf_counter()
             renderer._last_montage_commit_dirty_before = len(
                 getattr(session, "dirty_payloads", ()) or ()
             )
@@ -2007,6 +1952,7 @@ class FramePipelineEffects:
             renderer._last_montage_atomic_prepared_reused = bool(prepared_atomic_current)
             renderer._last_montage_atomic_fast_built = False
             renderer._last_montage_atomic_fast_reject_reason = ""
+            payload_build_call_start = perf_counter()
             if prepared_atomic_current:
                 base_tile_state = prepared_atomic["base_tile_state"]
                 tile_state = prepared_atomic["tile_state"]
@@ -2032,8 +1978,11 @@ class FramePipelineEffects:
                     )
                     if cpu_atomic_successor or shader_atomic_successor:
                         tile_delta = replace(tile_delta, atomic_handoff=True)
+            payload_build_call_done = perf_counter()
             tile_delta = _priority_ordered_tile_delta(session, tile_delta)
+            payload_priority_done = perf_counter()
             active_payloads = tile_state.active_payloads(tile_delta)
+            payload_state_done = perf_counter()
             first_display_commit = not bool(session.display_committed)
             renderer._last_montage_commit_first_display = bool(first_display_commit)
             renderer._last_montage_commit_delta_upserts = len(tile_delta.upserts)
@@ -2223,6 +2172,24 @@ class FramePipelineEffects:
                 rendered_geometry, montage_tile_states=session.ensure_tile_states()
             )
             renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
+            renderer._last_montage_tile_payload_seed_ms = (
+                payload_seed_done - payload_start
+            ) * 1000.0
+            renderer._last_montage_tile_payload_level_ms = (
+                payload_level_done - payload_seed_done
+            ) * 1000.0
+            renderer._last_montage_tile_payload_state_ms = (
+                payload_state_done - payload_level_done
+            ) * 1000.0
+            renderer._last_montage_tile_payload_build_call_ms = (
+                payload_build_call_done - payload_build_call_start
+            ) * 1000.0
+            renderer._last_montage_tile_payload_priority_ms = (
+                payload_priority_done - payload_build_call_done
+            ) * 1000.0
+            renderer._last_montage_tile_payload_active_ms = (
+                payload_state_done - payload_priority_done
+            ) * 1000.0
             prepare_source_start = perf_counter()
             # A cold CPU-windowed first commit may window from a provisional
             # refined subset (first-batch acceptance in
@@ -2235,6 +2202,11 @@ class FramePipelineEffects:
             semantic_source = renderer._montage_level_source_for_session(
                 session,
                 allow_partial=bool(publish_metadata or first_cpu_commit_source),
+                rehydrate_max_count=(
+                    dict(limits or {}).get("max_upserts")
+                    if not bool(capabilities.shader_windowing)
+                    else 0
+                ),
             )
             renderer._last_montage_tile_prepare_source_ms = (
                 perf_counter() - prepare_source_start
@@ -3001,12 +2973,38 @@ class FramePipelineEffects:
         priority_ranks = dict(getattr(tile_delta, "priority_ranks", {}) or {})
         lod_decision = getattr(session, "lod_policy_decision", None)
         lod_demand = getattr(lod_decision, "demand", None)
+        chunk_qualities = {
+            str(getattr(payload, "quality", "exact") or "exact")
+            for payload in dict(getattr(tile_delta, "upserts", {}) or {}).values()
+        }
+        pass_kind = (
+            "preview"
+            if chunk_qualities and chunk_qualities <= {"preview", "fallback"}
+            else "target"
+            if chunk_qualities == {"exact"}
+            else "mixed"
+            if chunk_qualities
+            else "metadata"
+        )
+        renderer._last_montage_pass_kind = pass_kind
+        pass_chunk_budget_ms = getattr(renderer, "_last_montage_pass_budget_ms", None)
+        required_tiles = tuple(int(tile) for tile in session.required_tile_numbers())
+        pass_completed_atomically = bool(
+            pass_kind in {"preview", "target"}
+            and len(required_tiles) > 1
+            and {int(tile) for tile in tile_delta.upserts} == set(required_tiles)
+        )
         emit_trace(
             "commit_batch",
             phase="backend_complete",
             session_id=int(getattr(session, "session_id", 0) or 0),
             revision=int(getattr(tile_state, "revision", 0) or 0),
             elapsed_ms=float(renderer._last_montage_tile_commit_ms),
+            pass_kind=pass_kind,
+            pass_chunk_items=len(tuple(tile_delta.upserts)),
+            pass_chunk_budget_ms=pass_chunk_budget_ms,
+            pass_chunk_within_50ms=bool(renderer._last_montage_tile_commit_ms <= 50.0),
+            pass_completed_atomically=pass_completed_atomically,
             presented_tiles=tuple(getattr(report, "presented_tiles", ()) or ()),
             committed_upserts=tuple(getattr(report, "committed_upserts", ()) or ()),
             cold_upsert_tiles=tuple(sorted(getattr(report, "cold_upsert_tiles", ()) or ())),
@@ -3064,6 +3062,56 @@ class FramePipelineEffects:
             ),
             uploads=int(getattr(report, "texture_uploads", 0) or 0),
             upload_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
+            backend_cold_work_ms=float(getattr(report, "cold_work_ms", 0.0) or 0.0),
+            backend_visibility_work_ms=float(getattr(report, "visibility_work_ms", 0.0) or 0.0),
+            backend_total_ms=float(getattr(report, "total_ms", 0.0) or 0.0),
+            backend_storage_rebuilds=int(getattr(report, "storage_rebuilds", 0) or 0),
+            prepare_ms=float(getattr(renderer, "_last_montage_tile_prepare_apply_ms", 0.0) or 0.0),
+            payload_build_ms=float(
+                getattr(renderer, "_last_montage_tile_payload_build_ms", 0.0) or 0.0
+            ),
+            payload_seed_ms=float(
+                getattr(renderer, "_last_montage_tile_payload_seed_ms", 0.0) or 0.0
+            ),
+            payload_level_ms=float(
+                getattr(renderer, "_last_montage_tile_payload_level_ms", 0.0) or 0.0
+            ),
+            payload_state_ms=float(
+                getattr(renderer, "_last_montage_tile_payload_state_ms", 0.0) or 0.0
+            ),
+            payload_build_call_ms=float(
+                getattr(renderer, "_last_montage_tile_payload_build_call_ms", 0.0) or 0.0
+            ),
+            payload_priority_ms=float(
+                getattr(renderer, "_last_montage_tile_payload_priority_ms", 0.0) or 0.0
+            ),
+            payload_active_ms=float(
+                getattr(renderer, "_last_montage_tile_payload_active_ms", 0.0) or 0.0
+            ),
+            prepare_stats_ms=float(
+                getattr(renderer, "_last_montage_tile_prepare_stats_ms", 0.0) or 0.0
+            ),
+            prepare_metadata_ms=float(
+                getattr(renderer, "_last_montage_tile_prepare_metadata_ms", 0.0) or 0.0
+            ),
+            prepare_source_ms=float(
+                getattr(renderer, "_last_montage_tile_prepare_source_ms", 0.0) or 0.0
+            ),
+            prepare_histogram_ms=float(
+                getattr(renderer, "_last_montage_tile_prepare_histogram_ms", 0.0) or 0.0
+            ),
+            backend_apply_ms=float(
+                getattr(renderer, "_last_montage_tile_layer_apply_ms", 0.0) or 0.0
+            ),
+            acknowledge_ms=float(
+                getattr(renderer, "_last_montage_tile_acknowledge_ms", 0.0) or 0.0
+            ),
+            state_publish_ms=float(
+                getattr(renderer, "_last_montage_tile_state_publish_ms", 0.0) or 0.0
+            ),
+            geometry_sync_ms=float(
+                getattr(renderer, "_last_montage_tile_geometry_sync_ms", 0.0) or 0.0
+            ),
             resident_rebinds=int(getattr(report, "resident_rebinds", 0) or 0),
             binding_fast_path_commits=int(getattr(report, "binding_fast_path_commits", 0) or 0),
             binding_full_republications=int(getattr(report, "binding_full_republications", 0) or 0),
@@ -3238,6 +3286,34 @@ class FramePipelineEffects:
             commit_feedback_bytes,
             "presentation_upsert",
             backend_name,
+        )
+        # This is the exact channel ResourceGovernor.decide_commit_batch()
+        # consumes. Recording only the diagnostic aliases left the governor
+        # permanently at its cold-start maximum, so neither preview nor target
+        # chunks adapted after an over-budget presentation callback.
+        _observe_ui(
+            renderer,
+            "montage_present_total",
+            commit_feedback_ms,
+            processed_count,
+            commit_feedback_bytes,
+            "presentation_upsert",
+            backend_name,
+            details=details,
+        )
+        _observe_ui(
+            renderer,
+            (
+                "montage_render_pass_target"
+                if str(getattr(renderer, "_last_montage_pass_kind", "")) == "target"
+                else "montage_render_pass_preview"
+            ),
+            commit_feedback_ms,
+            max(1, int(getattr(renderer, "_last_montage_commit_delta_upserts", 0) or 0)),
+            commit_feedback_bytes,
+            "presentation_upsert",
+            backend_name,
+            details=details,
         )
         _observe_ui(
             renderer,
@@ -4070,7 +4146,7 @@ def session_requested_levels(session) -> tuple[float, float] | None:
     return normalize_bounds(getattr(session, "user_levels_override", None))
 
 
-def shader_commit_level_source(renderer, session):
+def shader_commit_level_source(renderer, session, *, rehydrate_max_count: int | None = None):
     """Select the level source a shader commit may offer the controller.
 
     Before the first-pass histogram publishes, bounded partial evidence is the
@@ -4093,6 +4169,7 @@ def shader_commit_level_source(renderer, session):
     current_level_source = renderer._montage_level_source_for_session(
         session,
         allow_partial=not published,
+        rehydrate_max_count=rehydrate_max_count,
     )
     if published:
         current_summary = renderer._montage_level_tracker().summary_for(session.level_key)
@@ -4461,28 +4538,6 @@ def persistent_gpu_tile_residency_backend(window, _session=None) -> bool:
     )
 
 
-def _idle_backlog_cohort(session, batch_limit: int) -> int:
-    """Fixed-cost-amortizing item cohort for idle commits with a deep backlog.
-
-    The tiled commit's measured cost is fixed-dominated: full-plan classify,
-    delta walk, acknowledgement, and state publication run once per commit
-    regardless of item count, while the marginal per-item upload cost is
-    small and separately byte-capped.  A latency-governed item clamp
-    therefore cannot shorten the callback; against a deep backlog it only
-    multiplies the fixed cost per remaining tile (the 272-tile cold fill at
-    4 items per turn outran its settlement budget).  Idle commits take a
-    cohort that amortizes the fixed cost; the interactive clamp and the
-    byte cap stay authoritative on their own axes.
-    """
-
-    backlog = len(getattr(session, "dirty_payloads", ()) or ()) + len(
-        getattr(session, "pending_payload_upserts", ()) or ()
-    )
-    if backlog > int(batch_limit):
-        return min(32, int(backlog))
-    return int(batch_limit)
-
-
 def tile_layer_upsert_limits(window, session) -> dict[str, object]:
     if persistent_gpu_tile_residency_backend(window, session):
         return _persistent_tile_upsert_limits(window, session)
@@ -4506,7 +4561,11 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
     ):
         return {}
     interactive = interactive_active(window)
-    decision = _commit_batch_decision(window, interactive=interactive)
+    decision = _commit_batch_decision(
+        window,
+        interactive=interactive,
+        pass_token=_render_pass_token(session),
+    )
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
     if batch_limit <= 0:
@@ -4516,69 +4575,19 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
             if feedback is None
             else int(feedback.batch_limit("tile_layer_commit", interactive=interactive))
         )
-    if interactive:
-        batch_limit = min(8, max(4, int(batch_limit)))
-    aggregate_preview = _complete_aggregate_preview_scope(window, session)
-    verdict = getattr(getattr(session, "scheduling_policy", None), "verdict", None)
-    refinement_cohort = bool(
-        not interactive
-        and bool(getattr(session, "display_committed", False))
-        and verdict is not None
-        and bool(getattr(verdict, "refinement_admissible", False))
-    )
-    if refinement_cohort:
-        # The target pass begins only after the first frame is complete. Its
-        # current 12-item feedback clamp repeated whole-scene publication 20+
-        # times even though 32 items measured within the same ~75-85 ms fixed
-        # transaction cost. Keep the incumbent 32-item bound, and remove only
-        # the inner cold-walk deadline that otherwise fragments that cohort.
-        # Active interactions retain the 4-8 item clamp above.
-        batch_limit = _idle_backlog_cohort(session, batch_limit)
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
-    if aggregate_preview is not None:
-        # The worker batch and scheduling verdict prove this is the complete
-        # current FLOOR set; the backend capability proves it becomes one
-        # physical aggregate. This marker does not prove the aggregate fits the
-        # contract's 50 ms bound; the current path nevertheless bypasses the
-        # ordinary per-ImageItem cap/deadline.
-        batch_limit = max(int(batch_limit), len(aggregate_preview))
     limits = {
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
-        "cold_deadline_ms": (
-            None
-            if refinement_cohort or aggregate_preview is not None
-            else presentation_upload_control_budget_ms(
-                window, "tile_layer_commit", decision, interactive=interactive
-            )
+        "pass_budget_ms": float(getattr(decision, "budget_ms", 0.0) or 0.0),
+        "cold_deadline_ms": presentation_upload_control_budget_ms(
+            window, "tile_layer_commit", decision, interactive=interactive
         ),
         "upsert_cost_fn": pyqtgraph_payload_upload_nbytes,
         "pace_resident_retargets": True,
     }
     return limits
-
-
-def _complete_aggregate_preview_scope(window, session) -> tuple[int, ...] | None:
-    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    minimum_tiles = int(getattr(capabilities, "compact_preview_aggregate_min_tiles", 0) or 0)
-    if minimum_tiles <= 0:
-        return None
-    verdict = getattr(getattr(session, "scheduling_policy", None), "verdict", None)
-    if verdict is None or not bool(getattr(verdict, "coverage_open", False)):
-        return None
-    required = tuple(sorted(int(tile) for tile in verdict.required_tiles))
-    marker = getattr(session, "aggregate_preview_transaction", None)
-    if marker != (int(verdict.generation), required):
-        return None
-    payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
-    if len(required) < minimum_tiles or any(
-        str(getattr(payloads.get(tile), "quality", "") or "")
-        not in {"preview", "fallback", "exact"}
-        for tile in required
-    ):
-        return None
-    return required
 
 
 def presentation_upload_control_budget_ms(
@@ -4876,20 +4885,13 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         return {}
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
     interactive = interactive_active(window)
-    decision = _commit_batch_decision(window, interactive=interactive)
-    upload_decision = decision
-    batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
-    upload_batch_limit = int(getattr(upload_decision, "batch_limit", 0) or 0)
-    if not bool(getattr(session, "display_committed", False)) and upload_batch_limit > 0:
-        batch_limit = (
-            upload_batch_limit
-            if batch_limit <= 0
-            else min(int(batch_limit), int(upload_batch_limit))
-        )
-    byte_cap = max(
-        int(getattr(decision, "byte_cap", 0) or 0),
-        int(getattr(upload_decision, "byte_cap", 0) or 0),
+    decision = _commit_batch_decision(
+        window,
+        interactive=interactive,
+        pass_token=_render_pass_token(session),
     )
+    batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
+    byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
     if batch_limit <= 0:
         feedback = latency_feedback(window)
         batch_limit = (
@@ -4897,69 +4899,21 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
             if feedback is None
             else int(feedback.batch_limit("montage_present_total", interactive=interactive))
         )
-    if interactive:
-        # One early shader/driver realization must not collapse the whole
-        # gesture to one cold tile per commit. Bytes remain capped separately;
-        # 4-8 uploads amortize full-plan/backend overhead while preserving the
-        # callback target on the reference 60-tile workflow.
-        batch_limit = min(8, max(4, int(batch_limit)))
-    else:
-        # A tiled GPU transaction has a measured fixed cost even when one small
-        # texture is uploaded. Treating that entire transaction as the
-        # cost of one item makes feedback collapse an idle drain to one tile
-        # and repeats planning/presentation hundreds of times. The byte cap
-        # remains authoritative for large textures; four is only the minimum
-        # item cohort when the byte budget admits it.
-        batch_limit = max(4, int(batch_limit))
-        batch_limit = _idle_backlog_cohort(session, batch_limit)
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
-    aggregate_preview = _complete_aggregate_preview_scope(window, session)
-    if aggregate_preview is not None:
-        batch_limit = max(int(batch_limit), len(aggregate_preview))
-    wgpu_native_prefetch = bool(
-        capabilities.name == "wgpu"
-        and any(
-            wgpu_native_plane_warm_payload(payload)
-            for payload in dict(getattr(session, "display_tile_payloads", {}) or {}).values()
-        )
-    )
-    if wgpu_native_prefetch and interactive:
-        # One 336² scalar source plane is four 256² page uploads. During a
-        # gesture, keep this hidden source-page work in the same two-tile
-        # cohorts as the atomic warm owner: a mid-gesture callback that warms
-        # 20-40 MiB delays the next frame's pixels.
-        #
-        # Idle commits keep their backlog cohort. ``upsert_cost_fn`` already
-        # charges a warm payload its WHOLE plane, so the byte cap bounds
-        # hidden warming on its own axis and the item clamp adds nothing to
-        # it — while costing everything the cohort exists to save. Every tile
-        # of a reduced montage is a plane warm (``lod.level > 0`` alone
-        # qualifies), so an ungated clamp collapsed the ordinary cold fill to
-        # two tiles per commit: 272 tiles became 136 full-montage
-        # transactions at ~93 ms each, 15.4 s of GUI callbacks for a montage
-        # whose pixels were already computed (field trace 2026-07-25).
-        batch_limit = min(2, max(1, int(batch_limit)))
-        byte_cap = min(int(byte_cap), 3 * 1024 * 1024)
     limits: dict[str, object] = {
         "max_upserts": max(1, int(batch_limit)),
         "max_upsert_bytes": max(1024, int(byte_cap)),
+        "pass_budget_ms": float(getattr(decision, "budget_ms", 0.0) or 0.0),
         "upsert_cost_fn": (
-            # A complete compact preview shares a couple of physical pages
-            # across all logical tiles. Charge its local texture views once by
-            # logical bytes; the ordinary WGPU estimator rounds every tile to a
-            # separate page and would fragment this explicitly atomic cohort.
-            texture_payload_upload_nbytes
-            if aggregate_preview is not None
-            else wgpu_payload_upload_nbytes
+            wgpu_payload_upload_nbytes
             if capabilities.name == "wgpu"
             else texture_payload_upload_nbytes
         ),
-        # Physical atlas/page-table residency is the only proof that a retarget
-        # can bypass every cold admission cap.  The complete resident set must
-        # bind atomically; streaming it through the upload cohort is what made
-        # already-loaded coarse tiles pop in after every pan/zoom.
-        "pace_resident_retargets": False,
+        "cold_deadline_ms": presentation_upload_control_budget_ms(
+            window, "montage_present_total", decision, interactive=interactive
+        ),
+        "pace_resident_retargets": True,
     }
     resident = getattr(getattr(window.win, "img_view", None), "tiledPayloadResident", None)
     if callable(resident):
@@ -4967,8 +4921,33 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
     return limits
 
 
-def _commit_batch_decision(window, *, interactive: bool):
+def _render_pass_token(session) -> tuple[int, str, bool]:
+    verdict = getattr(getattr(session, "scheduling_policy", None), "verdict", None)
+    return (
+        int(getattr(session, "session_id", 0) or 0),
+        str(getattr(session, "render_round_id", "") or ""),
+        bool(getattr(verdict, "coverage_open", False)),
+    )
+
+
+def _commit_batch_decision(window, *, interactive: bool, pass_token=None):
     governor = getattr(window.win, "resource_governor", None)
+    pass_kind = (
+        "preview"
+        if isinstance(pass_token, tuple) and pass_token and bool(pass_token[-1])
+        else "target"
+    )
+    begin_pass = getattr(governor, "begin_render_pass", None)
+    if callable(begin_pass):
+        stable_pass_token = (
+            pass_token[:-1]
+            if isinstance(pass_token, tuple) and len(pass_token) >= 2
+            else pass_token
+        )
+        begin_pass(stable_pass_token, pass_kind=pass_kind)
+    decide_pass = getattr(governor, "decide_render_pass", None)
+    if callable(decide_pass):
+        return decide_pass(interactive=interactive, pass_kind=pass_kind)
     decide = getattr(governor, "decide_commit_batch", None)
     if callable(decide):
         return decide(interactive=interactive)

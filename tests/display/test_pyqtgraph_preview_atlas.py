@@ -306,7 +306,7 @@ def test_exact_item_replaces_only_its_atlas_member_after_success(qt_app):
     assert layer.physically_visible_tile_count == count
 
 
-def test_large_preview_prefix_is_not_acknowledged_as_physical_coverage(qt_app):
+def test_large_preview_prefix_uses_staged_items_without_torn_atlas(qt_app):
     count = 256
     owner = _Owner()
     layer = _layer(owner)
@@ -328,9 +328,9 @@ def test_large_preview_prefix_is_not_acknowledged_as_physical_coverage(qt_app):
     )
 
     assert owner.preview_items == []
-    assert owner.tile_items == {}
-    assert stats.committed_upserts == ()
-    assert stats.presented_identities == {}
+    assert set(owner.tile_items) == set(range(32))
+    assert stats.committed_upserts == tuple(range(32))
+    assert set(stats.presented_identities) == set(range(32))
     assert layer.preview_atlas_decline_reason == "awaiting-complete-preview-transaction"
 
 

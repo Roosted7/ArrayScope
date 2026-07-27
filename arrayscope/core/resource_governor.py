@@ -380,6 +380,66 @@ class ResourceGovernor:
             "montage_present_total", interactive=interactive, byte_cap=byte_cap
         )
 
+    def decide_render_pass(
+        self, *, interactive: bool, pass_kind: str = "preview"
+    ) -> UiWorkDecision:
+        """Own R5 chunk size and deadline for preview and target passes.
+
+        The generic UI target is intentionally tight (4/8 ms), but a tiled
+        presentation transaction has fixed scene-publication work. Driving
+        that channel to 8 ms collapses to one tile without shortening the
+        callback. R5 permits a governed chunk up to 50 ms, so the governor
+        targets 32 ms and keeps 18 ms of hard-budget margin.
+        """
+
+        pass_kind = "target" if str(pass_kind) == "target" else "preview"
+        channel = f"montage_render_pass_{pass_kind}"
+        byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
+        snapshot = self.latency_feedback.channel_snapshot(channel)
+        max_batch = max(1, int(self.latency_feedback.tuning.max_batch))
+        if snapshot.last_count <= 0:
+            # Cold-start at one. The old two-item prediction was already
+            # enough to exceed 50 ms for PyQtGraph's FFT windowing on some
+            # tiles; growth is earned only by measured sub-20 ms feedback.
+            batch = 1
+        elif snapshot.last_elapsed_ms >= 50.0:
+            batch = max(1, int(snapshot.last_count) // 2)
+        elif snapshot.last_elapsed_ms > 32.0:
+            batch = max(1, int(snapshot.last_count) - 1)
+        elif snapshot.last_elapsed_ms < 20.0:
+            batch = min(max_batch, int(snapshot.last_count) + 2)
+        else:
+            batch = min(max_batch, int(snapshot.last_count) + 1)
+        return UiWorkDecision(
+            channel,
+            batch,
+            32.0,
+            0,
+            "R5 governed render-pass target",
+            byte_cap,
+            32.0,
+            "r5-feedback",
+            (
+                f"snapshot last={snapshot.last_elapsed_ms:.2f}ms/"
+                f"{snapshot.last_count} items/{snapshot.last_byte_count} bytes",
+                f"per-item={_optional_ms(snapshot.per_item_ewma_ms)}",
+                "target=32.00ms hard=50.00ms",
+            ),
+        )
+
+    def begin_render_pass(self, token: object, *, pass_kind: str = "preview") -> None:
+        """Start feedback for one preview or target pass."""
+
+        pass_kind = "target" if str(pass_kind) == "target" else "preview"
+        tokens = getattr(self, "_render_pass_tokens", None)
+        if tokens is None:
+            tokens = {}
+            self._render_pass_tokens = tokens
+        if tokens.get(pass_kind) == token:
+            return
+        tokens[pass_kind] = token
+        self.latency_feedback.reset_channel(f"montage_render_pass_{pass_kind}")
+
     def _decide_budget(self, channel: str, *, interactive: bool, byte_cap: int) -> UiWorkDecision:
         channel = str(channel)
         feedback = self.latency_feedback

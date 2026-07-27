@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
-from time import monotonic
+from time import monotonic, perf_counter
 
 import numpy as np
 
@@ -2735,11 +2735,23 @@ class FrameSession:
             lut_identity=getattr(shader_mapping, "lut_identity", None),
         )
 
-    def bind_payloads_to_level_generation(self) -> int:
-        """Bind current wrappers to the uniform generation they will expose."""
+    def bind_payloads_to_level_generation(
+        self,
+        tile_numbers=None,
+        *,
+        max_count: int | None = None,
+    ) -> int:
+        """Bind a governed wrapper cohort to the uniform generation."""
 
         rebound = 0
-        for tile_number in tuple(self.display_tile_payloads):
+        candidates = (
+            tuple(self.display_tile_payloads)
+            if tile_numbers is None
+            else tuple(dict.fromkeys(int(tile) for tile in tile_numbers))
+        )
+        if max_count is not None:
+            candidates = candidates[: max(1, int(max_count))]
+        for tile_number in candidates:
             payload = self.display_tile_payloads.get(tile_number)
             if payload is None:
                 continue
@@ -3200,17 +3212,7 @@ class FrameSession:
             int(tile.montage_index): tile for tile in tuple(getattr(self.plan, "tiles", ()) or ())
         }
         candidate_numbers = tuple(dict.fromkeys(int(tile) for tile in self.pending_payload_upserts))
-        candidate_numbers = tuple(
-            tile
-            for tile in candidate_numbers
-            if tile in active_set
-            and _payload_matches_current_tile(
-                self,
-                int(tile),
-                self.display_tile_payloads.get(int(tile)),
-                plan_tiles_by_number,
-            )
-        )
+        candidate_numbers = tuple(tile for tile in candidate_numbers if tile in active_set)
         unpresented = active_set.difference(self.lifecycle.presented_tiles)
         if unpresented:
             coverage_candidates = tuple(
@@ -3233,6 +3235,21 @@ class FrameSession:
             # stale wrappers and mappings.
             return None
         ordered = self._prioritized_tile_numbers(candidate_numbers)
+        # The cached-followup fast path is still a governed transaction.
+        # In particular, physical-residency classification can call into the
+        # backend for every candidate, so it must not inspect the whole
+        # pending round before the admission queue applies ``max_upserts``.
+        ordered = ordered[: max(1, int(max_upserts))]
+        ordered = tuple(
+            tile
+            for tile in ordered
+            if _payload_matches_current_tile(
+                self,
+                int(tile),
+                self.display_tile_payloads.get(int(tile)),
+                plan_tiles_by_number,
+            )
+        )
         payloads = {int(tile): self.display_tile_payloads[int(tile)] for tile in ordered}
         if not payloads:
             return None
@@ -3324,6 +3341,7 @@ class FrameSession:
         physical_resident_fn=None,
         pace_resident_retargets: bool = False,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
+        build_started = perf_counter()
         source_ids = dict(source_ids or {})
         pending_followup = self._paced_pending_presentation_followup(
             cold_deadline_ms=cold_deadline_ms,
@@ -3334,6 +3352,14 @@ class FrameSession:
             pace_resident_retargets=pace_resident_retargets,
         )
         if pending_followup is not None:
+            emit_trace(
+                "presentation_build_timing",
+                session_id=int(self.session_id),
+                path="pending-followup",
+                elapsed_ms=(perf_counter() - build_started) * 1000.0,
+                max_upserts=max_upserts,
+                pending_upserts=len(self.pending_payload_upserts),
+            )
             return pending_followup
         previous_state = self.tile_presentation_state
         previous_payloads = dict(previous_state.payloads)
@@ -3351,7 +3377,8 @@ class FrameSession:
         dirty_numbers = {int(tile) for tile in self.dirty_payloads}
         dirty_numbers.update(int(tile) for tile in self.pending_payload_upserts)
         reconcile_numbers = dirty_numbers.intersection(planned_numbers)
-        reconcile_numbers.update(planned_numbers.difference(previous_payloads))
+        if self.pipeline is None:
+            reconcile_numbers.update(planned_numbers.difference(previous_payloads))
         # Lifecycle owns target/fallback readiness. Shared reduced transforms
         # produce valid target payloads without creating native per-tile
         # ``rendered_tiles`` entries; treating that renderer-local map as the
@@ -3399,6 +3426,7 @@ class FrameSession:
             self.level_generation.forget_tile(index)
             self.dirty_payloads[index] = None
         lod_factor = self._selected_lod_factor()
+        timing_setup_done = perf_counter()
         current_loaded = set(self.rendered_tiles)
         planned = tuple(
             dict.fromkeys(
@@ -3575,8 +3603,10 @@ class FrameSession:
         )
         for tile_number in preview_upgrade_tiles:
             self.dirty_payloads[int(tile_number)] = None
-        missing_payload_tiles = tuple(
-            int(tile) for tile in active if int(tile) not in self.display_tile_payloads
+        missing_payload_tiles = (
+            ()
+            if self.pipeline is not None
+            else tuple(int(tile) for tile in active if int(tile) not in self.display_tile_payloads)
         )
         for tile_number in missing_payload_tiles:
             self.dirty_payloads[int(tile_number)] = None
@@ -3624,13 +3654,22 @@ class FrameSession:
         # admission still has choices.
         build_limit = None
         if max_upserts is not None:
-            # Build only what this transaction can admit. Over-building 2x
-            # made a nominal 12-item GPU slice spend 40 ms reducing/wrapping
-            # 24 tiles before a 20 ms backend apply, breaching the 50 ms GUI
-            # hard gate without improving committed throughput.
-            build_limit = max(int(max_upserts), 8)
+            # Build only what this transaction can admit. Even the former
+            # minimum of eight widened a governor decision of one or two and
+            # made the first WGPU transaction spend 100+ ms constructing
+            # wrappers that could not enter its delta.
+            build_limit = max(1, int(max_upserts))
         floor_first_fill_active = self._lod_preview_floor_first_fill_active(planned_numbers)
-        if floor_first_fill_active:
+        timing_candidates_done = perf_counter()
+        # Coverage production belongs to the worker-backed render pipeline.
+        # Calling `_ensure_floor_payloads` here reduced/built preview pages on
+        # the GUI thread before the first governed worker chunk arrived (the
+        # 272-tile WGPU first commit spent 100+ ms in this payload build).
+        # During the first pass this builder consumes only floors already
+        # published by lifecycle; missing floors retain their worker owner.
+        if floor_first_fill_active and self.pipeline is None:
+            # Commit-only sessions (focused tests and teardown paths) have no
+            # worker owner, so retain the direct resident-floor resolver.
             floor_payload_tiles = tuple(planned_numbers)
             if max_upserts is not None:
                 floor_payload_tiles = prioritize(floor_payload_tiles)
@@ -3639,10 +3678,19 @@ class FrameSession:
                 max_count=build_limit if pace_resident_retargets else None,
             )
         built = 0
+        attempted = 0
         for tile_number in dirty_payload_tiles:
-            if build_limit is not None and built >= build_limit:
+            governed_progress = built if self.atomic_successor_pending else attempted
+            if build_limit is not None and governed_progress >= build_limit:
                 break
+            attempted += 1
             if floor_first_fill_active and int(tile_number) in planned_numbers:
+                if not bool(self.atomic_successor_pending):
+                    # The worker-backed preview pass owns missing floors.
+                    # Ordinary first-fill commits consume only floors already
+                    # published into payload state; probing the LOD cache here
+                    # duplicated that work on the GUI thread.
+                    continue
                 tile = plan_tiles_by_number.get(int(tile_number))
                 floor_payload = self.display_tile_payloads.get(int(tile_number))
                 floor_owned = bool(
@@ -3654,7 +3702,7 @@ class FrameSession:
                     )
                     and str(getattr(floor_payload, "quality", "") or "") in {"preview", "fallback"}
                 ) or self._floor_can_progress(int(tile_number), tile=tile)
-                if floor_owned or not bool(self.atomic_successor_pending):
+                if floor_owned:
                     continue
                 # Ground rule 11: an atomic successor may wait only when the
                 # missing complement has a live owner.  Floor-first is a
@@ -3672,13 +3720,14 @@ class FrameSession:
                     int(tile_number), rendered, source_ids, lod_factor=lod_factor
                 )
                 built += 1
-        if not floor_first_fill_active:
+        if not floor_first_fill_active and self.pipeline is None:
             floor_payload_tiles = tuple(planned_numbers - set(current_loaded))
             floor_build_limit = None
             if max_upserts is not None:
                 floor_payload_tiles = prioritize(floor_payload_tiles)
                 floor_build_limit = build_limit if pace_resident_retargets else None
             self._ensure_floor_payloads(floor_payload_tiles, max_count=floor_build_limit)
+        timing_floor_done = perf_counter()
         unpresented_active_tiles = tuple(
             int(tile)
             for tile in active
@@ -3703,6 +3752,7 @@ class FrameSession:
         )
         if max_upserts is not None or max_upsert_bytes is not None or stale_level_tiles:
             dirty_payload_tiles = prioritize(dirty_payload_tiles)
+        timing_unpresented_done = perf_counter()
         presented_preview_tiles = tuple(
             int(tile)
             for tile in planned_numbers
@@ -3719,6 +3769,7 @@ class FrameSession:
         )
         if floor_active_tiles or presented_preview_tiles:
             active = tuple(dict.fromkeys((*active, *presented_preview_tiles, *floor_active_tiles)))
+        timing_floor_scope_done = perf_counter()
         # Progress guarantee: a pending upsert is payload-backed.  A retained
         # stale backend slot may be visibly present while the replacement exact
         # tile is still evaluating, but without a current desired payload there
@@ -3732,7 +3783,10 @@ class FrameSession:
         # included), no build can keep that promise — dropping the entry lets
         # the commit loop settle while the evaluation claim remains visible.
         # A later rendered result re-dirties the tile through mark_materialized.
-        for tile_number in tuple(self.dirty_payloads):
+        dirty_cleanup_tiles = dirty_payload_tiles
+        if build_limit is not None:
+            dirty_cleanup_tiles = dirty_cleanup_tiles[:build_limit]
+        for tile_number in dirty_cleanup_tiles:
             if (
                 int(tile_number) not in self.rendered_tiles
                 and int(tile_number) not in self.display_tile_payloads
@@ -3740,6 +3794,7 @@ class FrameSession:
                 if self._floor_can_progress(int(tile_number)):
                     continue
                 self.dirty_payloads.pop(int(tile_number), None)
+        timing_payloads_done = perf_counter()
         current_payloads = self.display_tile_payloads
         # Payload creation can occur later in this same build (for example a
         # shared reduced target admitted by the LOD ladder). Reconcile queued
@@ -3836,6 +3891,7 @@ class FrameSession:
                 continue
             upserts[int(tile_number)] = payload
 
+        timing_upserts_done = perf_counter()
         resident_retarget_tiles = _resident_retarget_upsert_tiles(upserts, previous_payloads)
         # Level swaps re-presenting a backend-acknowledged identity are
         # residency remaps, not uploads: they never charge the byte budget
@@ -3908,6 +3964,27 @@ class FrameSession:
                 if int(tile) in coverage_upserts
             }
             resident_retarget_tiles.intersection_update(coverage_upserts)
+        if max_upserts is not None and len(all_candidate_upserts) > int(max_upserts):
+            # Physical residency is backend work, not a free classification
+            # prepass.  Probing every tile before admitting a bounded delta
+            # made a one-item WGPU transaction synchronously inspect the
+            # entire 272-tile round.  Apply the governor's cohort boundary
+            # before asking the backend which members are zero-byte rebinds;
+            # deferred candidates remain dirty for the continuation.
+            governed_candidates = prioritize(all_candidate_upserts)
+            governed_candidates = governed_candidates[: max(1, int(max_upserts))]
+            governed_set = {int(tile) for tile in governed_candidates}
+            all_candidate_upserts = {
+                int(tile): payload
+                for tile, payload in all_candidate_upserts.items()
+                if int(tile) in governed_set
+            }
+            cold_upserts = {
+                int(tile): payload
+                for tile, payload in cold_upserts.items()
+                if int(tile) in governed_set
+            }
+            resident_retarget_tiles.intersection_update(governed_set)
         free_retarget_tiles = _free_retarget_tiles(
             all_candidate_upserts,
             logical_resident_tiles=resident_retarget_tiles,
@@ -3975,6 +4052,7 @@ class FrameSession:
         # the first eight center tiles, the backend then acknowledged the rest
         # row-by-row. Carry the canonical admission order to the backend.
         upserts = capped_upserts
+        timing_admission_done = perf_counter()
         near = tuple(
             tile
             for tile in self._near_tile_numbers(margin_tiles=2)
@@ -4075,6 +4153,25 @@ class FrameSession:
             level_only_drain=level_only_drain,
         )
         state = previous_state.apply_delta(delta)
+        emit_trace(
+            "presentation_build_timing",
+            session_id=int(self.session_id),
+            path="full",
+            elapsed_ms=(perf_counter() - build_started) * 1000.0,
+            setup_ms=(timing_setup_done - build_started) * 1000.0,
+            candidates_ms=(timing_candidates_done - timing_setup_done) * 1000.0,
+            payloads_ms=(timing_payloads_done - timing_candidates_done) * 1000.0,
+            floor_ms=(timing_floor_done - timing_candidates_done) * 1000.0,
+            unpresented_ms=(timing_unpresented_done - timing_floor_done) * 1000.0,
+            floor_scope_ms=(timing_floor_scope_done - timing_unpresented_done) * 1000.0,
+            payload_cleanup_ms=(timing_payloads_done - timing_floor_scope_done) * 1000.0,
+            upserts_ms=(timing_upserts_done - timing_payloads_done) * 1000.0,
+            admission_ms=(timing_admission_done - timing_upserts_done) * 1000.0,
+            finish_ms=(perf_counter() - timing_admission_done) * 1000.0,
+            max_upserts=max_upserts,
+            dirty_payloads=len(self.dirty_payloads),
+            pending_upserts=len(self.pending_payload_upserts),
+        )
         return state, delta
 
     def build_atomic_successor_presentation(

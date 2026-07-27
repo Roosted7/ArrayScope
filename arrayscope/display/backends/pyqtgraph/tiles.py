@@ -1091,18 +1091,12 @@ class MontageTileLayer:
         drawable_payloads: dict[int, DisplayTilePayload] = {}
         page_assemblies: dict[int, _PageAssembly] = {}
         identity_rejected_tiles: list[int] = []
-        # Level-only drain fast path: a commit whose every emitted upsert is a
-        # level rewindow of an already-resident, already-presented tile does not
-        # touch the other resident tiles' pixels.  Resolving (page-assembling +
-        # re-windowing) every active payload here is the whole per-commit cost
-        # on a large complex montage (measured: ~1200 ms for 272 tiles vs
-        # ~55 ms for the 12 actually re-levelled).  Restrict resolution to the
-        # requested upsert slice; the remaining resident tiles keep their drawn
-        # pixels and stay in ``active`` via the resident-visibility seed below,
-        # exactly as they would have through the general (skip) path.
-        level_only_drain = bool(getattr(tile_delta, "level_only_drain", False))
-        atlas_tiles = self.preview_atlas_active_tiles
-        if level_only_drain or atlas_tiles:
+        # A governed delta does not touch other resident tiles' pixels.
+        # Resolving every active payload was the whole per-commit cost on a
+        # large complex montage. Restrict resolution to the admitted upserts;
+        # remaining resident tiles keep their drawn pixels through the
+        # resident-visibility seed below.
+        if tile_delta is not None and requested_upserts:
             resolve_items = tuple(
                 (int(tile), tile_payloads[int(tile)])
                 for tile in requested_upserts
@@ -1180,18 +1174,7 @@ class MontageTileLayer:
         # 272-tile montage: ~45 s to settle after a level drag).  Refinement
         # gets its own floor so each commit makes real progress while staying
         # within roughly one frame of UI-thread work.
-        level_rewindow_deadline_ms = (
-            None if cold_deadline_ms is None else max(8.0, float(cold_deadline_ms))
-        )
-        if level_only_drain:
-            # The session already bounded this commit to its upsert cap, and we
-            # resolved (page-assembled + re-windowed) exactly that slice above.
-            # A mid-loop rewindow deadline would then commit only the first few
-            # of the already-paid-for tiles and discard the rest, forcing the
-            # discarded tiles to be re-resolved on the next commit — pure wasted
-            # CPU that stretches the drain.  Boundedness comes from the upsert
-            # cap here, not the time deadline, so let every resolved tile land.
-            level_rewindow_deadline_ms = None
+        level_rewindow_deadline_ms = cold_deadline_ms
         cold_start = perf_counter()
         cold_tiles_committed = 0
         update_start = perf_counter()
@@ -1426,16 +1409,6 @@ class MontageTileLayer:
                 and level_update_admitted
             )
             item_deadline_ms = level_rewindow_deadline_ms if rewindow_only else cold_deadline_ms
-            if level_only_drain:
-                # PyQtGraph bakes levels into the payload source identity, so a
-                # re-level presents as a full-upload ``cold_candidate`` rather
-                # than the lightweight rewindow path.  The resolve pass above
-                # already page-assembled and re-windowed exactly the capped
-                # upsert slice; letting the cold deadline drop the tail here
-                # would discard that paid-for work and force a re-resolve next
-                # commit.  The upsert cap already bounds the work, so commit the
-                # whole resolved slice.
-                item_deadline_ms = None
             if (
                 item_deadline_ms is not None
                 and cold_candidate
@@ -1605,7 +1578,7 @@ class MontageTileLayer:
         return TileLayerUpdateStats(
             visible_items=len(physically_presented),
             presented_tiles=physically_presented,
-            presented_identities=self._presented_identities(drawable_payloads),
+            presented_identities=self._presented_identities(tile_payloads),
             committed_upserts=tuple(int(tile) for tile in sorted(committed_upserts)),
             identity_rejected_items=len(identity_rejected_tiles),
             identity_rejected_tiles=tuple(identity_rejected_tiles),
@@ -1641,10 +1614,9 @@ class MontageTileLayer:
     ) -> TileLayerUpdateStats | None:
         """Present one complete large raw preview as one physical Qt item.
 
-        The current backend path does not acknowledge a prefix. The render
-        pipeline must deliver the complete current required set in one delta;
-        only then is the atlas candidate built and swapped. This method does
-        not establish that the unchunked build fits the contract's 50 ms bound.
+        Prefixes fall through to ordinary governed ImageItems. The compact
+        candidate remains a complete hidden transaction and is never exposed
+        as partial physical truth.
         """
 
         if tile_delta is None:
@@ -1682,17 +1654,7 @@ class MontageTileLayer:
         }
         if active != required or not preview_tiles <= required or retained_direct != retained_tiles:
             self._preview_atlas_decline_reason = "awaiting-complete-preview-transaction"
-            physically_presented = self._physically_presented_tiles()
-            return TileLayerUpdateStats(
-                visible_items=len(physically_presented),
-                presented_tiles=physically_presented,
-                presented_identities=self._presented_identities(),
-                committed_upserts=(),
-                resident_items=len(self._states) + len(self.preview_atlas_active_tiles),
-                storage_capacity=len(self._states) + len(self.preview_atlas_active_tiles),
-                cpu_shadow_bytes=int(self._resident_bytes) + self._preview_atlas_nbytes(),
-                budget_bytes=int(tile_residency_budget_bytes or 0),
-            )
+            return None
         identity_rejected = tuple(
             sorted(
                 int(tile)
@@ -1722,11 +1684,7 @@ class MontageTileLayer:
         }
         if set(candidate_payloads) != preview_tiles:
             self._preview_atlas_decline_reason = "awaiting-complete-preview-payload-state"
-            return TileLayerUpdateStats(
-                presented_tiles=self._physically_presented_tiles(),
-                presented_identities=self._presented_identities(),
-                committed_upserts=(),
-            )
+            return None
         candidate = _build_compact_preview_item(
             candidate_payloads,
             layout=layout,

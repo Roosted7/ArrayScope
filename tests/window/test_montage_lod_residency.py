@@ -6727,11 +6727,8 @@ def test_deferred_stage_plan_applies_after_unrelated_render_generation_advance(m
     assert session.deferred_missing_tiles == ()
 
 
-@pytest.mark.parametrize(("physical_resident", "expected_upserts"), [(True, 16), (False, 1)])
-def test_only_physically_resident_payloads_bypass_all_cold_caps_in_one_delta(
-    physical_resident,
-    expected_upserts,
-):
+@pytest.mark.parametrize("physical_resident", [True, False])
+def test_physical_residency_does_not_bypass_the_governor_item_cap(physical_resident):
     session = _session(
         mode=LOD_POLICY_NATIVE_ONLY, count=16, pyramid=LodPageCache(max_bytes=1 << 20)
     )
@@ -6762,20 +6759,21 @@ def test_only_physically_resident_payloads_bypass_all_cold_caps_in_one_delta(
         physical_resident_fn=lambda _payload: physical_resident,
     )
 
-    assert len(delta.upserts) == expected_upserts
+    # R5: zero-byte residency is backend truth, but it is not permission to
+    # inspect and rebind the complete round in one presentation callback.
+    assert len(delta.upserts) == 1
     if physical_resident:
         assert set(delta.active_tiles) == set(range(16))
 
 
-def test_physically_resident_rebinds_do_not_share_a_delta_with_cold_uploads():
+def test_physically_resident_rebind_chunk_does_not_mix_with_cold_uploads():
     """A mixed pan/zoom cohort must expose its resident floor immediately.
 
     WGPU defers physically cold replacement work while a gesture is active.
     If one cold upload shares the resident rebind delta, that backend guard
-    necessarily defers the resident members too and already-loaded tiles pop
-    in only after the interaction-stop edge.  The admission owner therefore
-    emits the complete free cohort first and leaves every cold member queued
-    for the following transaction.
+    necessarily defers the resident members too.  The admission owner emits a
+    governed free cohort and leaves both remaining resident members and every
+    cold member queued for following transactions.
     """
 
     session = _session(
@@ -6804,20 +6802,27 @@ def test_physically_resident_rebinds_do_not_share_a_delta_with_cold_uploads():
         pace_resident_retargets=False,
     )
 
-    assert set(delta.upserts) == resident_tiles
+    assert len(delta.upserts) == 1
+    assert set(delta.upserts).issubset(resident_tiles)
     assert set(session.pending_payload_upserts).issuperset(set(range(12, 16)))
-    _state, paced_delta = session.build_tile_presentation(
-        {},
-        max_upserts=1,
-        max_upsert_bytes=1 << 20,
-        upsert_cost_fn=lambda payload: payload.nbytes,
-        physical_resident_fn=lambda payload: int(payload.tile_number) in resident_tiles,
-        pace_resident_retargets=False,
-    )
-    assert set(paced_delta.upserts) == resident_tiles
-    delta = paced_delta
     _acknowledge(session, delta)
     session.mark_presented(tuple(delta.upserts))
+
+    presented_resident = set(delta.upserts)
+    while presented_resident != set(resident_tiles):
+        _state, delta = session.build_tile_presentation(
+            {},
+            max_upserts=1,
+            max_upsert_bytes=1 << 20,
+            upsert_cost_fn=lambda payload: payload.nbytes,
+            physical_resident_fn=lambda payload: int(payload.tile_number) in resident_tiles,
+            pace_resident_retargets=False,
+        )
+        assert len(delta.upserts) == 1
+        assert set(delta.upserts).issubset(resident_tiles)
+        presented_resident.update(delta.upserts)
+        _acknowledge(session, delta)
+        session.mark_presented(tuple(delta.upserts))
 
     _state, cold_delta = session.build_tile_presentation(
         {},

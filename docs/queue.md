@@ -77,11 +77,14 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   rejected size surcharge made each 336-square tile one L9 sample and produced
   homogeneous grey boxes; the corrected field scale chooses L5 (11×11,
   4.22 screen pixels/sample) and preserves recognizable anatomy.
-  A complete preview set uses one shared worker task and one non-empty compact
-  backend commit, bypassing the ordinary 32-item ceiling only after its exact
-  required set is ready. Ready payloads suppress duplicate FLOOR evaluations.
-  The GUI seam keeps that atomic cohort intact and constructs floor payloads
-  once instead of rebuilding the complete visible lookup 272 times. The
+  **R5 bulk ownership corrected 2026-07-27:** preview production now uses the
+  ordinary governed worker continuation instead of one whole-round task, and
+  both preview and target presentation consume
+  `ResourceGovernor.decide_render_pass()` caps and deadlines unchanged.
+  PyQtGraph prefixes stage as direct items while the compact atlas remains a
+  hidden complete transaction; neither backend may enter an atlas build unless
+  the governor admitted the entire planned set. Ready payloads suppress
+  duplicate FLOOR evaluations. The
   optional JSONL oracle is buffered and its rich identity fields are bounded,
   so evidence collection no longer adds hundreds of synchronous writes before
   T1; the crash-oriented trace ring is unchanged. **Round-level ownership
@@ -153,9 +156,14 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   CPU-composites their derived RGBA8888 atlas through the round levels. A
   272-tile real-Wayland run acknowledged every level-5 preview identity before
   any level-2 target identity and reached physical preview coverage in
-  4175 ms. The atlas build held the GUI for 2985 ms, so R5 and the two-second
-  T1 gate remain red; this correctness slice does not claim the later
-  performance pass.
+  4175 ms. The former 2985 ms atomic atlas build is removed. Final-code Weston
+  chunk evidence is in the
+  [R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md): scalar
+  PyQtGraph preview/target chunks stayed below 50 ms, WGPU target stayed below
+  50 ms, while late WGPU preview binding republishes reached 62 ms and three
+  indivisible one-tile PyQtGraph FFT updates reached 155 ms. Those residuals
+  fail loudly and remain callback-bar debt; no measured pass completed
+  atomically.
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
 - **PyQtGraph full complex montage presentation is broken — OPEN.** Short
@@ -163,10 +171,12 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   target-only full FFT action failed to return before an 8 s process guard and
   emitted no phase row; an immediately preceding bounded run reached only
   62/272 exact ACKs by its five-second failure. The reduced complex preview is
-  now present, so this is the exact path's growing-set
-  republication/mapping cost, not a missing preview. Fix the whole-set
-  republication/mapping owner; gate on bounded commit and ACK counters plus a
-  full 272-tile completion within 5 s, never a widened timeout.
+  now present. The whole-active-set republication is fixed: the backend
+  resolves only the governor's admitted upserts and starts at one tile.
+  Completion remains red because three individual complex item updates in the
+  final Weston run took 63–155 ms and only 55/272 were physically presented by
+  five seconds. Split or move that per-item work; gate on bounded commit and ACK
+  counters plus a full 272-tile completion within 5 s, never a widened timeout.
 - **A ladder rung exception retries without bound — OPEN, separate from ADR
   0059 ordering.** The former PyQtGraph RGB-format trigger is removed by the
   reduced complex preview format, but the generic failure policy still replans

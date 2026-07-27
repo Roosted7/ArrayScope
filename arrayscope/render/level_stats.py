@@ -116,7 +116,12 @@ class LevelStatsService:
             return None
         return stats if int(getattr(stats, "evidence_quality", 0) or 0) >= int(quality) else None
 
-    def _rehydrate_montage_level_from_family_cache(self, session) -> int:
+    def _rehydrate_montage_level_from_family_cache(
+        self,
+        session,
+        *,
+        max_count: int | None = None,
+    ) -> int:
         """Seed the current level_key with retained per-source stats on retarget.
 
         The semantic ``level_key`` embeds the selected montage window, so a
@@ -142,8 +147,20 @@ class LevelStatsService:
         tracker.ensure_expected(session.level_key, expected)
         cache = self._montage_source_level_cache()
         family = _montage_level_family_key(session.level_key)
+        candidates = expected
+        if max_count is not None:
+            count = max(0, int(max_count))
+            if count == 0:
+                return 0
+            offsets = getattr(session, "_level_rehydrate_offsets", None)
+            if offsets is None:
+                offsets = {}
+                session._level_rehydrate_offsets = offsets
+            offset = int(offsets.get(session.level_key, 0) or 0) % len(expected)
+            candidates = (*expected, *expected)[offset : offset + count]
+            offsets[session.level_key] = (offset + len(candidates)) % len(expected)
         rehydrated = 0
-        for source_index in expected:
+        for source_index in candidates:
             source_index = int(source_index)
             cached = cache.peek((family, source_index))
             if cached is None:
@@ -698,12 +715,21 @@ class LevelStatsService:
         source = self._montage_level_source_for_session(session, allow_partial=allow_partial)
         return None if source is None else source.histogram_range
 
-    def _montage_level_source_for_session(self, session, *, allow_partial: bool = False):
+    def _montage_level_source_for_session(
+        self,
+        session,
+        *,
+        allow_partial: bool = False,
+        rehydrate_max_count: int | None = None,
+    ):
         # Partial semantic tile coverage is a valid provisional level source.
         # It must not be confused with viewport pixels; the level key is semantic
         # and excludes zoom/pan.  WindowLevelController keeps updates monotonic.
         tracker = self._montage_level_tracker()
-        self._rehydrate_montage_level_from_family_cache(session)
+        self._rehydrate_montage_level_from_family_cache(
+            session,
+            max_count=rehydrate_max_count,
+        )
         stats = tracker.summary_for(session.level_key)
         if stats is None:
             return None

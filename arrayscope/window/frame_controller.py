@@ -925,7 +925,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._last_frame_session_setup_ms = (perf_counter() - session_setup_start) * 1000.0
         initial_commit_start = perf_counter()
         try:
-            self.commit_frame_session_presentation(session)
+            # The first presentation is subject to the same governed
+            # continuation as every later preview/target chunk. Running it
+            # inline made the initiating render callback perform a whole-plan
+            # reconcile before input or paint could run.
+            self.apply_montage_presentation(session)
         except MemoryError as exc:
             show_status_message(self.win, str(exc), timeout=6000)
             return
@@ -954,10 +958,10 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._schedule_montage_cached_level_stats(session)
         if defer_stage_planning:
             montage_commit.submit_deferred_stage_fan_in_plan(self, session, missing_tiles)
-            self.retarget_frame_pipeline(session)
+            self.request_montage_replan(session)
         else:
             montage_commit.submit_stage_tasks(self, session, stage_plan["stage_requests"])
-            self.retarget_frame_pipeline(session)
+            self.request_montage_replan(session)
 
     def _maybe_retarget_frame_session(
         self,

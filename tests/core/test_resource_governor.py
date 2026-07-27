@@ -75,6 +75,28 @@ def test_commit_batch_knob_covers_last_observed_bytes_per_item():
     assert decision.model == "ewma"
 
 
+def test_render_pass_knob_owns_r5_target_and_adapts_chunk_size():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+
+    cold = governor.decide_render_pass(interactive=False)
+    governor.record_ui_observation(
+        "montage_render_pass_preview",
+        80.0,
+        item_count=8,
+        byte_count=8 * 1024,
+        work_class="presentation_upsert",
+        backend="pyqtgraph",
+    )
+    adapted = governor.decide_render_pass(interactive=False)
+
+    assert cold.channel == "montage_render_pass_preview"
+    assert cold.batch_limit == 1
+    assert cold.budget_ms == 32.0
+    assert adapted.batch_limit == 4
+    assert adapted.budget_ms == 32.0
+    assert adapted.model == "r5-feedback"
+
+
 def test_callback_observations_are_kept_without_decision_ring():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
     observation = GuiCallbackObservation(

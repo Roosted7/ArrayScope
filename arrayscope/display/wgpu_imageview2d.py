@@ -1575,11 +1575,18 @@ class WgpuImageView2D(ImageViewShell):
                     representation=representation,
                     lod_reducer=preview_reducer,
                 )
-                # Construct only at the complete required-scope boundary.
-                # Progressive sub-cohorts remain on ordinary bindings;
-                # repeatedly rebuilding a growing atlas would add uploads
-                # without advancing whole-montage coverage.
-                if preview_atlas is None and len(preview_payloads) == planned_count:
+                # Construction remains a complete hidden transaction. The
+                # production owner can reach this branch only when the
+                # governor admitted the whole required set as one chunk;
+                # progressive prefixes stay on ordinary page bindings.
+                governed_upserts = {
+                    int(tile) for tile in dict(getattr(tile_delta, "upserts", {}) or {})
+                }
+                if (
+                    preview_atlas is None
+                    and len(preview_payloads) == planned_count
+                    and governed_upserts == set(preview_payloads)
+                ):
                     preview_atlas = _build_wgpu_preview_atlas(
                         preview_payloads,
                         textures,

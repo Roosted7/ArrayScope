@@ -2763,7 +2763,8 @@ def test_wgpu_persistent_upsert_limits_use_governed_upload_limit():
     assert limits["max_upserts"] == 11
     assert limits["max_upsert_bytes"] == 2 * 1024 * 1024
     assert limits["physical_resident_fn"] is resident
-    assert limits["pace_resident_retargets"] is False
+    assert limits["pace_resident_retargets"] is True
+    assert limits["cold_deadline_ms"] == 2.0
 
 
 def test_hidden_target_warm_does_not_wait_for_visible_target_settlement(monkeypatch):
@@ -3216,7 +3217,7 @@ def test_wgpu_first_persistent_upsert_limits_use_shared_commit_batch():
     assert limits["max_upsert_bytes"] == 1024 * 1024
 
 
-def test_wgpu_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transaction_cost():
+def test_wgpu_persistent_upsert_limits_do_not_widen_governor_cohort():
     from arrayscope.window import frame_effects as montage_commit
 
     image = np.zeros((512, 512), dtype=np.float32)
@@ -3257,7 +3258,7 @@ def test_wgpu_persistent_upsert_limits_keep_minimum_cohort_under_fixed_transacti
 
     limits = montage_commit._persistent_tile_upsert_limits(window, session)
 
-    assert limits["max_upserts"] == 4
+    assert limits["max_upserts"] == 1
     assert limits["max_upsert_bytes"] == 1024 * 1024
     assert limits["upsert_cost_fn"](payload) == texture.nbytes
 
@@ -3314,7 +3315,7 @@ def _wgpu_warm_limits_window(*, interactive: bool):
     return window
 
 
-def test_wgpu_native_source_prefetch_stays_in_bounded_two_tile_cohorts_mid_gesture():
+def test_wgpu_native_source_prefetch_uses_governor_cohort_mid_gesture():
     from arrayscope.window import frame_effects as montage_commit
 
     native = np.zeros((336, 336), dtype=np.float32)
@@ -3330,11 +3331,11 @@ def test_wgpu_native_source_prefetch_stays_in_bounded_two_tile_cohorts_mid_gestu
         _wgpu_warm_limits_window(interactive=True), session
     )
 
-    assert limits["max_upserts"] == 2
-    assert limits["max_upsert_bytes"] == 3 * 1024 * 1024
+    assert limits["max_upserts"] == 32
+    assert limits["max_upsert_bytes"] == 32 * 1024 * 1024
     # Four whole 256² pages, not the 336² plane's own 451 584 B: the mid-gesture
-    # cap of 3 MiB admits three such warms, so the two-tile item clamp is still
-    # what binds here — but the byte cap no longer thinks it admits six.
+    # The presentation effect reports the physical cost; the governor alone
+    # owns the cohort and byte cap.
     assert native.nbytes == 336 * 336 * 4
     assert limits["upsert_cost_fn"](payload) == 4 * 256 * 256 * 4
 
@@ -3417,8 +3418,8 @@ def test_wgpu_cropped_native_warm_is_costed_as_its_whole_plane():
     limits = montage_commit._persistent_tile_upsert_limits(
         _wgpu_warm_limits_window(interactive=True), session
     )
-    assert limits["max_upserts"] == 2
-    assert limits["max_upsert_bytes"] == 3 * 1024 * 1024
+    assert limits["max_upserts"] == 32
+    assert limits["max_upsert_bytes"] == 32 * 1024 * 1024
     assert limits["upsert_cost_fn"](cropped) == plane_pages
 
 
@@ -3460,15 +3461,7 @@ def test_wgpu_upload_cost_is_whole_pages_on_every_route():
     )
 
 
-def test_wgpu_idle_upsert_cohort_scales_to_large_backlog():
-    # The tiled commit's cost is fixed-dominated (full-plan classify + delta
-    # walk + acknowledgement run once per commit regardless of item count),
-    # so a latency-governed item clamp multiplies the fixed cost across a
-    # large idle backlog instead of shortening any callback: the 272-tile
-    # cold fill at 4 items/turn outran its settlement budget.  Idle commits
-    # with a backlog larger than the governed limit take a fixed-cost
-    # amortizing cohort; the byte cap stays authoritative for upload size
-    # and the interactive clamp is untouched.
+def test_wgpu_idle_upsert_cohort_is_owned_by_governor():
     from arrayscope.window import frame_effects as montage_commit
 
     def build_session(backlog: int):
@@ -3496,12 +3489,10 @@ def test_wgpu_idle_upsert_cohort_scales_to_large_backlog():
     window.win = window
 
     assert (
-        montage_commit._persistent_tile_upsert_limits(window, build_session(60))["max_upserts"]
-        == 32
+        montage_commit._persistent_tile_upsert_limits(window, build_session(60))["max_upserts"] == 4
     )
     assert (
-        montage_commit._persistent_tile_upsert_limits(window, build_session(10))["max_upserts"]
-        == 10
+        montage_commit._persistent_tile_upsert_limits(window, build_session(10))["max_upserts"] == 4
     )
     assert (
         montage_commit._persistent_tile_upsert_limits(window, build_session(3))["max_upserts"] == 4
@@ -3555,7 +3546,7 @@ def test_pyqtgraph_idle_commits_keep_governed_cohort_under_deep_backlog():
     assert montage_commit.tile_layer_upsert_limits(window, build_session(60))["max_upserts"] <= 8
 
 
-def test_pyqtgraph_idle_refinement_uses_bounded_fixed_cost_cohort():
+def test_pyqtgraph_idle_refinement_does_not_override_governor():
     from arrayscope.window import frame_effects as montage_commit
 
     session = SimpleNamespace(
@@ -3588,11 +3579,11 @@ def test_pyqtgraph_idle_refinement_uses_bounded_fixed_cost_cohort():
 
     limits = montage_commit.tile_layer_upsert_limits(window, session)
 
-    assert limits["max_upserts"] == 32
-    assert limits["cold_deadline_ms"] is None
+    assert limits["max_upserts"] == 2
+    assert limits["cold_deadline_ms"] == 2.0
 
 
-def test_pyqtgraph_full_preview_cap_bypass_requires_explicit_aggregate_marker():
+def test_full_preview_marker_cannot_override_governor_limits():
     from arrayscope.window import frame_effects as montage_commit
 
     required = tuple(range(272))
@@ -3637,8 +3628,8 @@ def test_pyqtgraph_full_preview_cap_bypass_requires_explicit_aggregate_marker():
     )
 
     aggregate = montage_commit.tile_layer_upsert_limits(window, session)
-    assert aggregate["max_upserts"] == 272
-    assert aggregate["cold_deadline_ms"] is None
+    assert aggregate["max_upserts"] == 2
+    assert aggregate["cold_deadline_ms"] == 2.0
 
     session.aggregate_preview_transaction = None
     governed = montage_commit.tile_layer_upsert_limits(window, session)
@@ -3655,8 +3646,9 @@ def test_pyqtgraph_full_preview_cap_bypass_requires_explicit_aggregate_marker():
     )
     window.img_view.tiledPayloadResident = lambda _payload: True
     wgpu_aggregate = montage_commit.tile_layer_upsert_limits(window, session)
-    assert wgpu_aggregate["max_upserts"] == 272
-    assert wgpu_aggregate["upsert_cost_fn"] is montage_commit.texture_payload_upload_nbytes
+    assert wgpu_aggregate["max_upserts"] == 2
+    assert wgpu_aggregate["upsert_cost_fn"] is montage_commit.wgpu_payload_upload_nbytes
+    assert wgpu_aggregate["cold_deadline_ms"] == 2.0
 
 
 def test_pyqtgraph_floor_progress_commits_stay_governed():
@@ -4067,7 +4059,7 @@ def test_wgpu_persistent_resident_remap_uses_shared_commit_batch():
 
     limits = montage_commit._persistent_tile_upsert_limits(window, session)
 
-    assert limits["max_upserts"] == 4
+    assert limits["max_upserts"] == 1
     assert limits["max_upsert_bytes"] == 1024
 
 
@@ -4275,11 +4267,7 @@ def test_level_only_drain_resolves_only_the_upsert_slice(qt_app, monkeypatch):
     assert sorted(resolved) == [1, 3]
 
 
-def test_level_only_drain_commits_the_whole_upsert_slice(qt_app):
-    # A level_only_drain commit must land every tile in its already-bounded
-    # upsert slice: the resolve pass paid to re-window each of them, so a
-    # mid-loop deadline must not drop the tail and force a wasteful re-resolve
-    # next commit.
+def test_level_only_drain_honors_governor_deadline(qt_app):
     from pyqtgraph.graphicsItems.ImageItem import ImageItem
 
     from arrayscope.display.backends.pyqtgraph.tiles import (
@@ -4369,7 +4357,7 @@ def test_level_only_drain_commits_the_whole_upsert_slice(qt_app):
         tile_delta=delta,
     )
 
-    assert sorted(stats.committed_upserts) == [0, 1, 2, 3]
+    assert sorted(stats.committed_upserts) == [0]
 
 
 def test_tile_presentation_admission_uses_backend_cost_function():
