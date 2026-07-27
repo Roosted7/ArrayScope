@@ -51,12 +51,27 @@ the deleted `tests/artifacts/` tree).
 | 3 — stress ring (opt-in, serial) | synthetic stress matrix + live churn convergence on WGPU and PyQtGraph by default; the livelock/stall reproducers | **manually, before merging scheduling/lifecycle/presentation changes** | `ARRAYSCOPE_STRESS=1 pytest tests/stress -n 0` (live half needs Wayland + local NIfTI under `data/`; override with `ARRAYSCOPE_STRESS_BACKENDS`) |
 | 4 — real-rendering/Wayland acceptance | `tests/gpu_interaction` physical-pixel/heartbeat harness + live gates (real Vulkan/WGPU presentation and real Qt raster/PyQtGraph); the only ring that satisfies ground rule #1 | **manually, before any rendering/scheduling "fixed" claim or perf claim** | `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland pytest tests/gpu_interaction -n 0` |
 | journey matrix — real Wayland, serial | `{cold fill, zoom-in, zoom-out, scroll shuffle, index scroll, deep zoom/far scroll} × {WGPU, PyQtGraph}` (12 cells); JSONL phase ordering/priority/LOD plus screenshot-output latency | **pre-merge for every `display/`, `render/`, `kernel/`, or `window/` change** | `XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland python -m arrayscope.tools.journey_matrix run --artifact-dir tests/artifacts/journey-matrix-$(date +%F)` (add `--wgpu-present-method screen` to run the WGPU rows on the native swapchain; the driver fails loudly if screen cannot activate) |
-| benchmarks/harness | `profile_montage_workflow`, `histogram_pipeline_benchmark`, `rendering_benchmarks`, `profile_scroll_input`, real-BART numeric validation + trace tools | per queue-step evidence | `python -m arrayscope.tools.profile_montage_workflow` runs every stage on WGPU and PyQtGraph; `python -m arrayscope.tools.histogram_pipeline_benchmark --output /tmp/histogram.json` covers dtype/storage/population plus real low/high-power WGPU evidence; `python tools/validate_bart_numerics.py --bart-toolbox-path /path/to/bart` checks all exposed BART definitions against independent references/invariants; pass `--backend {wgpu,pyqtgraph}` for an explicit profile backend (cwd = repo root for `data/` paths) |
+| benchmarks/harness | `profile_montage_workflow`, `histogram_pipeline_benchmark`, `rendering_benchmarks`, `profile_scroll_input`, progressive-render replay, real-BART numeric validation + trace tools | per queue-step evidence | `python -m arrayscope.tools.profile_montage_workflow` runs every stage on WGPU and PyQtGraph; `python -m arrayscope.tools.progressive_render_oracle [--summary] TRACE.jsonl [...]` replays diagnostics snapshots against progressive contract R1/R3; `python -m arrayscope.tools.histogram_pipeline_benchmark --output /tmp/histogram.json` covers dtype/storage/population plus real low/high-power WGPU evidence; `python tools/validate_bart_numerics.py --bart-toolbox-path /path/to/bart` checks all exposed BART definitions against independent references/invariants; pass `--backend {wgpu,pyqtgraph}` for an explicit profile backend (cwd = repo root for `data/` paths) |
 
 The 5 s interaction limit applies to each step in every ring and harness, not
 to the cumulative duration of a scenario with several steps. Profile CLI
 values above the limit are clamped, and the architecture guard rejects local
 settlement-timeout owners.
+
+### Progressive render trace replay
+
+`arrayscope.tools.progressive_render_oracle` checks the recorded diagnostics
+snapshot stream without importing Qt or renderer implementation state. Its
+detailed output names every failing one-based snapshot index and LOD set;
+`--summary` emits one Markdown verdict row per input trace. A contract-clean
+trace exits zero, any R1/R3 violation exits one, and empty or malformed traces
+fail closed.
+
+The optional pytest gate reads `*.jsonl` from
+`tests/fixtures/progressive-render-contract/` and the gitignored
+`tests/artifacts/progressive-render-contract/`. It skips when neither contains
+a trace. JSONL artifacts are never committed; copy local captures into the
+artifact directory to exercise the gate.
 
 The profiler's displayed-X and displayed-Y stages keep both view axes cropped
 while they apply fast and slow scrolls to every dimension. Each stage retains
