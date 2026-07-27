@@ -79,7 +79,7 @@ never per-pixel events.
 | bridge_drain | `kernel/qt_bridge.py:96` | events count, budget observation, worst event |
 | lifecycle | `presentation/tile_lifecycle.py` transition methods (`:425–:567`) | tile, TileIdentity, payload ref (source, lod, quality), phase edge |
 | commit_batch | `window/display_presenter.py:78/:205` | render generation, CommitKind, frame_key, commit report |
-| backend_ack | backend `tiles.py` layer updates (`vispy/tiles.py:1439` etc.) | slot, acknowledged identity, uploads/bytes, lod |
+| backend_ack | WGPU executor frame reports and PyQtGraph tiled-layer commit reports | slot/page or item identity, acknowledged identity, uploads/bytes, lod |
 | camera | `window/montage_viewport.py:94/:211` | view_range, viewport plan, frame_session_key |
 | levels_publish | `render/level_stats.py:136` | level_key, source, evidence quality, refined flag |
 

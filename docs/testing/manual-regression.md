@@ -6,7 +6,7 @@ Use this checklist for release candidates and rendering/UI changes. Historical p
 
 - commit and clean/dirty state;
 - OS and X11/Wayland/macOS/Windows session;
-- Python, PySide6, PyQtGraph, VisPy, NumPy/SciPy versions;
+- Python, PySide6, PyQtGraph, WGPU/rendercanvas, NumPy/SciPy versions;
 - GPU and driver;
 - backend and performance settings;
 - data generator/file, shape, dtype, and operation stack;
@@ -133,7 +133,7 @@ PATH=~/miniconda3/bin:$PATH direnv exec . py-spy record \
 ```
 
 Use `perf record -F 99 -g` when native attribution matters, such as SciPy FFT,
-Qt painting, or GL driver calls. `py-spy --native` can be useful as a last
+Qt painting, or render-driver calls. `py-spy --native` can be useful as a last
 resort, but it can significantly perturb Qt/FFT timing; if used, compare it
 against a plain JSONL run and do not use the native py-spy timings as pacing
 evidence.
@@ -152,7 +152,7 @@ claim.
 
 ## Backend parity
 
-Run the same scenarios in PyQtGraph and VisPy:
+Run the same scenarios in WGPU and PyQtGraph:
 
 - scalar real/log/symlog;
 - complex real/imag/magnitude/phase;

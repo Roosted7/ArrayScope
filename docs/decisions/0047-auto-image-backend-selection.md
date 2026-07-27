@@ -1,6 +1,9 @@
 # 0047 — Capability-probed automatic image backend selection
 
-**Status:** Accepted (2026-07).
+**Status:** Superseded in backend choice by
+[ADR 0061](0061-retire-vispy-rendering-backend.md) (2026-07-27). The X5a
+measurements below remain historical evidence; AUTO now selects WGPU when its
+device gate passes and otherwise PyQtGraph.
 
 ## Context
 

@@ -83,9 +83,8 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
 10. **Maintained backends are first-class for correctness.** WGPU and
    PyQtGraph run the same stages and user-visible correctness gates. WGPU is
    the GPU/rendering certification path; PyQtGraph targets GPU-headless and
-   remote use and gets 2× the performance allowance. VisPy is an explicit
-   retirement comparator only; `all` must not silently route stages through
-   it or use it as the sole owner of a feature gate (Thomas, 2026-07-24).
+   remote use and gets 2× the WGPU performance allowance. No removed or
+   experimental backend may remain the sole owner of a feature gate.
 11. **No wait without an owner.** Every deferral, bail, or barrier names the
     event that resumes it, and that event must have a live owner — "a later
     replan will pick it up" is not an owner. Six stall defects in 2026-07

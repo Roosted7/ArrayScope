@@ -1,9 +1,9 @@
 # ADR 0058: Canonical tile orientation and display-only axis swap
 
-- **Status:** Accepted; implemented for the wgpu and PyQtGraph backends
-  (2026-07-22). VisPy stays on the legacy re-render path (capability off,
-  slated for retirement). The interim "rebuild on swap" guard is retained as a
-  permanent per-backend fallback for non-canonical backends.
+- **Status:** Accepted; implemented for the WGPU and PyQtGraph backends
+  (2026-07-22). The former VisPy fallback is historical after
+  [ADR 0061](0061-retire-vispy-rendering-backend.md); capability-gated fallback
+  remains valid for any future non-canonical backend.
 
 ## Context
 

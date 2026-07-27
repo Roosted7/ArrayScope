@@ -45,14 +45,13 @@ the deleted `tests/artifacts/` tree).
 | Ring | What | Trigger | Command |
 |---|---|---|---|
 | 0 — fast Qt-free loop | kernel/render/presentation semantics (~0.5 s) | while editing | `pytest tests/kernel tests/render tests/presentation -q -n 0` |
-| presentation contract — fast offscreen | committed-frame continuity, maturity-gated level reuse, and live shift/commit ownership (a few seconds) | every `frame_session.py` or `frame_effects.py` change, and any presentation-contract change | `QT_QPA_PLATFORM=offscreen pytest -q -n 0 tests/window/test_presentation.py tests/window/test_display_commit.py tests/ui/test_window_shift_live_path.py` |
-| 1 — default offscreen suite | everything except stress/gpu_interaction; ~2300 tests, xdist (workers capped at half cores — GL segfault guard) | every `pytest`; **CI on every push/PR** (`.github/workflows/ci.yml`, incl. 3.10–3.14 compat, coverage, strict-UI, 3-OS wheel validation) | `QT_QPA_PLATFORM=offscreen pytest tests -q` |
+| presentation contract — fast offscreen | committed-frame continuity, maturity-gated level reuse, and live shift/commit ownership (a few seconds) | every `frame_session.py` or `frame_effects.py` change, and any presentation-contract change | `QT_QPA_PLATFORM=offscreen pytest -q -n 0 tests/window/test_presentation.py tests/window/test_display_commit.py tests/ui/test_scrub_presentation_retention.py` |
+| 1 — default offscreen suite | everything except stress/gpu_interaction; xdist workers capped at half cores to limit simultaneous renderer/device initialization | every `pytest`; **CI on every push/PR** (`.github/workflows/ci.yml`, incl. 3.10–3.14 compat, coverage, strict-UI, 3-OS wheel validation) | `QT_QPA_PLATFORM=offscreen pytest tests -q` |
 | 2 — serial artifact ring | canonical screenshot/JSONL artifacts | CI (`-n 0` steps); before UI-visual claims | `pytest tests/ui/test_qt_smoke_artifacts.py -n 0` |
 | 3 — stress ring (opt-in, serial) | synthetic stress matrix + live churn convergence on WGPU and PyQtGraph by default; the livelock/stall reproducers | **manually, before merging scheduling/lifecycle/presentation changes** | `ARRAYSCOPE_STRESS=1 pytest tests/stress -n 0` (live half needs Wayland + local NIfTI under `data/`; override with `ARRAYSCOPE_STRESS_BACKENDS`) |
-| 4 — real-GL/Wayland acceptance | `tests/gpu_interaction` pixel/heartbeat harness + live gate tests; the only ring that satisfies ground rule #1 | **manually, before any rendering/scheduling "fixed" claim or perf claim** | `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland pytest tests/gpu_interaction -n 0` |
-| journey matrix — real Wayland, serial | `{cold fill, zoom-in, zoom-out, scroll shuffle, index scroll} × {VisPy, PyQtGraph, Wgpu}`; JSONL phase ordering/priority/LOD plus screenshot-output latency | **pre-merge for every `display/`, `render/`, `kernel/`, or `window/` change** | `XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland python -m arrayscope.tools.journey_matrix run --artifact-dir tests/artifacts/journey-matrix-$(date +%F)` (add `--wgpu-present-method screen` to run the wgpu rows on the native swapchain; the driver fails loudly if screen cannot activate) |
-| 4 — real-display/GL Wayland acceptance | `tests/gpu_interaction` physical-pixel/heartbeat harness + live gate tests (real GL for VisPy, real Qt raster for PyQtGraph); the only ring that satisfies ground rule #1 | **manually, before any rendering/scheduling "fixed" claim or perf claim** | `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland pytest tests/gpu_interaction -n 0` |
-| benchmarks/harness | `profile_montage_workflow`, `histogram_pipeline_benchmark`, `rendering_benchmarks`, `profile_scroll_input`, real-BART numeric validation + trace tools | per queue-step evidence | `python -m arrayscope.tools.profile_montage_workflow` runs every stage on WGPU and PyQtGraph; `python -m arrayscope.tools.histogram_pipeline_benchmark --output /tmp/histogram.json` covers dtype/storage/population plus real low/high-power WGPU evidence; `python tools/validate_bart_numerics.py --bart-toolbox-path /path/to/bart` checks all exposed BART definitions against independent references/invariants; pass `--backend {vispy,pyqtgraph,wgpu}` for an explicit profile backend (cwd = repo root for `data/` paths) |
+| 4 — real-rendering/Wayland acceptance | `tests/gpu_interaction` physical-pixel/heartbeat harness + live gates (real Vulkan/WGPU presentation and real Qt raster/PyQtGraph); the only ring that satisfies ground rule #1 | **manually, before any rendering/scheduling "fixed" claim or perf claim** | `ARRAYSCOPE_GPU_TESTS=1 XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland pytest tests/gpu_interaction -n 0` |
+| journey matrix — real Wayland, serial | `{cold fill, zoom-in, zoom-out, scroll shuffle, index scroll, deep zoom/far scroll} × {WGPU, PyQtGraph}` (12 cells); JSONL phase ordering/priority/LOD plus screenshot-output latency | **pre-merge for every `display/`, `render/`, `kernel/`, or `window/` change** | `XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland python -m arrayscope.tools.journey_matrix run --artifact-dir tests/artifacts/journey-matrix-$(date +%F)` (add `--wgpu-present-method screen` to run the WGPU rows on the native swapchain; the driver fails loudly if screen cannot activate) |
+| benchmarks/harness | `profile_montage_workflow`, `histogram_pipeline_benchmark`, `rendering_benchmarks`, `profile_scroll_input`, real-BART numeric validation + trace tools | per queue-step evidence | `python -m arrayscope.tools.profile_montage_workflow` runs every stage on WGPU and PyQtGraph; `python -m arrayscope.tools.histogram_pipeline_benchmark --output /tmp/histogram.json` covers dtype/storage/population plus real low/high-power WGPU evidence; `python tools/validate_bart_numerics.py --bart-toolbox-path /path/to/bart` checks all exposed BART definitions against independent references/invariants; pass `--backend {wgpu,pyqtgraph}` for an explicit profile backend (cwd = repo root for `data/` paths) |
 
 The 5 s interaction limit applies to each step in every ring and harness, not
 to the cumulative duration of a scenario with several steps. Profile CLI
@@ -72,7 +71,7 @@ distinguishes display-axis rebinds (zero upload required) from montage-axis
 motion (cold demand reported independently).
 
 **Enforcement gap, stated honestly:** rings 3–4 need a real compositor and
-real GL, and CI is entirely offscreen software-GL. The rule is therefore
+physical GPU/Qt presentation; CI is entirely offscreen. The rule is therefore
 personal, not scheduled: **whoever (human or agent) changes a
 display/render/kernel/window lane runs rings 3–4 themselves before claiming
 the change works**, and records the run in the commit or PR description. No
@@ -81,7 +80,7 @@ the claim is "compiles", not "fixed".
 
 What *has* changed (2026-07-21): those rings no longer need an **attached
 display**. `arrayscope.tools.headless_display` owns a headless Weston with
-the real GL renderer, so ring 3–4 commands run on a machine with no logged-in
+the real device renderer, so ring 3–4 commands run on a machine with no logged-in
 session — see [Headless real rendering](#headless-real-rendering-rings-34-without-an-attached-display).
 They still need a real GPU and local data, so this widens *where* the rings
 can run; it does not make them automatic, and it does not make an offscreen
@@ -174,8 +173,8 @@ every applicable journey/backend cell:
    within its emitted cap. Shader-backend atomic successors are unbounded;
    GPU shader-backend commits may atomically include already-resident rebinds
    beyond the item cap when their explicitly reported cold-upsert tile subset
-   remains within it (the legacy all-zero texture/upload-byte/vertex-upload
-   proof is also accepted). Uploaded tiles never bypass the cold cap. Rank
+   remains within it (an all-zero upload proof is also accepted). Uploaded
+   tiles never bypass the cold cap. Rank
    correlation compares each commit's local presentation ordinal
    with the immutable current-camera ranks captured at its final backend
    boundary when two or more ranked payloads make ordering observable. Each
@@ -193,14 +192,14 @@ every applicable journey/backend cell:
    observed, its explicit close transition is mandatory.
 
 The `N` values live beside the oracle in
-`arrayscope.tools.journey_matrix.MIN_COMMITS`: cold VisPy and scroll shuffles
+`arrayscope.tools.journey_matrix.MIN_COMMITS`: cold WGPU and scroll shuffles
 must visibly progress through at least two bounded commits; PyQtGraph's cold
 CPU-windowed fill must do the same rather than appearing in one complete pop;
 zoom-out may legitimately reuse finer resident pixels without a payload
 commit. Every oracle has a fault-injection test in
 `tests/app/test_journey_matrix.py`.
 
-For a quick software-GL diagnostic, append `--offscreen-smoke`. It exercises
+For a quick offscreen diagnostic, append `--offscreen-smoke`. It exercises
 the trace/replay plumbing and PyQtGraph output trajectory, but it is not a
 rendering, scheduling, timing, GPU, or Wayland acceptance result and never
 replaces the command above.
@@ -240,35 +239,24 @@ instances whose page-table spans are currently resident; an empty physical-row
 set is a failing diagnostic, not evidence that a visibly populated frame is
 empty.
 
-## Known suite state (2026-07-17)
+## Current suite contract (2026-07-27)
 
-- 2026-07-17 branch run: 2277 passed / 34 skipped / 1 xfailed (~116 s
-  parallel), plus one pre-existing architecture-guard failure also reproduced
-  on untouched `main` (`test_lod_demand_freshness.py` owns two uncapped
-  `waitUntil` timeouts). The skips are the opt-in rings.
-- Open xfails that are *tracked work, not noise*: churn-convergence
-  (queue step 1, strict=False), tiny-3-slices raciness (strict=False), and
-  live-camera LOD-demand freshness after zoom (strict=True). The native
-  complex64 PyQtGraph stress row has been a hard pass since `db18c8df` and
-  was re-verified serially on 2026-07-17.
-- `tests/gpu_interaction`: 16/16 green on real Wayland (2026-07-17 full
-  lane, strict=True), tiny-3-slices raciness (strict=False).
-- `tests/gpu_interaction`: 20/20 green on real Wayland (2026-07-17 full
-  serial run) — the 4 P9-era baseline failures no longer reproduce post-G5.
-  The ring now includes physical-pixels-to-CPU reference gates for both
-  first-class backends: VisPy framebuffer
-  (`test_framebuffer_cpu_reference.py`) and PyQtGraph Qt raster
-  (`test_pyqtgraph_raster_cpu_reference.py`). Their shared oracle is
-  `arrayscope/tools/framebuffer_reference.py`; default-ring smokes are
-  `tests/ui/test_framebuffer_cpu_reference.py` and
-  `tests/ui/test_pyqtgraph_raster_cpu_reference.py`.
-- The shared framebuffer oracle also reads WGPU's physical executor target.
+- Exact totals are not pinned here because backend retirement changes
+  collection counts. The default suite excludes the opt-in stress and
+  real-rendering rings; skips and xfails must still correspond to named queue
+  work.
+- Physical-pixels-to-CPU reference coverage is required for both maintained
+  backends: WGPU executor output through
+  `arrayscope/tools/framebuffer_reference.py`, and PyQtGraph Qt raster through
+  `tests/gpu_interaction/test_pyqtgraph_raster_cpu_reference.py` with its
+  default-ring smoke in `tests/ui/test_pyqtgraph_raster_cpu_reference.py`.
+- The shared framebuffer oracle reads WGPU's physical executor target.
   `test_cropped_display_axis_scroll_keeps_complete_montage` applies it after
   rapid displayed-axis crop churn and X/Y swaps, so current lifecycle labels
   cannot hide stale page texels. The profile crop matrix separately gates the
   cold crop-local identity that becomes relevant under page pressure.
-- Shared fakes: `tests/display/vispy_test_utils.py`; live-window harness:
-  `tests/ui/helpers.py` — use these, don't re-roll.
+- The live-window harness is `tests/ui/helpers.py`; use its maintained-backend
+  setup instead of recreating backend-specific windows.
 
 ## Environment facts (hard-won; trust these)
 
@@ -293,8 +281,7 @@ empty.
   stack dump. A swallowed exception in `request_operation` surfaces as a
   modal QMessageBox that hangs offscreen runs.
 - `print()` in app code is swallowed under pytest/Qt — append to a /tmp
-  file. JSONL wedge evidence lives in the static tail. VisPy offscreen
-  `canvas.render()` needs int-rounded `physical_size`.
+  file. JSONL wedge evidence lives in the static tail.
   `with_montage_axis(axis, text=...)` does NOT set the index window — pass
   `indices=range(...)`.
 - Artifacts convention: `tests/artifacts/<gate>-<date>/` (gitignored);
@@ -308,11 +295,10 @@ empty.
    import force-sets `QT_QPA_PLATFORM=xcb` on Wayland hosts at import
    time, silently flipping the AUTO backend probe for every later window
    in the process (cross-file test pollution, 2026-07-18).
-2. Every wgpu adapter probe pins
+2. Every WGPU adapter probe pins
    `set_instance_extras(backends=["Vulkan"])` BEFORE its first
-   `request_adapter_sync`: an all-backends instance re-inits EGL during
-   GL adapter enumeration and SIGABRTs workers holding vispy GL state
-   (wgpu-hal panic `gles/egl.rs:305`).
+   `request_adapter_sync`; this keeps adapter selection deterministic and
+   avoids the all-backends EGL initialization path.
 3. `winId() == wl_surface*` is undocumented Qt behavior, pinned per Qt
    minor by `tests/gpu_interaction/test_wgpu_native_wayland_pin.py`
    (ring 4) — run it after any Qt upgrade.

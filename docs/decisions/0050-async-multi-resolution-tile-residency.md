@@ -8,6 +8,9 @@ still owns FLOOR → PREVIEW → DESIRED → EXACT policy, while page claims and
 physical residency remain cache/backend state rather than a second lifecycle.
 The defect inventory from these landings motivated
 [ADR 0051](0051-single-owner-tile-lifecycle.md), which owns tile lifecycle.
+VisPy-specific implementation detail below is historical after
+[ADR 0061](0061-retire-vispy-rendering-backend.md); WGPU and PyQtGraph retain
+the materialization/residency contract.
 
 ## Context
 

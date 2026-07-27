@@ -125,11 +125,11 @@ Wrap the workflow with external profilers only for attribution. Prefer a
 low-impact `py-spy record --format raw --rate 50 --nonblocking --gil` sample for
 quick Python hot-stack hints, a duration-bounded blocking `py-spy --rate 80` run
 when complete sampled Python-thread stacks matter more than pacing, and
-`perf record -F 99 -g` for native SciPy/Qt/GL stacks. Use `cProfile` only as
+`perf record -F 99 -g` for native SciPy/Qt/render-driver stacks. Use `cProfile` only as
 opt-in deterministic Python call-count evidence because it substantially
 perturbs the GUI workflow. Avoid treating high-rate, blocking, cProfile, or
 `py-spy --native` runs as timing evidence unless they are compared against a
-plain JSONL run. Run the workflow on a real display for OpenGL/VisPy claims.
+plain JSONL run. Run the workflow on a real display for WGPU/Vulkan claims.
 
 The built-in `--profile-suite` runner emits plain timing JSONL, low-impact
 py-spy, full sampled py-spy, and perf artifacts by default; cProfile is
@@ -147,7 +147,7 @@ claim rests on a valid timing artifact.
 
 ## Manual and real-hardware tests
 
-[Manual regression](manual-regression.md) covers interaction feel, rendering artifacts, Wayland/panel behavior, HiDPI, GPU limits, and lifecycle/context loss. Record OS, session type, Qt/PySide/PyQtGraph/VisPy versions, GPU/driver, data shape/dtype, backend, and settings. When pytest-qt interaction tests disagree with the real app, capture the real widget event stream at the ownership boundary and convert that observed sequence into the regression test.
+[Manual regression](manual-regression.md) covers interaction feel, rendering artifacts, Wayland/panel behavior, HiDPI, GPU limits, and lifecycle/context loss. Record OS, session type, Qt/PySide/PyQtGraph/WGPU/rendercanvas versions, GPU/driver, data shape/dtype, backend, and settings. When pytest-qt interaction tests disagree with the real app, capture the real widget event stream at the ownership boundary and convert that observed sequence into the regression test.
 
 Headless `offscreen` runs cannot validate:
 
@@ -169,7 +169,8 @@ addopts = "-n auto --dist loadfile"
 
 **Why xdist (processes), not threads.** xdist runs each worker as a separate OS process, so
 global C-extension and Qt state is fully isolated. That is essential here: `QApplication`, all
-`QObject`/widget code, and the GL surfaces must live on one main thread and are not thread-safe.
+`QObject`/widget code and rendering surfaces must live on one main thread and
+are not thread-safe.
 Thread-based runners (e.g. `pytest-parallel`) would share one interpreter and corrupt that state —
 do not use them. `pytest-xdist` is also the actively maintained, pytest-org tool.
 
@@ -179,10 +180,11 @@ debugging. The session-scoped `qt_app` fixture is *correct* under xdist: each wo
 process, so each builds and reuses exactly one `QApplication`. Do not make it function-scoped.
 
 **Worker cap.** `-n auto` is capped at half the logical cores by
-`pytest_xdist_auto_num_workers` in `tests/conftest.py`. Many tests create real GL contexts
-(vispy/pyqtgraph surfaces); one worker per core saturates the CPU and has every worker building GL
-contexts against the same offscreen/software-GL stack simultaneously, which intermittently
-**segfaults** the driver. Leaving half the cores free for each worker's Qt/GL threads keeps workers
+`pytest_xdist_auto_num_workers` in `tests/conftest.py`. Many tests create Qt
+surfaces and some initialize GPU device state; one worker per core saturates
+the CPU and makes every worker initialize rendering state simultaneously,
+which has intermittently destabilized the platform stack. Leaving half the
+cores free for each worker's Qt/render threads keeps workers
 stable while still giving a large speedup (full suite ≈150s serial → ≈35s here). On 2-core CI
 runners the cap floors at 2, so CI parallelism is unaffected.
 

@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted for incremental migration.
+Implemented for WGPU and PyQtGraph. VisPy-specific migration mechanics below
+are historical after [ADR 0061](0061-retire-vispy-rendering-backend.md); the
+shared semantic-surface decision remains current.
 
 ## Context
 

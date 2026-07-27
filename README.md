@@ -7,7 +7,7 @@
 
 ArrayScope is a Python/Qt viewer for quickly understanding n-dimensional NumPy arrays. It is aimed at scientific and reconstruction workflows where the useful first questions are usually: *which dimensions matter, what does this slice contain, how do values change, and what happens after a small operation such as an FFT, crop, reduction, or axis change?*
 
-The current repository is the ArrayScope `0.8.0` release-candidate line. It has moved well beyond the original lightweight ndslice viewer: the implementation now contains a staged operation evaluator, bounded caches, progressive montage rendering, ROI/profile inspection, runtime diagnostics, and an experimental VisPy backend. See [Current state](docs/current-state.md) before treating every advanced path as production-stable.
+The current repository is the ArrayScope `0.8.0` release-candidate line. It has moved well beyond the original lightweight ndslice viewer: the implementation now contains a staged operation evaluator, bounded caches, progressive montage rendering, ROI/profile inspection, runtime diagnostics, and maintained WGPU and PyQtGraph rendering backends. See [Current state](docs/current-state.md) before treating every advanced path as production-stable.
 
 <picture>
   <source srcset="docs/media/showcase.avif" type="image/avif">
@@ -100,7 +100,7 @@ The operation stack supports reversible, ordered steps such as crop, reverse, re
 - Montage tiles are evaluated and presented progressively.
 - Image, tile, profile, and reusable operation-stage caches have separate budgets.
 - Runtime memory policy, latency feedback, a resource governor, and diagnostics expose why work was admitted, delayed, degraded, or refused.
-- PyQtGraph is the default backend. VisPy provides experimental shader windowing and persistent tiled residency.
+- WGPU is the GPU/rendering certification path, with shader mapping, compute, and persistent tiled residency. PyQtGraph is the CPU/remote fallback.
 
 <picture>
   <source srcset="docs/media/montage.avif" type="image/avif">
@@ -178,7 +178,7 @@ ArrayScope identifies this release-candidate baseline as version `0.8.0`. Until 
 ```bash
 git clone <repository-url>
 cd ArrayScope
-python -m pip install -e ".[dev,vispy]"
+python -m pip install -e ".[dev,wgpu]"
 python -m arrayscope path/to/data.npy
 ```
 
@@ -196,7 +196,7 @@ Pull requests run a dedicated coverage job in CI. To reproduce it locally:
 PATH=~/miniconda3/bin:$PATH direnv exec . pytest tests/ -q --cov=arrayscope --cov-report=term-missing:skip-covered --cov-report=xml
 ```
 
-Core runtime dependencies include NumPy, PySide6, PyQtGraph, SciPy, h5py, pydicom, nibabel, imageio, Pillow, and psutil. VisPy is optional.
+Core runtime dependencies include NumPy, PySide6, PyQtGraph, SciPy, h5py, pydicom, nibabel, imageio, Pillow, and psutil. WGPU support is available through the optional `wgpu` extra.
 
 ## Project documentation
 

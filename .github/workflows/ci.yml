@@ -41,11 +41,11 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y libgl1 libegl1
+          sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,vispy]"
+          python -m pip install -e ".[dev,wgpu]"
       - name: Run Python compatibility tests
         run: |
           pytest -q \
@@ -71,11 +71,11 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y libgl1 libegl1
+          sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,vispy]"
+          python -m pip install -e ".[dev,wgpu]"
       - name: Run GUI and integration tests
         run: pytest -q tests/display tests/window tests/ui tests/app
 
@@ -98,11 +98,11 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y libgl1 libegl1
+          sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,vispy]"
+          python -m pip install -e ".[dev,wgpu]"
       - name: Run full suite with coverage
         run: |
           pytest tests/ -q \
@@ -142,11 +142,11 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y libgl1 libegl1
+          sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,vispy]"
+          python -m pip install -e ".[dev,wgpu]"
       - name: Run strict UI tests
         run: pytest tests/ui -q
 
@@ -196,11 +196,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y libgl1 libegl1
+          sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pytest-qt pytest-xdist hypothesis "vispy>=0.14.0"
+          python -m pip install pytest pytest-qt pytest-xdist hypothesis "wgpu>=0.31,<0.32" "rendercanvas>=2.7"
       - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
@@ -231,7 +231,7 @@ jobs:
         # tests/artifacts/ that a later step uploads; under xdist workers each
         # worker redirects that directory to a private temp path.
         run: pytest tests/ui/test_qt_smoke_artifacts.py -q -n 0
-      - name: Run rendering benchmark smoke
+      - name: Run PyQtGraph rendering benchmark smoke
         id: benchmarks
         continue-on-error: true
         shell: bash
@@ -242,8 +242,8 @@ jobs:
           mkdir -p tests/artifacts
           python -m arrayscope.display.rendering_benchmarks \
             --runs 1 \
-            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-${{ matrix.os }}.jsonl \
-            2>&1 | tee tests/artifacts/v0.8.0-rendering-benchmark-${{ matrix.os }}.log
+            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-pyqtgraph-${{ matrix.os }}.jsonl \
+            2>&1 | tee tests/artifacts/v0.8.0-rendering-benchmark-pyqtgraph-${{ matrix.os }}.log
       - name: Run platform display/window tests
         id: platform-tests
         continue-on-error: true
@@ -283,10 +283,10 @@ jobs:
             else
               echo "- No platform artifact directory was created."
             fi
-            benchmark_log="tests/artifacts/v0.8.0-rendering-benchmark-${{ matrix.os }}.log"
-            if [ -f "$benchmark_log" ] && grep -Eiq "OpenGL|no OpenGL context|WARNING|ERROR" "$benchmark_log"; then
+            benchmark_log="tests/artifacts/v0.8.0-rendering-benchmark-pyqtgraph-${{ matrix.os }}.log"
+            if [ -f "$benchmark_log" ] && grep -Eiq "WARNING|ERROR" "$benchmark_log"; then
               echo
-              echo "Benchmark log contains OpenGL/runtime warnings; inspect the log before treating this run as hardware performance evidence."
+              echo "Benchmark log contains runtime warnings; inspect the log before treating this run as rendering evidence."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Check platform validation results
@@ -324,11 +324,11 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y libgl1 libegl1
+          sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,vispy]"
+          python -m pip install -e ".[dev,wgpu]"
       - name: Generate RC diagnostics trace
         run: |
           mkdir -p tests/artifacts
@@ -339,16 +339,19 @@ jobs:
             tests/artifacts/v0.8.0-diagnostics-pyqtgraph.jsonl \
             > tests/artifacts/v0.8.0-diagnostics-pyqtgraph-summary.md
           python -m arrayscope.tools.release_diagnostics \
-            --jsonl tests/artifacts/v0.8.0-diagnostics-vispy.jsonl \
-            --backend vispy
+            --jsonl tests/artifacts/v0.8.0-diagnostics-wgpu.jsonl \
+            --backend wgpu
           python -m arrayscope.core.diagnostics_trace \
-            tests/artifacts/v0.8.0-diagnostics-vispy.jsonl \
-            > tests/artifacts/v0.8.0-diagnostics-vispy-summary.md
-      - name: Generate rendering benchmark artifact
+            tests/artifacts/v0.8.0-diagnostics-wgpu.jsonl \
+            > tests/artifacts/v0.8.0-diagnostics-wgpu-summary.md
+      - name: Generate WGPU performance-baseline artifact
         run: |
           python -m arrayscope.display.rendering_benchmarks \
-            --runs 1 \
-            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-linux.jsonl
+            --tile-counts 1,16,64 \
+            --pan-steps 8 \
+            --pan-tile-edge 64 \
+            --pan-present-method bitmap \
+            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-wgpu-linux.jsonl
       - name: Generate screenshot smoke artifacts
         # Serial (-n 0): this step must write PNGs to the canonical
         # tests/artifacts/ that a later step uploads; under xdist workers each

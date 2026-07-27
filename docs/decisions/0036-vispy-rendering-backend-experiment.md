@@ -2,6 +2,10 @@
 
 ## Status
 
+Historical as of 2026-07-27: VisPy was retired by
+[ADR 0061](0061-retire-vispy-rendering-backend.md). The experiment and its
+evidence below are preserved as decision history.
+
 Superseded in part by [0037 — First-class VisPy tiled montage renderer](0037-first-class-vispy-tiled-renderer.md).
 The hybrid PyQtGraph-interaction / VisPy-pixel strategy remains accepted, but the original
 per-tile-VisPy-visual montage experiment is no longer the tiled renderer design.

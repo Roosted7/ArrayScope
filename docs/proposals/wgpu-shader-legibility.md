@@ -13,6 +13,11 @@ ship **default off**; see the note in Stage A on why.
 
 **Stages B, C, and D are unbuilt** and remain the live part of this proposal.
 
+**Current renderer note (2026-07-27):** VisPy was retired by
+[ADR 0061](../decisions/0061-retire-vispy-rendering-backend.md). Its behavior
+below is historical comparison evidence, not a source tree or fallback to
+extend.
+
 The original ADR 0058 reservation is void: a parallel branch claimed 0058 for
 [canonical tile orientation](../decisions/0058-canonical-tile-orientation-and-display-transpose.md)
 — exactly the collision the reservation anticipated. Stage C is the only
@@ -64,8 +69,8 @@ have since drifted; the claims below were re-verified against main on
   (`_codec_sampler`), not tile rendering. Every tile texture read is still
   `textureLoad` at integer coordinates, mip 0, so Stage C's premise holds.
 - **No mipmaps.** Every `create_texture` omits `mip_level_count`
-  (`wgpu_executor.py:925, 971, 982, 988, 998`). VisPy *does* have them
-  (`display/backends/vispy/tiles.py:364`); wgpu never grew a counterpart, so
+  (`wgpu_executor.py:925, 971, 982, 988, 998`). The retired VisPy renderer
+  had them, but WGPU never grew a counterpart, so
   `tile_layer_mipmap_available` is permanently `False` for it
   (`display/imageview2d.py:465-466`).
 - **Resolution adaptation is CPU-side.** `display/pyramid.py` is a NumPy box
@@ -104,7 +109,7 @@ have since drifted; the claims below were re-verified against main on
 
 ### Mipmaps: the answer is no
 
-wgpu should **not** grow VisPy's mipmaps. GPU mipmap generation averages
+WGPU should **not** grow generic hardware mipmaps. GPU mipmap generation averages
 texels in the texture's own format. The pyramid's reducer families exist
 because a coarse level of complex data is not the arithmetic mean of its
 components — `REDUCER_PHASE_VECTOR` and `REDUCER_RMS` are the semantically
@@ -471,15 +476,15 @@ covered by a test.
 
 - **Oracle churn.** Any visible default change forces a rebaseline of the
   framebuffer and `Scene.reference` mirrors. Mitigated by principle 1.
-- **`framebuffer_reference.py` has no wgpu path today** — it covers VisPy and
-  PyQtGraph only. Stage A's ring-4 gate either adds one or leans on the
-  executor-level `Scene` oracle plus managed-Weston bitmap evidence. Adding
-  the wgpu path is the more durable choice and may deserve its own commit.
+- **WGPU physical-reference path — closed.** `framebuffer_reference.py` reads
+  the WGPU executor target as well as PyQtGraph raster output. Stage B–D must
+  extend that path and its fault-shaped executor oracles rather than create a
+  new renderer-specific reference.
 - **Derivative correctness at tile seams.** `fwidth` across a tile-quad edge
   can spike on the boundary fragment. Needs visual checking at seams, not just
   in tile interiors.
-- **Stage C tap cost** on the fast-scroll path, which is the wgpu promotion
-  evidence currently in flight (`docs/queue.md` row 3d). Stage C must not
+- **Stage C tap cost** on the fast-scroll path, which remains WGPU field
+  evidence in `docs/queue.md` row 3. Stage C must not
   disturb that measurement — run it after, or behind a default-off setting.
 
 ## Related

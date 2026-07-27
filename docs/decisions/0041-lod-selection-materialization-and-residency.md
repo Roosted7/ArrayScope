@@ -1,6 +1,8 @@
 # ADR 0041: Separate LOD selection, materialization, and residency
 
-- **Status:** Accepted design; native-only production policy
+- **Status:** Accepted and implemented through ADR 0050/0056 for the
+  maintained WGPU and PyQtGraph backends. VisPy examples below are historical
+  after [ADR 0061](0061-retire-vispy-rendering-backend.md).
 - **Date:** 2026-06-24
 - **Related:** ADR 0037, ADR 0039, ADR 0040
 

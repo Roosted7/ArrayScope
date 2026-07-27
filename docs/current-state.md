@@ -1,12 +1,12 @@
 # Current state
 
-**Snapshot: `main`, 2026-07-19.** One line of development. The 2026-07-19
-wave is merged: G6 GPU compute, native wgpu overlays + glyph text, opt-in
-screen presentation (`wgpu_present_method`), the fill-throughput and
-demand-freshness live-path fixes, the codex post-merge review fixes, and
-the course reshape ([reviews/2026-07-19-course-review.md](reviews/2026-07-19-course-review.md):
-Programs A–F, queue Next section, Done ledger split to
-[`queue-done.md`](queue-done.md)). Keep this file a *short* snapshot —
+**Snapshot: `main`, 2026-07-27.** One line of development. WGPU and
+PyQtGraph are the maintained rendering backends: WGPU is the GPU/rendering
+certification path and PyQtGraph is the CPU/headless/remote path. The legacy
+VisPy renderer was retired after its engine mechanisms moved behind the
+backend-neutral command, residency, and presentation contracts
+([ADR 0061](decisions/0061-retire-vispy-rendering-backend.md)). Keep this
+file a *short* snapshot —
 history belongs to the archives, direction to [`queue.md`](queue.md).
 Update by replacement, not by layering dated correction blocks.
 
@@ -18,20 +18,19 @@ Update by replacement, not by layering dated correction blocks.
   scheduling-phase owner** (`render/progressive_scheduling.py`).
 - The GPU engine (ADR 0055/0056, G1–G6): Qt-free `arrayscope/gpu/` chunk
   keys/grid, page table, chunk store; the ADR 0057 renderer command
-  protocol with the wgpu backend live behind an explicit pin — native GPU
+  protocol with the WGPU backend — native GPU
   overlays incl. glyph text, GPU histogram/LOD compute, screen
-  presentation opt-in. wgpu leads fast-scroll; promotion evidence is
-  queue row 3d.
+  presentation opt-in.
 - Visible-truth machinery: schema-v1 trace bus; `trace_verify`
-  invariants; the journey-matrix trajectory gate (first full 15/15
-  reached 2026-07-19); framebuffer-to-CPU pixel oracles on the backends
+  invariants; the 12-cell maintained-backend journey matrix (six journeys
+  across WGPU and PyQtGraph); framebuffer-to-CPU pixel oracles on both backends
   with fault injection.
 
 ## Known open work
 
-Direction and exit gates: [`queue.md`](queue.md). Headlines: wgpu
-promotion evidence (row 3d — callback bars, dogfood hours, the FFT-scroll
-headline), G7 compressed transport, then the product turn (compare,
+Direction and exit gates: [`queue.md`](queue.md). Headlines: WGPU
+field evidence (callback bars, dogfood hours, the FFT-scroll
+headline), retention truth, then the product turn (compare,
 plugin ops/sigpy/BART, ingestion — queue rows 5–10). Standing lane:
 demand-freshness unit fixture, offscreen cold-tail stall, bounded process
 exit, R8 continuity-gate adjudication.
@@ -43,7 +42,8 @@ exit, R8 continuity-gate adjudication.
    reduce owner count; the "presentation clock" close-out (Program A)
    is the structural answer.
 2. **Acceptance is machine-bound.** Rings 3–4 and the journey matrix run
-   only on this machine by hand; CI is offscreen software-GL. Whoever
+   only on this machine by hand; CI is offscreen and cannot certify physical
+   WGPU/Vulkan presentation. Whoever
    changes a display/render/kernel/window lane runs them
    ([testing/README.md](testing/README.md)).
 

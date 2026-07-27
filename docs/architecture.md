@@ -48,7 +48,7 @@ ArrayScopeWindow + focused UI controllers
                                committed frame            backend adapter
                                       |                         |
                                       +--> hover/ROI/profile    +--> PyQtGraph
-                                                                +--> VisPy
+                                                                +--> WGPU
 ```
 
 ## Ownership
@@ -79,7 +79,8 @@ meaning, and backend adapters own concrete textures/items/visuals only.
 - `display.commit` applies a presentation through an adapter contract.
 - `display.geometry` maps committed world/canvas/tile coordinates to array indices and profile states.
 - `display.layers` owns image-view graphics-item insertion and z-order.
-- Concrete PyQtGraph/VisPy modules own upload, texture, atlas, shader, visual, and scene mechanics only.
+- Concrete PyQtGraph/WGPU modules own item, upload, page-pool, shader, draw,
+  and scene mechanics only.
 - `window.montage_viewport` owns Qt-free montage viewport reflow and source-local ROI remapping; renderers
   apply those decisions but do not redefine auto/manual semantics.
 
@@ -158,13 +159,13 @@ Placeholders and dirty state clear only after presentation acknowledgement. Work
 ### Presentation generations
 
 A global presentation command has one semantic target/revision, but convergence is capability-specific.
-PyQtGraph may require prioritized, budgeted CPU/item redraws for every active tile; VisPy can normally
-apply compatible level changes through shader uniforms. Retained visibility is not acknowledgement of
+PyQtGraph may require prioritized, budgeted CPU/item redraws for every active tile; WGPU can normally
+apply compatible level changes through mapping/uniform commands. Retained visibility is not acknowledgement of
 the current target. A backend advances only the work it actually accepted, and completion means all
 currently active coverage is acknowledged at the latest revision. See
 [ADR 0040](decisions/0040-backend-aware-presentation-convergence.md).
 `PresentationGenerationTracker` owns target/revision/active-coverage state; `LevelConvergenceStrategy`
-adapts PyQtGraph progressive redraw and VisPy uniform acknowledgement to that shared contract.
+adapts PyQtGraph progressive redraw and WGPU mapping/uniform acknowledgement to that shared contract.
 
 Persistence intent (for example an explicit user lock) is separate from the latest physical presentation
 target. A newer concrete target supersedes older automatic work without recreating the materialization
@@ -206,7 +207,7 @@ state/viewport change
   -> acknowledgement and committed frame
 ```
 
-Pan/zoom retarget the session rather than recreating document work; same-key re-renders reuse the live session and index-window scrub steps with identical layout geometry retarget it in place ([ADR 0051](decisions/0051-single-owner-tile-lifecycle.md)). Display LOD is resident by default on VisPy tiled scenes: asynchronous pyramid materialization, per-class atlas residency, a presentation floor, and a retained preview level ([ADR 0050](decisions/0050-async-multi-resolution-tile-residency.md) implements the [ADR 0041](decisions/0041-lod-selection-materialization-and-residency.md) split). Exact inspection values remain native; normal (non-tiled) images stay native-only until X5c/X5d.
+Pan/zoom retarget the session rather than recreating document work; same-key re-renders reuse the live session and index-window scrub steps with identical layout geometry retarget it in place ([ADR 0051](decisions/0051-single-owner-tile-lifecycle.md)). Display LOD is resident by default on WGPU tiled scenes: asynchronous pyramid materialization, per-class page-pool residency, a presentation floor, and a retained preview level ([ADR 0050](decisions/0050-async-multi-resolution-tile-residency.md) implements the [ADR 0041](decisions/0041-lod-selection-materialization-and-residency.md) split). Exact inspection values remain native; normal (non-tiled) images stay native-only until X5c/X5d.
 
 Montage resize and layout reflow are viewport retargets, not semantic scope changes. Manual resize
 preserves screen zoom through `ViewportController`; same-source column reflow may translate the range
@@ -243,7 +244,7 @@ region-first materialization.
 - The visible operation stack is never silently rewritten by runtime optimization.
 - Worker callbacks never commit stale semantic or presentation revisions.
 - Camera-only changes do not restart array evaluation.
-- Levels/LUT edits do not evict unchanged source texture data; PyQtGraph may still require bounded CPU/item redraws while VisPy uses uniforms.
+- Levels/LUT edits do not evict unchanged source texture data; PyQtGraph may still require bounded CPU/item redraws while WGPU updates mapping uniforms.
 - First pixels do not wait for a detailed histogram plot; they do require a valid semantic level source for the pixels shown.
 - GUI callbacks have item, byte, and elapsed-time limits; an item cap alone is not a time budget.
 - Cold upload/preparation is measured separately from warm rebind/visibility work.
@@ -252,8 +253,8 @@ region-first materialization.
 - The committed frame, not a compatibility placeholder, answers hover/value queries.
 - Backend branches are based on declared capabilities, not concrete class-name tests.
 - Clearing a backend requires an explicit reason such as context loss, replacement, document revision, or incompatible physical representation.
-- VisPy visible tile admission is coherent: placeholders clear only after texture data, geometry,
-  visibility, and draw invalidation are consistent.
+- WGPU visible tile admission is coherent: placeholders clear only after page
+  data, mapping/geometry, draw submission, and acknowledgement are consistent.
 - Desired and applied LOD are separate states; no commit performs synchronous pyramid construction.
 
 ## Placement guide

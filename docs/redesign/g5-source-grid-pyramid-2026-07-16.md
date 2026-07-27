@@ -6,6 +6,11 @@ cache, producer migration, and both backend consumers are implemented on the
 landing candidate; the remaining broad/stress and real-Wayland acceptance
 matrix still gates queue row 1.
 
+**Historical renderer note (2026-07-27):** VisPy-specific measurements and
+landing evidence in this dated dossier are intentionally preserved. The
+current consumers are WGPU and PyQtGraph; see
+[ADR 0061](../decisions/0061-retire-vispy-rendering-backend.md).
+
 ## One canonical reduction route
 
 Ingest reduction, ladder materialization, cached derivation, and later

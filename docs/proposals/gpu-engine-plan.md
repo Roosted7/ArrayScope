@@ -13,6 +13,11 @@ fixed with failing-pre-fix gates. **The remaining G-steps are ordered in
 design/stage record. Historical status detail: this file's git history and
 the [continuation brief](gpu-port-continuation.md).
 
+**Current renderer note (2026-07-27):** the initial VisPy integration steps
+below are historical. WGPU is the maintained GPU executor, PyQtGraph is the
+CPU/headless/remote executor, and VisPy was retired by
+[ADR 0061](../decisions/0061-retire-vispy-rendering-backend.md).
+
 ## User problem
 
 Interactions that change *which resident values are shown* — same-extent

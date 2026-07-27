@@ -6,6 +6,11 @@ the executable program stays [`gpu-engine-plan.md`](gpu-engine-plan.md)
 and the ideas banked for later stages, so they are designed-for rather than
 retrofitted.
 
+**Current renderer note (2026-07-27):** WGPU and PyQtGraph are the maintained
+backends under [ADR 0061](../decisions/0061-retire-vispy-rendering-backend.md).
+VisPy plans, comparisons, and measurements below are preserved as the evidence
+that led to the command-protocol migration and retirement decision.
+
 ## The endpoint in one sentence
 
 A real-time, deadline-driven tensor exploration engine whose CPU, GPU,

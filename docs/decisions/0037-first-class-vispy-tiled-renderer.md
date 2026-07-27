@@ -2,6 +2,10 @@
 
 ## Status
 
+Historical as of 2026-07-27: VisPy was retired by
+[ADR 0061](0061-retire-vispy-rendering-backend.md). The body below records the
+renderer design that established the surviving tiled-presentation contracts.
+
 Accepted and extended, with its original CPU-side LOD payload plan superseded by
 [0041 — Separate LOD selection, materialization, and residency](0041-lod-selection-materialization-and-residency.md).
 VisPy is the preferred backend for sustained large tiled rendering, pending small-view latency and

@@ -21,7 +21,20 @@ This file records user-visible release changes. Detailed development history and
   smoke test records every scenario so UI changes that would break the demos
   fail loudly. The old hand-recorded GIFs under `docs/images/` are gone.
 
+### Removed
+
+- The legacy VisPy rendering backend, its optional dependency, settings/menu
+  choice, and backend-specific tests have been removed. WGPU is the maintained
+  GPU/rendering certification path and PyQtGraph remains the CPU/remote
+  fallback; a persisted legacy `vispy` choice resolves through normal AUTO
+  selection instead of trying to construct a removed backend.
+
 ### Fixed
+
+- WGPU reduced phase-vector LOD pages now preserve resultant coherence as
+  intensity instead of rendering cancellation at full-brightness phase hue.
+  Backend-labelled diagnostics and profile tools also reject renderer fallback,
+  so PyQtGraph output cannot be published as WGPU evidence.
 
 - The experimental wgpu screen presentation mode (`wgpu_present_method:
   screen`, native Wayland) now draws its floating overlays exactly as the
@@ -77,7 +90,7 @@ This file records user-visible release changes. Detailed development history and
   `montage_histogram_lod_swap_recomputes`).
 - Display-LOD changes no longer occasionally re-run expensive pipelines
   (per-tile FFT re-runs): montage tile results are now always stored in the
-  semantic display cache, including the settled VisPy fast-drain path, and
+  semantic display cache, including the settled GPU fast-drain path, and
   demanded pyramid levels are derived from the finest already-resident level
   (level-from-level) when shapes divide evenly instead of always re-reducing
   the native plane (`montage_lod_pipeline_reruns_avoided`,
@@ -145,7 +158,7 @@ This file records user-visible release changes. Detailed development history and
   0050's future reduce-before-ops display evaluation lane.
 
 - Multi-resolution montage textures (ADR 0050): the `montage_lod_policy`
-  setting (`resident` default on VisPy tiled scenes, `native-only`
+  setting (`resident` default on GPU tiled scenes, `native-only`
   fallback, selectable from Performance > Montage LOD without a restart)
   presents zoomed-out montages from box-mean-reduced
   pyramid levels that are materialized asynchronously in the background and

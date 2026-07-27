@@ -13,7 +13,7 @@ chokepoints below are where areas meet.
 
 | Area | Code | Tests | Docs anchor |
 |---|---|---|---|
-| **GPU engine / residency** | `arrayscope/gpu/`, `display/vispy*`, atlas/pool, `display/source_anchoring.py` | `tests/gpu`, `tests/display` | ADR 0055/0056, [gpu-engine-plan](proposals/gpu-engine-plan.md) |
+| **GPU engine / residency** | `arrayscope/gpu/`, `display/wgpu*`, WGPU page pools, `display/source_anchoring.py` | `tests/gpu`, `tests/display` | ADR 0055/0056/0057, [gpu-engine-plan](proposals/gpu-engine-plan.md) |
 | **Kernel / scheduling** | `arrayscope/kernel/`, governor, lanes, `latency_feedback.py` | `tests/kernel`, `tests/presentation` | ADR 0053 (one scheduler — hard rule) |
 | **Render pipeline / LOD** | `arrayscope/render/` (ladder, pipeline, lod) | `tests/render` | [g5 contract](redesign/g5-source-grid-pyramid-2026-07-16.md) |
 | **Operations / stages** | `arrayscope/operations/` (capabilities, stage cache, slabs) | `tests/operations` | ADR on operation capabilities |

@@ -88,6 +88,11 @@
   (renderer strategy + command table),
   `docs/proposals/wgpu-renderer-experiment.md` (gate-B evidence).
 
+**Current backend note (2026-07-27):** WGPU is the maintained GPU/rendering
+executor. The VisPy strangler discussion below is preserved as migration
+history; VisPy was retired by
+[ADR 0061](0061-retire-vispy-rendering-backend.md).
+
 ## Context
 
 The renderer experiments settled the strategy question with evidence:

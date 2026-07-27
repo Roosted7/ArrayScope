@@ -51,7 +51,7 @@ A progressive tile can be shown before a high-detail plot is complete, but autom
 
 Montage level evidence is ranked separately from coverage: rough preview,
 rough target/full, then refined. Rough preview evidence may seed the first
-VisPy shader levels and histogram plot, but it remains provisional. A reduced
+WGPU shader-mapping levels and histogram plot, but it remains provisional. A reduced
 target LOD is rough target evidence, not merely preview evidence, when it is
 the requested final display target. Refined evidence is admitted after visible
 presentation settles and may update the histogram/levels without a tile upload.
@@ -67,7 +67,7 @@ multiple semantic tile regions. Those are layouts inside one presentation model,
 renderers.
 
 A tiled presentation is a set of semantic regions and payloads. PyQtGraph uses persistent per-tile
-image items; VisPy uses atlas/texture-backed visuals. Tile identity is based on materialized data and
+image items; WGPU uses page-pool bindings and instanced draws. Tile identity is based on materialized data and
 compatible physical representation, not levels/LUT. Level/window/LUT changes are presentation
 updates, preferably shader/uniform updates where the backend supports them, and do not imply new
 source pixels.
@@ -129,15 +129,15 @@ diagnostics derive from those owners. A priority queue may exist as a local,
 ephemeral ordering utility for prefetch, but its membership is never semantic
 or lifecycle state.
 
-VisPy atlas residency is a data-keyed cache, not a mirror of the current viewport. `active_tiles`
-controls which retained tile mappings are visible; source identity, texture kind, LOD, tile shape,
-storage mode, budget eviction, reset/context loss, or teardown are the only valid reasons for texture
+WGPU page residency is a data-keyed cache, not a mirror of the current viewport. `active_tiles`
+controls which retained tile mappings are visible; source identity, texture kind, LOD, page shape,
+storage mode, budget eviction, reset/device loss, or teardown are the only valid reasons for texture
 residency to become cold.
 
 Presentation-generation and admission state are Qt-free. `PresentationGenerationTracker` owns the
 latest level target, revision, active coverage, pending work, and acknowledgement state.
 `TileAdmissionQueue` owns priority/aging/item/byte/deadline admission without knowing array semantics.
-`LevelConvergenceStrategy` keeps PyQtGraph progressive tile redraws and VisPy uniform updates behind
+`LevelConvergenceStrategy` keeps PyQtGraph progressive tile redraws and WGPU mapping/uniform updates behind
 one semantic convergence contract. The kernel sits above these component models and owns real
 lane-level execution/counters for visible planning, materialization, display preparation, GUI fan-in,
 backend commit, side analysis, stage materialization, and speculative residency. Work visibility is
@@ -162,16 +162,16 @@ new content. ROI geometry follows the same source-local rule through canonical
 
 ### Multi-resolution
 
-Resident multi-resolution LOD is the default for VisPy tiled scenes
+Resident multi-resolution LOD is the default for WGPU tiled scenes
 ([ADR 0050](../decisions/0050-async-multi-resolution-tile-residency.md)): asynchronous worker-side
-pyramid materialization keyed by semantic tile identity; atlas pages classed by
+pyramid materialization keyed by semantic tile identity; page pools classed by
 `(level, texture shape, format, gutter)` so a reduced tile never enters a native-shaped slot; a
 presentation floor that presents any resident level instead of a placeholder; and a retained,
 pinned preview level. Tile lifecycle state (what is evaluated, resident, presented) is owned by
 the Qt-free `TileLifecycle` machine
 ([ADR 0051](../decisions/0051-single-owner-tile-lifecycle.md)); backends acknowledge commits with
 slot identities and never own semantic bookkeeping. Exact inspection stays native-resolution;
-PyQtGraph adoption and ops-input LOD remain roadmap work.
+PyQtGraph uses its bounded CPU/item residency implementation; ops-input LOD remains roadmap work.
 
 ## Backend contract
 
@@ -185,7 +185,7 @@ Shared code asks for capabilities such as:
   (`display_axis_transpose`, see below);
 - diagnostics and acknowledgement.
 
-It must not branch on `isinstance(...VisPy...)` to decide semantic meaning.
+It must not branch on a concrete backend class to decide semantic meaning.
 
 ### Canonical orientation and display-only axis swap
 
@@ -201,8 +201,7 @@ view's payloads and GPU residency. wgpu applies the swap with a swapped UV walk
 in the vertex shader; PyQtGraph feeds the `ImageItem` a transposed view of the
 canonical buffer. Value readout indexes the canonical array with swapped
 coordinates. LOD **factor** selection and montage layout stay display-oriented,
-but page **source** rectangles are canonical. A non-capable backend (VisPy)
-keeps the legacy re-render-on-swap path.
+but page **source** rectangles are canonical.
 
 Concrete backend code may own:
 
@@ -231,41 +230,29 @@ The default path is mature and provides the complete feature baseline. Its tiled
 It accepts typed tiled presentations for internally tiled single planes as well as montages. The
 old direct tile-layer widget API has been removed; tile-layer commits enter through
 `present_tiled` with committed tile state and revisioned tile deltas.
-PyQtGraph now declares persistent CPU/item tile residency separately from VisPy shader residency.
+PyQtGraph declares persistent CPU/item tile residency separately from WGPU device-page residency.
 Inactive tiles are retained as prepared `ImageItem` state under a bounded inactive pool and can be
 rebound by source/content identity without recreating the item or rebuilding display arrays. Viewport,
 camera, and active-set changes may hide, move, or rebind residents, but they must not clear them.
 Only explicit reset/teardown, incompatible source/content identity, or residency-budget eviction can
 destroy PyQtGraph tile residency.
 
-### VisPy
+### WGPU
 
-VisPy supports shader mapping and persistent tiled residency with atlas-backed drawing. It can avoid
-repeated CPU windowing and reduce many-item overhead. `VisPySurface` now reaches presentation commits
-through the shared `ImageSurface` contract rather than inheriting the PyQtGraph concrete surface.
-VisPy does not expose a direct tile-layer presentation API; all tiled updates use the typed
-`DisplayTiledPresentation` path so histogram identity, payload revisions, residency acknowledgement,
-and committed value semantics stay on one control plane.
-Normal-image commits hide/deactivate the tiled presentation but do not reset compatible VisPy atlas
-residency or retained acknowledged tile payloads. Explicit surface reset, context loss, teardown, and
-incompatible physical representation changes are the reset boundaries that destroy residency.
-The VisPy canvas remains mouse-transparent for the stacked Qt event layer. ROI/profile hover and drag
-use the shared pointer interaction controller, while background pan/zoom uses
-`display.view_navigation_driver` plus `display.view_navigation` range math to update the canonical
-`ViewBox` range and camera without PyQtGraph scene drag.
-VisPy is the preferred backend for sustained large tiled rendering, pending small-view latency and
-platform validation. Its active visible commit should be a coherent GPU presentation transaction:
-admitted payloads are acknowledged only after texture data, atlas/page geometry, visibility, and draw
-invalidation are consistent.
-The layer-wide shader-mapping key is only a desired-state cache; each atlas
-page visual owns physical uniform state. Every touched/active page synchronizes
-that state, even when the layer-wide key is unchanged. A levels-only action
-updates levels only and must never replay cached component, display, LUT, or
-scale state.
-Its atlas/quad path uses frame-plan tile geometry for internally tiled single planes and montage
-geometry for montage presentations.
+WGPU is the maintained GPU/rendering certification path. `WgpuSurface`
+reaches the shared `ImageSurface` contract, and all tiled updates use typed
+`DisplayTiledPresentation` commands so histogram identity, payload revisions,
+residency acknowledgement, and committed value semantics stay on one control
+plane. The ADR 0057 executor owns device page pools, shader mapping, compute,
+draw submission, and bitmap or native-Wayland presentation mechanics.
 
-Widget close stops warm-tile work, cancels queued histogram refresh, and closes the VisPy canvas.
+ROI/profile interaction remains in the shared shell. A visible transaction is
+acknowledged only after page data, page-table mappings, geometry, and the draw
+have been accepted by the executor. Normal-image commits may deactivate tiled
+draws without destroying compatible resident pages; reset, device loss,
+teardown, incompatible representation, and budget eviction are the cold
+boundaries. Widget close cancels pending work and tears down the executor and
+canvas.
 
 ## Progressive presentation contract (Thomas, 2026-07-17/18 — binding)
 
@@ -359,7 +346,7 @@ COMPUTE GOES, never about what may be shown:
    The visible-dependency evidence producers run at the same INTERACTIVE
    priority as the tiles they gate — evidence queued behind the fill it
    unblocks is a self-inflicted wait. Rough→refined *preview* level
-   phasing remains shader-windowing (VisPy) behavior only.
+   phasing remains shader-windowing (WGPU) behavior only.
 
 Work classification follows the presentation dependency, not a historical
 function or lane name. In particular, PyQtGraph semantic level evidence and
@@ -379,8 +366,8 @@ queue, or commit-emission counts.
 - Apply backpressure before visible admission; once admitted, visible payloads commit coherently or
   the previous placeholder/retained frame remains in force.
 - Bound cold preparation/upload by items, bytes, and elapsed time.
-- A VisPy transaction that performs zero texture uploads, zero upload bytes,
-  and zero vertex uploads is a resident mapping rebind, not a cold batch. It
+- A WGPU transaction that performs zero page uploads and zero upload bytes is
+  a resident mapping rebind, not a cold batch. It
   may bypass the item cap so presentation does not withhold ready pixels;
   commits that upload any pixels remain capped.
 - Do not count a batch of many tiles as one feedback item.
@@ -394,7 +381,7 @@ queue, or commit-emission counts.
 ## Migration direction
 
 `ImageViewShell` is the shared widget contract for controls, histogram, HUD, viewport intent,
-interaction state, and display timing. PyQtGraph and VisPy expose concrete `ImageSurface`
+interaction state, and display timing. PyQtGraph and WGPU expose concrete `ImageSurface`
 implementations with declared capabilities; `DisplayCommitter` commits semantic tiled presentations
 directly to that surface contract. The contract also covers camera application, overlay
 coordinate mapping, diagnostics, context-loss reset, teardown, interaction-state visual sync, and
@@ -406,5 +393,5 @@ Since 2026-07-17 the shell is the single owner of the tiled-commit flow
 declared backend hooks (`_apply_backend_tiled_presentation`,
 `_after_tiled_commit`, `_tiled_presentation_layer`, and the ROI/profile visual
 hooks) with scene/texture mechanics only. `ImageView2D` carries the PyQtGraph
-tile-layer mechanics; `VisPySurface` no longer constructs a dormant PyQtGraph
-tile layer.
+tile-layer mechanics; `WgpuSurface` carries the device executor and
+presentation bridge.

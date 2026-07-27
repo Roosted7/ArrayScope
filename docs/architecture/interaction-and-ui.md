@@ -62,7 +62,7 @@ The shared interaction controller owns:
 - handle selection.
 
 Backends draw that state. Qt pointer events for semantic overlays are normalized by the shared pointer
-driver; PyQtGraph items and VisPy visuals mirror ROI/profile state rather than owning drag behavior.
+driver; PyQtGraph items and WGPU surfaces mirror ROI/profile state rather than owning drag behavior.
 Pointer hover first queries an indexed display-space ROI candidate set and then applies exact
 backend-independent hit testing. Hit testing uses real display coordinates; only active drag updates
 are clamped to the committed image bounds. If a montage range shrink leaves an ROI outside the
@@ -79,10 +79,10 @@ backend, applying Qt's platform-provided incremental acceleration and momentum d
 second animation owner. A manually calibrated angle-delta mapping preserves accelerated touchpad
 motion when available, bounded against simultaneous native pixel deltas so alternate Qt encodings do
 not create a speed discontinuity; angle-only devices retain the full compatibility calibration.
-Mouse-wheel events remain with the existing backend wheel path. VisPy uses the native path so plain
-pan/zoom updates the canonical range and camera immediately without routing through PyQtGraph scene
-drag machinery. ROI/profile hits still take priority and use the shared semantic interaction
-controller.
+Mouse-wheel events remain with the existing backend wheel path. WGPU applies
+the shared navigation path to the canonical viewport range and camera without
+routing through PyQtGraph scene drag machinery. ROI/profile hits still take
+priority and use the shared semantic interaction controller.
 
 Middle-button drag is direction-locked after a small movement threshold. Vertical drag performs a
 smooth focus-anchored zoom; horizontal drag steps the last manually used scrollable dimension, or
@@ -149,8 +149,8 @@ A command palette is useful when it calls the same semantic command handlers as 
 ## Current UI debt
 
 - `ImageViewShell` remains large and still contains shared shell, PyQtGraph mechanics, and backend hooks.
-- VisPy still uses a transparent Qt/PyQtGraph event layer for shared overlay events, but background
-  viewport navigation now bypasses PyQtGraph scene drag.
+- WGPU bitmap and screen presentation share the shell and semantic overlay
+  model but retain distinct compositor/capture mechanics.
 - Some callbacks still combine state transition, scheduling, rendering, and status updates.
 - Recent slicing grammar is powerful but needs clearer inline preview/error feedback.
 - Tile hover priority is sampled when a plan is built; active queue retargeting needs a coalesced design.

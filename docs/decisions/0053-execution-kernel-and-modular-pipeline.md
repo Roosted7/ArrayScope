@@ -4,6 +4,10 @@
 (2026-07-09), R8 evidence pending. Redesign branch `redesign`.
 **Drives:** the plan set in [`docs/redesign/`](../redesign/README.md).
 
+**Current backend note (2026-07-27):** “both backends” now means WGPU and
+PyQtGraph. VisPy references below record the original redesign context; the
+backend was retired by [ADR 0061](0061-retire-vispy-rendering-backend.md).
+
 ## Problem
 
 Regressions ping-ponged between subsystems because scheduling was split

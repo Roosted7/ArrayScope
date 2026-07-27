@@ -28,17 +28,16 @@ bounded progressive rendering.
 
 ## Now — Program A: finish the engine bet
 
-**2026-07-19 update:** the renderer decision is made and implemented. The
-wgpu backend (ADR 0057 command protocol) is live behind an explicit pin
+**2026-07-27 update:** the renderer decision is made and implemented. The
+WGPU backend (ADR 0057 command protocol) is the maintained GPU path
 with every payload shape, native GPU overlays incl. glyph text, GPU
 histogram/LOD compute (G6 complete), and opt-in screen presentation
-(bitmap remains default; AUTO = screen on native Wayland). The journey
-matrix reached its first 15/15; wgpu leads fast-scroll. What "Now" means
-until further notice: **promotion evidence** (queue row 3d — shared row-1
-callback bars, dogfood hours, the FFT-scroll headline) on the VisPy
-decision ladder (perf bars → AUTO backend flip at field parity → VisPy
-demotion review only after field evidence; PyQtGraph keeps the
-headless/interaction-host role). **G7 compression closed with a measured NO**:
+(bitmap remains default; AUTO selects WGPU when its device gate passes).
+The historical three-backend matrix reached 15/15 before the legacy VisPy
+renderer was retired; the maintained gate is now the 12-cell WGPU/PyQtGraph
+matrix. What "Now" means until further notice is continued field evidence
+(shared row-1 callback bars, dogfood hours, the FFT-scroll headline) while
+PyQtGraph keeps the headless/interaction-host role. **G7 compression closed with a measured NO**:
 component codecs exist, but the 2026-07-22 live audit restored RAW/OFF after
 cold latency, LOD, and physical-allocation gates failed. It is not a current
 engine task: revive it only after telemetry proves a capacity/I/O bottleneck,
@@ -75,8 +74,8 @@ bug archaeology; they retire the two biggest recurring-defect roots):
   poll boundary as a capability (shared design with plugin ops, below).
 - **Policy out of backends** — continue moving admission/upsert/commit
   policy from `backends/*/tiles.py` into the protocol/model layer until a
-  backend is only a command executor; this is what makes VisPy retirement
-  cheap and a later QPainter software executor small (~2k LOC).
+  backend is only a command executor; this is what made VisPy retirement
+  bounded and keeps a later QPainter software executor small (~2k LOC).
 
 ## Next — the product turn (Programs B–D)
 

@@ -26,6 +26,11 @@ trust a row below.
 Recorded 2026-06-22 at the v0.8.0 release. Regenerate with the command in
 [`docs/testing/release-candidate.md`](release-candidate.md).
 
+The VisPy rows below are preserved as release-era evidence only. VisPy is no
+longer an executable comparator or a current performance gate. Current changes
+must measure WGPU and PyQtGraph together; WGPU is the baseline and PyQtGraph
+gets the documented 2× allowance.
+
 **Environment (both runs).** `Linux-7.0.12-zen1-1-zen-x86_64-with-glibc2.43`,
 Python 3.12.13, PySide6, Wayland session, `gpu_max_texture_size` 4096. The two
 runs differ only in `qt_qpa_platform`: `offscreen` for the `-linux` file, and the
@@ -98,6 +103,11 @@ per-run pass/fail verdicts are kept here; the diagnosis behind each red lives in
 the dossiers under [`docs/redesign/`](../redesign/) and the narrative in
 [`docs/queue.md`](../queue.md) row 3 and [`docs/queue-done.md`](../queue-done.md).
 
+This ledger records the historical three-backend decision evidence. The
+maintained matrix is now 12 cells: six journeys across WGPU and PyQtGraph.
+Historical VisPy rows below remain evidence for the retirement decision, not
+cells in the current gate.
+
 Journeys are `cold_fill`, `zoom_in`, `zoom_out`, `scroll_shuffle`,
 `index_scroll`, and — from 2026-07-21 — `deep_zoom_far_scroll`. Early
 (2026-07-17) runs used a 10-row schema with boolean statuses; later runs use 15
@@ -126,7 +136,7 @@ each passed all five journeys.
 `deep_zoom_far_scroll` was newly added and red across all three backends — it was
 introduced to expose a known gap, so its reds are expected, not a regression.
 wgpu was the strongest backend in the final matrix, consistent with the
-promotion-evidence argument in `docs/queue.md` row 3.
+subsequent backend-retirement decision.
 
 ### All runs, chronologically
 

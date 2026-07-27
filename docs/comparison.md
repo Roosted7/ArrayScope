@@ -42,7 +42,7 @@ A modern, minimal browser/webview product that works across many invocation envi
 | Invocation reach | Python, CLI, Jupyter Qt fallback | MATLAB | Strongest: CLI/scripts/notebooks/editors/remote |
 | Large-data model | Cost/region/stage/cache/montage budgets | Primarily eager MATLAB object workflows | Lazy/mmap formats and server cache; CPU render transport |
 | Progressive semantic rendering | Strongest internal model | Limited | Responsive pipeline, but frontend/server state is mode-centric |
-| GPU strategy | PyQtGraph default, experimental VisPy/raw shader/tile residency | MATLAB graphics | Canvas + some WebGL; much server-rendered RGBA/PNG |
+| GPU strategy | WGPU command executor, compute, and persistent page residency; PyQtGraph CPU fallback | MATLAB graphics | Canvas + some WebGL; much server-rendered RGBA/PNG |
 | Diagnostics/admission | Explicit memory, lanes, governor, traces | Limited | Tests/audits, less explicit per-request resource policy |
 | Architecture concentration | Several large transition modules | Main handle object/global workspace | 29k-line frontend + large launcher |
 
@@ -84,7 +84,7 @@ ArrayScope has solid Python/CLI and process handling, but notebook/editor/remote
 
 ### Architectural convergence
 
-The normal/montage and PyQtGraph/VisPy paths still differ too much. Large files and timer interactions make local fixes risky until the FramePlanner/scheduler/surface migration advances.
+The normal/montage and PyQtGraph/WGPU paths still differ physically. Large files and timer interactions make local fixes risky unless semantic planning, lifecycle, and presentation ownership remain shared.
 
 ### Hardware evidence
 
@@ -168,7 +168,7 @@ Define one semantic session/command boundary that CLI, Jupyter, and editor integ
 
 ### 8. Use evidence to choose the backend
 
-The default should be selected by parity, stability, request-to-presented latency, event-loop behavior, memory/residency, and platform coverage. PyQtGraph can remain the safe default while VisPy matures; no roadmap should assume that “GPU” automatically means faster.
+The default should be selected by parity, stability, request-to-presented latency, event-loop behavior, memory/residency, and platform coverage. AUTO chooses WGPU only where its device gate passes and otherwise uses PyQtGraph; no roadmap should assume that “GPU” automatically means faster.
 
 ## Strategic position
 

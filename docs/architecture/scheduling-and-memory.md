@@ -78,7 +78,7 @@ retained stage warmup; retained quality is optional and must yield to visible ba
 
 ## GUI-thread contract
 
-All paths that mutate Qt or OpenGL state follow these limits:
+All paths that mutate Qt or backend rendering state follow these limits:
 
 - interactive callbacks target **≤ 4 ms**;
 - idle presentation callbacks target **≤ 8 ms**;

@@ -53,14 +53,17 @@ python -m arrayscope.core.diagnostics_trace \
   tests/artifacts/v0.8.0-diagnostics-pyqtgraph.jsonl \
   > tests/artifacts/v0.8.0-diagnostics-pyqtgraph-summary.md
 QT_QPA_PLATFORM=offscreen python -m arrayscope.tools.release_diagnostics \
-  --jsonl tests/artifacts/v0.8.0-diagnostics-vispy.jsonl \
-  --backend vispy
+  --jsonl tests/artifacts/v0.8.0-diagnostics-wgpu.jsonl \
+  --backend wgpu
 python -m arrayscope.core.diagnostics_trace \
-  tests/artifacts/v0.8.0-diagnostics-vispy.jsonl \
-  > tests/artifacts/v0.8.0-diagnostics-vispy-summary.md
+  tests/artifacts/v0.8.0-diagnostics-wgpu.jsonl \
+  > tests/artifacts/v0.8.0-diagnostics-wgpu-summary.md
 QT_QPA_PLATFORM=offscreen python -m arrayscope.display.rendering_benchmarks \
-  --runs 1 \
-  --jsonl tests/artifacts/v0.8.0-rendering-benchmark-linux.jsonl
+  --tile-counts 1,16,64 \
+  --pan-steps 8 \
+  --pan-tile-edge 64 \
+  --pan-present-method bitmap \
+  --jsonl tests/artifacts/v0.8.0-rendering-benchmark-wgpu-linux.jsonl
 ```
 
 Do not feed rendering benchmark JSONL into
@@ -92,11 +95,11 @@ py-spy record \
     --jsonl tests/artifacts/v0.8.0-montage-workflow-profile.jsonl
 ```
 
-Use `perf record -F 99 -g` for native SciPy/Qt/GL attribution. Avoid using
+Use `perf record -F 99 -g` for native SciPy/Qt/render-driver attribution. Avoid using
 `py-spy --native` timings as release pacing evidence unless a plain JSONL run
 shows comparable pacing.
 
-Do not run this command with `QT_QPA_PLATFORM=offscreen` when making VisPy or GPU
+Do not run this command with `QT_QPA_PLATFORM=offscreen` when making WGPU
 frame-pacing claims.
 
 Rendering benchmark evidence must include small, medium, and large tiled cases.
@@ -110,5 +113,5 @@ not use failed profiler output as benchmark support.
 
 Record the git revision, clean/dirty state, CI run URL, command line, tool
 status, platform skips, artifact paths, OS/session type,
-Python/Qt/PySide/PyQtGraph/VisPy versions, backend, dataset shape/dtype, and
+Python/Qt/PySide/PyQtGraph/WGPU/rendercanvas versions, backend, dataset shape/dtype, and
 any diagnostics warning observed during manual checks.
