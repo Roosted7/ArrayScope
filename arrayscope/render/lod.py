@@ -1406,7 +1406,13 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
     )
 
 
-def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None) -> None:
+def ensure_floor_payloads(
+    session,
+    tile_numbers,
+    *,
+    max_count: int | None = None,
+    preferred_keys: dict[int, LodPageSetKey] | None = None,
+) -> None:
     """Present the best resident pyramid level for unrendered planned tiles.
 
     The floor invariant (ADR 0050): a planned tile with any resident
@@ -1445,15 +1451,33 @@ def ensure_floor_payloads(session, tile_numbers, *, max_count: int | None = None
             continue
         source_index = int(tile.source_index)
         semantic_id = session.tile_semantic_source_id(source_index)
-        best = best_floor_key(session, source_index, tile_number=int(tile_number))
-        if best is None:
-            continue
-        key, coarsest_actual_level, owning_cache = best
-        resolved, metadata, best_quality = _floor_resolution_and_quality(
-            session,
-            key,
-            owning_cache,
-        )
+        key = None if preferred_keys is None else preferred_keys.get(int(tile_number))
+        if key is not None:
+            # A shared preview has just admitted this exact requested set.
+            # Re-running best_floor_key here reconstructs and probes every
+            # acceptable level for every tile before first pixels can commit.
+            # Consume the already-proven key directly; if cache pressure
+            # displaced it between admission and payload construction, fall
+            # back to the ordinary best-floor search.
+            resolved, metadata, best_quality = _floor_resolution_and_quality(
+                session,
+                key,
+                cache,
+            )
+            if resolved is not None and bool(resolved.exact):
+                coarsest_actual_level = int(resolved.coarsest_actual_level)
+            else:
+                key = None
+        if key is None:
+            best = best_floor_key(session, source_index, tile_number=int(tile_number))
+            if best is None:
+                continue
+            key, coarsest_actual_level, owning_cache = best
+            resolved, metadata, best_quality = _floor_resolution_and_quality(
+                session,
+                key,
+                owning_cache,
+            )
         if resolved is None:
             continue
         # Quality is the provenance of the cached page — a target-level page

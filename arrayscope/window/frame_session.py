@@ -2960,8 +2960,19 @@ class FrameSession:
     def _floor_can_progress(self, tile_number: int, tile=None) -> bool:
         return render_lod.floor_can_progress(self, tile_number, tile=tile)
 
-    def _ensure_floor_payloads(self, tile_numbers, *, max_count: int | None = None) -> None:
-        return render_lod.ensure_floor_payloads(self, tile_numbers, max_count=max_count)
+    def _ensure_floor_payloads(
+        self,
+        tile_numbers,
+        *,
+        max_count: int | None = None,
+        preferred_keys=None,
+    ) -> None:
+        return render_lod.ensure_floor_payloads(
+            self,
+            tile_numbers,
+            max_count=max_count,
+            preferred_keys=preferred_keys,
+        )
 
     def preview_floor_metadata(self, key) -> PreviewFloorMetadata | None:
         return self.lod_preview_metadata.get(key)

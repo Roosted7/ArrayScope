@@ -2325,7 +2325,7 @@ def test_floor_payload_upgrades_when_closer_level_becomes_resident():
     assert upgraded.page_backing.materialized_pages[0].key.lod.reduction == (2, 2)
 
 
-def test_reduced_target_payload_is_not_preview_when_target_lod_is_reduced():
+def test_reduced_target_payload_is_not_preview_when_target_lod_is_reduced(monkeypatch):
     pyramid = LodPageCache(max_bytes=1 << 24)
     session = _session(pyramid=pyramid, count=2)
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
@@ -2351,7 +2351,14 @@ def test_reduced_target_payload_is_not_preview_when_target_lod_is_reduced():
         quality="exact",
     )
 
-    session._ensure_floor_payloads((1,))
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            "arrayscope.render.lod.best_floor_key",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("freshly admitted shared preview must use its proven key")
+            ),
+        )
+        session._ensure_floor_payloads((1,), preferred_keys={1: key})
     payload = session.display_tile_payloads[1]
     assert payload.quality == "exact"
     assert payload.lod.level == int(demand.desired_level)
@@ -2977,14 +2984,18 @@ def test_shared_preview_worker_rows_admit_as_checked_canonical_pages():
     )
     renderer = _RungPrepareRenderer()
     renderer._rendered_tile_for_current_payload = lambda *_args, **_kwargs: None
-    renderer._admit_first_pass_level_evidence = lambda *_args, **_kwargs: None
+    renderer._admit_first_pass_level_evidence_batch = lambda *_args, **_kwargs: None
     frame_effects = FramePipelineEffects(renderer, session)
     ensure_calls = []
     original_ensure_floor_payloads = session._ensure_floor_payloads
 
-    def ensure_floor_payloads(tile_numbers, *, max_count=None):
+    def ensure_floor_payloads(tile_numbers, *, max_count=None, preferred_keys=None):
         ensure_calls.append(tuple(int(tile) for tile in tile_numbers))
-        return original_ensure_floor_payloads(tile_numbers, max_count=max_count)
+        return original_ensure_floor_payloads(
+            tile_numbers,
+            max_count=max_count,
+            preferred_keys=preferred_keys,
+        )
 
     session._ensure_floor_payloads = ensure_floor_payloads
 

@@ -280,6 +280,7 @@ class LevelStatsService:
         rendered,
         *,
         expected_indices=None,
+        expected_indices_ready: bool = False,
         require_refined: bool = False,
         evidence_quality: LevelEvidenceQuality | int | str | None = None,
     ) -> bool:
@@ -289,7 +290,8 @@ class LevelStatsService:
             previous_stats = self._montage_level_tracker().summary_for(level_key)
             expected_indices = () if previous_stats is None else previous_stats.expected_indices
         tracker = self._montage_level_tracker()
-        tracker.ensure_expected(level_key, expected_indices)
+        if not bool(expected_indices_ready):
+            tracker.ensure_expected(level_key, expected_indices)
         source_index = int(rendered.tile.source_index)
         quality = _rendered_level_evidence_quality(
             rendered,
@@ -426,6 +428,40 @@ class LevelStatsService:
                 evidence_quality=evidence_quality,
             )
         )
+
+    def _admit_first_pass_level_evidence_batch(
+        self,
+        session,
+        rendered_items,
+        *,
+        quality: str,
+    ) -> int:
+        """Merge one shared-preview scope without rebuilding its expected set."""
+
+        if not bool(getattr(session, "shader_display", False)):
+            return 0
+        if not session.note_first_pass_quality(quality):
+            return 0
+        expected = self._montage_level_expected_indices(session)
+        self._montage_level_tracker().ensure_expected(session.level_key, expected)
+        evidence_quality = (
+            LevelEvidenceQuality.ROUGH_PREVIEW
+            if str(quality) == "preview"
+            else LevelEvidenceQuality.ROUGH_TARGET
+        )
+        admitted = 0
+        for rendered in tuple(rendered_items or ()):
+            admitted += bool(
+                self._update_montage_level_bounds_from_prepared(
+                    session.level_key,
+                    rendered,
+                    expected_indices=expected,
+                    expected_indices_ready=True,
+                    require_refined=False,
+                    evidence_quality=evidence_quality,
+                )
+            )
+        return int(admitted)
 
     def _first_pass_level_evidence_complete(self, session) -> bool:
         if not bool(getattr(session, "shader_display", False)):

@@ -291,6 +291,60 @@ def test_known_montage_level_source_is_not_resampled(monkeypatch):
     assert calls == []
 
 
+def test_shared_first_pass_evidence_prepares_expected_scope_once(monkeypatch):
+    from arrayscope.display.model.montage_levels import MontageLevelTracker
+    from arrayscope.render.level_stats import LevelStatsService
+
+    class Window(LevelStatsService):
+        def __init__(self):
+            self._tracker = MontageLevelTracker()
+
+        def _montage_level_tracker(self):
+            return self._tracker
+
+    session = SimpleNamespace(
+        shader_display=True,
+        first_pass_quality=None,
+        level_key=("shared-preview-levels",),
+        level_expected_indices=(0, 1),
+    )
+
+    def note_first_pass_quality(quality):
+        if session.first_pass_quality is None:
+            session.first_pass_quality = str(quality)
+        return session.first_pass_quality == str(quality)
+
+    session.note_first_pass_quality = note_first_pass_quality
+    rendered = tuple(
+        SimpleNamespace(
+            tile=SimpleNamespace(source_index=source_index),
+            level_stats=None,
+            level_data=np.asarray([source_index, source_index + 1], dtype=np.float32),
+        )
+        for source_index in (0, 1)
+    )
+    win = Window()
+    ensure_calls = []
+    original_ensure = win._tracker.ensure_expected
+
+    def capture(key, expected):
+        ensure_calls.append((key, tuple(expected)))
+        return original_ensure(key, expected)
+
+    monkeypatch.setattr(win._tracker, "ensure_expected", capture)
+
+    assert (
+        win._admit_first_pass_level_evidence_batch(
+            session,
+            rendered,
+            quality="preview",
+        )
+        == 2
+    )
+    assert ensure_calls == [(session.level_key, session.level_expected_indices)]
+    assert win._tracker.summary_for(session.level_key).source_indices == frozenset({0, 1})
+
+
 def test_montage_source_level_cache_reuses_overlapping_selection_and_keeps_refined():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.model.montage_levels import (

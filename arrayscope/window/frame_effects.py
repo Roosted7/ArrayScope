@@ -1647,6 +1647,7 @@ class FramePipelineEffects:
         admitted_any = False
         visible_previews = 0
         admitted_tiles = []
+        admitted_keys = {}
         for row in tuple(rows or ()):
             (
                 tile_number,
@@ -1675,12 +1676,17 @@ class FramePipelineEffects:
                 continue
             admitted_any = True
             admitted_tiles.append(int(tile_number))
+            admitted_keys[int(tile_number)] = key
         # A complete shared preview owns one result for the whole required
         # scope. Build its display payloads with the same scope shape:
         # ensure_floor_payloads constructs the visible-tile lookup once per
         # call, so invoking it per row turns 272 tiny planes into 272 full-set
         # scans before the first commit.
-        session._ensure_floor_payloads(admitted_tiles)
+        session._ensure_floor_payloads(
+            admitted_tiles,
+            preferred_keys=admitted_keys,
+        )
+        first_pass_rendered = []
         for tile_number in admitted_tiles:
             display_payload = session.display_tile_payloads.get(int(tile_number))
             if display_payload is not None:
@@ -1690,11 +1696,20 @@ class FramePipelineEffects:
                     display_payload,
                 )
                 if rendered is not None:
-                    self.renderer._admit_first_pass_level_evidence(
-                        session,
-                        rendered,
-                        quality=quality,
-                    )
+                    first_pass_rendered.append(rendered)
+        if len(first_pass_rendered) > 1:
+            self.renderer._admit_first_pass_level_evidence_batch(
+                session,
+                first_pass_rendered,
+                quality=quality,
+            )
+        elif first_pass_rendered:
+            self.renderer._admit_first_pass_level_evidence(
+                session,
+                first_pass_rendered[0],
+                quality=quality,
+            )
+        for tile_number in admitted_tiles:
             pending_upserted = int(tile_number) in session.pending_payload_upserts
             preview_upserted = bool(
                 is_preview
