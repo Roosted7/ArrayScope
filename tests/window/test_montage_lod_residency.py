@@ -46,7 +46,11 @@ from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, RungStep, Ti
 from arrayscope.render.lod import LodPageSetKey, admit_retained_preview_level
 from arrayscope.render.stages import CommitBatch, LodAdmissionScope, RenderIntent
 from arrayscope.window import frame_effects as montage_commit
-from arrayscope.window.frame_effects import FramePipelineEffects, _priority_ordered_tile_delta
+from arrayscope.window.frame_effects import (
+    FramePipelineEffects,
+    _looks_like_shared_preview_rows,
+    _priority_ordered_tile_delta,
+)
 from arrayscope.window.frame_session import (
     FrameSession,
     _base_source_id,
@@ -6230,6 +6234,26 @@ def test_native_preview_result_makes_target_pass_evaluation_free(monkeypatch, sh
     result = work()
     assert result[0] == "materialized"
     assert session.rendered_tiles[0] is rendered
+
+
+def test_native_output_payload_is_not_misread_as_shared_preview_rows():
+    """A tuple-shaped page-set key is one payload, not an outer row cohort."""
+
+    session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    rendered = session.rendered_tiles[0]
+    demand = session.lod_policy_decision.demand
+    key = page_set_key_for_rendered(
+        rendered,
+        demand=demand,
+        level=int(demand.desired_level),
+        semantic_source_id=session.tile_semantic_source_id(0),
+    )
+    pages = _materialized_page_set(key, np.asarray(rendered.image))
+    payload = (key, pages, None, None, None, None, None, None, rendered)
+    row = (0, *payload)
+
+    assert not _looks_like_shared_preview_rows(payload)
+    assert _looks_like_shared_preview_rows((row,))
 
 
 def test_completed_evaluation_keeps_claim_until_gui_delivery():
