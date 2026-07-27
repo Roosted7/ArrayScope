@@ -63,18 +63,31 @@ contract).
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
-- **ADR 0059 coarse-rung utility policy — DONE 2026-07-26; product skips.**
+- **ADR 0059 exclusive dynamic preview-first — RAW GATE DONE 2026-07-27;
+  WGPU FFT 1 s T1 gate OPEN; product default.**
   Root cause was the successor rule itself: a FLOOR-backed `DESIRED` task still
   used `DISPLAY_PREVIEW`, so phase-only experiments delayed ACK while target
   evaluation consumed coverage workers. Target work now stays on
   `DISPLAY_PREPARATION`, coverage closes on backend-acknowledged first-pass
   identities, and the profile hard-fails both ACK order and worker execution
-  order per scheduling generation. The corrected three-pass T1/T2/B A/B found
-  no qualifying signature: WGPU raw 2139/5585/2723 ms, WGPU FFT
-  3041/>5000/3451 ms; PyQtGraph raw reached no T2 in 3/3 A passes, and complex
-  has no reduced RGB format. Product therefore defaults to target-only;
-  `--enable-coarse-rung` retains the measurable mechanism. Future signatures
-  require new order-balanced T1/T2/B evidence
+  order per scheduling generation. Preview quality is always at least two LOD
+  levels coarser than the target; montages with at least 256 tiles spend three
+  additional levels on first-frame latency, and retention may choose coarser.
+  A complete small preview set uses one shared worker task and one non-empty
+  compact backend commit, bypassing the ordinary 32-item ceiling only after
+  its exact required set is ready. Ready payloads suppress duplicate FLOOR
+  evaluations. Complete preview admission now constructs floor payloads once
+  for the admitted scope instead of rebuilding the complete visible lookup
+  272 times. Final post-rebase low-load AC T1/T2/B medians: WGPU raw
+  939/3726/2308 ms (6/6/6 passes), WGPU FFT 1329/unavailable/4729 ms
+  (3/1/3), PyQtGraph raw 960/4390/3380 ms (6/6/6); every A pass passed both
+  clauses and all 12 raw A passes met the strict 1000 ms gate. The WGPU FFT
+  preview remains red because its worker starts only after the operation
+  transition builds the new semantic session; shorten that transition/shared
+  construction path without allowing target work through the barrier.
+  Target+6 measured slower than target+5. PyQtGraph complex reduced RGB is
+  explicitly deferred and its pre-existing exact fill remains incomplete.
+  Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
 - **PyQtGraph full complex montage presentation is broken — OPEN.** Short
   prefixes are sufficient; do not hide it behind a long watchdog. The

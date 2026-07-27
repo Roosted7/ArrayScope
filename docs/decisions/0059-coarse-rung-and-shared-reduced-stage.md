@@ -1,9 +1,9 @@
 # ADR 0059: One coarse rung, fed by a shared reduced-input stage
 
-- **Status:** Mechanism accepted and implemented (2026-07-26); unconditional
-  product admission retracted after follow-up measurement. The shared
-  real-document stage remains the canonical way to produce a reduced rung,
-  but whether to schedule that rung is now an empirical utility decision.
+- **Status:** Accepted and implemented (2026-07-26). Preview-first is the
+  explicit product default: one complete reduced pass precedes every target
+  worker, upload, and commit transaction. The shared real-document stage
+  remains the canonical way to produce the reduced rung.
   Supersedes the scheduling half of ADR 0050's "reduce-before-ops and
   preview-then-refine" section: the two routes it designed still exist as
   *evaluation* capabilities, but this ADR replaces the shared-transform
@@ -121,7 +121,7 @@ parallel rungs. Admission, not compute, is the larger term in both.
 
 ## Decision
 
-### 1. One coarse rung, and its level is a retention decision only
+### 1. One coarse rung, dynamically coarser than the target
 
 Merge FLOOR and PREVIEW into a single rung. ADR 0050 described them as
 separate because they answer different questions, and §7 of the dossier
@@ -131,18 +131,15 @@ proposed keeping both as parameters:
 CoarseRung(level, retained: bool, evaluate_at: reduced | native_then_reduce)
 ```
 
-**The `level` input has exactly one driver: retention.** Keep
-`preview_level_for_tile_shape(target_edge=48)` — whole-stack footprint against
-spare display budget — which answers its own question well. The proposed
-second driver, a compute-derived preview level "adaptive to operation cost per
-texel", **is dropped as redundant, not as worthless**: the retention formula's
-`min_level=4` clamp already lands past the knee, where the transform is 1.0 ms
-of a 36.5 ms rung, so a compute-aware driver could only agree with it. It stops
-being redundant the moment that floor moves finer, where level is worth 10×.
-
-This is the simplification the §7 proposal was reaching for. The coarse rung's
-real degrees of freedom are **who evaluates it** and **how the result is fanned
-out** — not how coarse it is.
+The preview level is derived from the current demanded level:
+`max(retention_floor, desired + 2)`, plus three more levels for a montage of at
+least 256 tiles. The first `+2` is the minimum product distance (4× coarser per
+axis, 16× fewer texels); it applies even when the target is already coarse.
+The size rule makes the reference target-level-2, 272-tile gate level 7 while
+a 50-tile cropped montage retains level 4. Retention may choose a coarser
+level. The target level therefore cannot catch or cross the preview level, and
+the thresholds are greppable in the ladder rather than split across
+retention, effects, and profiler defaults.
 
 Merging also fixes the §2 collapse directly. Today `floor_level` and
 `preview_level` are both `session.lod_preview_level`, so the PREVIEW guard
@@ -226,34 +223,54 @@ scopes are not mixed with the final required set. This uses the existing
 one-way phase owner and bounded presentation cohorts; it does not restore the
 retired acknowledge-all scheduler.
 
-### Follow-up: schedule only when T1/T2/B proves delivery utility
+### Product default and measured delivery
 
 The relevant quantities are T1 (every required tile has preview quality), T2
-(every required tile has target quality), and B (T2 with FLOOR disabled). A
-preview is useful only when T1 is far below B and T2 remains close to B.
-Worker totals and `operations/cost.py` cannot answer that delivery question.
+(every required tile has target quality), and B (T2 with FLOOR disabled).
+Preview is the product's required first frame; these quantities measure its
+delivery cost rather than deciding whether it exists. Worker totals and
+`operations/cost.py` cannot answer that delivery question.
 
-With the execution invariant actually enforced, three order-balanced
-single-process passes per arm gave:
+After the preview-specific transaction scope, duplicate-floor suppression,
+large-montage quality rule, and exclusive admission fan-out, the final
+post-rebase real-Wayland measurements under the declared low-load AC condition
+were:
 
 | backend / pipeline | median T1 | median T2 | median B | verdict |
 |---|---:|---:|---:|---|
-| WGPU raw | 2139 ms | 5585 ms | 2723 ms | reject: T2 +105%; A missed the 5 s gate 3/3 |
-| WGPU FFT | 3041 ms | >5000 ms | 3451 ms | reject: only 410 ms earlier coverage; A missed 3/3 |
-| PyQtGraph raw | ≥4710 ms | >5000 ms | ≥5000 ms (one 3861 ms completion) | reject: A reached no T2 in 3/3 |
-| PyQtGraph FFT | N/A | >5000 ms | >5000 ms | no reduced RGB format; target path independently broken |
+| WGPU raw | **939 ms (6)** | 3726 ms (6) | 2308 ms (6) | both clauses green 6/6; strict 1 s T1 green 6/6 |
+| WGPU FFT | **1329 ms (3)** | unavailable (1/3 complete) | 4729 ms (3) | both clauses green 3/3; strict 1 s T1 red 3/3 |
+| PyQtGraph raw | **960 ms (6)** | 4390 ms (6) | 3380 ms (6) | both clauses green 6/6; strict 1 s T1 green 6/6 |
+| PyQtGraph FFT | unavailable | unavailable (0/3 complete) | unavailable (0/3 complete) | reduced RGB preview deferred; exact path pre-existing incomplete |
 
-The WGPU FFT rows are single runs, never `--repeat`; process order was balanced
-`A, B, A, B, B, A`. PyQtGraph is bistable: the bounded passes report the
-incomplete ACK count instead of waiting longer. The complex run can also block
-inside the synchronous CPU-composition action, in which case the 8 s process
-guard produces no phase record; that is a broken action, not a censored timing.
+Raw uses `--repeat 3` in fresh processes with A/B/B/A order, giving six
+in-process observations per arm and backend. FFT uses single-run
+processes in A/B/B/A/A/B order. WGPU FFT A reached 256, 272, and 265 target
+ACKs within the bounded runs, so one completion is insufficient to quote a
+T2 median; its target-only arm completed all 272 in 3/3. PyQtGraph complex
+reached 39–47/272 exact ACKs and 14–21 physical tiles in every bounded arm. It
+has no preview row because CPU
+composition produces `(h,w,3)` RGB and the canonical reduced-page formats are
+scalar/complex; inventing a format in this slice would cross the
+display-payload seam that previously froze the application. That
+backend/pipeline cell is explicitly deferred, not silently treated as
+target-only success.
 
-No current signature qualifies, so the product defaults to target-only.
-`--enable-coarse-rung` remains a profiling arm, not a product heuristic.
-Future admission requires new order-balanced T1/T2/B evidence for the complete
-backend/pipeline/display signature. Unknown signatures skip; no speculative
-runtime cost predicate is landed.
+The raw transaction-count and strict near-instant objectives are complete:
+each 272-tile raw preview uses one non-empty commit and every accepted raw pass
+is below the profiler's 1000 ms hard bar. The final structural defect was
+logical fan-out, not pixels: complete preview admission invoked
+`ensure_floor_payloads` 272 times, and each invocation rebuilt the complete
+visible-tile lookup. Building the floor payloads once for the complete admitted
+scope moved both raw backends under the bar without changing quality,
+transaction count, or per-tile acknowledgement truth.
+
+The WGPU FFT cell remains open at 1329 ms. Its shared level-7 worker begins
+only after the operation transition builds the new semantic session, and one
+target+6 experiment was slower and destabilised refinement. Further
+coarsening is therefore not the next lever; that cell needs the operation
+transition and shared-preview construction path shortened without moving FFT
+target work ahead of preview coverage.
 
 ## Consequences
 
@@ -261,27 +278,28 @@ Mechanism consequences, each one gated below rather than a universal product
 claim:
 
 - The coarse rung's evaluation for the whole montage drops from 272 native
-  evaluations to one ~36 ms reduced evaluation plus 272 parallel fan-outs.
-- Refinement stays on the per-tile parallel ladder. The original expectation
-  that this preserved the exact span is retracted by the follow-up above:
-  shared evaluation does not prevent the extra presentation stream from
-  delaying complete coverage.
+  evaluations to one shared reduced-volume task which slices all 272 logical
+  planes directly. Refinement stays on the per-tile parallel ladder, but its
+  first task cannot be admitted until physical preview coverage closes.
 - Three predicates lose their reason to exist
   (`preview_montage_planes_are_independent` and the two shared-transform
   ownership tests), and `shared_preview_is_useful`'s policy gate goes with the
   route it gated.
-- Admission remains the dominant wall-clock term (3171 ms to acknowledge 272
-  preview rows that took 643 ms to compute). **This ADR does not address it**,
-  and no first-pixel claim should be made without measuring it: it is the
-  standing "per-commit whole-montage cost" queue item, and the coarse rung
-  merely stops being the reason it is not reached.
+- Admission remains the dominant wall-clock term. A single shared FLOOR task
+  produces the complete current required set, and only that exact-set marker
+  lets a backend with a compact physical representation bypass the ordinary
+  32-item ceiling and deadline. The 272-tile raw gate now uses one non-empty
+  preview commit on each maintained backend instead of the incumbent 9–18
+  whole-scene publications. Ready but unacknowledged preview payloads suppress
+  duplicate FLOOR evaluations.
   [The per-commit dossier](../redesign/per-commit-transaction-count-2026-07-26.md)
   prices it: `apply` is 63–69% of every commit and scales with `presented`
   rather than with the delta, so two commits per fill cost 93.0 and 89.8 ms
   while carrying a *zero* delta at 272 presented. The implementation's
-  obligation is therefore narrow but real — **the fan-out must not multiply the
-  number of commits.** Parallel fan-out tasks must feed the existing bounded
-  commit cohorts, not one commit per task.
+  obligation is therefore narrow but real — **the fan-out must not multiply
+  the number of commits.** WGPU packs the complete logical set into shared GPU
+  pages; PyQtGraph draws it through one scalar atlas item while retaining
+  per-tile physical acknowledgement truth.
 
 - **Non-goal: optimising the reduction.** Even erasing it entirely saves 35.5 ms
   against 643 ms of compute and 3171 ms of admission — 5% of compute, under 1%
@@ -302,20 +320,22 @@ claim:
    addition, no target-rung `kernel_start` may precede the final preview-rung
    `kernel_finish`; this is the clause that catches delayed ACK with concurrent
    target execution.
-4. For each admitted signature, full refined stays at or under baseline. Quote
-   a **median over at least three order-balanced passes** and say how many: the
+4. For each admitted signature, report T1, T2, and target-only B. Quote a
+   **median over at least three order-balanced passes** and say how many: the
    per-commit dossier found the refinement is bistable — one unmodified
    baseline pass took 49 batches over 8.0 s with `fully_visible_ms` 16 015
    against the usual 2 batches over 0.28 s — so a single pass can land on that
    tail and prove nothing. The FFT stage must still come from single runs,
    never `--repeat`, which inflates it 40% through worker contention.
-5. `montage_quality_rung_evaluations` prices both alternatives. Raw WGPU is
-   expected to skip after the follow-up A/B above; merely removing `floor
-   already covers this level` is no longer a success criterion.
+5. `montage_quality_rung_evaluations` prices both alternatives. The product
+   default remains preview-first; `--disable-coarse-rung` exists only to
+   measure B. Merely removing `floor already covers this level` is not a
+   success criterion.
 
 ### Implementation evidence
 
-Implemented on local `main` at `6ad55232`.
+Implemented on `codex/preview-first-exclusive` and rebased onto the 2026-07-27
+local `main` tip before the final matrix.
 
 - The reduced-input branch has a direct test, and the 272-tile FFT gate reports
   one stage materialization (`scheduled=1`, `completed=1`) with the other 271
@@ -363,12 +383,22 @@ Implemented on local `main` at `6ad55232`.
   action itself. A timeout still closes the trace and writes a structured
   incomplete record with requested/presented/payload/ACK counts; it does not
   erase the evidence by raising before JSONL publication.
-- The final three-pass WGPU A/B is the T1/T2/B table above. With product
-  target-only policy, a subsequent full-grid run completed raw in **3261 ms**
-  (`T2=2909 ms`) and FFT in **4205 ms** (`T2=3930 ms`). PyQtGraph raw completed
-  in **4151 ms** (`T2=4111 ms`). PyQtGraph FFT did not return from its
-  synchronous CPU-composition action before an 8 s process guard and emitted
-  only the load row; its growing-set CPU mapping remains a separate queue item.
+- The red control used local `main` with only trace/oracle instrumentation.
+  WGPU raw started target at 1694.7 ms before the final preview finish at
+  1701.4 ms; WGPU FFT started at 2743.8 ms before the 2754.8 ms finish.
+  PyQtGraph raw had only 184/272 preview ACKs when 84 target ACKs had already
+  arrived. The fixed full-grid A rows in the table above pass both clauses;
+  PyQtGraph FFT remains explicitly `no-preview-pass`.
+- The broad UI ring found a stepped-crop page-identity mismatch after the
+  final rebase: a `SourceAnchoring` object with neither axis anchored made the
+  reducer use global bins while page planning used a window-local rectangle.
+  Alignment is now derived per axis from `anchored_starts`; the original
+  100-tile busy-pump WGPU scrub gate and the focused render ring pass.
+- A final trace-price pass found complete preview admission rebuilding the
+  272-entry visible lookup once per row. Batching floor construction once per
+  shared result took raw WGPU/PyQtGraph below the 1 s bar in every
+  order-balanced pass; the regression pins one floor-construction call for a
+  complete shared result.
 - A three-pass in-process raw run (`--repeat 3`) reported only
   `tile already has committable coverage` and `allow_preview false` as coarse
   refusal reasons; `floor already covers this level` is gone.
@@ -385,12 +415,12 @@ green by this ADR.
   applies to the *evaluation*, which stays single). Rejected because it leaves
   two owners of "evaluate once, fan out", keeps the global barrier, and
   reproduces by hand what the stage cache does by construction.
-- **Adaptive compute-driven preview level** (§7's proposal). Rejected as
-  redundant *under today's floor*: `PREVIEW_FLOOR_MIN_LEVEL = 4` means
-  retention never picks finer than level 4, where the transform is 1.0 ms of a
-  36.5 ms rung, so a compute-aware driver has nothing to add. Not rejected on
-  the grounds that level is cheap — level 1 costs 10× level 4, and this bullet
-  reverses if the floor ever moves finer.
+- **An operation-cost estimator as a second preview-level owner.** Rejected:
+  target distance, retention, and montage size now derive one explicit level.
+  On the 272-tile gate target+5 improved raw T1; target+6 was slower and made
+  refinement less stable. Level is not cheap — level 1 costs 10× level 4 —
+  but a second speculative cost policy would duplicate the one greppable
+  quality owner without a measured win.
 - **Keep FLOOR and PREVIEW separate and fix the guard.** Rejected: their levels
   come from one value today, and the merged rung needs one level anyway once
   the compute driver is dropped.
