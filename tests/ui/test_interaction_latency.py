@@ -381,6 +381,14 @@ def test_wgpu_montage_view_range_change_expands_visible_tile_set(qtbot, monkeypa
         win.update_image_view()
         plan = win.renderer._frame_session.plan
         tile_count = len(plan.tiles)
+        # The preview pass is real worker work. Wait until its first committed
+        # frame owns coordinate semantics before retargeting the camera; a
+        # direct retarget against an uncommitted frame intentionally preserves
+        # the preceding frame's range.
+        qtbot.waitUntil(
+            lambda: bool(getattr(win.renderer._frame_session, "display_committed", False)),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
         # Expanded montage ranges auto-fit by design. Narrow explicitly so this
         # test measures viewport retargeting rather than initial fit policy.
         win.img_view.getView().setRange(xRange=(0.0, 10.0), yRange=(0.0, 4.0), padding=0)
