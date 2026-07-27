@@ -1794,10 +1794,15 @@ def test_pyqtgraph_current_predicate_accepts_partial_seed_with_mixed_preview_evi
     semantic evidence owner samples its first blocking batch.  The aggregate
     summary is consequently mixed (and therefore not globally ``refined``),
     even though the producer has covered the exact 16-source threshold that
-    currently authorizes the provisional first frame. Waiting on the aggregate's
-    all-sources flag deadlocks: the producer intentionally parks its remaining
-    refinement behind preview acknowledgement, while acknowledgement waits on
-    this predicate.
+    currently authorizes the provisional first frame.
+
+    The deadlock this predicate was originally written against no longer
+    exists: the producer used to park its remaining refinement behind preview
+    acknowledgement while acknowledgement waited on this predicate, and that
+    park was removed in ``61bb5f1a`` because it held the montage at seed-batch
+    levels for a whole fill. What is characterized here is only the surviving
+    half -- accepting a partial seed as the round window -- which R3 forbids
+    on its own terms, with or without the deadlock.
     """
 
     from arrayscope.core.window_levels import LevelSourceRank

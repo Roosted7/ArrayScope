@@ -24,14 +24,37 @@ def test_trace_bus_writes_flat_jsonl_and_bounds_ring(tmp_path):
     assert [event["sequence"] for event in snapshot] == [6, 7, 8]
 
 
-def test_live_trace_sink_hides_buffered_rows_until_close(tmp_path):
-    """Characterize the sink's loss of live row visibility while buffered."""
+def test_live_trace_sink_publishes_each_row_immediately(tmp_path):
+    """The file sink is durable by default: a row is on disk when emitted.
+
+    The only file-sink caller is the ``--trace`` CLI flag, whose whole point
+    is watching a run as it happens -- and whose most valuable rows are the
+    last ones before a crash or hang, which a user-space buffer would drop.
+    The in-process ring is not a substitute; it cannot be recovered post
+    mortem.
+    """
 
     from arrayscope.core.trace import TraceBus
 
     path = tmp_path / "trace.jsonl"
     bus = TraceBus()
     bus.configure(path, ring_events=0)
+    bus.emit("lifecycle", edge="fallback_ready", tile=7)
+
+    assert len(path.read_text().splitlines()) == 1
+
+    bus.close()
+    assert len(path.read_text().splitlines()) == 1
+
+
+def test_buffered_trace_sink_is_opt_in_and_still_publishes_on_close(tmp_path):
+    """Throughput over durability stays available, but must be asked for."""
+
+    from arrayscope.core.trace import TraceBus
+
+    path = tmp_path / "trace.jsonl"
+    bus = TraceBus()
+    bus.configure(path, ring_events=0, buffered=True)
     bus.emit("lifecycle", edge="fallback_ready", tile=7)
 
     assert path.read_text() == ""

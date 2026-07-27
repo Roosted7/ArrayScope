@@ -24,10 +24,16 @@ TRACE_SCHEMA_VERSION = 1
 # the workload; emit sites cap their own collection fields (see the `stall`
 # event's `tile_rows`).
 DEFAULT_RING_EVENTS = 8192
-# A file-backed trace is profiling evidence, not the crash-safe flight
-# recorder (the bounded ring owns that job).  Batch JSONL writes so a traced
-# montage commit does not turn hundreds of lifecycle edges into hundreds of
-# synchronous GUI-thread filesystem writes.  Close still publishes every row.
+# Opt-in batching for a file-backed trace.  Batching turns hundreds of
+# lifecycle edges per montage commit into a handful of writes, but it also
+# makes the file lag the process and loses the unflushed tail if that process
+# dies -- and the tail is the part worth having after a crash or hang.  The
+# in-process ring does not substitute: it cannot be recovered post mortem.
+#
+# So this is NOT the default.  The only file-sink caller is the ``--trace``
+# CLI flag, whose entire purpose is watching a live run; the profiler passes
+# ``path=None`` and uses the ring, so it never paid the write cost this would
+# save.  Callers that genuinely want throughput over durability ask for it.
 LIVE_SINK_BUFFER_BYTES = 64 * 1024
 
 
@@ -79,6 +85,7 @@ class TraceBus:
         *,
         ring_events: int = DEFAULT_RING_EVENTS,
         append: bool = False,
+        buffered: bool = False,
     ) -> None:
         self.close()
         handle = None
@@ -88,7 +95,7 @@ class TraceBus:
             handle = output.open(
                 "a" if append else "w",
                 encoding="utf-8",
-                buffering=LIVE_SINK_BUFFER_BYTES,
+                buffering=LIVE_SINK_BUFFER_BYTES if buffered else 1,
             )
         limit = max(0, int(ring_events))
         with self._lock:
@@ -163,8 +170,9 @@ def configure_trace(
     *,
     ring_events: int = DEFAULT_RING_EVENTS,
     append: bool = False,
+    buffered: bool = False,
 ) -> None:
-    TRACE.configure(path, ring_events=ring_events, append=append)
+    TRACE.configure(path, ring_events=ring_events, append=append, buffered=buffered)
 
 
 def close_trace() -> None:

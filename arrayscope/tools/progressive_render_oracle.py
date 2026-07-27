@@ -105,7 +105,13 @@ def format_progressive_render_violations(result: ProgressiveRenderOracleResult) 
             "(production cannot be told from cache arrival)"
         )
     if result.passed:
-        lines.append("PASS: no R1/R3 violations")
+        # Deliberately not "PASS: no R1/R3 violations". These checks are
+        # snapshot heuristics: R1 sees upload growth outside the floors but
+        # not duplicate production AT a floor, and R3 sees evidence coverage
+        # stall but never the value-range containment the rule actually
+        # states. A clean run is the absence of detected violations, which is
+        # weaker than the contract being satisfied.
+        lines.append("no R1/R3 violations detected (snapshot heuristics; not a contract proof)")
     for violation in result.violations:
         levels = _format_levels(violation.levels)
         counts = _format_level_counts(violation.level_counts)
@@ -158,7 +164,16 @@ def _check_r1(snapshots: Sequence[_Snapshot]) -> tuple[ProgressiveRenderViolatio
 
     violations: list[ProgressiveRenderViolation] = []
     for previous, current in pairwise(snapshots):
-        if current.session_id != previous.session_id:
+        # A round boundary is the session AND its floors. Attributing an
+        # upload delta that straddles a floor change to the later snapshot's
+        # floors would both invent violations and hide them. Session id alone
+        # happens to move with the floors in the traces recorded so far, which
+        # is exactly why this must not be relied on implicitly.
+        if (current.session_id, current.target_level, current.preview_level) != (
+            previous.session_id,
+            previous.target_level,
+            previous.preview_level,
+        ):
             continue
         if not current.uploads_by_level or not previous.uploads_by_level:
             continue
