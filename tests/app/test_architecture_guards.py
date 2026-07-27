@@ -1593,6 +1593,21 @@ def test_frame_state_modules_are_qt_free():
 
 
 def test_update_image_view_does_not_batch_missing_regions():
+    """Missing regions reach the ladder, never an inline per-tile batch.
+
+    The property is that ``update_image_view`` hands its missing tiles to the
+    frame pipeline instead of evaluating them itself. Either route satisfies
+    that: ``retarget_frame_pipeline`` replans immediately, and
+    ``request_montage_replan`` marks bounded state and coalesces one replan
+    onto the next event-loop turn.
+
+    R5 moved this call site to the coalescing route deliberately, so that the
+    initiating render callback does not perform a whole-plan reconcile before
+    input or paint can run. Accepting both keeps the guard on the property
+    that matters rather than on one spelling of it; the anti-batching
+    assertions below are the part that must never relax.
+    """
+
     text = (ROOT / "arrayscope" / "window" / "frame_controller.py").read_text()
     tree = ast.parse(text)
     for node in ast.walk(tree):
@@ -1600,7 +1615,7 @@ def test_update_image_view_does_not_batch_missing_regions():
             segment = ast.get_source_segment(text, node) or ""
             assert "tuple((tile, evaluate_image_snapshot" not in segment
             assert "for tile in missing_tiles)" not in segment
-            assert "retarget_frame_pipeline" in segment
+            assert "retarget_frame_pipeline" in segment or "request_montage_replan" in segment
             return
     raise AssertionError("update_image_view not found")
 
