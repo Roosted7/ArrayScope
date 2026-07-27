@@ -244,6 +244,57 @@ A backend adapter may decide *how* to apply a value (bake vs bind). It may
 never decide *what* the value is, and it may never be the place a round-level
 invariant is first enforced.
 
+## R7 — Speculative residency is post-settle work
+
+Uploading data the *current* round does not display — whole-plane warming for a
+future crop, breadth for a future scroll — is **prefetch**. It runs after the
+round settles, on an idle/prefetch lane, and it yields to any new round
+immediately. It is never admitted alongside the preview or target pass.
+
+This is not a priority preference. Speculative traffic dominates the upload
+path: across the two recorded WGPU traces, level 0 is **82% and 84% of all
+upload bytes** (891 MB of 1089 MB; 381 MB of 453 MB) while the levels the
+rounds actually displayed account for under 11% each. Letting that share
+compete with the fill is the difference between a montage that completes and
+one that empties out.
+
+> Observed violation: on the 272-tile WGPU FFT round the preview pass reached
+> 272/272 presented, and then — as whole-plane level-0 warming began (+64,
+> +192, +128, +128, +128, +192 uploads in consecutive intervals) — presented
+> collapsed to 183, then 77, and took four more seconds to climb back to 272.
+> The montage visibly emptied out *after* it was already complete.
+
+### Warming does not have to be native
+
+The mechanism is legitimate: `canonical_plane_view_state` lets an anchored crop
+be presented out of whole-plane pages instead of a crop-local upload, so
+whole-plane residency is what makes cropped X/Y indexing fast.
+
+But it does not follow that the warm must be at level 0. Tile identity on a
+windowable axis is **source-anchored**: the tile grid aligns to
+source-coordinate multiples and the content key names the whole plane with the
+anchored axis' window stripped. A window shift from `50:100` to `51:101` is
+therefore already a hit **at whatever level the whole-plane pages exist** — the
+reduction bins are anchored to the source grid, not to the window origin, so
+they do not re-phase when the window slides. Shift-invariance comes from
+anchoring, not from native resolution.
+
+Two consequences for the prefetch ladder:
+
+- **Breadth before depth.** Extending whole-plane coverage at a coarse level
+  buys the same shift-invariance for a fraction of the traffic — a whole plane
+  at level 2 is 16× smaller than at level 0. Prefetch should widen coverage at
+  the levels a near-future view would actually display before it deepens
+  anything.
+- **Native warming is the narrow case, and goes last.** It is justified only
+  where arbitrary levels must be re-derived on the GPU without a re-upload. It
+  is not the general answer to crop shifts.
+
+Note what warming cannot buy: on a *non-anchored* axis (an FFT along it) the
+window stays folded into the content key, so a shift misses by construction —
+and native residency does not rescue that, because the operation has to be
+recomputed regardless.
+
 ## Acceptance
 
 A change to the progressive path is accepted when the invariant oracle reports
@@ -259,3 +310,8 @@ they exist and reported as unverifiable where they do not. Nothing distinguishes
 a deliberate native-warm upload from over-production; until uploads are tagged
 with their purpose, level-0 traffic during a coarser round is reported as
 *suspected* over-production, not asserted as a violation.
+
+Tagging uploads with their purpose (round production vs speculative warm) is
+the change that turns this from a suspicion into a decidable rule, and it makes
+R7 checkable at the same time: warm traffic inside a round's fill window is a
+violation regardless of its level.
