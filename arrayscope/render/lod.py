@@ -25,6 +25,8 @@ optimistic bookkeeping — these rules are load-bearing):
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 import numpy as np
@@ -69,6 +71,46 @@ PREVIEW_FLOOR_MIN_LEVEL = 4
 PREVIEW_MIN_LEVEL_DELTA = 2
 PREVIEW_MIN_SCREEN_PIXELS_PER_TEXEL = 3.0
 PREVIEW_MAX_SCREEN_PIXELS_PER_TEXEL = 6.0
+
+
+def progressive_render_round_key(session) -> tuple[object, ...]:
+    """Return the structural identity of one settled progressive view target.
+
+    A demand/admission change is deliberately absent: when the semantic
+    document target, exact camera range, viewport shape, montage layout, and
+    display axes are unchanged, it is another planning pass in the same round.
+    Resident/visible tile population is also work state, not target identity.
+    """
+
+    plan = session.plan
+    view_range = getattr(session, "view_range", None)
+    normalized_range = (
+        None
+        if view_range is None
+        else tuple(tuple(float(value) for value in axis_range) for axis_range in view_range)
+    )
+    view_state = getattr(session, "view_state", None)
+    display_axes = tuple(int(axis) for axis in (getattr(view_state, "image_axes", None) or ()))
+    return (
+        "progressive-render-round-v1",
+        session.key,
+        normalized_range,
+        tuple(int(value) for value in session.viewport_shape),
+        plan,
+        display_axes,
+    )
+
+
+def progressive_render_round_id(round_key: object) -> str:
+    """Return the compact diagnostics spelling of a structural round key."""
+
+    encoded = json.dumps(
+        round_key,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=repr,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def round_preview_level(
@@ -613,35 +655,51 @@ def resident_lod_active(session) -> bool:
 
 
 def selected_lod_factor(session) -> int:
+    round_key = progressive_render_round_key(session)
+    same_round = round_key == getattr(session, "render_round_key", None)
+    round_demand = getattr(session, "render_round_demand", None) if same_round else None
     previous = session.lod_policy_decision.demand.desired_factor
     if resident_lod_active(session):
-        session.lod_policy_decision = resident_lod_policy(
+        decision = resident_lod_policy(
             session.view_range,
             session.viewport_shape,
             session.plan.tile_shape,
+            demand=round_demand,
             previous_factor=previous,
             resident_levels=session_resident_levels(session, previous),
             allow_anisotropy=bool(getattr(session, "lod_anisotropic_pages", True)),
         )
+    else:
+        decision = native_lod_policy(
+            session.view_range,
+            session.viewport_shape,
+            session.plan.tile_shape,
+            demand=round_demand,
+            previous_factor=previous,
+            deferred_reason=session.lod_native_reason,
+            allow_anisotropy=bool(getattr(session, "lod_anisotropic_pages", True)),
+        )
+    if not same_round:
         base_preview = int(
             getattr(session, "lod_preview_min_level", 0)
             or getattr(session, "lod_preview_level", 0)
             or 0
         )
-        if base_preview > 0:
-            session.lod_preview_level = round_preview_level(
-                demand=session.lod_policy_decision.demand,
+        preview_level = (
+            round_preview_level(
+                demand=decision.demand,
                 retention_level=base_preview,
             )
-    else:
-        session.lod_policy_decision = native_lod_policy(
-            session.view_range,
-            session.viewport_shape,
-            session.plan.tile_shape,
-            previous_factor=previous,
-            deferred_reason=session.lod_native_reason,
-            allow_anisotropy=bool(getattr(session, "lod_anisotropic_pages", True)),
+            if base_preview > 0
+            else 0
         )
+        session.render_round_key = round_key
+        session.render_round_id = progressive_render_round_id(round_key)
+        session.render_round_demand = decision.demand
+        session.round_preview_level = int(preview_level)
+        session.round_target_level = int(decision.demand.desired_level)
+    session.lod_policy_decision = decision
+    session.lod_preview_level = int(session.round_preview_level)
     _trace_demand_transition(session)
     return int(session.lod_policy_decision.applied_factor)
 

@@ -215,20 +215,16 @@ class FramePipeline:
                     int(state.tile_number): int(state.scheduling_rank) for state in states
                 },
             )
-        # TODO(R2b): this reads the floor back off the ladder policy it is
-        # about to plan with, and `plan` falls back to that same value when the
-        # argument is omitted -- so passing it is currently a no-op round trip
-        # that documents ownership without enforcing it. The value does now
-        # originate in one place (`render.lod.round_preview_level`, via
-        # `selected_lod_factor`), but it reaches here by `frame_runtime`
-        # mutating `ladder.policy` before every plan. Closing this needs a
-        # round identity to pin the floor to; see the contract's R2b.
-        preview_level = max(0, int(self.ladder.policy.floor_level))
+        if not intent.render_round_id:
+            raise ValueError("frame pipeline intent has no progressive render round identity")
+        if intent.round_preview_level is None or intent.round_target_level is None:
+            raise ValueError("frame pipeline intent has no round-owned LOD floors")
         steps = self.ladder.plan(
             states,
             demand,
             verdict,
-            preview_level=preview_level,
+            preview_level=int(intent.round_preview_level),
+            target_level=int(intent.round_target_level),
         )
         self.last_plan_states = tuple(
             (

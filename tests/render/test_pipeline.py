@@ -174,7 +174,16 @@ def drain(kernel):
         kernel.dispatch_event(event)
 
 
-def intent(semantic="doc-v1", viewport="vp-1", *, interactive=False, source_id=None):
+def intent(
+    semantic="doc-v1",
+    viewport="vp-1",
+    *,
+    interactive=False,
+    source_id=None,
+    preview_level=4,
+    target_level=1,
+    round_id=None,
+):
     return RenderIntent(
         semantic_key=semantic,
         viewport_key=viewport,
@@ -182,6 +191,9 @@ def intent(semantic="doc-v1", viewport="vp-1", *, interactive=False, source_id=N
         view_range=((0.0, 10.0), (0.0, 10.0)),
         viewport_shape=(100, 100),
         interactive=bool(interactive),
+        render_round_id=str(round_id or f"{semantic}:{viewport}"),
+        round_preview_level=int(preview_level),
+        round_target_level=int(target_level),
         tile_source_ids=() if source_id is None else ((0, source_id),),
         tile_source_indices=() if source_id is None else ((0, int(source_id[-1])),),
     )
@@ -212,7 +224,7 @@ def demand(level: int) -> LodDemand:
 
 def test_retarget_submits_ladder_work_and_commits_batches():
     kernel, effects, pipeline = make_pipeline(tiles=2)
-    submitted = pipeline.retarget(intent(), demand(1), scope(0, 1, missing=2))
+    submitted = pipeline.retarget(intent(target_level=1), demand(1), scope(0, 1, missing=2))
     assert submitted == 2  # one coarse rung per tile; desired waits for first pixels
     drain(kernel)
     assert len(effects.evaluated) == 2
@@ -234,7 +246,7 @@ def test_any_missing_preview_blocks_every_target_rung_until_coverage_closes():
         resident_levels=(2,),
     )
 
-    submitted = pipeline.retarget(intent(), demand(1), scope(0, 1, missing=1))
+    submitted = pipeline.retarget(intent(target_level=1), demand(1), scope(0, 1, missing=1))
     drain(kernel)
 
     assert submitted == 1
@@ -248,7 +260,9 @@ def test_any_missing_preview_blocks_every_target_rung_until_coverage_closes():
         resident_levels=(4,),
     )
     effects.phase = SchedulingPhase.REFINE
-    submitted = pipeline.retarget(intent(viewport="coverage-closed"), demand(1), scope(0, 1))
+    submitted = pipeline.retarget(
+        intent(viewport="coverage-closed", target_level=1), demand(1), scope(0, 1)
+    )
     drain(kernel)
 
     assert submitted == 2
@@ -261,17 +275,17 @@ def test_any_missing_preview_blocks_every_target_rung_until_coverage_closes():
 def test_converged_retarget_submits_nothing():
     kernel, effects, pipeline = make_pipeline(tiles=1)
     effects.states[0] = TileLodState(tile_number=0, presented_level=1, resident_levels=(1,))
-    assert pipeline.retarget(intent(), demand(1), scope(0)) == 0
+    assert pipeline.retarget(intent(target_level=1), demand(1), scope(0)) == 0
     drain(kernel)
     assert effects.evaluated == []
 
 
 def test_semantic_change_clears_previous_scope():
     kernel, effects, pipeline = make_pipeline(tiles=1)
-    pipeline.retarget(intent(semantic="doc-v1"), demand(1), scope(0))
+    pipeline.retarget(intent(semantic="doc-v1", target_level=1), demand(1), scope(0))
     drain(kernel)
     evaluated_before = len(effects.evaluated)
-    pipeline.retarget(intent(semantic="doc-v2"), demand(1), scope(0))
+    pipeline.retarget(intent(semantic="doc-v2", target_level=1), demand(1), scope(0))
     drain(kernel)
     # Old scope cleared, new work ran; nothing half-committed from doc-v1.
     assert len(effects.evaluated) > evaluated_before
@@ -287,10 +301,10 @@ def test_camera_only_retarget_never_invalidates_rung_work():
     """
 
     kernel, effects, pipeline = make_pipeline(tiles=1)
-    pipeline.retarget(intent(viewport="vp-1"), demand(2), scope(0))
+    pipeline.retarget(intent(viewport="vp-1", target_level=2), demand(2), scope(0))
     drain(kernel)
     evaluated_before = len(effects.evaluated)
-    pipeline.retarget(intent(viewport="vp-2"), demand(2), scope(0))
+    pipeline.retarget(intent(viewport="vp-2", target_level=2), demand(2), scope(0))
     drain(kernel)
     assert len(effects.evaluated) == evaluated_before
 
@@ -302,7 +316,9 @@ def test_camera_only_retarget_reranks_already_queued_coverage_work():
         0: TileLodState(tile_number=0, scheduling_rank=0),
         1: TileLodState(tile_number=1, scheduling_rank=1),
     }
-    pipeline.retarget(intent(viewport="before-fit"), demand(1), scope(0, 1, missing=2))
+    pipeline.retarget(
+        intent(viewport="before-fit", target_level=1), demand(1), scope(0, 1, missing=2)
+    )
 
     effects.states = {
         0: TileLodState(tile_number=0, scheduling_rank=1),
@@ -327,9 +343,9 @@ def test_demand_level_change_supersedes_stale_rung_targets():
     kernel, effects, pipeline = make_pipeline(tiles=1)
     effects.phase = SchedulingPhase.REFINE
     effects.states[0] = TileLodState(tile_number=0, presented_level=4, resident_levels=(4,))
-    pipeline.retarget(intent(viewport="vp-1"), demand(2), scope(0))
+    pipeline.retarget(intent(viewport="vp-1", target_level=2), demand(2), scope(0))
     # Before the GUI drains, the demand moves to a finer level.
-    pipeline.retarget(intent(viewport="vp-2"), demand(1), scope(0))
+    pipeline.retarget(intent(viewport="vp-2", target_level=1), demand(1), scope(0))
     drain(kernel)
     lanes = kernel.diagnostics().lanes
     invalidated = sum(
@@ -349,7 +365,10 @@ def test_demand_level_change_supersedes_stale_rung_targets():
 def test_interactive_native_demand_defers_cold_native_until_noninteractive_replan():
     kernel, effects, pipeline = make_pipeline(tiles=1)
 
-    assert pipeline.retarget(intent(interactive=True), demand(0), scope(0, missing=1)) == 1
+    assert (
+        pipeline.retarget(intent(interactive=True, target_level=0), demand(0), scope(0, missing=1))
+        == 1
+    )
     drain(kernel)
 
     # Native demand plans FLOOR then DESIRED(0); DESIRED waits until the
@@ -361,7 +380,7 @@ def test_interactive_native_demand_defers_cold_native_until_noninteractive_repla
         tile_number=0, presented_level=2, resident_levels=(2,), presented_quality="preview"
     )
     effects.phase = SchedulingPhase.REFINE
-    assert pipeline.retarget(intent(interactive=False), demand(0), scope(0)) == 1
+    assert pipeline.retarget(intent(interactive=False, target_level=0), demand(0), scope(0)) == 1
     drain(kernel)
     assert (0, 2, 0) in effects.evaluated
 
@@ -369,11 +388,11 @@ def test_interactive_native_demand_defers_cold_native_until_noninteractive_repla
 def test_interactive_opaque_desired_rung_defers_reduce_from_native_work():
     kernel, effects, pipeline = make_pipeline(tiles=1, reduced_input_available=False)
 
-    assert pipeline.retarget(intent(interactive=True), demand(1), scope(0)) == 0
+    assert pipeline.retarget(intent(interactive=True, target_level=1), demand(1), scope(0)) == 0
     assert effects.evaluated == []
     assert pipeline.counters.interactive_native_deferred == 1
 
-    assert pipeline.retarget(intent(interactive=False), demand(1), scope(0)) == 1
+    assert pipeline.retarget(intent(interactive=False, target_level=1), demand(1), scope(0)) == 1
     drain(kernel)
     assert effects.evaluated == [(0, 2, 1)]
 
@@ -384,7 +403,7 @@ def test_interactive_retained_native_source_is_correctness_work():
     kernel.set_lane_quota(Lane.DISPLAY_PREVIEW, 1)
     kernel.set_lane_quota(Lane.DISPLAY_PREPARATION, 0)
 
-    assert pipeline.retarget(intent(interactive=True), demand(1), scope(0)) == 1
+    assert pipeline.retarget(intent(interactive=True, target_level=1), demand(1), scope(0)) == 1
     drain(kernel)
 
     assert effects.evaluated == [(0, 2, 1)]
@@ -396,7 +415,7 @@ def test_interactive_cold_native_stays_deferred_with_preview_lane_available():
     kernel.set_lane_quota(Lane.DISPLAY_PREVIEW, 1)
     kernel.set_lane_quota(Lane.DISPLAY_PREPARATION, 0)
 
-    assert pipeline.retarget(intent(interactive=True), demand(1), scope(0)) == 0
+    assert pipeline.retarget(intent(interactive=True, target_level=1), demand(1), scope(0)) == 0
     drain(kernel)
 
     assert effects.evaluated == []
@@ -407,8 +426,8 @@ def test_zoom_out_over_presented_native_submits_no_display_demotions():
     kernel, effects, pipeline = make_pipeline(tiles=1)
     effects.states[0] = TileLodState(tile_number=0, presented_level=0, resident_levels=(0,))
 
-    assert pipeline.retarget(intent(interactive=True), demand(6), scope(0)) == 0
-    assert pipeline.retarget(intent(interactive=False), demand(6), scope(0)) == 0
+    assert pipeline.retarget(intent(interactive=True, target_level=6), demand(6), scope(0)) == 0
+    assert pipeline.retarget(intent(interactive=False, target_level=6), demand(6), scope(0)) == 0
     drain(kernel)
 
     assert effects.evaluated == []
@@ -425,7 +444,7 @@ def test_preview_at_non_native_demand_level_still_admits_target_rung():
         presented_quality="preview",
     )
 
-    assert pipeline.retarget(intent(interactive=False), demand(3), scope(0)) == 1
+    assert pipeline.retarget(intent(interactive=False, target_level=3), demand(3), scope(0)) == 1
     drain(kernel)
 
     assert effects.evaluated == [(0, Rung.DESIRED, 3)]
@@ -436,7 +455,7 @@ def test_trace_phase_follows_first_pixel_role_not_desired_rung_name():
     blank_effects = StubEffects(tiles=1)
     blank_pipeline = FramePipeline(blank_kernel, blank_effects, LodLadder())
 
-    assert blank_pipeline.retarget(intent(), demand(3), scope(0)) == 1
+    assert blank_pipeline.retarget(intent(target_level=3), demand(3), scope(0)) == 1
     assert blank_kernel.specs[0].lane == Lane.DISPLAY_PREVIEW
     assert blank_kernel.specs[0].presentation_phase == 1
 
@@ -451,7 +470,7 @@ def test_trace_phase_follows_first_pixel_role_not_desired_rung_name():
     covered_effects.phase = SchedulingPhase.REFINE
     covered_pipeline = FramePipeline(covered_kernel, covered_effects, LodLadder())
 
-    assert covered_pipeline.retarget(intent(), demand(3), scope(0)) == 1
+    assert covered_pipeline.retarget(intent(target_level=3), demand(3), scope(0)) == 1
     assert covered_kernel.specs[0].lane == Lane.DISPLAY_PREPARATION
     assert covered_kernel.specs[0].presentation_phase == 2
 
@@ -461,11 +480,11 @@ def test_stale_done_from_previous_semantic_is_dropped_not_committed():
     effects = StubEffects(tiles=1)
     pipeline = FramePipeline(kernel, effects, LodLadder())
 
-    pipeline.retarget(intent(semantic="window-1"), demand(1), scope(0))
+    pipeline.retarget(intent(semantic="window-1", target_level=1), demand(1), scope(0))
     old_done = kernel.callbacks[0]["on_done"]
     old_step = kernel.specs[0].key
 
-    pipeline.retarget(intent(semantic="window-2"), demand(1), scope(0))
+    pipeline.retarget(intent(semantic="window-2", target_level=1), demand(1), scope(0))
     old_done(("payload", old_step.tile_number, old_step.level))
 
     assert effects.batches == []
@@ -478,7 +497,7 @@ def test_none_completion_releases_prepared_rung_claim():
     effects = StubEffects(tiles=1)
     pipeline = FramePipeline(kernel, effects, LodLadder())
 
-    pipeline.retarget(intent(semantic="window-1"), demand(1), scope(0))
+    pipeline.retarget(intent(semantic="window-1", target_level=1), demand(1), scope(0))
     done = kernel.callbacks[0]["on_done"]
     step = kernel.specs[0].key
 
@@ -513,11 +532,11 @@ def test_dropped_queued_rung_releases_prepared_state():
     kernel, _backend, effects, pipeline = make_manual_pipeline(tiles=1)
     effects.phase = SchedulingPhase.REFINE
     effects.states[0] = TileLodState(tile_number=0, presented_level=4, resident_levels=(4,))
-    assert pipeline.retarget(intent(viewport="vp-1"), demand(2), scope(0)) == 1
+    assert pipeline.retarget(intent(viewport="vp-1", target_level=2), demand(2), scope(0)) == 1
 
     # Supersede the queued desired-level rung before it can run.  The effects
     # already prepared lifecycle ownership; the drop callback must release it.
-    assert pipeline.retarget(intent(viewport="vp-2"), demand(1), scope(0)) == 1
+    assert pipeline.retarget(intent(viewport="vp-2", target_level=1), demand(1), scope(0)) == 1
     drain(kernel)
 
     assert (0, 2, 2) in effects.dropped
@@ -526,7 +545,7 @@ def test_dropped_queued_rung_releases_prepared_state():
 
 def test_counters_track_pipeline_activity():
     kernel, _effects, pipeline = make_pipeline(tiles=1)
-    pipeline.retarget(intent(), demand(1), scope(0))
+    pipeline.retarget(intent(target_level=1), demand(1), scope(0))
     drain(kernel)
     counts = pipeline.counters.as_dict()
     assert counts["intents"] == 1
@@ -538,7 +557,7 @@ def test_rung_dependencies_park_tasks_until_stage_key_completes():
     kernel, effects, pipeline = make_pipeline(tiles=1)
     effects.deps[0] = ("stage-key",)
 
-    assert pipeline.retarget(intent(), demand(1), scope(0)) == 1
+    assert pipeline.retarget(intent(target_level=1), demand(1), scope(0)) == 1
     assert effects.evaluated == []
     assert kernel.diagnostics().parked_deps == 1
 
@@ -557,7 +576,7 @@ def test_pipeline_never_expresses_rung_ordering_through_deps():
     effects = StubEffects(tiles=2)
     pipeline = FramePipeline(kernel, effects, LodLadder())
 
-    assert pipeline.retarget(intent(), demand(1), scope(0, 1, missing=2)) == 2
+    assert pipeline.retarget(intent(target_level=1), demand(1), scope(0, 1, missing=2)) == 2
 
     assert all(spec.deps == () for spec in kernel.specs)
     # Coarse rungs are submitted before fine rungs across all tiles.
@@ -578,7 +597,7 @@ def test_retarget_plans_visible_scope_only_not_coverage_or_near_tiles():
         visible_missing_count=2,
     )
 
-    assert pipeline.retarget(intent(), demand(1), admission_scope) == 2
+    assert pipeline.retarget(intent(target_level=1), demand(1), admission_scope) == 2
 
     submitted_tiles = {int(spec.key.tile_number) for spec in kernel.specs}
     assert submitted_tiles == {2, 4}
@@ -591,7 +610,7 @@ def test_large_visible_plan_admission_is_chunked_and_completion_driven():
     kernel, backend, effects, pipeline = make_manual_pipeline(tiles=40)
     visible = tuple(range(40))
 
-    submitted = pipeline.retarget(intent(), demand(1), scope(*visible, missing=40))
+    submitted = pipeline.retarget(intent(target_level=1), demand(1), scope(*visible, missing=40))
 
     assert submitted == pipeline.ADMISSION_CHUNK
     assert pipeline.counters.tasks_submitted == pipeline.ADMISSION_CHUNK
@@ -613,7 +632,7 @@ def test_full_preview_scope_uses_one_worker_and_one_completion_batch():
     visible = tuple(range(tile_count))
 
     submitted = pipeline.retarget(
-        intent(),
+        intent(target_level=2),
         demand(2),
         scope(*visible, missing=tile_count),
     )
@@ -646,7 +665,7 @@ def test_full_preview_scope_batches_missing_tiles_beside_retained_exact_coverage
     visible = tuple(range(tile_count))
 
     submitted = pipeline.retarget(
-        intent(),
+        intent(target_level=2),
         demand(2),
         scope(*visible, missing=tile_count - len(retained)),
     )
@@ -671,7 +690,7 @@ def test_preview_batch_requires_exact_scheduling_verdict_tile_set():
     visible = tuple(range(272))
 
     submitted = pipeline.retarget(
-        intent(),
+        intent(target_level=2),
         demand(2),
         scope(*visible, missing=len(visible)),
     )
@@ -692,7 +711,7 @@ def test_rung_provenance_rides_the_task_spec_without_changing_identity():
     effects = StubEffects(tiles=1)
     pipeline = FramePipeline(kernel, effects, LodLadder())
 
-    pipeline.retarget(intent(), demand(1), scope(0, missing=1))
+    pipeline.retarget(intent(target_level=1), demand(1), scope(0, missing=1))
 
     assert kernel.specs
     for spec in kernel.specs:
@@ -703,7 +722,7 @@ def test_rung_provenance_rides_the_task_spec_without_changing_identity():
 def test_rung_evaluation_timings_account_every_evaluated_rung():
     kernel, effects, pipeline = make_pipeline(tiles=2)
 
-    pipeline.retarget(intent(), demand(1), scope(0, 1, missing=2))
+    pipeline.retarget(intent(target_level=1), demand(1), scope(0, 1, missing=2))
     drain(kernel)
 
     rows = pipeline.rung_timings.rows()
@@ -734,7 +753,7 @@ def test_failed_rung_evaluation_still_reports_the_work_it_burned():
         return run
 
     effects.evaluate_rung = explode
-    pipeline.retarget(intent(), demand(1), scope(0, missing=1))
+    pipeline.retarget(intent(target_level=1), demand(1), scope(0, missing=1))
     drain(kernel)
 
     assert sum(int(row["calls"]) for row in pipeline.rung_timings.rows()) == 1
@@ -744,9 +763,9 @@ def test_superseded_rung_evaluation_is_counted_as_discarded_work():
     """A finished evaluation that cannot commit is spent work, and says so."""
 
     kernel, _effects, pipeline = make_pipeline(tiles=1)
-    pipeline.retarget(intent(semantic="doc-v1"), demand(1), scope(0, missing=1))
+    pipeline.retarget(intent(semantic="doc-v1", target_level=1), demand(1), scope(0, missing=1))
     # Semantic change before the results drain: nothing may commit.
-    pipeline.retarget(intent(semantic="doc-v2"), demand(1), scope(0, missing=1))
+    pipeline.retarget(intent(semantic="doc-v2", target_level=1), demand(1), scope(0, missing=1))
     drain(kernel)
 
     rows = {(int(r["rung"]), int(r["level"])): r for r in pipeline.rung_timings.rows()}
@@ -756,7 +775,7 @@ def test_superseded_rung_evaluation_is_counted_as_discarded_work():
 
 def test_committed_rung_evaluation_is_not_counted_as_discarded():
     kernel, effects, pipeline = make_pipeline(tiles=1)
-    pipeline.retarget(intent(), demand(1), scope(0, missing=1))
+    pipeline.retarget(intent(target_level=1), demand(1), scope(0, missing=1))
     drain(kernel)
 
     assert effects.batches
@@ -768,10 +787,8 @@ def test_plan_reports_why_tiles_got_no_coarse_rung():
 
     from arrayscope.render import ladder as ladder_module
 
-    _kernel, _effects, pipeline = make_pipeline(
-        tiles=2, floor_level=4, reduced_input_available=False
-    )
-    pipeline.retarget(intent(), demand(2), scope(0, 1, missing=2))
+    _kernel, _effects, pipeline = make_pipeline(tiles=2, reduced_input_available=False)
+    pipeline.retarget(intent(target_level=2), demand(2), scope(0, 1, missing=2))
 
     assert [rung for _tile, rung, _level in pipeline.last_plan_steps] == [2, 2]
     assert pipeline.last_coarse_rung_refusals == ((ladder_module.COARSE_RUNG_NO_REDUCED_INPUT, 2),)
@@ -779,7 +796,7 @@ def test_plan_reports_why_tiles_got_no_coarse_rung():
 
 def test_tiles_that_got_a_coarse_rung_are_not_reported_as_refused():
     _kernel, _effects, pipeline = make_pipeline(tiles=2)
-    pipeline.retarget(intent(), demand(1), scope(0, 1, missing=2))
+    pipeline.retarget(intent(target_level=1), demand(1), scope(0, 1, missing=2))
 
     assert any(rung == 0 for _tile, rung, _level in pipeline.last_plan_steps)
     assert pipeline.last_coarse_rung_refusals == ()
@@ -799,9 +816,9 @@ def test_rung_superseded_before_it_ran_is_not_counted_as_spent_work():
     pipeline = FramePipeline(kernel, effects, LodLadder())
 
     # Queue work, then supersede the whole scope before any worker runs it.
-    pipeline.retarget(intent(semantic="doc-v1"), demand(1), scope(0, 1, missing=2))
+    pipeline.retarget(intent(semantic="doc-v1", target_level=1), demand(1), scope(0, 1, missing=2))
     assert effects.evaluated == []
-    pipeline.retarget(intent(semantic="doc-v2"), demand(1), scope(0, 1, missing=2))
+    pipeline.retarget(intent(semantic="doc-v2", target_level=1), demand(1), scope(0, 1, missing=2))
     while backend.run_next():
         drain(kernel)
     drain(kernel)
@@ -818,7 +835,9 @@ def test_discarded_never_exceeds_calls_even_when_everything_is_superseded():
     kernel, effects, pipeline = make_pipeline(tiles=3)
     for generation in range(4):
         pipeline.retarget(
-            intent(semantic=f"doc-v{generation}"), demand(1), scope(0, 1, 2, missing=3)
+            intent(semantic=f"doc-v{generation}", target_level=1),
+            demand(1),
+            scope(0, 1, 2, missing=3),
         )
     drain(kernel)
 
@@ -839,10 +858,8 @@ def test_coarse_rung_gate_history_survives_the_plan_that_converges():
 
     from arrayscope.render import ladder as ladder_module
 
-    _kernel, _effects, pipeline = make_pipeline(
-        tiles=1, floor_level=4, reduced_input_available=False
-    )
-    pipeline.retarget(intent(), demand(2), scope(0, missing=1))
+    _kernel, _effects, pipeline = make_pipeline(tiles=1, reduced_input_available=False)
+    pipeline.retarget(intent(target_level=2), demand(2), scope(0, missing=1))
     cold = dict(pipeline.coarse_rung_refusals())
     assert cold == {ladder_module.COARSE_RUNG_NO_REDUCED_INPUT: 1}
 
@@ -851,7 +868,7 @@ def test_coarse_rung_gate_history_survives_the_plan_that_converges():
     effects_states[0] = TileLodState(
         tile_number=0, resident_levels=(2,), presented_level=2, allow_preview=False
     )
-    pipeline.retarget(intent(), demand(2), scope(0, missing=0))
+    pipeline.retarget(intent(target_level=2), demand(2), scope(0, missing=0))
 
     assert pipeline.last_coarse_rung_refusals == (
         (ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED, 1),
@@ -871,11 +888,11 @@ def test_interactive_native_deferral_covers_every_step_without_reduced_input():
     interactive_native_deferred = 3808 in one run.
     """
 
-    _kernel, effects, pipeline = make_pipeline(
-        tiles=3, floor_level=4, reduced_input_available=False
-    )
+    _kernel, effects, pipeline = make_pipeline(tiles=3, reduced_input_available=False)
 
-    submitted = pipeline.retarget(intent(interactive=True), demand(2), scope(0, 1, 2, missing=3))
+    submitted = pipeline.retarget(
+        intent(interactive=True, target_level=2), demand(2), scope(0, 1, 2, missing=3)
+    )
 
     assert submitted == 0
     assert pipeline.counters.interactive_native_deferred == 3
@@ -886,10 +903,14 @@ def test_interactive_native_deferral_covers_every_step_without_reduced_input():
 def test_same_plan_admits_everything_once_the_interaction_ends():
     """The deferral is a pause, not a drop: the identical plan then submits."""
 
-    kernel, effects, pipeline = make_pipeline(tiles=3, floor_level=4, reduced_input_available=False)
-    pipeline.retarget(intent(interactive=True), demand(2), scope(0, 1, 2, missing=3))
+    kernel, effects, pipeline = make_pipeline(tiles=3, reduced_input_available=False)
+    pipeline.retarget(
+        intent(interactive=True, target_level=2), demand(2), scope(0, 1, 2, missing=3)
+    )
 
-    submitted = pipeline.retarget(intent(interactive=False), demand(2), scope(0, 1, 2, missing=3))
+    submitted = pipeline.retarget(
+        intent(interactive=False, target_level=2), demand(2), scope(0, 1, 2, missing=3)
+    )
     drain(kernel)
 
     assert submitted == 3

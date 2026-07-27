@@ -165,7 +165,7 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     effects = SimpleNamespace()
     pipeline = SimpleNamespace(
         effects=effects,
-        ladder=SimpleNamespace(policy=LadderPolicy(floor_level=4)),
+        ladder=SimpleNamespace(policy=LadderPolicy()),
         retarget=lambda _intent, _demand, _scope: 0,
         last_plan_states=(),
         last_plan_steps=(),
@@ -180,12 +180,9 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     runtime._ensure_montage_watchdog = lambda: None
     runtime._schedule_montage_cached_level_stats = lambda _session: None
 
-    preview_levels = iter((9, 6))
-
     def select_lod(current):
         calls.append("select")
-        current.lod_preview_level = next(preview_levels)
-        return 1 << int(current.lod_preview_level)
+        return 1
 
     monkeypatch.setattr(render_lod, "selected_lod_factor", select_lod)
     monkeypatch.setattr(
@@ -201,14 +198,14 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     assert submitted == 0
     assert calls[:2] == ["select", "mark"]
     assert calls.count("commit") == 1
-    assert pipeline.ladder.policy.floor_level == 9
+    assert not hasattr(pipeline.ladder.policy, "floor_level")
 
     calls.clear()
     submitted = FrameRuntimeMixin.retarget_frame_pipeline(runtime, session)
 
     assert submitted == 0
     assert calls[:2] == ["select", "mark"]
-    assert pipeline.ladder.policy.floor_level == 6
+    assert not hasattr(pipeline.ladder.policy, "floor_level")
 
     calls.clear()
     submitted = FrameRuntimeMixin.retarget_frame_pipeline(

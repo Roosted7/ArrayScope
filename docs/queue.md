@@ -108,11 +108,16 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   presented but unsettled at 5 s, **R4 now green** after the complex-preview
   atlas landed; WGPU raw red R1/R5 at 272/272 with off-floor physical uploads;
   WGPU FFT red R1/R5 at 113/272 with off-floor uploads and duplicate per-pass
-  production. R2b and R6 are reported **unverifiable**, not green — R2b for the
-  missing round identity, R6 because one settled phase cannot exercise
-  sustained-input shedding. Note the R1 rule verdict is uninformative until the
-  round identity lands: `authoritative_round_identity_present` fails on every
-  run, so read the per-gate names rather than the rule roll-up.
+  production. **R2b round identity landed 2026-07-27:** the structural target
+  key covers semantic document/operation state, exact camera/viewport, montage
+  plan, and display axes; both floors latch to it and every `pipeline_plan`
+  carries the id plus `(P, T)`. The in-process profiler now certifies one floor
+  pair per derived round (the focused live-Weston synthetic matrix reported
+  R2b=0 on all five applicable phases), and only R6 remains **unverifiable** because one
+  settled phase cannot exercise sustained-input shedding. The five earlier
+  field snapshot traces predate the new identity fields and must be recaptured
+  before the stricter standalone replay can attribute their R1 deltas; their
+  recorded R1/R3 reds remain standing, not silently converted to green.
   Final-tip low-load AC trace-ACK T1/T2/B medians: WGPU raw
   **972/3874/2130 ms (6/6/3 passes)**, WGPU FFT
   **948/6118/4795 ms (6/5 observed/3 independent processes)**, and PyQtGraph

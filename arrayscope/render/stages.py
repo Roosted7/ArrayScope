@@ -36,6 +36,9 @@ class RenderIntent:
     view_range: tuple | None
     viewport_shape: tuple[int, int] | None
     interactive: bool = False
+    render_round_id: str = ""
+    round_preview_level: int | None = None
+    round_target_level: int | None = None
     tile_source_ids: tuple[tuple[int, object], ...] = ()
     tile_source_indices: tuple[tuple[int, int], ...] = ()
 

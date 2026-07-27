@@ -98,6 +98,7 @@ class ProgressiveSchedulingPolicy:
         *,
         progressive: bool,
         session_id: int = 0,
+        round_id: str = "",
     ) -> bool:
         """Adopt one required lifecycle scope; return whether it changed."""
 
@@ -122,6 +123,7 @@ class ProgressiveSchedulingPolicy:
             required_tiles=len(required),
             required_tile_numbers=required,
             session_id=int(session_id),
+            round_id=str(round_id or ""),
         )
         return True
 

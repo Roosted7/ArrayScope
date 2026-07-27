@@ -42,7 +42,7 @@ from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
 from arrayscope.presentation import ClaimOwner, Presentation
 from arrayscope.render import effects as render_effects
 from arrayscope.render import lod as render_lod
-from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, RungStep
+from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, RungStep, TileLodState
 from arrayscope.render.lod import LodPageSetKey, admit_retained_preview_level
 from arrayscope.render.stages import CommitBatch, LodAdmissionScope, RenderIntent
 from arrayscope.window import frame_effects as montage_commit
@@ -80,7 +80,14 @@ def _tiles(count=2):
     )
 
 
-def _session(*, mode=LOD_POLICY_RESIDENT, pyramid=None, view_range=ZOOMED_OUT_RANGE, count=2):
+def _session(
+    *,
+    mode=LOD_POLICY_RESIDENT,
+    pyramid=None,
+    view_range=ZOOMED_OUT_RANGE,
+    count=2,
+    preview_level=0,
+):
     tiles = _tiles(count)
     session = FrameSession(
         session_id=1,
@@ -113,6 +120,8 @@ def _session(*, mode=LOD_POLICY_RESIDENT, pyramid=None, view_range=ZOOMED_OUT_RA
         skipped_tiles=set(),
         lod_policy_mode=mode,
         lod_page_cache=pyramid,
+        lod_preview_level=int(preview_level),
+        lod_preview_min_level=int(preview_level),
     )
     for index, tile in enumerate(tiles):
         image = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE) + index
@@ -341,11 +350,15 @@ def _plan_rung_materializations(session) -> tuple:
     demand = session.lod_policy_decision.demand
     policy = LadderPolicy(
         mode=session.lod_policy_mode,
-        floor_level=max(1, int(getattr(session, "lod_preview_level", 0) or 4)),
         reduced_input_available=True,
     )
     effects = FramePipelineEffects(_RungPrepareRenderer(), session)
-    for step in LodLadder(policy).plan(render_effects.tile_lod_states(session, demand), demand):
+    for step in LodLadder(policy).plan(
+        render_effects.tile_lod_states(session, demand),
+        demand,
+        preview_level=int(session.lod_preview_level),
+        target_level=int(demand.desired_level),
+    ):
         if step.rung == Rung.DESIRED:
             effects.prepare_rung(None, step)
     return tuple(session.lifecycle.active_materializations())
@@ -472,11 +485,12 @@ def test_preview_level_tracks_coarser_viewport_demand():
         pyramid=LodPageCache(max_bytes=1 << 24),
         view_range=far_zoom,
         count=272,
+        preview_level=4,
     )
-    session.lod_preview_min_level = 4
-    session.lod_preview_level = 4
 
-    session._selected_lod_factor()
+    # The floor seed is round policy and therefore exists before FrameSession
+    # chooses the round. Mutating it afterwards used to depend on the forbidden
+    # per-retarget recomputation that R2b removes.
 
     assert session.lod_policy_decision.demand.desired_level >= 5
     assert session.lod_preview_level == session.lod_policy_decision.demand.desired_level + 2
@@ -2610,10 +2624,14 @@ def test_orphaned_loading_state_does_not_suppress_pipeline_target():
     states = render_effects.tile_lod_states(session, demand)
     policy = LadderPolicy(
         mode=session.lod_policy_mode,
-        floor_level=4,
         reduced_input_available=True,
     )
-    steps = LodLadder(policy).plan(states, demand)
+    steps = LodLadder(policy).plan(
+        states,
+        demand,
+        preview_level=int(session.lod_preview_level),
+        target_level=int(demand.desired_level),
+    )
 
     assert 1 in session.required_target_unsettled_tiles()
     assert any(int(step.tile_number) == 1 for step in steps)
@@ -3375,7 +3393,6 @@ def test_coverage_pass_blocks_targets_until_required_preview_coverage_closes():
     ladder = LodLadder(
         policy=LadderPolicy(
             mode="resident",
-            floor_level=4,
             reduced_input_available=True,
         )
     )
@@ -3388,7 +3405,13 @@ def test_coverage_pass_blocks_targets_until_required_preview_coverage_closes():
         presented_level=4,
         presented_quality="preview",
     )
-    covered_steps = ladder.plan_tile(covered, demand, coverage)
+    covered_steps = ladder.plan_tile(
+        covered,
+        demand,
+        coverage,
+        preview_level=4,
+        target_level=int(demand.desired_level),
+    )
     assert not any(step.rung is Rung.DESIRED for step in covered_steps), (
         "one tile's preview acknowledgement must not admit its target while "
         "another required tile is blank"
@@ -3398,7 +3421,13 @@ def test_coverage_pass_blocks_targets_until_required_preview_coverage_closes():
         tile_number=1,
         allow_preview=True,
     )
-    steps = ladder.plan_tile(blank_with_preview_path, demand, coverage)
+    steps = ladder.plan_tile(
+        blank_with_preview_path,
+        demand,
+        coverage,
+        preview_level=4,
+        target_level=int(demand.desired_level),
+    )
     assert any(step.rung is Rung.FLOOR for step in steps)
     assert not any(step.rung is Rung.DESIRED for step in steps), (
         "DESIRED must wait for this tile's own coarse acknowledgement"
@@ -3409,9 +3438,16 @@ def test_coverage_pass_blocks_targets_until_required_preview_coverage_closes():
         presented_level=4,
         presented_quality="preview",
     )
-    assert any(step.rung is Rung.DESIRED for step in ladder.plan_tile(closed, demand, refine)), (
-        "refinement must plan immediately once the pass closes"
-    )
+    assert any(
+        step.rung is Rung.DESIRED
+        for step in ladder.plan_tile(
+            closed,
+            demand,
+            refine,
+            preview_level=4,
+            target_level=int(demand.desired_level),
+        )
+    ), "refinement must plan immediately once the pass closes"
 
 
 def test_atomic_successor_uses_native_for_tiles_without_a_resolvable_floor():
@@ -5478,6 +5514,108 @@ def test_live_phase_vector_ladder_builds_cancellation_preserving_page_payload():
     )
 
 
+def test_r2b_round_floors_latch_across_replans_and_changing_tile_population():
+    """R2b: one settled target owns fixed P/T floors across every planning pass."""
+
+    session = _session(
+        pyramid=LodPageCache(max_bytes=1 << 20),
+        count=2,
+        preview_level=4,
+    )
+
+    render_lod.selected_lod_factor(session)
+    first_round = session.render_round_id
+    first_floors = (session.round_preview_level, session.round_target_level)
+    ladder = LodLadder()
+
+    session.lod_policy_decision = replace(
+        session.lod_policy_decision,
+        demand=LodDemand(
+            desired_level=first_floors[1] + 1,
+            desired_factor=2 ** (first_floors[1] + 1),
+            desired_factor_xy=(
+                2 ** (first_floors[1] + 1),
+                2 ** (first_floors[1] + 1),
+            ),
+            acceptable_levels=(first_floors[1] + 1,),
+            source_texels_per_pixel_xy=(99.0, 99.0),
+            reason="synthetic demand churn without a target change",
+        ),
+    )
+    render_lod.selected_lod_factor(session)
+    assert session.render_round_id == first_round
+    assert (session.round_preview_level, session.round_target_level) == first_floors
+    assert session.lod_policy_decision.demand.desired_level == first_floors[1]
+
+    populations = (
+        (TileLodState(tile_number=0),),
+        (TileLodState(tile_number=0), TileLodState(tile_number=1)),
+        (
+            TileLodState(tile_number=0, resident_levels=(first_floors[0],)),
+            TileLodState(tile_number=1),
+        ),
+    )
+    for states in populations:
+        steps = ladder.plan(
+            states,
+            session.lod_policy_decision.demand,
+            preview_level=first_floors[0],
+            target_level=first_floors[1],
+        )
+        assert {step.level for step in steps} <= set(first_floors)
+        # A changing retention hint and another policy pass do not rename an
+        # unchanged target or reopen either floor decision.
+        session.lod_preview_level = first_floors[0] + 3
+        render_lod.selected_lod_factor(session)
+        assert session.render_round_id == first_round
+        assert (session.round_preview_level, session.round_target_level) == first_floors
+
+    # Exact camera range is target identity. A genuine zoom starts a new round,
+    # where both floors are deliberately free to be selected again.
+    session.view_range = tuple((float(lo), float(hi) * 2.0) for lo, hi in session.view_range)
+    render_lod.selected_lod_factor(session)
+
+    assert session.render_round_id != first_round
+    assert (session.round_preview_level, session.round_target_level) != first_floors
+
+
+def test_progressive_round_identity_names_target_inputs_not_work_population():
+    session = _session(
+        pyramid=LodPageCache(max_bytes=1 << 20),
+        count=2,
+        preview_level=4,
+    )
+    session.view_state = SimpleNamespace(image_axes=(0, 1))
+    base = render_lod.progressive_render_round_key(session)
+
+    session.visible_tiles = session.visible_tiles[:1]
+    session.loading_tiles.add(1)
+    assert render_lod.progressive_render_round_key(session) == base
+
+    original_key = session.key
+    session.key = ("document-operation-revision-2",)
+    assert render_lod.progressive_render_round_key(session) != base
+    session.key = original_key
+
+    original_range = session.view_range
+    session.view_range = ((0.0, original_range[0][1] + 1.0), original_range[1])
+    assert render_lod.progressive_render_round_key(session) != base
+    session.view_range = original_range
+
+    original_shape = session.viewport_shape
+    session.viewport_shape = (original_shape[0] + 1, original_shape[1])
+    assert render_lod.progressive_render_round_key(session) != base
+    session.viewport_shape = original_shape
+
+    original_plan = session.plan
+    session.plan = replace(original_plan, gap=original_plan.gap + 1)
+    assert render_lod.progressive_render_round_key(session) != base
+    session.plan = original_plan
+
+    session.view_state = SimpleNamespace(image_axes=(1, 0))
+    assert render_lod.progressive_render_round_key(session) != base
+
+
 def test_live_phase_ladder_does_not_accept_resident_mean_family_as_floor():
     pyramid = LodPageCache(max_bytes=1 << 20)
     session = _session(pyramid=pyramid, count=1)
@@ -7141,10 +7279,14 @@ def test_admitted_wrapper_keeps_ladder_residency_during_atomic_wait():
 
     policy = LadderPolicy(
         mode=session.lod_policy_mode,
-        floor_level=4,
         reduced_input_available=True,
     )
-    steps = LodLadder(policy).plan(states, demand)
+    steps = LodLadder(policy).plan(
+        states,
+        demand,
+        preview_level=int(session.lod_preview_level),
+        target_level=int(demand.desired_level),
+    )
     assert not any(int(step.tile_number) == 1 and step.rung == Rung.FLOOR for step in steps), (
         "no duplicate FLOOR producer may be planned while the wrapper awaits the swap"
     )

@@ -109,13 +109,14 @@ measurement rather than inspection:
   changes; observing a floor change inside one session is therefore **not**
   evidence of a violation, and it was misread as one before this note.
 
-**There is no round identity in the code today.** The pipeline has sessions,
-demands, generations and admission epochs, but nothing that names "one settled
-view target" as a thing a floor can be pinned to. Until that exists, R2b cannot
-be enforced by a test and the oracle cannot key on it — which is why the R1
-replay uses session plus both floors as a conservative proxy for a round
-boundary. Establishing that identity is a prerequisite for the rest of R2b, not
-a detail of it.
+**Round identity is now explicit.** It is a structural key over the semantic
+session key (document/operation revision and display state), exact view range,
+viewport shape, montage plan geometry/source population, and display axes.
+Visible/resident tile population is work state and is deliberately excluded.
+So are demand, admission, and scheduler epochs: a change to any of those that
+leaves the settled view target unchanged is another planning pass in the same
+round and must reuse its latched floors. A genuine change to the structural
+target starts a new round and permits both floors to be selected again.
 
 ## R3 — Levels never clip what is drawn
 
@@ -248,13 +249,13 @@ The binding assignment:
 Both altitude errors have now been repaired:
 
 - **Preview floor — repaired.** `render.lod.selected_lod_factor()` chooses the
-  preview floor from the round demand, stores that one value on the session,
-  and the frame runtime passes it through the pipeline to `LodLadder.plan()`.
-  The ladder still decides, per tile, whether that tile is *skipped* — that is
-  correctly per-tile work (R2) — but evaluation and rung planning now read the
-  round floor unchanged rather than re-deriving it. It is not finished: the
-  floor is still recomputed per planning pass rather than pinned to a round,
-  which R2b above records as blocked on a round identity.
+  preview and target floors from the round demand and latches that demand plus
+  both values against the structural round key. The immutable render intent
+  carries the id and floors through the pipeline to `LodLadder.plan()`; the
+  ladder policy owns no fallback value, and omitting either floor fails
+  loudly. The ladder still decides, per tile, whether that tile is *skipped* —
+  that is correctly per-tile work (R2) — but evaluation and rung planning now
+  read the round floors unchanged rather than re-deriving them.
 - **Round levels — repaired.** `LevelStatsService` claims the decision when a
   preview rung is admitted, then installs the complete preview cohort as one
   tracker revision. The cohort rows carry worker-prepared bounds and samples,
@@ -331,7 +332,7 @@ recomputed regardless.
 ## Acceptance
 
 A change to the progressive path is accepted when the invariant oracle reports
-no R1/R3 violation across the recorded interaction traces, and the relevant
+no R1/R2b/R3 violation across the recorded interaction traces, and the relevant
 suites are green. Latency medians are reported alongside, but a median may
 never be traded for an invariant.
 

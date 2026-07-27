@@ -96,7 +96,7 @@ class RungStep:
 
 @dataclass(frozen=True)
 class LadderPolicy:
-    """Tunable ladder policy plus the round-owned preview floor it reads.
+    """Tunable ladder policy.
 
     TODO(redesign R3): re-derive coarse-level bounds and the DESIRED
     priority from fresh A/B evidence (roadmap X5 queue item 2) before
@@ -104,7 +104,6 @@ class LadderPolicy:
     """
 
     mode: str = "resident"  # "resident" | "native-only"
-    floor_level: int = 4
     reduced_input_available: bool = True
     coarse_rung_enabled: bool = COARSE_RUNG_ENABLED_DEFAULT
     levels_authoritative_rung: Rung = Rung.FLOOR
@@ -176,21 +175,21 @@ class LodLadder:
         demand: LodDemand,
         verdict: SchedulingVerdict | None = None,
         *,
-        preview_level: int | None = None,
+        preview_level: int,
+        target_level: int,
     ) -> tuple[RungStep, ...]:
         """Return the ordered steps ``state`` still needs to satisfy ``demand``.
 
-        ``preview_level`` is the round planner's value. Direct unit callers may
-        omit it and use the already-configured policy value; the live pipeline
-        always passes the round value explicitly. An empty result means the
-        tile is converged for this demand.
+        Both levels are required round-planner values. There is deliberately no
+        policy fallback: omitting the round owner must fail loudly. An empty
+        result means the tile is converged for this demand.
         """
 
         policy = self.policy
         if policy.mode == "native-only":
             return self._native_only_plan(state)
 
-        desired = max(0, int(demand.desired_level))
+        desired = max(0, int(target_level))
         acceptable = tuple(demand.acceptable_levels or (desired,))
         steps: list[RungStep] = []
 
@@ -235,10 +234,7 @@ class LodLadder:
         # The admission predicate permits genuinely tile-local pipelines and
         # montage-axis expansions whose identical reduced region is backed by
         # one cacheable real-document stage.
-        preview_level = max(
-            0,
-            int(policy.floor_level if preview_level is None else preview_level),
-        )
+        preview_level = max(0, int(preview_level))
         preview_target_has_finer_followup = preview_level > desired
         cheap_pre_native = (
             bool(policy.coarse_rung_enabled)
@@ -344,7 +340,8 @@ class LodLadder:
         demand: LodDemand,
         verdict: SchedulingVerdict | None = None,
         *,
-        preview_level: int | None = None,
+        preview_level: int,
+        target_level: int,
     ) -> tuple[RungStep, ...]:
         """Plan every tile, coarse rungs across tiles before fine rungs.
 
@@ -359,7 +356,8 @@ class LodLadder:
                 state,
                 demand,
                 verdict,
-                preview_level=(self.policy.floor_level if preview_level is None else preview_level),
+                preview_level=preview_level,
+                target_level=target_level,
             )
             for state in states
         ]

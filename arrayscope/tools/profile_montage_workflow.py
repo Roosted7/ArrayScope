@@ -5428,6 +5428,7 @@ class _ProgressiveInvariantProbe:
             "kernel_finish",
             "kernel_start",
             "kernel_submit",
+            "pipeline_plan",
             "scheduling_phase",
         }
     )
@@ -5504,11 +5505,11 @@ class _ProgressiveInvariantProbe:
         if int(getattr(session, "session_id", 0) or 0) != session_id:
             session = None
         required = tuple(int(tile) for tile in tuple(fields.get("required_tile_numbers", ()) or ()))
-        decision = None if session is None else getattr(session, "lod_policy_decision", None)
-        demand = None if decision is None else getattr(decision, "demand", None)
-        target_floor = None if demand is None else int(getattr(demand, "desired_level", 0) or 0)
+        target_floor = (
+            None if session is None else int(getattr(session, "round_target_level", 0) or 0)
+        )
         preview_floor = (
-            None if session is None else int(getattr(session, "lod_preview_level", 0) or 0)
+            None if session is None else int(getattr(session, "round_preview_level", 0) or 0)
         )
         if preview_floor is not None and target_floor is not None and preview_floor <= target_floor:
             preview_floor = None
@@ -5524,12 +5525,11 @@ class _ProgressiveInvariantProbe:
         )
         upload_counts_available, upload_counts = self._wgpu_upload_snapshot()
         row = {
-            # No producer currently emits this field. Keeping it explicit makes
-            # the gate fail closed until the renderer owns a real view-target
-            # round identity; session/generation is only a scheduling-scope
-            # proxy and the normative R2b contract forbids treating it as a
-            # round key.
-            "round_id": fields.get("round_id"),
+            "round_id": str(
+                fields.get("round_id")
+                or ("" if session is None else getattr(session, "render_round_id", ""))
+                or ""
+            ),
             "session_id": session_id,
             "generation": generation,
             "started_ns": int(perf_counter_ns()),
@@ -5556,11 +5556,11 @@ class _ProgressiveInvariantProbe:
         session = getattr(self._win, "_frame_session", None)
         if int(getattr(session, "session_id", 0) or 0) != int(session_id):
             return
-        decision = getattr(session, "lod_policy_decision", None)
-        demand = None if decision is None else getattr(decision, "demand", None)
-        if row.get("target_floor") is None and demand is not None:
-            row["target_floor"] = int(getattr(demand, "desired_level", 0) or 0)
-        preview_floor = int(getattr(session, "lod_preview_level", 0) or 0)
+        if row.get("target_floor") is None:
+            row["target_floor"] = int(getattr(session, "round_target_level", 0) or 0)
+        if not row.get("round_id"):
+            row["round_id"] = str(getattr(session, "render_round_id", "") or "")
+        preview_floor = int(getattr(session, "round_preview_level", 0) or 0)
         target_floor = row.get("target_floor")
         if row.get("preview_floor") is None and preview_floor > int(
             target_floor if isinstance(target_floor, int) else -1
@@ -7392,8 +7392,12 @@ def _phase_record(
             [str(reason), int(count)]
             for reason, count in tuple(getattr(montage, "tile_lod_coarse_rung_gates", ()) or ())
         ],
-        "montage_quality_ladder_floor_level": int(
-            getattr(montage, "tile_lod_ladder_floor_level", -1)
+        "montage_render_round_id": str(getattr(montage, "render_round_id", "") or ""),
+        "montage_quality_round_preview_level": int(
+            getattr(montage, "tile_lod_round_preview_level", -1)
+        ),
+        "montage_quality_round_target_level": int(
+            getattr(montage, "tile_lod_round_target_level", -1)
         ),
         "montage_quality_ladder_reduced_input": bool(
             getattr(montage, "tile_lod_ladder_reduced_input", False)
@@ -8326,11 +8330,10 @@ def _progressive_invariant_certification(
 ) -> dict[str, object]:
     """Certify R1–R5/R7 from the profiler's mandatory in-process evidence.
 
-    R2b and R6 are intentionally absent. The renderer has no authoritative
-    settled-view round identity with which to prove cross-plan floor stability,
-    and one settled phase cannot prove the scheduler's load-shedding trajectory.
-    The returned ``unverifiable_rules`` field keeps both boundaries explicit
-    instead of silently turning missing observations into green.
+    R2b keys every pipeline plan on the renderer's derived round identity. R6
+    remains absent because one settled phase cannot prove the scheduler's
+    load-shedding trajectory; ``unverifiable_rules`` keeps that boundary
+    explicit instead of silently turning missing observations into green.
     """
 
     failures: list[dict[str, object]] = []
@@ -8352,6 +8355,40 @@ def _progressive_invariant_certification(
 
     rounds = tuple(dict(row) for row in tuple(evidence.get("rounds", ()) or ()))
     events = tuple(dict(row) for row in tuple(evidence.get("events", ()) or ()))
+    plan_floor_rows = tuple(
+        event
+        for event in events
+        if str(event.get("kind", "")) == "pipeline_plan"
+        and str(event.get("render_round_id", "") or "")
+    )
+    floors_by_round: dict[str, set[tuple[int, int]]] = {}
+    for event in plan_floor_rows:
+        preview_floor = int(event.get("round_preview_level", -1))
+        target_floor = int(event.get("round_target_level", -1))
+        floors_by_round.setdefault(str(event["render_round_id"]), set()).add(
+            (
+                -1 if preview_floor <= target_floor else preview_floor,
+                target_floor,
+            )
+        )
+    for round_row in rounds:
+        round_id = str(round_row.get("round_id", "") or "")
+        if round_id:
+            preview_floor = round_row.get("preview_floor")
+            target_floor = round_row.get("target_floor")
+            floors_by_round.setdefault(round_id, set()).add(
+                (
+                    -1 if preview_floor is None else int(preview_floor),
+                    -1 if target_floor is None else int(target_floor),
+                )
+            )
+    require(
+        "R2b",
+        "one_floor_pair_per_round",
+        bool(floors_by_round) and all(len(floors) == 1 for floors in floors_by_round.values()),
+        observed={round_id: tuple(sorted(floors)) for round_id, floors in floors_by_round.items()},
+        target="every observed planning pass in one derived round uses one P/T pair",
+    )
     require(
         "R1",
         "in_process_evidence_not_truncated",
@@ -8384,7 +8421,7 @@ def _progressive_invariant_certification(
         require(
             "R1",
             "authoritative_round_identity_present",
-            round_id is not None,
+            bool(round_id),
             observed={
                 "round_id": round_id,
                 "scheduling_scope_proxy": identity,
@@ -8820,6 +8857,7 @@ def _progressive_invariant_certification(
         )
         round_summaries.append(
             {
+                "round_id": round_id,
                 "session_id": session_id,
                 "generation": generation,
                 "required_tiles": len(required),
@@ -8882,7 +8920,7 @@ def _progressive_invariant_certification(
 
     rule_failures = {
         rule: sum(failure["rule"] == rule for failure in failures)
-        for rule in ("R1", "R2", "R3", "R4", "R5", "R7")
+        for rule in ("R1", "R2", "R2b", "R3", "R4", "R5", "R7")
     }
     return {
         "invariant_gate_applicable": True,
@@ -8894,12 +8932,6 @@ def _progressive_invariant_certification(
         "invariant_gate_round_count": len(rounds),
         "invariant_gate_rounds": tuple(round_summaries),
         "invariant_gate_unverifiable_rules": {
-            "R2b": (
-                "the renderer does not yet own an authoritative settled-view round "
-                "identity, so floor stability across every planning pass in one round "
-                "cannot be certified; session/generation is retained only as a "
-                "scheduling-scope proxy"
-            ),
             "R6": (
                 "one settled profiler phase does not exercise sustained-input "
                 "load shedding or prove moving-pixel liveness"

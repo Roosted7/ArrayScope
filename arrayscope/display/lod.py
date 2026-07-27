@@ -157,6 +157,7 @@ def native_lod_policy(
     viewport_shape: tuple[int, int],
     tile_shape: tuple[int, int],
     *,
+    demand: LodDemand | None = None,
     previous_factor: int | None = None,
     deferred_reason: str | None = None,
     allow_anisotropy: bool = True,
@@ -165,16 +166,18 @@ def native_lod_policy(
 
     ``deferred_reason`` states *why* a desired factor > 1 is not applied
     (user-selected native-only policy vs. resident LOD not yet adopted on the
-    active backend); it defaults to the policy-selected wording.
+    active backend); it defaults to the policy-selected wording. A supplied
+    ``demand`` is a round-owned snapshot and is applied without re-derivation.
     """
 
-    demand = select_lod_demand(
-        view_range,
-        viewport_shape,
-        tile_shape,
-        previous_factor=previous_factor,
-        allow_anisotropy=allow_anisotropy,
-    )
+    if demand is None:
+        demand = select_lod_demand(
+            view_range,
+            viewport_shape,
+            tile_shape,
+            previous_factor=previous_factor,
+            allow_anisotropy=allow_anisotropy,
+        )
     if demand.reason == LOD_REASON_INVALID_VIEW:
         reason = LOD_REASON_INVALID_VIEW
     elif demand.desired_factor > 1:
@@ -273,6 +276,7 @@ def resident_lod_policy(
     viewport_shape: tuple[int, int],
     tile_shape: tuple[int, int],
     *,
+    demand: LodDemand | None = None,
     previous_factor: int | None = None,
     resident_levels=(),
     allow_anisotropy: bool = True,
@@ -282,16 +286,18 @@ def resident_lod_policy(
     The applied level is always materialized-and-resident (level 0 counts as
     implicitly resident).  Finer/equal resident LODs may satisfy or improve
     tile presentation; coarser-only resident levels stay physical cache and do
-    not decide semantic completion.
+    not decide semantic completion. A supplied ``demand`` is a round-owned
+    snapshot and is applied without re-derivation.
     """
 
-    demand = select_lod_demand(
-        view_range,
-        viewport_shape,
-        tile_shape,
-        previous_factor=previous_factor,
-        allow_anisotropy=allow_anisotropy,
-    )
+    if demand is None:
+        demand = select_lod_demand(
+            view_range,
+            viewport_shape,
+            tile_shape,
+            previous_factor=previous_factor,
+            allow_anisotropy=allow_anisotropy,
+        )
     if demand.reason == LOD_REASON_INVALID_VIEW:
         return LodPolicyDecision(
             demand=demand,

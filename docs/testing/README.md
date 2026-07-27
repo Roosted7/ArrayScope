@@ -64,9 +64,17 @@ settlement-timeout owners.
 snapshot stream without importing Qt or renderer implementation state. Its
 detailed output names every failing one-based snapshot index and LOD set;
 `--summary` emits one Markdown verdict row per input trace. A contract-clean
-trace exits zero, any R1/R3 violation exits one, and empty or malformed traces
-fail closed. R3 covers both a partial evidence count frozen during presentation
-growth and an inactive fill whose evidence starts only afterwards.
+trace exits zero, any R1/R2b/R3 violation exits one, and empty or malformed
+traces fail closed. The explicit derived round id proves which snapshots share
+one target and makes a floor move inside that round an R2b violation; upload
+purpose/duplicates and R3 value containment remain snapshot limitations. R3
+covers both a partial evidence count frozen during presentation growth and an
+inactive fill whose evidence starts only afterwards.
+
+The profiler's richer in-process invariant probe also consumes every
+`pipeline_plan` event. It groups those planning passes by the same derived id
+and certifies one `(P, T)` pair per round; R2b is no longer listed as
+unverifiable in profiler output.
 
 The optional pytest gate reads `*.jsonl` from
 `tests/fixtures/progressive-render-contract/` and the gitignored

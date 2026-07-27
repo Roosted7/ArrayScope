@@ -18,6 +18,7 @@ def _snapshot(
     session_id=1,
     target_level=2,
     preview_level=5,
+    round_id="round-1",
     presented=1,
     covered=None,
     population=10,
@@ -28,10 +29,12 @@ def _snapshot(
         covered = max(presented, population)
     montage = {
         "session_id": session_id,
+        "render_round_id": round_id,
         "tile_lod_resident_tile_levels": [[level, count] for level, count in levels],
         "tile_lod_applied_level": levels[0][0] if levels else 0,
         "tile_lod_desired_factor": 2**target_level,
-        "tile_lod_ladder_floor_level": preview_level,
+        "tile_lod_round_preview_level": preview_level,
+        "tile_lod_round_target_level": target_level,
         "presented_tiles": presented,
         "visible_tiles": population,
         "semantic_evidence_blocking_reason": "ready",
@@ -146,6 +149,26 @@ def test_production_outside_the_round_floors_fails_r1(snapshots, expected_index,
     assert expected_fragment in violations[0].description
 
 
+def test_floor_change_inside_one_round_fails_r2b_even_when_session_is_unchanged():
+    snapshots = [
+        _snapshot([(5, 10)], target_level=2, preview_level=5),
+        _snapshot([(6, 10)], target_level=3, preview_level=6),
+    ]
+
+    violations = check_progressive_render_snapshots(snapshots)
+
+    assert [(item.rule, item.snapshot_index) for item in violations] == [("R2b", 2)]
+
+
+def test_new_round_id_is_the_proven_boundary_even_inside_one_session():
+    snapshots = [
+        _snapshot([(5, 10)], target_level=2, preview_level=5, round_id="round-a"),
+        _snapshot([(6, 10)], target_level=3, preview_level=6, round_id="round-b"),
+    ]
+
+    assert check_progressive_render_snapshots(snapshots) == ()
+
+
 def test_r1_is_not_checked_without_per_level_upload_counters(tmp_path):
     """A clean R1 column on a PyQtGraph trace means "not checked", not "passed".
 
@@ -246,7 +269,14 @@ def test_superseded_inactive_round_without_later_evidence_is_not_mislabeled():
     snapshots = [
         _snapshot([(5, 40)], presented=40, covered=0, population=0),
         _snapshot([(5, 200)], presented=200, covered=0, population=0),
-        _snapshot([(2, 10)], session_id=2, presented=10, covered=10, population=10),
+        _snapshot(
+            [(2, 10)],
+            session_id=2,
+            round_id="round-2",
+            presented=10,
+            covered=10,
+            population=10,
+        ),
     ]
     for snapshot in snapshots[:2]:
         snapshot["diagnostics"]["montage"]["semantic_evidence_blocking_reason"] = "inactive"
@@ -275,8 +305,8 @@ def test_replay_and_formatters_report_snapshot_index_and_markdown_table(tmp_path
         in format_progressive_render_violations(result)
     )
     summary = format_progressive_render_summary([result])
-    assert "| Trace | Snapshots | R1 | R3 | Verdict |" in summary
-    assert "| `off-floor-production.jsonl` | 2 | 1 | 0 | FAIL |" in summary
+    assert "| Trace | Snapshots | R1 | R2b | R3 | Verdict |" in summary
+    assert "| `off-floor-production.jsonl` | 2 | 1 | 0 | 0 | FAIL |" in summary
 
 
 def test_summary_cli_returns_nonzero_for_contract_violation(tmp_path, capsys):
@@ -289,7 +319,7 @@ def test_summary_cli_returns_nonzero_for_contract_violation(tmp_path, capsys):
     exit_code = main(["--summary", str(path)])
 
     assert exit_code == 1
-    assert "| `off-floor-production.jsonl` | 2 | 1 | 0 | FAIL |" in capsys.readouterr().out
+    assert "| `off-floor-production.jsonl` | 2 | 1 | 0 | 0 | FAIL |" in capsys.readouterr().out
 
 
 def test_replay_rejects_empty_trace(tmp_path):

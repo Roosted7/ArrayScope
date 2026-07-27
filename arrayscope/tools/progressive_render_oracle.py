@@ -41,7 +41,9 @@ class ProgressiveRenderOracleResult:
 @dataclass(frozen=True)
 class _Snapshot:
     index: int
+    # Diagnostic context only; session identity is never a round boundary.
     session_id: int | None
+    round_id: str
     levels: tuple[int, ...]
     level_counts: tuple[tuple[int, int], ...]
     target_level: int
@@ -90,7 +92,8 @@ def check_progressive_render_snapshots(
     )
     if not normalized:
         raise ValueError("progressive render snapshot sequence is empty")
-    violations = list(_check_r1(normalized))
+    violations = list(_check_r2b(normalized))
+    violations.extend(_check_r1(normalized))
     violations.extend(_check_r3(normalized))
     return tuple(sorted(violations, key=lambda item: (item.snapshot_index, item.rule)))
 
@@ -105,13 +108,14 @@ def format_progressive_render_violations(result: ProgressiveRenderOracleResult) 
             "(production cannot be told from cache arrival)"
         )
     if result.passed:
-        # Deliberately not "PASS: no R1/R3 violations". These checks are
-        # snapshot heuristics: R1 sees upload growth outside the floors but
-        # not duplicate production AT a floor, and R3 sees evidence coverage
-        # stall but never the value-range containment the rule actually
-        # states. A clean run is the absence of detected violations, which is
-        # weaker than the contract being satisfied.
-        lines.append("no R1/R3 violations detected (snapshot heuristics; not a contract proof)")
+        # Round attribution and observed floor immutability are now proofs.
+        # Upload purpose/duplicates and R3 value containment remain invisible
+        # in 500 ms snapshots, so a clean trace is still weaker than the full
+        # progressive contract being satisfied.
+        lines.append(
+            "no R1/R2b/R3 violations detected "
+            "(round attribution is proven; production purpose and R3 remain heuristic)"
+        )
     for violation in result.violations:
         levels = _format_levels(violation.levels)
         counts = _format_level_counts(violation.level_counts)
@@ -128,20 +132,50 @@ def format_progressive_render_summary(
     """Format a compact Markdown table for review evidence."""
 
     lines = [
-        "| Trace | Snapshots | R1 | R3 | Verdict |",
-        "|---|---:|---:|---:|:---:|",
+        "| Trace | Snapshots | R1 | R2b | R3 | Verdict |",
+        "|---|---:|---:|---:|---:|:---:|",
     ]
     for result in results:
         r1_count = sum(violation.rule == "R1" for violation in result.violations)
+        r2b_count = sum(violation.rule == "R2b" for violation in result.violations)
         r3_count = sum(violation.rule == "R3" for violation in result.violations)
         r1_cell = str(r1_count) if result.r1_verifiable else "n/a"
         verdict = "PASS" if result.passed else "FAIL"
         name = Path(result.path).name.replace("|", "\\|")
-        lines.append(f"| `{name}` | {result.snapshot_count} | {r1_cell} | {r3_count} | {verdict} |")
+        lines.append(
+            f"| `{name}` | {result.snapshot_count} | {r1_cell} | "
+            f"{r2b_count} | {r3_count} | {verdict} |"
+        )
     if not all(result.r1_verifiable for result in results):
         lines.append("")
         lines.append("`n/a` = no per-level upload counters in the trace; R1 was not checked.")
     return "\n".join(lines)
+
+
+def _check_r2b(snapshots: Sequence[_Snapshot]) -> tuple[ProgressiveRenderViolation, ...]:
+    """Prove that every observed snapshot of one round carries the same floors."""
+
+    floors_by_round: dict[str, tuple[int, int | None]] = {}
+    violations: list[ProgressiveRenderViolation] = []
+    for snapshot in snapshots:
+        floors = (snapshot.target_level, snapshot.preview_level)
+        expected = floors_by_round.setdefault(snapshot.round_id, floors)
+        if floors == expected:
+            continue
+        violations.append(
+            ProgressiveRenderViolation(
+                rule="R2b",
+                snapshot_index=snapshot.index,
+                levels=snapshot.levels,
+                level_counts=snapshot.level_counts,
+                description=(
+                    f"round {snapshot.round_id} moved floors from "
+                    f"P={expected[1]}, T={expected[0]} to "
+                    f"P={snapshot.preview_level}, T={snapshot.target_level}"
+                ),
+            )
+        )
+    return tuple(violations)
 
 
 def _check_r1(snapshots: Sequence[_Snapshot]) -> tuple[ProgressiveRenderViolation, ...]:
@@ -164,16 +198,10 @@ def _check_r1(snapshots: Sequence[_Snapshot]) -> tuple[ProgressiveRenderViolatio
 
     violations: list[ProgressiveRenderViolation] = []
     for previous, current in pairwise(snapshots):
-        # A round boundary is the session AND its floors. Attributing an
-        # upload delta that straddles a floor change to the later snapshot's
-        # floors would both invent violations and hide them. Session id alone
-        # happens to move with the floors in the traces recorded so far, which
-        # is exactly why this must not be relied on implicitly.
-        if (current.session_id, current.target_level, current.preview_level) != (
-            previous.session_id,
-            previous.target_level,
-            previous.preview_level,
-        ):
+        # This explicit derived identity upgrades boundary attribution from
+        # the former session+floors proxy to proof. Upload purpose is still
+        # absent, and duplicate production at a legal floor stays invisible.
+        if current.round_id != previous.round_id:
             continue
         if not current.uploads_by_level or not previous.uploads_by_level:
             continue
@@ -262,7 +290,7 @@ def _check_r3_frozen_partial_evidence(
 
     for snapshot in snapshots:
         same_run = bool(run) and (
-            snapshot.session_id == run[-1].session_id
+            snapshot.round_id == run[-1].round_id
             and snapshot.evidence_covered == run[-1].evidence_covered
             and snapshot.evidence_population == run[-1].evidence_population
             and snapshot.presented_tiles >= run[-1].presented_tiles
@@ -288,7 +316,7 @@ def _check_r3_inactive_evidence(
         maximum = max(run, key=lambda snapshot: snapshot.presented_tiles)
         evidence_started_later = any(
             snapshot.index > run[-1].index
-            and snapshot.session_id == first.session_id
+            and snapshot.round_id == first.round_id
             and snapshot.evidence_population > 0
             for snapshot in snapshots
         )
@@ -314,7 +342,7 @@ def _check_r3_inactive_evidence(
 
     for snapshot in snapshots:
         same_run = bool(run) and (
-            snapshot.session_id == run[-1].session_id
+            snapshot.round_id == run[-1].round_id
             and snapshot.evidence_reason == "inactive"
             and snapshot.evidence_population == 0
         )
@@ -355,7 +383,7 @@ def _snapshot_from_mapping(mapping: dict[str, object], *, index: int) -> _Snapsh
         raise ValueError(
             f"snapshot {index} tile_lod_desired_factor must be a positive power of two"
         )
-    preview_level_value = _required_int(montage, "tile_lod_ladder_floor_level", index=index)
+    preview_level_value = _required_int(montage, "tile_lod_round_preview_level", index=index)
     preview_level = None if preview_level_value < 0 else preview_level_value
     level_counts = _resident_level_counts(
         montage.get("tile_lod_resident_tile_levels"), snapshot_index=index
@@ -363,9 +391,10 @@ def _snapshot_from_mapping(mapping: dict[str, object], *, index: int) -> _Snapsh
     return _Snapshot(
         index=index,
         session_id=_optional_int(montage.get("session_id")),
+        round_id=_required_string(montage, "render_round_id", index=index),
         levels=tuple(level for level, count in level_counts if count),
         level_counts=level_counts,
-        target_level=desired_factor.bit_length() - 1,
+        target_level=_required_nonnegative_int(montage, "tile_lod_round_target_level", index=index),
         preview_level=preview_level,
         presented_tiles=_required_nonnegative_int(montage, "presented_tiles", index=index),
         visible_tiles=_required_nonnegative_int(montage, "visible_tiles", index=index),

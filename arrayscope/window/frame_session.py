@@ -730,6 +730,13 @@ class FrameSession:
     # means a real preview pass is still producing the one complete source;
     # ``preview-cohort`` means that source was installed atomically.
     round_level_evidence_source: str = ""
+    # Structural identity and the two R2b floors for one settled view target.
+    # Planning/admission and resident tile population are deliberately absent.
+    render_round_key: object = None
+    render_round_id: str = ""
+    render_round_demand: object = None
+    round_preview_level: int = 0
+    round_target_level: int = 0
     first_pass_quality: str | None = None
     first_pass_histogram_published: bool = False
     pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)
@@ -1285,6 +1292,7 @@ class FrameSession:
             tuple(sorted(required.intersection(targets))),
             progressive=bool(self.shader_display or self._resident_lod_active()),
             session_id=int(self.session_id),
+            round_id=str(self.render_round_id or ""),
         )
 
         # Payload mutation sites report lifecycle events directly.  This scan

@@ -100,6 +100,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
     montage = MontageRuntimeDiagnostics(
         active=session is not None,
         session_id=None if session is None else int(session.session_id),
+        render_round_id=""
+        if session is None
+        else str(getattr(session, "render_round_id", "") or ""),
         loaded_tiles=0 if session is None else len(session.rendered_tiles),
         loading_tiles=0 if session is None else len(session.loading_tiles),
         active_tile_requests=0
@@ -256,7 +259,12 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         tile_lod_rung_evaluations=_rung_evaluation_rows(session),
         tile_lod_coarse_rung_gates=_coarse_rung_gate_rows(session),
         tile_lod_pipeline_counters=_pipeline_counter_row(session),
-        tile_lod_ladder_floor_level=int(getattr(_ladder_policy(session), "floor_level", -1)),
+        tile_lod_round_preview_level=-1
+        if session is None
+        else int(getattr(session, "round_preview_level", -1)),
+        tile_lod_round_target_level=-1
+        if session is None
+        else int(getattr(session, "round_target_level", -1)),
         tile_lod_ladder_reduced_input=bool(
             getattr(_ladder_policy(session), "reduced_input_available", False)
         ),

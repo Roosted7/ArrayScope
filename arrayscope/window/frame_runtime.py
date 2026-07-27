@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 
@@ -220,6 +219,9 @@ class FrameRuntimeMixin:
             view_range=session.view_range,
             viewport_shape=tuple(session.viewport_shape),
             interactive=_interactive_active(self),
+            render_round_id=str(getattr(session, "render_round_id", "") or ""),
+            round_preview_level=int(getattr(session, "round_preview_level", 0) or 0),
+            round_target_level=int(getattr(session, "round_target_level", 0) or 0),
             tile_source_ids=tuple(
                 (
                     int(tile.montage_index),
@@ -287,7 +289,6 @@ class FrameRuntimeMixin:
                         mode=str(
                             getattr(session, "lod_policy_mode", "native-only") or "native-only"
                         ),
-                        floor_level=max(1, int(getattr(session, "lod_preview_level", 0) or 0)),
                         # Admission remains tile-local: genuinely independent
                         # pipelines pass directly; a montage-axis expansion
                         # passes only when its identical real-document region
@@ -384,20 +385,7 @@ class FrameRuntimeMixin:
         intent = self._montage_render_intent(session)
         scope = self._lod_admission_scope(session, intent)
         pipeline = self._frame_pipeline_for_session(session)
-        # The pipeline object survives camera retargets, while
-        # selected_lod_factor() chooses one preview floor for each new round.
-        # Copy that round-owned value into the ladder policy before planning;
-        # the ladder may decide per-tile skips, but must never derive the floor.
         ladder_policy = getattr(getattr(pipeline, "ladder", None), "policy", None)
-        if ladder_policy is not None:
-            pipeline.ladder.policy = replace(
-                ladder_policy,
-                floor_level=max(
-                    1,
-                    int(getattr(session, "lod_preview_level", 0) or 0),
-                ),
-            )
-            ladder_policy = pipeline.ladder.policy
         if montage_commit.complete_deferred_stage_fan_in(self, session):
             return 0
         montage_commit.rearm_ready_stage_dependents(session)
@@ -411,7 +399,9 @@ class FrameRuntimeMixin:
             # The policy the steps were planned against, and why the coarse
             # rungs are absent when they are.  Without these a plan of pure
             # rung=2 steps names no cause for its own missing preview.
-            policy_floor_level=int(getattr(ladder_policy, "floor_level", -1)),
+            render_round_id=str(getattr(session, "render_round_id", "") or ""),
+            round_preview_level=int(getattr(session, "round_preview_level", 0) or 0),
+            round_target_level=int(getattr(session, "round_target_level", 0) or 0),
             policy_reduced_input=bool(getattr(ladder_policy, "reduced_input_available", False)),
             demand_level=int(getattr(session.lod_policy_decision.demand, "desired_level", -1)),
             # Whether this plan believed an interaction was in flight. Expensive

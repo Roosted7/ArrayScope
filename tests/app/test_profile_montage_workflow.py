@@ -1675,12 +1675,13 @@ def test_progressive_invariant_fixture_carries_a_real_contract_proof():
     assert result["invariant_gate_rule_failures"] == {
         "R1": 0,
         "R2": 0,
+        "R2b": 0,
         "R3": 0,
         "R4": 0,
         "R5": 0,
         "R7": 0,
     }
-    assert set(result["invariant_gate_unverifiable_rules"]) == {"R2b", "R6"}
+    assert set(result["invariant_gate_unverifiable_rules"]) == {"R6"}
 
 
 def test_progressive_invariant_gate_fails_without_authoritative_round_identity():
@@ -1691,6 +1692,24 @@ def test_progressive_invariant_gate_fails_without_authoritative_round_identity()
 
     assert result["invariant_gate_passed"] is False
     assert "authoritative_round_identity_present" in _failed_invariant_gates(result)
+
+
+def test_progressive_invariant_gate_proves_round_floors_across_pipeline_plans():
+    evidence = deepcopy(_passing_contract_evidence())
+    evidence["events"] = (
+        *evidence["events"],
+        {
+            "kind": "pipeline_plan",
+            "render_round_id": "round-11",
+            "round_preview_level": 5,
+            "round_target_level": 2,
+        },
+    )
+
+    result = _contract_verdict(evidence)
+
+    assert result["invariant_gate_passed"] is False
+    assert "one_floor_pair_per_round" in _failed_invariant_gates(result)
 
 
 def test_r8_certification_fails_closed_without_in_process_invariant_verdict():

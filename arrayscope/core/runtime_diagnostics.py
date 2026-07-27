@@ -86,6 +86,7 @@ class ImageUploadTiming:
 class MontageRuntimeDiagnostics:
     active: bool
     session_id: int | None = None
+    render_round_id: str = ""
     loaded_tiles: int = 0
     loading_tiles: int = 0
     active_tile_requests: int = 0
@@ -163,7 +164,8 @@ class MontageRuntimeDiagnostics:
     # a settled fill's final plan is converged, and its reason ("covered") is
     # the opposite of the cold-fill answer the question is about.
     tile_lod_coarse_rung_gates: tuple[tuple[str, int], ...] = ()
-    tile_lod_ladder_floor_level: int = -1
+    tile_lod_round_preview_level: int = -1
+    tile_lod_round_target_level: int = -1
     tile_lod_ladder_reduced_input: bool = False
     # `PipelineCounters.as_dict()`: intents, ladder_plans, tasks_submitted,
     # interactive_native_deferred, commit_batches, acks_confirmed,
@@ -943,6 +945,7 @@ _MONTAGE_COVERED = frozenset(
     {
         "active",
         "session_id",
+        "render_round_id",
         "display_mode",
         "backend_chosen",
         "backend_reason",
@@ -1012,7 +1015,8 @@ _MONTAGE_COVERED = frozenset(
         "tile_lod_preview_presentations",
         "tile_lod_rung_evaluations",
         "tile_lod_coarse_rung_gates",
-        "tile_lod_ladder_floor_level",
+        "tile_lod_round_preview_level",
+        "tile_lod_round_target_level",
         "tile_lod_ladder_reduced_input",
         "tile_lod_pipeline_counters",
         "tile_lod_stats_cross_level_reuses",
@@ -1166,7 +1170,9 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
         (
             (
                 "Coarse rung: "
-                f"floor=L{montage.tile_lod_ladder_floor_level} "
+                f"round={montage.render_round_id[:12] or 'n/a'} "
+                f"floors=P{montage.tile_lod_round_preview_level}/"
+                f"T{montage.tile_lod_round_target_level} "
                 f"reduced_input={_bool_text(montage.tile_lod_ladder_reduced_input)} "
                 f"native_deferred="
                 f"{int(montage.tile_lod_pipeline_counters.get('interactive_native_deferred', 0))}"
@@ -1184,7 +1190,7 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
                 else ()
             ),
         )
-        if montage.tile_lod_ladder_floor_level >= 0
+        if montage.tile_lod_round_preview_level >= 0
         else ()
     )
     rung_evaluation_lines = (
