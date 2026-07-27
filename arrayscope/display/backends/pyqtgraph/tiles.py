@@ -1613,7 +1613,22 @@ class MontageTileLayer:
             return None
         active = {int(tile) for tile in tuple(getattr(tile_delta, "active_tiles", ()) or ())}
         required = planned
-        if active != required or set(preview_upserts) != required:
+        target_identities = dict(getattr(tile_delta, "target_identities", {}) or {})
+        preview_tiles = set(preview_upserts)
+        retained_tiles = required - preview_tiles
+        retained_direct = {
+            int(tile)
+            for tile in retained_tiles
+            if (
+                (state := self._states.get(int(tile))) is not None
+                and _state_is_physically_visible(state)
+                and acknowledged_identity_satisfies_target(
+                    state.acknowledged_identity,
+                    target_identities.get(int(tile)),
+                )
+            )
+        }
+        if active != required or not preview_tiles <= required or retained_direct != retained_tiles:
             self._preview_atlas_decline_reason = "awaiting-complete-preview-transaction"
             physically_presented = self._physically_presented_tiles()
             return TileLayerUpdateStats(
@@ -1626,7 +1641,6 @@ class MontageTileLayer:
                 cpu_shadow_bytes=int(self._resident_bytes) + self._preview_atlas_nbytes(),
                 budget_bytes=int(tile_residency_budget_bytes or 0),
             )
-        target_identities = dict(getattr(tile_delta, "target_identities", {}) or {})
         identity_rejected = tuple(
             sorted(
                 int(tile)
@@ -1651,10 +1665,10 @@ class MontageTileLayer:
             return None
         candidate_payloads = {
             int(tile): tile_payloads[int(tile)]
-            for tile in sorted(required)
+            for tile in sorted(preview_tiles)
             if int(tile) in tile_payloads
         }
-        if set(candidate_payloads) != required:
+        if set(candidate_payloads) != preview_tiles:
             self._preview_atlas_decline_reason = "awaiting-complete-preview-payload-state"
             return TileLayerUpdateStats(
                 presented_tiles=self._physically_presented_tiles(),
@@ -1691,23 +1705,22 @@ class MontageTileLayer:
             if callable(remove_item):
                 remove_item(old)
         for tile_number in tuple(self._states):
-            self._hide_tile(int(tile_number))
+            if int(tile_number) not in retained_tiles:
+                self._hide_tile(int(tile_number))
         self._preview_atlas_decline_reason = ""
-        presented = tuple(sorted(candidate.active_tiles))
-        identities = {
-            int(tile): candidate.tiles[int(tile)].acknowledged_identity for tile in presented
-        }
+        presented = self._physically_presented_tiles()
+        identities = self._presented_identities()
         return TileLayerUpdateStats(
             visible_items=len(presented),
             presented_tiles=presented,
             presented_identities=identities,
-            committed_upserts=presented,
-            updated_tiles=presented,
+            committed_upserts=tuple(sorted(preview_tiles)),
+            updated_tiles=tuple(sorted(preview_tiles)),
             items_created=1,
             items_updated=1,
             resident_items=len(presented),
             storage_capacity=len(presented),
-            cpu_shadow_bytes=int(candidate.resident_nbytes),
+            cpu_shadow_bytes=int(self._resident_bytes) + int(candidate.resident_nbytes),
             budget_bytes=int(tile_residency_budget_bytes or 0),
             page_count=int(candidate.page_count),
             upload_ms=0.0,

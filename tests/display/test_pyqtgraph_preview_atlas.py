@@ -242,6 +242,54 @@ def test_large_preview_prefix_is_not_acknowledged_as_physical_coverage(qt_app):
     assert layer.preview_atlas_decline_reason == "awaiting-complete-preview-transaction"
 
 
+def test_large_preview_completes_around_retained_exact_items(qt_app):
+    """A single-slice predecessor may satisfy part of the preview scope.
+
+    Entering a full montage retains the one or two exact ImageItems already on
+    screen and evaluates reduced previews only for the missing tiles.  The
+    compact transaction is complete when those retained items physically
+    satisfy the complement; requiring every active tile to appear in the
+    preview-upsert delta rejects the same complete 270+2 frame forever.
+    """
+
+    count = 272
+    retained_tiles = (135, 136)
+    owner = _Owner()
+    layer = _layer(owner)
+    geometry = _geometry(count)
+    exact = {tile: _exact_payload(tile) for tile in retained_tiles}
+    layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 1400.0),
+        rgb_already_windowed=False,
+        dirty_tiles=retained_tiles,
+        tile_payloads=exact,
+        tile_delta=_delta(exact, active=retained_tiles),
+    )
+    previews = {tile: _preview_payload(tile) for tile in range(count) if tile not in retained_tiles}
+    mixed = {**previews, **exact}
+
+    stats = layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 1400.0),
+        rgb_already_windowed=False,
+        dirty_tiles=tuple(previews),
+        tile_payloads=mixed,
+        tile_delta=_delta(previews, active=range(count), planned=range(count)),
+    )
+
+    assert stats.committed_upserts == tuple(sorted(previews))
+    assert stats.presented_tiles == tuple(range(count))
+    assert layer.preview_atlas_active_tiles == frozenset(previews)
+    assert set(owner.tile_items) == set(retained_tiles)
+    assert all(owner.tile_items[tile].isVisible() for tile in retained_tiles)
+    assert stats.presented_identities == {tile: mixed[tile].source_id for tile in range(count)}
+
+
 def test_compact_preview_paints_through_the_real_pyqtgraph_scene(qtbot):
     count = 256
     geometry = _geometry(count)
