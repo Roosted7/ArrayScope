@@ -230,11 +230,42 @@ def test_render_pass_weights_fill_time_against_continuous_latency_cost():
         remaining_items=272,
     )
 
-    assert 3 < decision.batch_limit < 20
+    # 50.0 ms at one item and 50.1 ms at two is an almost entirely fixed cost:
+    # 49.9 ms fixed, 0.1 ms per item. With 272 remaining, the cohort that
+    # actually minimizes the objective is ~136 items at ~63 ms per chunk --
+    # deliberately over the 50 ms report line, because two 63 ms chunks beat
+    # 272 single-item chunks of 50 ms each by two orders of magnitude of fill
+    # time. Collapsing toward 1 here is the pathology, not the safe choice.
+    #
+    # Evidence only extends to two items, though, so the extrapolation term
+    # must still hold the step short of that informed optimum: the governor
+    # explores outward across successive decisions rather than trusting a
+    # model fitted on two points at 68x the range it has measured.
+    assert decision.batch_limit > 3, "fixed-dominated cost must not collapse the cohort"
+    assert decision.batch_limit < 136, (
+        "a two-point model must not jump straight to the informed optimum"
+    )
     assert any(
         "steering=weighted-fill-latency-extrapolation" in detail for detail in decision.details
     )
     assert any("r5-achievable=1" in detail for detail in decision.details)
+
+    # Widening the evidence must move the choice toward that optimum, not away.
+    governor.record_ui_observation(
+        "montage_render_pass_target",
+        50.0 + 0.1 * decision.batch_limit,
+        item_count=decision.batch_limit,
+        work_class="presentation_upsert",
+        backend="wgpu",
+    )
+    wider = governor.decide_render_pass(
+        interactive=False,
+        pass_kind="target",
+        remaining_items=272,
+    )
+    assert wider.batch_limit > decision.batch_limit, (
+        "the cohort must ratchet outward as the cost model gains range"
+    )
 
 
 def test_render_pass_latency_cost_is_zero_then_smooth_and_quadratic():

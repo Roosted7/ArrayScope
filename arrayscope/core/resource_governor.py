@@ -1020,7 +1020,21 @@ def _render_pass_optimal_point(
             )
         rows.append(
             (
-                chunks * (chunk_ms + latency_cost + extrapolation_cost),
+                # Fill time and responsiveness are paid by EVERY chunk, so they
+                # scale with the chunk count. The extrapolation term does not:
+                # it prices the risk that this cost model is wrong at a size it
+                # has never observed, which is a property of taking the step at
+                # all, not of each chunk that follows. Multiplying it by
+                # `chunks` conflated the two, and did so worst exactly where
+                # the chunk count is highest -- a small cohort inflated a few
+                # milliseconds of model risk into hundreds, so the objective
+                # preferred the size it had already measured no matter what the
+                # model predicted. Measured: with a genuinely per-item cost
+                # (2 ms fixed, 8 ms/item, 272 remaining) the per-chunk form
+                # pinned the cohort at 1 forever -- 272 single-item chunks
+                # against an optimum of 3 -- because probing 2 items scored a
+                # 630 ms penalty for 4.6 ms of actual risk.
+                chunks * (chunk_ms + latency_cost) + extrapolation_cost,
                 chunk_ms,
                 items,
                 latency_cost,
