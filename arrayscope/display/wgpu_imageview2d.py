@@ -3273,6 +3273,7 @@ class WgpuImageView2D(ImageViewShell):
             ),
             "wgpu_adapter": str(adapter_info.get("device", "") or ""),
             "wgpu_adapter_type": str(adapter_info.get("adapter_type", "") or ""),
+            "wgpu_backend_type": str(adapter_info.get("backend_type", "") or ""),
             "wgpu_power_preference": _SHARED_WGPU_POWER_PREFERENCE,
             "wgpu_plane_lookup_candidates_total": int(
                 getattr(executor, "plane_lookup_candidates_total", 0) or 0

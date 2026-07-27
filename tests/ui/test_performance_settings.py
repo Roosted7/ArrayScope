@@ -40,6 +40,7 @@ def test_performance_menu_exists(qtbot):
         _process_events(qtbot)
         assert _menu(win, "Performance") is not None
         assert _submenu_action(win, "Performance", "Memory Profile", "Balanced") is not None
+        assert _submenu_action(win, "Performance", "Render Responsiveness", "Balanced") is not None
         assert _submenu_action(win, "Performance", "Render Memory Budget", "128 MiB") is not None
         assert _menu_action(win, "Performance", "Use Less Memory") is not None
         assert _menu_action(win, "Performance", "Use More Memory") is not None
@@ -130,6 +131,25 @@ def test_selecting_memory_profile_recomputes_policy(qtbot):
 
         assert win.app_settings.memory_profile == MemoryProfileChoice.CONSERVATIVE
         assert win.renderer._memory_policy().profile == MemoryProfileChoice.CONSERVATIVE
+    finally:
+        win.close()
+
+
+def test_render_responsiveness_preset_updates_the_governor_and_persists(qtbot):
+    _clear_arrayscope_settings()
+    from arrayscope.app.settings_state import RenderResponsivenessChoice
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot)
+        _submenu_action(win, "Performance", "Render Responsiveness", "Responsive").trigger()
+        _process_events(qtbot)
+
+        assert win.app_settings.render_responsiveness == RenderResponsivenessChoice.RESPONSIVE
+        assert win.resource_governor.responsiveness_weight == 2.0
+        assert win._settings.value("render_responsiveness") == "responsive"
     finally:
         win.close()
 

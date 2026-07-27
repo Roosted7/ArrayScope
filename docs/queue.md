@@ -159,14 +159,29 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   4175 ms. The former 2985 ms atomic atlas build is removed. Final-code Weston
   chunk and wall-time evidence is in the
   [R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md). The governor
-  now fits fixed, item, byte, and cohort-curvature cost, and minimizes total
-  fill plus continuous callback-latency and exponential extrapolation prices;
+  now fits fixed, item, and byte cost, and minimizes total fill plus continuous
+  callback-latency and exponential extrapolation prices;
   50 ms remains a fixed reported requirement, never an adaptive target or a
-  hard cohort boundary. Scalar PyQtGraph preview/target chunks stayed below
-  50 ms; scalar target still has 60–77 ms outliers and completes in
-  5.71–6.26 s. WGPU ordinary deltas no longer reconcile the whole active set
-  and settle in 4.52–4.73 s, but preview median remains 28.3% slower than
-  pre-f11 and the earlier 4.4 s target-settle result is still 0.12–0.33 s away.
+  hard cohort boundary. Fixed/byte knowledge is shared by backend + commit
+  path + montage geometry across passes and reloads; item cost remains
+  pass/representation-local and representation changes warm-seed it at high
+  uncertainty. Extrapolation is optimistic while sample count/span/residual
+  make the fit uncertain, then tightens to the full curve. The former
+  quadratic cohort term was removed after the real-backend probe produced no
+  repeatable WGPU curvature and only contradictory isolated PyQtGraph fits.
+  One Render Responsiveness preset scales the latency price only
+  (Responsive/Balanced/Throughput = 2.0/1.0/0.3); remote/software sessions seed
+  Throughput unless the user has chosen otherwise. Equal-valued callbacks are
+  distinct evidence, robust Cauchy fitting bounds a single high-leverage
+  stall, and a separate three-observation load offset follows sustained host
+  load and recovery without rewriting item cost. The matched interleaved
+  four-repeat Weston run gives WGPU 4.221 s median settlement versus 4.571 s
+  at base (7.7% faster, 4/4 versus 3/4 settled). PyQtGraph's valid median is
+  4.538 s versus 4.843 s at base, with the same 2/4 censoring. An experimental
+  hard-reset arm once reached 3.94 s but also caused 128–185 ms preview jumps
+  and a 4.83 s rerun; that result remains a follow-up target, not the landed
+  baseline. The first widened WGPU target commit still spends 117–144 ms in
+  backend apply while later similar cohorts cost 25–32 ms.
   WGPU now attributes one-time executor initialization and pool growth
   separately: those times stay in full R5 evidence but do not train the steady
   fixed/count/byte model. The reusable Weston

@@ -4598,6 +4598,7 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
         interactive=interactive,
         pass_token=_render_pass_token(session),
         remaining_items=_render_pass_remaining_items(session),
+        session=session,
     )
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
@@ -4927,6 +4928,7 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         interactive=interactive,
         pass_token=_render_pass_token(session),
         remaining_items=_render_pass_remaining_items(session),
+        session=session,
     )
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
@@ -4986,6 +4988,7 @@ def _commit_batch_decision(
     interactive: bool,
     pass_token=None,
     remaining_items: int | None = None,
+    session=None,
 ):
     governor = getattr(window.win, "resource_governor", None)
     pass_kind = (
@@ -5000,7 +5003,13 @@ def _commit_batch_decision(
             if isinstance(pass_token, tuple) and len(pass_token) >= 2
             else pass_token
         )
-        begin_pass(stable_pass_token, pass_kind=pass_kind)
+        structural_key, representation_key = _render_pass_cost_context(window, session)
+        begin_pass(
+            stable_pass_token,
+            pass_kind=pass_kind,
+            structural_key=structural_key,
+            representation_key=representation_key,
+        )
     decide_pass = getattr(governor, "decide_render_pass", None)
     if callable(decide_pass):
         return decide_pass(
@@ -5015,6 +5024,34 @@ def _commit_batch_decision(
     if callable(provider):
         return provider("presentation_commit", interactive=interactive)
     return None
+
+
+def _render_pass_cost_context(window, session) -> tuple[object, object]:
+    """Identify only the facts that change transaction cost-model terms."""
+
+    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
+    plan = getattr(session, "plan", None)
+    tiles = tuple(getattr(plan, "tiles", ()) or ())
+    structural_key = (
+        str(getattr(capabilities, "name", "") or "unknown"),
+        (
+            "persistent-delta"
+            if bool(getattr(capabilities, "persistent_tile_residency", False))
+            else "cpu-delta"
+        ),
+        tuple(int(value) for value in tuple(getattr(plan, "tile_shape", ()) or ())),
+        int(getattr(plan, "columns", 0) or 0),
+        int(getattr(plan, "rows", 0) or 0),
+        int(getattr(plan, "gap", 0) or 0),
+        len(tiles),
+    )
+    view_state = getattr(session, "view_state", None)
+    channel = getattr(getattr(view_state, "channel", None), "value", None)
+    representation_key = (
+        str(getattr(session, "output_dtype", "") or ""),
+        str(channel or ""),
+    )
+    return structural_key, representation_key
 
 
 def _reset_commit_timings(renderer) -> None:

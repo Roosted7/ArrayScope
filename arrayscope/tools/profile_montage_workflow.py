@@ -7624,6 +7624,7 @@ def _phase_record(
         "wgpu_codec_min_psnr_db": float(presentation.get("wgpu_codec_min_psnr_db", 0.0) or 0.0),
         "wgpu_adapter": str(presentation.get("wgpu_adapter", "") or ""),
         "wgpu_adapter_type": str(presentation.get("wgpu_adapter_type", "") or ""),
+        "wgpu_backend_type": str(presentation.get("wgpu_backend_type", "") or ""),
         "wgpu_power_preference": str(presentation.get("wgpu_power_preference", "") or ""),
         "resource_feedback_channels": [asdict(channel) for channel in feedback_channels],
         "resource_lane_decisions": [

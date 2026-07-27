@@ -7,8 +7,10 @@ machine-bound — they needed the developer's own logged-in Wayland session,
 so CI never ran them and the harness could rot between manual runs.
 
 A headless Weston removes the *attached display* requirement without
-weakening the evidence: the compositor, the GL renderer, and the client
-protocol are the same ones the real session uses.  Measured parity on the
+weakening the evidence: the compositor's GL renderer and the Wayland client
+protocol are the same ones the real session uses. The client renderer is
+independent: ArrayScope's WGPU path pins Vulkan, while Weston uses GL only to
+composite client surfaces. Measured parity on the
 reference laptop (2026-07-21): ``tests/gpu_interaction`` 28/28 here and
 28/28 on the real session, and a full-suite run whose failure set is
 identical to the real session's.

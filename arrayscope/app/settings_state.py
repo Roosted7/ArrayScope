@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 
@@ -38,6 +39,20 @@ class ImageRenderingBackendChoice(Enum):
     # AUTO prefers wgpu on Linux with a real GPU device
     # (see resolve_auto_backend_choice). This value is the explicit pin.
     WGPU = "wgpu"
+
+
+class RenderResponsivenessChoice(Enum):
+    RESPONSIVE = "responsive"
+    BALANCED = "balanced"
+    THROUGHPUT = "throughput"
+
+    @property
+    def weight(self) -> float:
+        return {
+            RenderResponsivenessChoice.RESPONSIVE: 2.0,
+            RenderResponsivenessChoice.BALANCED: 1.0,
+            RenderResponsivenessChoice.THROUGHPUT: 0.3,
+        }[self]
 
 
 class WgpuPresentMethodChoice(Enum):
@@ -85,6 +100,10 @@ class AppSettingsState:
     fft_backend: FFTBackendChoice = FFTBackendChoice.AUTO
     fft_workers: FFTWorkersChoice = FFTWorkersChoice.AUTO
     image_rendering_backend: ImageRenderingBackendChoice = ImageRenderingBackendChoice.AUTO
+    render_responsiveness: RenderResponsivenessChoice = RenderResponsivenessChoice.BALANCED
+    # Provenance only, not another user setting. A detected default must not
+    # become a persisted override when an unrelated preference is saved.
+    render_responsiveness_explicit: bool = False
     # wgpu backend only; screen is an explicit experimental pin (queue row 3).
     wgpu_present_method: WgpuPresentMethodChoice = WgpuPresentMethodChoice.BITMAP
     montage_quality_policy: MontageQualityPolicyChoice = MontageQualityPolicyChoice.RESIDENT
@@ -129,6 +148,12 @@ def settings_from_mapping(values) -> AppSettingsState:
         image_rendering_backend=normalize_image_rendering_backend_choice(
             values.get("image_rendering_backend")
         ),
+        render_responsiveness=(
+            normalize_render_responsiveness_choice(values.get("render_responsiveness"))
+            if "render_responsiveness" in values
+            else default_render_responsiveness_choice()
+        ),
+        render_responsiveness_explicit="render_responsiveness" in values,
         wgpu_present_method=normalize_wgpu_present_method_choice(values.get("wgpu_present_method")),
         montage_quality_policy=normalize_montage_quality_policy_choice(
             values.get("montage_quality_policy")
@@ -151,7 +176,7 @@ def settings_from_mapping(values) -> AppSettingsState:
 
 
 def settings_to_mapping(settings: AppSettingsState):
-    return {
+    values = {
         "theme": settings.theme.value,
         "prefetch_nearby_slices": bool(settings.prefetch_nearby_slices),
         "panel_resize_behavior": settings.panel_resize_behavior.value,
@@ -171,6 +196,9 @@ def settings_to_mapping(settings: AppSettingsState):
         "qt_platform": settings.qt_platform.value,
         "python_free_threading": settings.python_free_threading.value,
     }
+    if settings.render_responsiveness_explicit:
+        values["render_responsiveness"] = settings.render_responsiveness.value
+    return values
 
 
 def normalize_panel_resize_behavior(value) -> PanelResizeBehavior:
@@ -210,6 +238,72 @@ def normalize_image_rendering_backend_choice(value) -> ImageRenderingBackendChoi
         return ImageRenderingBackendChoice(str(value))
     except Exception:
         return ImageRenderingBackendChoice.AUTO
+
+
+def normalize_render_responsiveness_choice(value) -> RenderResponsivenessChoice:
+    if isinstance(value, RenderResponsivenessChoice):
+        return value
+    value = getattr(value, "value", value)
+    try:
+        return RenderResponsivenessChoice(str(value))
+    except Exception:
+        return RenderResponsivenessChoice.BALANCED
+
+
+def default_render_responsiveness_choice(
+    *,
+    environ=None,
+    topology=None,
+) -> RenderResponsivenessChoice:
+    """Seed the preset from session facts; a persisted choice always wins."""
+
+    environment = os.environ if environ is None else environ
+    remote_keys = (
+        "SSH_CONNECTION",
+        "SSH_CLIENT",
+        "VNCSESSION",
+        "VNCDESKTOP",
+        "XRDP_SESSION",
+        "X2GO_SESSION",
+        "NXSESSIONID",
+        "WAYPIPE_SOCKET",
+    )
+    if any(str(environment.get(key, "") or "").strip() for key in remote_keys):
+        return RenderResponsivenessChoice.THROUGHPUT
+    if str(environment.get("QT_QPA_PLATFORM", "") or "").lower() in {
+        "offscreen",
+        "minimal",
+    }:
+        return RenderResponsivenessChoice.THROUGHPUT
+    software_values = " ".join(
+        str(environment.get(key, "") or "").lower()
+        for key in (
+            "LIBGL_ALWAYS_SOFTWARE",
+            "GALLIUM_DRIVER",
+            "MESA_LOADER_DRIVER_OVERRIDE",
+            "QT_QUICK_BACKEND",
+        )
+    )
+    if any(
+        marker in software_values
+        for marker in ("llvmpipe", "softpipe", "swrast", "swiftshader", "software")
+    ) or str(environment.get("LIBGL_ALWAYS_SOFTWARE", "")).lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return RenderResponsivenessChoice.THROUGHPUT
+    if topology is None:
+        from arrayscope.gpu.device_topology import detect_topology
+
+        topology = detect_topology()
+    device_name = str(getattr(topology, "device_name", "") or "").lower()
+    if str(getattr(topology, "kind", "unknown")) == "unknown" or any(
+        marker in device_name
+        for marker in ("llvmpipe", "softpipe", "swrast", "swiftshader", "software")
+    ):
+        return RenderResponsivenessChoice.THROUGHPUT
+    return RenderResponsivenessChoice.BALANCED
 
 
 def normalize_wgpu_present_method_choice(value) -> WgpuPresentMethodChoice:

@@ -2,6 +2,7 @@ from arrayscope.tools.render_pass_governor_probe import (
     _backend_schedule,
     _fill_summary,
     _pass_summary,
+    learning_summaries,
 )
 
 
@@ -37,6 +38,21 @@ def test_fill_summary_reports_wall_clock_and_incremental_target_throughput():
     assert summary.exact_payload_tiles == 272
 
 
+def test_fill_summary_distinguishes_vulkan_client_from_weston_compositor():
+    summary = _fill_summary(
+        {
+            "requested_tile_count": 272,
+            "wgpu_backend_type": "Vulkan",
+            "wgpu_adapter": "NVIDIA RTX",
+            "wgpu_adapter_type": "DiscreteGpu",
+        },
+        backend="wgpu",
+        repeat=0,
+    )
+
+    assert summary.application_renderer == "Vulkan / NVIDIA RTX (DiscreteGpu)"
+
+
 def test_pass_summary_keeps_full_latency_and_splits_structural_time():
     summary = _pass_summary(
         [
@@ -69,3 +85,26 @@ def test_pass_summary_keeps_full_latency_and_splits_structural_time():
     assert summary.structural_pool_growth_ms == 60.0
     assert summary.structural_executor_initialization_ms == 5.0
     assert summary.atomic_chunks == 0
+
+
+def test_learning_probe_reports_cold_fill_and_convergence_for_each_regime():
+    rows = learning_summaries(total_items=272)
+    indexed = {(row.regime, row.policy): row for row in rows}
+
+    assert set(indexed) == {
+        (regime, policy)
+        for regime in ("fixed-dominated", "mixed", "per-item")
+        for policy in ("before", "after")
+    }
+    assert (
+        indexed["fixed-dominated", "after"].fill_ms < indexed["fixed-dominated", "before"].fill_ms
+    )
+    assert (
+        indexed["fixed-dominated", "after"].chunks_to_within_10_percent
+        < indexed["fixed-dominated", "before"].chunks_to_within_10_percent
+    )
+    assert (
+        indexed["mixed", "after"].chunks_to_within_10_percent
+        <= indexed["mixed", "before"].chunks_to_within_10_percent
+    )
+    assert indexed["per-item", "after"].chunks_to_within_10_percent == 1

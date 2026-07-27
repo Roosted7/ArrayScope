@@ -119,6 +119,7 @@ class ArrayScopeWindow(
         self.resource_governor = ResourceGovernor(
             self.compute_policy,
             profile=self.app_settings.memory_profile,
+            responsiveness_weight=self.app_settings.render_responsiveness.weight,
         )
         self.latency_feedback = self.resource_governor.latency_feedback
         self.resource_governor.update_telemetry(

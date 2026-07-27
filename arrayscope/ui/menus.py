@@ -16,6 +16,7 @@ from arrayscope.app.settings_state import (
     MemoryProfileChoice,
     MontageQualityPolicyChoice,
     PanelResizeBehavior,
+    RenderResponsivenessChoice,
     TextureCodecChoice,
     WgpuPresentMethodChoice,
     settings_from_mapping,
@@ -276,6 +277,39 @@ class WindowMenuMixin:
             )
             profile_menu.addAction(action)
             self._memory_profile_actions[choice] = action
+
+        self._render_responsiveness_actions = {}
+        self._render_responsiveness_action_group = QtGui.QActionGroup(self)
+        self._render_responsiveness_action_group.setExclusive(True)
+        responsiveness_menu = QtWidgets.QMenu("Render Responsiveness", self)
+        responsiveness_menu.setToolTipsVisible(True)
+        performance_menu.addMenu(responsiveness_menu)
+        self._render_responsiveness_menu = responsiveness_menu
+        for choice, label, tooltip in (
+            (
+                RenderResponsivenessChoice.RESPONSIVE,
+                "Responsive",
+                "Price long presentation callbacks twice as strongly.",
+            ),
+            (
+                RenderResponsivenessChoice.BALANCED,
+                "Balanced",
+                "Use the measured latency/throughput objective at its standard weight.",
+            ),
+            (
+                RenderResponsivenessChoice.THROUGHPUT,
+                "Throughput",
+                "Prefer fewer, fuller commits on remote or software-rendered sessions.",
+            ),
+        ):
+            action = QtGui.QAction(label, self, checkable=True)
+            action.setToolTip(tooltip)
+            self._render_responsiveness_action_group.addAction(action)
+            action.triggered.connect(
+                lambda checked=False, choice=choice: self._set_render_responsiveness_choice(choice)
+            )
+            responsiveness_menu.addAction(action)
+            self._render_responsiveness_actions[choice] = action
 
         # The prefetch handler survived the legacy-path removal but its menu
         # action did not; the setting was unreachable except by editing the
@@ -699,6 +733,10 @@ class WindowMenuMixin:
             action.blockSignals(True)
             action.setChecked(self.app_settings.memory_profile == choice)
             action.blockSignals(False)
+        for choice, action in getattr(self, "_render_responsiveness_actions", {}).items():
+            action.blockSignals(True)
+            action.setChecked(self.app_settings.render_responsiveness == choice)
+            action.blockSignals(False)
         for mb, action in self._render_budget_actions.items():
             action.blockSignals(True)
             action.setChecked(int(self.app_settings.render_memory_budget_mb) == int(mb))
@@ -719,6 +757,11 @@ class WindowMenuMixin:
             show_status_message(self, "pyFFTW is not installed; using SciPy FFT")
         if persist:
             self._save_app_settings()
+        governor = getattr(self, "resource_governor", None)
+        if governor is not None:
+            set_weight = getattr(governor, "set_responsiveness_weight", None)
+            if callable(set_weight):
+                set_weight(current.render_responsiveness.weight)
         if hasattr(self, "_refresh_memory_policy"):
             policy = self._refresh_memory_policy(active_render=False)
             if hasattr(self, "_apply_compute_policy"):
@@ -737,6 +780,13 @@ class WindowMenuMixin:
 
     def _set_fft_backend_choice(self, choice):
         self.app_settings = self._updated_app_settings(fft_backend=choice)
+        self._apply_performance_settings(persist=True)
+
+    def _set_render_responsiveness_choice(self, choice):
+        self.app_settings = self._updated_app_settings(
+            render_responsiveness=choice,
+            render_responsiveness_explicit=True,
+        )
         self._apply_performance_settings(persist=True)
 
     def _set_fft_workers_choice(self, choice):

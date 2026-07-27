@@ -158,6 +158,7 @@ def test_settings_round_trip_defaults_and_values():
             "fft_backend": "pyfftw",
             "fft_workers": "2",
             "image_rendering_backend": "vispy",
+            "render_responsiveness": "responsive",
             "wgpu_present_method": "screen",
             "montage_quality_policy": "resident",
             "chunk_transport_codec": "zfp",
@@ -181,6 +182,7 @@ def test_settings_round_trip_defaults_and_values():
         "fft_backend": "pyfftw",
         "fft_workers": "2",
         "image_rendering_backend": "auto",
+        "render_responsiveness": "responsive",
         "wgpu_present_method": "screen",
         "montage_quality_policy": "resident",
         "chunk_transport_codec": "zfp",
@@ -205,6 +207,11 @@ def test_settings_round_trip_defaults_and_values():
     assert defaults.fft_backend == settings_state.FFTBackendChoice.AUTO
     assert defaults.fft_workers == settings_state.FFTWorkersChoice.AUTO
     assert defaults.image_rendering_backend == settings_state.ImageRenderingBackendChoice.AUTO
+    assert defaults.render_responsiveness in {
+        settings_state.RenderResponsivenessChoice.BALANCED,
+        settings_state.RenderResponsivenessChoice.THROUGHPUT,
+    }
+    assert "render_responsiveness" not in settings_state.settings_to_mapping(defaults)
     # Screen presentation is opt-in (queue row 3): bitmap default, unknown
     # values normalize back to bitmap, and auto (screen where the measured
     # native-Wayland path exists) round-trips.
@@ -276,6 +283,32 @@ def test_performance_settings_normalize_unknowns_and_clamp_budget():
     assert unknown.fft_backend == settings_state.FFTBackendChoice.AUTO
     assert unknown.fft_workers == settings_state.FFTWorkersChoice.AUTO
     assert unknown.image_rendering_backend == settings_state.ImageRenderingBackendChoice.AUTO
+    assert (
+        settings_state.settings_from_mapping({"render_responsiveness": "bad"}).render_responsiveness
+        == settings_state.RenderResponsivenessChoice.BALANCED
+    )
+
+
+def test_render_responsiveness_default_detects_remote_but_explicit_choice_wins():
+    from types import SimpleNamespace
+
+    detected = settings_state.default_render_responsiveness_choice(
+        environ={"SSH_CONNECTION": "client server"},
+        topology=SimpleNamespace(kind="discrete", device_name="GPU"),
+    )
+    local = settings_state.default_render_responsiveness_choice(
+        environ={},
+        topology=SimpleNamespace(kind="discrete", device_name="GPU"),
+    )
+
+    assert detected == settings_state.RenderResponsivenessChoice.THROUGHPUT
+    assert local == settings_state.RenderResponsivenessChoice.BALANCED
+    assert (
+        settings_state.settings_from_mapping(
+            {"render_responsiveness": "responsive"}
+        ).render_responsiveness
+        == settings_state.RenderResponsivenessChoice.RESPONSIVE
+    )
     assert (
         settings_state.settings_from_mapping({"memory_profile": "bad"}).memory_profile
         == settings_state.MemoryProfileChoice.BALANCED
