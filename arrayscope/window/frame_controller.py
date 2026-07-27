@@ -802,6 +802,15 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # same slice would find those levels permanently claimed (stale
         # wrong-LOD tiles).  Balance them before the replacement takes over.
         dying_session = getattr(self, "_frame_session", None)
+        dying_pipeline = getattr(dying_session, "pipeline", None)
+        if dying_pipeline is not None:
+            # Each session owns its own FramePipeline. A semantic/layout
+            # rebirth never retargets the dying pipeline, so its ordinary
+            # semantic-key supersession hook cannot clear the old scope.
+            # Close it explicitly before the successor starts: otherwise its
+            # queued preview tasks keep consuming the shared workers ahead of
+            # the successor's complete-scope preview batch.
+            dying_pipeline.close()
         render_lod.release_session_claims(dying_session)
         # Backend slots outlive sessions (persistent tile residency), so the
         # identity ground truth from the last report stays valid — but a fresh

@@ -207,6 +207,8 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot):
             payloads.clear()
         win.update_image_view()
         stale_session = win.renderer._frame_session
+        stale_pipeline = stale_session.pipeline
+        stale_admission_generation = stale_pipeline._admission_generation
         win.renderer.show_frame_session_slow_overlay(stale_session)
         assert win.img_view._evaluation_overlay is not None
 
@@ -218,5 +220,7 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot):
         win.renderer._settle_montage_visible_plan_if_complete(stale_session)
 
         assert win.img_view._evaluation_overlay.isVisible()
+        assert stale_pipeline._admission_generation == stale_admission_generation + 1
+        assert tuple(stale_pipeline._pending_admissions) == ()
     finally:
         win.close()
