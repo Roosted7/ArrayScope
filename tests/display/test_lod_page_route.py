@@ -46,6 +46,7 @@ from arrayscope.gpu import PageSlot, PageTable
 from arrayscope.gpu.keys import COMPLEX_RG32F, RGB8, SCALAR_R32F
 from arrayscope.presentation.tile_lifecycle import TileTarget, payload_ref_from_display_payload
 from arrayscope.render import lod as render_lod
+from arrayscope.tools.framebuffer_reference import payload_display_kind
 
 CONTENT = ("src-anchored", ("doc", 4), ("op", "fft"))
 
@@ -297,6 +298,30 @@ def test_native_uint8_route_keeps_two_dimensional_values_scalar():
     assert all(table.lookup(page.key) is not None for page in pages)
     assert {page.key.representation for page in pages} == {SCALAR_R32F}
     assert all(page.values.ndim == 2 for page in pages)
+
+    # Metadata alone cannot say a backend actually STORED this as scalar --
+    # a uint8 page is exactly the shape that gets mistaken for RGB.  Commit it
+    # through the maintained CPU backend and read its physical truth back.
+    lod = LodInfo(0, 1, values.shape, values.shape, 0)
+    payload = DisplayTilePayload(
+        0,
+        0,
+        values,
+        values,
+        ("uint8-scalar-payload", 0),
+        semantic_data=values,
+        texture_data=values,
+        lod=lod,
+        page_backing=PageBackedPresentation(key.plans, pages, (0, 3, 0, 4), lod),
+    )
+    layer = _pyqtgraph_tile_layer()
+    stats = _present_one_tile(layer, payload, tile_shape=values.shape, levels=(0.0, 255.0))
+
+    assert stats.presented_tiles == (0,)
+    row = layer.tile_truth_physical_rows()[0]
+    assert row["physical_mapping_mode"] == "scalar_levels"
+    assert len(row["physical_texture_shape"]) == 2
+    assert layer.payload_resident(payload) is True
 
 
 def test_materialized_representation_rejects_two_dimensional_values_under_rgb_key():
@@ -1133,6 +1158,141 @@ def _expanded_direct_oracle(reduction):
     return expanded
 
 
+def _assert_stored_pages_match_direct_oracle(pages, reduction):
+    """Every STORED page sample equals the direct reduction of its own bin.
+
+    Per page, not merely per assembled tile: an assembled-image check can be
+    satisfied by a compensating pair of faults, and it cannot say WHICH page
+    is wrong.  Pages are the unit both maintained backends bind, so this is
+    the value-level statement that survives the retired backend (it used to
+    read texels back out of a fake GL atlas; the stored array is the same
+    truth without the backend indirection).
+    """
+
+    values_by_rect = dict(zip(reduction.source_rects, reduction.values.reshape(-1), strict=True))
+    assert pages, "oracle comparison needs at least one materialized page"
+    for materialized in pages:
+        sample_rects = materialized.plan.sample_source_rects_yx
+        expected = np.asarray(
+            [values_by_rect[rect] for rect in sample_rects],
+            dtype=reduction.values.dtype,
+        ).reshape(materialized.plan.stored_shape)
+        actual = np.asarray(materialized.values)
+        if actual.ndim == 3 and actual.shape[-1] == 1:
+            actual = actual[..., 0]
+        np.testing.assert_allclose(
+            actual[: expected.shape[0], : expected.shape[1]],
+            expected,
+            err_msg=f"stored page {materialized.key!r} diverges from the direct oracle",
+        )
+
+
+def _assert_draw_blocks_cover_source_exactly(plans, reduction):
+    """Draw geometry tiles the source rect exactly, one owner per oracle bin.
+
+    ``LodPagePlan.draw_blocks`` is the canonical geometry BOTH maintained
+    backends draw from -- the retired backend's emitted quads were one
+    consumer of it, so asserting the owner is strictly stronger than
+    asserting that consumer.  Checks the three properties a clipped boundary
+    page can break: total covered area equals the source area (no gap, no
+    overlap), every block is inside the source rect, and each reduction bin
+    is contained in exactly one block with a stored extent that matches its
+    own reduction.
+    """
+
+    blocks = tuple(block for page_plan in plans for block in page_plan.draw_blocks)
+    assert blocks, "page plans must publish draw geometry"
+
+    y0, y1, x0, x1 = reduction.valid_source_rect_yx
+    covered = sum(
+        (block.source_rect_yx[1] - block.source_rect_yx[0])
+        * (block.source_rect_yx[3] - block.source_rect_yx[2])
+        for block in blocks
+    )
+    assert covered == (y1 - y0) * (x1 - x0), (
+        f"draw blocks cover {covered} source samples, expected {(y1 - y0) * (x1 - x0)}"
+    )
+    for block in blocks:
+        by0, by1, bx0, bx1 = block.source_rect_yx
+        escaped = f"draw block {block.source_rect_yx} escapes source rect {(y0, y1, x0, x1)}"
+        assert y0 <= by0 < by1 <= y1, escaped
+        assert x0 <= bx0 < bx1 <= x1, escaped
+        sy0, sy1, sx0, sx1 = block.stored_rect_yx
+        empty = f"draw block has empty stored rect {block.stored_rect_yx}"
+        assert sy1 > sy0, empty
+        assert sx1 > sx0, empty
+
+    for bin_rect in reduction.source_rects:
+        owners = [
+            block
+            for block in blocks
+            if block.source_rect_yx[0] <= bin_rect[0]
+            and bin_rect[1] <= block.source_rect_yx[1]
+            and block.source_rect_yx[2] <= bin_rect[2]
+            and bin_rect[3] <= block.source_rect_yx[3]
+        ]
+        assert len(owners) == 1, f"bin {bin_rect} has {len(owners)} draw owners, expected 1"
+
+
+def _pyqtgraph_tile_layer():
+    """A real MontageTileLayer -- the maintained CPU backend, no Qt window."""
+
+    class Owner:
+        def add_tile_item(self, *_args):
+            pass
+
+        def remove_tile_item(self, *_args):
+            pass
+
+        def move_tile_item(self, *_args):
+            pass
+
+    def set_image(item, values, image_levels, **_kwargs):
+        item.setImage(values, autoLevels=False, levels=image_levels)
+
+    return MontageTileLayer(
+        Owner(),
+        set_image_item_data=set_image,
+        record_upload_timing=lambda *_args: None,
+        histogram_levels_for_display=lambda image_levels: image_levels,
+        is_rgb_image=lambda values: np.asarray(values).ndim == 3,
+    )
+
+
+def _present_one_tile(layer, payload, *, tile_shape, levels=(0.0, 64.0)):
+    """Commit one payload through the maintained backend and return its stats."""
+
+    geometry = DisplayGeometry(
+        view_state=None,
+        display_shape=tile_shape,
+        montage=MontageGeometry(
+            indices=(0,),
+            tile_shape=tile_shape,
+            columns=1,
+            rows=1,
+            gap=0,
+        ),
+    )
+    delta = SimpleNamespace(
+        upserts={0: payload},
+        active_tiles=(0,),
+        target_identities={},
+        removals=(),
+        near_tile_source_ids={},
+        cold_deadline_ms=None,
+    )
+    return layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=levels,
+        rgb_already_windowed=False,
+        dirty_tiles=None,
+        tile_payloads={0: payload},
+        tile_delta=delta,
+    )
+
+
 def test_clipped_page_backing_matches_direct_oracle_and_canonical_resolution():
     rect = (100, 105, 101, 114)
     values = source(rect)
@@ -1179,6 +1339,9 @@ def test_clipped_page_backing_matches_direct_oracle_and_canonical_resolution():
         page_plan.key for page_plan in plans
     )
     assert all(item.actual_key == item.target_key for item in resolutions)
+
+    _assert_stored_pages_match_direct_oracle(pages, oracle)
+    _assert_draw_blocks_cover_source_exactly(plans, oracle)
 
 
 def test_mean_abs_page_values_match_canonical_route_and_never_alias_complex_mean():
@@ -1267,6 +1430,7 @@ def test_mean_abs_page_values_match_canonical_route_and_never_alias_complex_mean
         and resolution.actual_key == resolution.target_key
         for page_plan in mean_abs_plans
     )
+    _assert_stored_pages_match_direct_oracle(mean_abs_pages, mean_abs_oracle)
 
     table = PageTable()
     table.bind(mean_pages[0].key, PageSlot("mean-family", 0, 0), nbytes=mean_pages[0].nbytes)
@@ -1373,11 +1537,35 @@ def test_page_backed_residency_requires_exact_supplied_pages_not_fallback_covera
         page_backing=PageBackedPresentation((fine_plan,), (fine_page,), rect, lod),
     )
 
+    # The coarse ancestor RESOLVES the fine target (that is fallback coverage
+    # working), but the fine page itself is not bound.
     assert table.resolve(fine_page.key) is not None
     assert table.lookup(fine_page.key) is None
-    supplied_keys = {page.key for page in fine_payload.page_backing.materialized_pages}
-    assert fine_page.key in supplied_keys
-    assert table.lookup(fine_page.key) is None
+
+    # The point of the test: a backend holding only the coarse page must
+    # answer its residency PREDICATE with False.  Fallback coverage is not
+    # residency -- reporting True here is what lets a retarget skip the
+    # upload the tile actually needs.  Asserted against the maintained
+    # backend, not against page-table bookkeeping, because the predicate is
+    # the thing that was ever wrong.
+    coarse_lod = LodInfo(2, 4, values.shape, coarse_page.values.shape, 0)
+    coarse_payload = DisplayTilePayload(
+        0,
+        0,
+        coarse_page.values,
+        None,
+        coarse_page.key,
+        texture_data=coarse_page.values,
+        texture_kind=TexturePlaneKind.SCALAR_R32F,
+        lod=coarse_lod,
+        page_backing=PageBackedPresentation((coarse_plan,), (coarse_page,), rect, coarse_lod),
+    )
+    layer = _pyqtgraph_tile_layer()
+    stats = _present_one_tile(layer, coarse_payload, tile_shape=values.shape)
+
+    assert stats.presented_tiles == (0,)
+    assert layer.payload_resident(coarse_payload) is True
+    assert layer.payload_resident(fine_payload) is False
 
 
 def test_pyqtgraph_anisotropic_resolution_matches_canonical_page_table(qt_app):
@@ -1950,6 +2138,11 @@ def test_phase_vector_backend_route_blacks_cancellation_and_rejects_mean_family(
     assert payload.shader_mapping.display_mode == ShaderDisplayMode.PHASE_COLOR
     assert payload.shader_mapping.component == ShaderComponent.ANGLE
     assert payload.shader_mapping.histogram_source_policy == "mapped"
+    # The mapping fields above are the payload's REQUEST.  Classification is a
+    # separate step that the retired backend owned as mode 5; the surviving
+    # owner is the shared oracle's classifier, which is what decides the
+    # expected pixels for every physical comparison.
+    assert payload_display_kind(payload) == "phase_vector"
     resolved = _resolve_page_backed_payload(payload, levels=(-1000.0, 1000.0))
     assert resolved.resolutions[0].actual_key == target.key
     np.testing.assert_array_equal(resolved.payload.image, np.zeros((2, 2, 3), np.uint8))
