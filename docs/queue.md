@@ -71,30 +71,36 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   `DISPLAY_PREPARATION`, coverage closes on backend-acknowledged first-pass
   identities, and the profile hard-fails both ACK order and worker execution
   order per scheduling generation. Preview quality is always at least two LOD
-  levels coarser than the target; montages with at least 256 tiles spend five
-  additional levels on first-frame latency, and retention may choose coarser.
-  A complete small preview set uses one shared worker task and one non-empty
-  compact backend commit, bypassing the ordinary 32-item ceiling only after
-  its exact required set is ready. Ready payloads suppress duplicate FLOOR
-  evaluations. Complete preview admission now constructs floor payloads once
-  for the admitted scope instead of rebuilding the complete visible lookup
-  272 times. Superseded session pipelines now close before the successor
-  starts, the compound profile Fit action cannot emit an intermediate
-  stale-document session, admitted page keys bypass redundant floor searches,
-  and shared level/page planning prepares only the selected scope once.
+  levels coarser than the target and follows the smooth zoom so one preview
+  texel spans 3–6 screen pixels. Tile count never decides image quality. The
+  rejected size surcharge made each 336-square tile one L9 sample and produced
+  homogeneous grey boxes; the corrected field scale chooses L5 (11×11,
+  4.22 screen pixels/sample) and preserves recognizable anatomy.
+  A complete preview set uses one shared worker task and one non-empty compact
+  backend commit, bypassing the ordinary 32-item ceiling only after its exact
+  required set is ready. Ready payloads suppress duplicate FLOOR evaluations.
+  The GUI seam keeps that atomic cohort intact and constructs floor payloads
+  once instead of rebuilding the complete visible lookup 272 times. The
+  optional JSONL oracle is buffered and its rich identity fields are bounded,
+  so evidence collection no longer adds hundreds of synchronous writes before
+  T1; the crash-oriented trace ring is unchanged.
   Final-tip low-load AC trace-ACK T1/T2/B medians: WGPU raw
-  **842/3622/2138 ms (3/3/3 passes)**, WGPU FFT
-  **976/6372/4760 ms (3/3/3 independent processes)**, and PyQtGraph raw
-  **838/4193/3321 ms (3/3/3 passes)**. Every A pass passed both exclusivity
-  clauses; all six raw passes and 2/3 WGPU FFT passes were individually below
-  1 s, with every median below the strict bar. PyQtGraph reached all target
-  ACKs in all raw A passes, but its later CPU level sweep still outlived the
-  five-second settlement watchdog; keep that convergence debt separate from
-  trace T2. PyQtGraph complex reduced RGB is explicitly deferred
-  (`pyqtgraph-composited-rgb-format-deferred`); in three bounded A/B processes
-  it reached a median 57/62 exact ACKs of 272 and no T1/T2, matching the
-  pre-existing full-complex completion defect rather than hiding it as
-  target-only success.
+  **972/3874/2130 ms (6/6/3 passes)**, WGPU FFT
+  **948/6118/4795 ms (6/5 observed/3 independent processes)**, and PyQtGraph
+  raw **853/4374/3358 ms (3/3/3 passes)**. Every applicable A pass passed both
+  exclusivity clauses. One WGPU FFT A tail reached only 270/272 target ACKs,
+  and every WGPU FFT action exceeded the five-second settlement limit; those
+  are reported as target convergence debt, not hidden by the green T1 median.
+  The current-main red control reports worker/ACK overlap on WGPU raw and FFT,
+  ACK overlap on PyQtGraph raw, and no PyQtGraph complex preview pass.
+  Field PyQtGraph 272-tile transitions additionally pinned and fixed two
+  no-progress cycles: mixed exact/rough level evidence now publishes from its
+  per-source covered set, and a compact preview now accepts a physically
+  current retained exact slice as the complement of its 271 reduced tiles.
+  PyQtGraph complex reduced RGB is explicitly deferred
+  (`pyqtgraph-composited-rgb-format-deferred`); the final bounded A/B recheck
+  reached 36/28 presented tiles of 272 and no T1/T2, matching the pre-existing
+  full-complex completion defect rather than hiding it as target-only success.
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
 - **PyQtGraph full complex montage presentation is broken — OPEN.** Short

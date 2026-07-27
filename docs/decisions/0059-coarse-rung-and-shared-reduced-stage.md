@@ -67,20 +67,13 @@ is exactly what it is not. (Cross-checked on a synthetic `(336,336,272)`
 float32 volume: reduce 26.3/17.2/10.6/10.2/7.7 ms for factors 2/4/8/16/32 —
 flatter than the numbers above, same 100×+ transform swing.)
 
-What actually removes the compute-side level driver is narrower, and it is a
-clamp rather than a physical law. `preview_level_for_tile_shape` ends in
-`max(int(min_level), level)`, and `frame_controller` passes
-`min_level=PREVIEW_FLOOR_MIN_LEVEL = 4`, so **the retention formula can never
-choose a level finer than 4** — and `preview_evaluation_level` only ever
-coarsens it further (`max(desired, preview)`). Level 4 is already past the knee
-where the transform stops mattering (1.0 ms of a 36.5 ms rung). A compute-aware
-level driver would therefore have nothing left to optimise *given today's
-floor*.
-
-Stated so a future reader is not misled: **a finer coarse rung is not free. If
-`PREVIEW_FLOOR_MIN_LEVEL` ever moves finer, the compute term returns as a ~10×
-lever and this decision must be revisited.** The claim below is conditional on
-that floor, not on level-independence.
+What removed the compute-side level driver in the measured predecessor was
+narrower: its fixed `PREVIEW_FLOOR_MIN_LEVEL = 4` clamp already sat past the
+knee where the transform stops mattering (1.0 ms of a 36.5 ms rung). The
+accepted implementation below retires that fixed quality owner in favour of
+the live screen-space contract. A finer preview is therefore not free, but its
+cost is now paid only when the current zoom needs those samples to preserve
+visible content; a compute estimator cannot silently make it coarser.
 
 Nor is 35.5 ms a floor on the reduction itself — it is an implementation, not
 physics. `render/effects.py:reduce_nd_axis_mean` is pure NumPy and makes **two
@@ -131,15 +124,20 @@ proposed keeping both as parameters:
 CoarseRung(level, retained: bool, evaluate_at: reduced | native_then_reduce)
 ```
 
-The preview level is derived from the current demanded level:
-`max(retention_floor, desired + 2)`, plus three more levels for a montage of at
-least 256 tiles. The first `+2` is the minimum product distance (4× coarser per
-axis, 16× fewer texels); it applies even when the target is already coarse.
-The size rule makes the reference target-level-2, 272-tile gate level 7 while
-a 50-tile cropped montage retains level 4. Retention may choose a coarser
-level. The target level therefore cannot catch or cross the preview level, and
-the thresholds are greppable in the ladder rather than split across
-retention, effects, and profiler defaults.
+The preview level is derived from the complete current `LodDemand`, not from
+tile count or a fixed constant. It starts at `desired + 2`: four times coarser
+per axis and sixteen times fewer texels even when the target is already
+coarse. It then follows the continuous, step-less screen scale until one
+preview texel spans at least 3 screen pixels on the dominant axis. The target
+LOD owner keeps at least one target texel per screen pixel; that guarantee
+makes the resulting discrete preview step span at most 6 screen pixels. A
+retained level may be reused only while it remains inside the same 6-pixel
+ceiling.
+
+This is deliberately a screen-space contract. A smooth zoom does not make
+"six pixels" synonymous with four LOD levels, and a large tile count does not
+authorize erasing spatial content. The thresholds and the two-level target
+distance are greppable together in `render/ladder.py`.
 
 Merging also fixes the §2 collapse directly. Today `floor_level` and
 `preview_level` are both `session.lod_preview_level`, so the PREVIEW guard
@@ -238,16 +236,21 @@ were:
 
 | backend / pipeline | median T1 | median T2 | median B | verdict |
 |---|---:|---:|---:|---|
-| WGPU raw | **842 ms (3)** | 3622 ms (3) | 2138 ms (3) | both clauses green 3/3; strict 1 s T1 green 3/3 |
-| WGPU FFT | **976 ms (3)** | 6372 ms (3) | 4760 ms (3) | both clauses green 3/3; strict 1 s median green (2/3 individual) |
-| PyQtGraph raw | **838 ms (3)** | 4193 ms (3) | 3321 ms (3) | both clauses green 3/3; strict 1 s T1 green 3/3 |
-| PyQtGraph FFT | unavailable | unavailable (0/3 complete) | unavailable (0/3 complete) | reduced RGB preview explicitly deferred; exact path pre-existing incomplete |
+| WGPU raw | **972 ms (6)** | 3874 ms (6) | 2130 ms (3) | A-B-A blocks; both clauses green 6/6; strict 1 s median green |
+| WGPU FFT | **948 ms (6)** | 6118 ms (5 observed) | 4795 ms (3) | independent A-B-A processes; both clauses green 6/6; one A tail reached only 270/272 target ACKs |
+| PyQtGraph raw | **853 ms (3)** | 4374 ms (3) | 3358 ms (3) | both clauses green 3/3; strict 1 s T1 green 3/3 |
+| PyQtGraph FFT | unavailable | unavailable | unavailable | reduced RGB preview explicitly deferred; exact path pre-existing incomplete |
 
-Raw uses `--repeat 3`, giving three cold in-process observations per arm and
-backend. FFT uses three independent single-run processes per arm so cold fills
-never share the four workers. WGPU FFT A and B reached all 272 target ACKs in
-3/3. PyQtGraph complex reached a median 57/272 exact ACKs in A and 62/272 in B
-within the bounded runs. It has no preview row because CPU
+Raw uses `--repeat 3`, giving cold in-process observations per arm and
+backend; WGPU's A arm was repeated around its B block because the first A
+block contained the machine's known timing tail. FFT uses independent
+single-run processes so cold fills never share the four workers. WGPU FFT
+reached all 272 target ACKs in five of six A runs and all three B runs; the
+other A run reached 270, so the T2 median names the five observed boundaries
+instead of pretending the missing boundary existed. Every WGPU FFT action
+still exceeded the five-second whole-step settlement limit. PyQtGraph complex
+was rechecked once per arm and reached 36/272 presented tiles in A and 28/272
+in B within the bounded runs. It has no preview row because CPU
 composition produces `(h,w,3)` RGB and the canonical reduced-page formats are
 scalar/complex; inventing a format in this slice would cross the
 display-payload seam that previously froze the application. That
@@ -255,25 +258,57 @@ backend/pipeline cell is explicitly deferred, not silently treated as
 target-only success.
 
 T1 and T2 are the trace ACK boundaries, not the later whole-session settlement
-timestamp. In the final PyQtGraph raw A runs all 272 target ACKs arrived at
-4.15–4.25 s, while the CPU level-generation sweep still outlived the
-five-second interaction limit. That remaining post-target
-settlement debt does not redefine T2, but it remains an honest convergence
-defect rather than a completed-run claim.
+timestamp. All raw A/B actions completed; the WGPU FFT A/B settlement tails
+above do not redefine T2 and are not reclassified as completed runs.
+
+The red control used the same trace oracle on local `main` `90aab674`.
+WGPU raw and FFT both reported `overlap`: both the ACK clause and task-execution
+clause were false, with all 272 target tasks starting before preview coverage
+closed. PyQtGraph raw also reported `overlap` (the ACK clause was false).
+PyQtGraph FFT reported `no-preview-pass` and reached only 19/272 physical tiles
+within the bounded run; that is the composited-RGB format gap called out below,
+not a green exemption manufactured after the fact. On this branch every
+applicable raw and WGPU FFT pass reports `ordered`; PyQtGraph complex is
+explicitly named `pyqtgraph-composited-rgb-format-deferred`.
 
 The raw and maintained-backend FFT transaction-count and median near-instant
 objectives are complete: each 272-tile preview uses one non-empty commit and
 the admitted cells remain below the profiler's 1000 ms median bar. The final
-structural T1 defect was logical fan-out, not pixels: complete preview admission invoked
-`ensure_floor_payloads` 272 times, and each invocation rebuilt the complete
-visible-tile lookup. Building the floor payloads once for the complete admitted
-scope moved both raw backends under the bar. Explicitly retiring predecessor
-pipelines and suppressing the compound Fit action's intermediate range signal
-then removed stale-session competition from FFT. Finally, once the preview was
-one worker and one transaction, the >=256-tile quality owner spent two more
-levels (target+7 minimum): a 336-square target-L2 tile reaches L9, one stored
-sample, and WGPU FFT moved to a 976 ms median without changing transaction
-count or per-tile acknowledgement truth.
+structural T1 defect was logical fan-out, not pixels: complete preview
+admission invoked `ensure_floor_payloads` 272 times, and each invocation
+rebuilt the complete visible-tile lookup. The GUI seam now keeps the worker's
+atomic cohort intact and builds the floor payloads once.
+
+The prior tile-count quality surcharge is explicitly retracted. A field WGPU
+trace and screenshot showed that it drove a target-L2 336-square tile to L9:
+one stored sample per tile, rendered as homogeneous grey boxes with no brain
+anatomy. At the captured smooth zoom, the screen-space contract selects L5,
+an 11×11 preview whose samples span 4.22 screen pixels. A structured-data
+oracle requires non-zero spatial range, and the real-Wayland screenshot shows
+recognizable anatomy across all 272 preview tiles before refinement.
+
+PyQtGraph field use exposed two separate completion cycles that the fresh
+profile did not reproduce. First, the initial 16-source exact level batch was
+combined with rough preview evidence for the other sources; waiting on the
+aggregate `refined` flag meant no later event could publish the already-correct
+frame. Publication now consumes the canonical per-source covered set. Second,
+entering the montage from a settled center slice retained one or two exact
+`ImageItem`s, so the compact preview delta correctly contained only 271 or 270
+reduced payloads. The backend nevertheless required 272 preview payloads and
+declined the physically complete 271+1 or 270+2 union forever. It now accepts
+only current, visible direct items whose acknowledged identities satisfy the
+target as that complement, builds the atlas from the reduced subset, and
+reports the physical union. A live 336×336×272 PyQtGraph UI regression pins
+the single-slice-to-full-montage handoff at 272/272 physical tiles with no
+stall assertion.
+
+The live JSONL oracle also used to perturb the quantity it measured: its
+line-buffered sink synchronously wrote every lifecycle edge and repeated rich
+semantic/page identities, producing about 20 MB for one FFT fill. The
+crash-oriented in-memory ring is unchanged; the optional file sink now uses a
+bounded 64 KiB buffer and lifecycle rows retain compact tile/LOD/page-count
+coordinates. Trace replay and both exclusivity clauses consume unchanged
+primitive fields.
 
 ## Consequences
 
@@ -400,9 +435,9 @@ local `main` tip before the final matrix.
   100-tile busy-pump WGPU scrub gate and the focused render ring pass.
 - A final trace-price pass found complete preview admission rebuilding the
   272-entry visible lookup once per row. Batching floor construction once per
-  shared result took raw WGPU/PyQtGraph below the 1 s bar in every
-  order-balanced pass; the regression pins one floor-construction call for a
-  complete shared result.
+  shared result took the order-balanced raw medians and the independent WGPU
+  FFT median below the 1 s bar; the regression pins one floor-construction call
+  for a complete shared result.
 - A three-pass in-process raw run (`--repeat 3`) reported only
   `tile already has committable coverage` and `allow_preview false` as coarse
   refusal reasons; `floor already covers this level` is gone.
@@ -419,12 +454,12 @@ green by this ADR.
   applies to the *evaluation*, which stays single). Rejected because it leaves
   two owners of "evaluate once, fan out", keeps the global barrier, and
   reproduces by hand what the stage cache does by construction.
-- **An operation-cost estimator as a second preview-level owner.** Rejected:
-  target distance, retention, and montage size now derive one explicit level.
-  On the 272-tile gate the one montage-size owner now spends five additional
-  levels (target+7 minimum) and moves WGPU FFT below the median T1 bar. Level
-  is not cheap — level 1 costs 10× level 4 — but a second speculative cost
-  policy would duplicate the one greppable quality owner.
+- **An operation-cost or tile-count estimator as a second preview-level
+  owner.** Rejected: target distance and continuous screen scale derive one
+  explicit level. The attempted 272-tile surcharge met its timing counter by
+  reducing every tile to one sample and visibly erased the data. Level is not
+  cheap — level 1 costs 10× level 4 — but transaction/admission shape, not
+  invisible pixels, must buy T1.
 - **Keep FLOOR and PREVIEW separate and fix the guard.** Rejected: their levels
   come from one value today, and the merged rung needs one level anyway once
   the compute driver is dropped.
