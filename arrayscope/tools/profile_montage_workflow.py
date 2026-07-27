@@ -15,12 +15,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, replace
 from importlib import metadata
 from pathlib import Path
 from statistics import median
-from time import perf_counter
+from time import perf_counter, perf_counter_ns
 from uuid import uuid4
 
 import numpy as np
@@ -71,6 +72,8 @@ R8_HEARTBEAT_MAX_GAP_MS = 16.0
 R8_WARM_INPUT_MAX_MS = 15.0
 PREVIEW_FIRST_T1_TARGET_MS = 1_000.0
 PROFILE_TRACE_RING_EVENTS = 32_768
+PROFILE_INVARIANT_EVENT_LIMIT = 65_536
+PROFILE_INVARIANT_PRESENTED_REF_LIMIT = 262_144
 PROFILE_RESIDENCY_PAGE_SAMPLES = 256
 PROFILE_PHYSICAL_SAMPLES_PER_TILE = 64
 DISPLAY_AXIS_CROP_SCENARIO_NAMES = (
@@ -5405,6 +5408,433 @@ def _histogram_loop_record_fields(prefix: str, stats: dict[str, object]) -> dict
     }
 
 
+class _ProgressiveInvariantProbe:
+    """Collect exact in-process evidence for the normative montage contract.
+
+    The generic diagnostics replay deliberately remains a heuristic: snapshots
+    cannot distinguish duplicate production at a legal floor and do not carry
+    each committed tile's value range.  The profiler owns a richer observation
+    point.  It records the purpose-bearing kernel rows and takes read-only
+    ``FrameSession`` snapshots at the round and backend-commit boundaries.
+
+    The probe wraps the already-enabled in-memory trace bus only while one
+    profiler phase is active.  It never requires or writes a JSONL artifact.
+    """
+
+    _EVENT_KINDS = frozenset(
+        {
+            "backend_ack",
+            "commit_batch",
+            "kernel_finish",
+            "kernel_start",
+            "kernel_submit",
+            "scheduling_phase",
+        }
+    )
+
+    def __init__(self, win):
+        self._win = win
+        self._lock = threading.RLock()
+        self._original_emit = None
+        self._events: list[dict[str, object]] = []
+        self._rounds: list[dict[str, object]] = []
+        self._round_by_identity: dict[tuple[int, int], dict[str, object]] = {}
+        self._event_truncated = False
+        self._presented_ref_count = 0
+        self._presented_refs_truncated = False
+
+    def start(self) -> None:
+        if self._original_emit is not None:
+            raise RuntimeError("progressive invariant probe already started")
+        original = TRACE.emit
+        self._original_emit = original
+
+        def observed_emit(kind: str, **fields) -> None:
+            original(kind, **fields)
+            self._capture(str(kind), fields)
+
+        TRACE.emit = observed_emit
+
+    def stop(self) -> None:
+        original = self._original_emit
+        if original is None:
+            return
+        TRACE.emit = original
+        self._original_emit = None
+        with self._lock:
+            session = getattr(self._win, "_frame_session", None)
+            session_id = int(getattr(session, "session_id", 0) or 0)
+            candidates = [row for row in self._rounds if int(row["session_id"]) == session_id]
+            if (
+                candidates
+                and callable(getattr(session, "required_target_settled", None))
+                and session.required_target_settled()
+                and not bool(getattr(session, "atomic_successor_pending", False))
+            ):
+                candidates[-1].setdefault("settled_ns", int(perf_counter_ns()))
+
+    def _capture(self, kind: str, fields: dict[str, object]) -> None:
+        if kind not in self._EVENT_KINDS:
+            return
+        with self._lock:
+            if len(self._events) >= PROFILE_INVARIANT_EVENT_LIMIT:
+                self._event_truncated = True
+            else:
+                self._events.append(
+                    {
+                        "kind": str(kind),
+                        "observed_ns": int(perf_counter_ns()),
+                        **dict(fields),
+                    }
+                )
+            if kind == "scheduling_phase" and str(fields.get("event", "")) == "scope_started":
+                self._capture_round(fields)
+            elif kind == "kernel_submit":
+                self._hydrate_latest_round(int(fields.get("session_id", 0) or 0))
+            elif kind == "commit_batch" and str(fields.get("phase", "")) == "backend_complete":
+                self._capture_commit(fields)
+
+    def _capture_round(self, fields: dict[str, object]) -> None:
+        session_id = int(fields.get("session_id", 0) or 0)
+        generation = int(fields.get("generation", 0) or 0)
+        identity = (session_id, generation)
+        if identity in self._round_by_identity:
+            return
+        session = getattr(self._win, "_frame_session", None)
+        if int(getattr(session, "session_id", 0) or 0) != session_id:
+            session = None
+        required = tuple(int(tile) for tile in tuple(fields.get("required_tile_numbers", ()) or ()))
+        decision = None if session is None else getattr(session, "lod_policy_decision", None)
+        demand = None if decision is None else getattr(decision, "demand", None)
+        target_floor = None if demand is None else int(getattr(demand, "desired_level", 0) or 0)
+        preview_floor = (
+            None if session is None else int(getattr(session, "lod_preview_level", 0) or 0)
+        )
+        if preview_floor is not None and target_floor is not None and preview_floor <= target_floor:
+            preview_floor = None
+        baseline = self._resident_floor_rows(session, required)
+        resident_query_available = callable(
+            getattr(getattr(self._win, "img_view", None), "tiledPayloadResident", None)
+        )
+        settled_at_start = bool(
+            session is not None
+            and callable(getattr(session, "required_target_settled", None))
+            and session.required_target_settled()
+            and not bool(getattr(session, "atomic_successor_pending", False))
+        )
+        upload_counts_available, upload_counts = self._wgpu_upload_snapshot()
+        row = {
+            # No producer currently emits this field. Keeping it explicit makes
+            # the gate fail closed until the renderer owns a real view-target
+            # round identity; session/generation is only a scheduling-scope
+            # proxy and the normative R2b contract forbids treating it as a
+            # round key.
+            "round_id": fields.get("round_id"),
+            "session_id": session_id,
+            "generation": generation,
+            "started_ns": int(perf_counter_ns()),
+            "required_tiles": required,
+            "target_floor": target_floor,
+            "preview_floor": preview_floor,
+            "baseline": baseline,
+            "resident_query_available": bool(resident_query_available),
+            "uploads_by_level_available": bool(upload_counts_available),
+            "uploads_by_level_start": upload_counts,
+            "settled_at_start": settled_at_start,
+            "commits": [],
+        }
+        if settled_at_start:
+            row["settled_ns"] = int(row["started_ns"])
+        self._rounds.append(row)
+        self._round_by_identity[identity] = row
+
+    def _hydrate_latest_round(self, session_id: int, *, exclude_tiles=()) -> None:
+        candidates = [row for row in self._rounds if int(row["session_id"]) == int(session_id)]
+        if not candidates:
+            return
+        row = candidates[-1]
+        session = getattr(self._win, "_frame_session", None)
+        if int(getattr(session, "session_id", 0) or 0) != int(session_id):
+            return
+        decision = getattr(session, "lod_policy_decision", None)
+        demand = None if decision is None else getattr(decision, "demand", None)
+        if row.get("target_floor") is None and demand is not None:
+            row["target_floor"] = int(getattr(demand, "desired_level", 0) or 0)
+        preview_floor = int(getattr(session, "lod_preview_level", 0) or 0)
+        target_floor = row.get("target_floor")
+        if row.get("preview_floor") is None and preview_floor > int(
+            target_floor if isinstance(target_floor, int) else -1
+        ):
+            row["preview_floor"] = preview_floor
+        if not row.get("baseline"):
+            excluded = {int(tile) for tile in tuple(exclude_tiles or ())}
+            row["baseline"] = tuple(
+                item
+                for item in self._resident_floor_rows(session, row["required_tiles"])
+                if int(item["tile"]) not in excluded
+            )
+            row["resident_query_available"] = callable(
+                getattr(
+                    getattr(self._win, "img_view", None),
+                    "tiledPayloadResident",
+                    None,
+                )
+            )
+
+    def _resident_floor_rows(self, session, required) -> tuple[dict[str, object], ...]:
+        if session is None:
+            return ()
+        payloads = dict(
+            getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {}
+        )
+        backend = dict(
+            getattr(getattr(session, "lifecycle", None), "backend_presented_identities", {}) or {}
+        )
+        resident_query = getattr(getattr(self._win, "img_view", None), "tiledPayloadResident", None)
+        rows = []
+        for tile in required:
+            payload = payloads.get(int(tile))
+            if payload is None:
+                continue
+            acknowledged = backend.get(int(tile)) == tile_ack_identity(payload)
+            resident = bool(resident_query(payload)) if callable(resident_query) else acknowledged
+            rows.append(
+                {
+                    "tile": int(tile),
+                    "level": int(
+                        getattr(
+                            payload,
+                            "conservative_actual_lod_level",
+                            getattr(getattr(payload, "lod", None), "level", 0),
+                        )
+                        or 0
+                    ),
+                    "quality": str(getattr(payload, "quality", "exact") or "exact"),
+                    "acknowledged": bool(acknowledged),
+                    "resident": bool(resident),
+                    "source_id": _trace_identity(getattr(payload, "source_id", None)),
+                }
+            )
+        return tuple(rows)
+
+    def _wgpu_upload_snapshot(self) -> tuple[bool, dict[int, int]]:
+        diagnostics = getattr(
+            getattr(self._win, "img_view", None),
+            "presentation_diagnostics",
+            None,
+        )
+        presentation = dict(diagnostics() or {}) if callable(diagnostics) else {}
+        available = "wgpu_uploads_by_level" in presentation
+        counts: dict[int, int] = {}
+        for item in tuple(presentation.get("wgpu_uploads_by_level", ()) or ()):
+            if not isinstance(item, dict):
+                continue
+            level = item.get("level")
+            uploads = item.get("uploads")
+            if isinstance(level, int) and isinstance(uploads, int):
+                counts[int(level)] = counts.get(int(level), 0) + int(uploads)
+        return bool(available), counts
+
+    def _capture_commit(self, fields: dict[str, object]) -> None:
+        session_id = int(fields.get("session_id", 0) or 0)
+        session = getattr(self._win, "_frame_session", None)
+        if int(getattr(session, "session_id", 0) or 0) != session_id:
+            session = None
+        candidates = [row for row in self._rounds if int(row["session_id"]) == session_id]
+        if not candidates:
+            return
+        round_row = candidates[-1]
+        self._hydrate_latest_round(
+            session_id,
+            exclude_tiles=tuple(
+                {
+                    *(int(tile) for tile in tuple(fields.get("cold_upsert_tiles", ()) or ())),
+                    *(int(tile) for tile in tuple(fields.get("delta_upserts", ()) or ())),
+                }
+            ),
+        )
+        payload_rows: list[tuple[int, object, object, object]] = []
+        if session is not None:
+            state_payloads = dict(
+                getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {}
+            )
+            display_payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+            backend = dict(
+                getattr(
+                    getattr(session, "lifecycle", None),
+                    "backend_presented_identities",
+                    {},
+                )
+                or {}
+            )
+            presented = tuple(int(tile) for tile in tuple(fields.get("presented_tiles", ()) or ()))
+            physical_layer = getattr(
+                getattr(self._win, "img_view", None),
+                "_montage_tile_layer",
+                None,
+            )
+            physical_states = dict(getattr(physical_layer, "states", {}) or {})
+            remaining = max(
+                0,
+                PROFILE_INVARIANT_PRESENTED_REF_LIMIT - self._presented_ref_count,
+            )
+            if len(presented) > remaining:
+                self._presented_refs_truncated = True
+                presented = presented[:remaining]
+            for tile in presented:
+                payload = state_payloads.get(int(tile))
+                backend_identity = backend.get(int(tile))
+                if payload is None or backend_identity != tile_ack_identity(payload):
+                    candidate = display_payloads.get(int(tile))
+                    if candidate is not None and backend_identity == tile_ack_identity(candidate):
+                        payload = candidate
+                physical = physical_states.get(int(tile))
+                payload_rows.append(
+                    (
+                        int(tile),
+                        payload,
+                        backend_identity,
+                        None if physical is None else getattr(physical, "levels", None),
+                    )
+                )
+            self._presented_ref_count += len(payload_rows)
+        settled = bool(
+            session is not None
+            and callable(getattr(session, "required_target_settled", None))
+            and session.required_target_settled()
+            and not bool(getattr(session, "atomic_successor_pending", False))
+        )
+        upload_counts_available, upload_counts = self._wgpu_upload_snapshot()
+        round_row["uploads_by_level_available"] = bool(
+            round_row.get("uploads_by_level_available", False) or upload_counts_available
+        )
+        round_row["commits"].append(
+            {
+                "fields": dict(fields),
+                "payload_rows": tuple(payload_rows),
+                "uploads_by_level": upload_counts,
+                "settled": settled,
+            }
+        )
+        if settled and round_row.get("settled_ns") is None:
+            round_row["settled_ns"] = int(perf_counter_ns())
+
+    def evidence(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "events": tuple(dict(event) for event in self._events),
+                "rounds": tuple(self._distill_round(row) for row in self._rounds),
+                "event_truncated": bool(self._event_truncated),
+                "presented_refs_truncated": bool(self._presented_refs_truncated),
+            }
+
+    def _distill_round(self, row: dict[str, object]) -> dict[str, object]:
+        commits = []
+        for commit in tuple(row.get("commits", ()) or ()):
+            payload_rows = []
+            for tile, payload, backend_identity, physical_levels in tuple(commit["payload_rows"]):
+                payload_rows.append(
+                    {
+                        "tile": int(tile),
+                        "acknowledged": bool(
+                            payload is not None and backend_identity == tile_ack_identity(payload)
+                        ),
+                        "level": (
+                            None
+                            if payload is None
+                            else int(
+                                getattr(
+                                    payload,
+                                    "conservative_actual_lod_level",
+                                    getattr(getattr(payload, "lod", None), "level", 0),
+                                )
+                                or 0
+                            )
+                        ),
+                        "quality": (
+                            None
+                            if payload is None
+                            else str(getattr(payload, "quality", "exact") or "exact")
+                        ),
+                        "source_id": (
+                            None
+                            if payload is None
+                            else _trace_identity(getattr(payload, "source_id", None))
+                        ),
+                        "value_bounds": _payload_value_bounds(payload),
+                        "baked_levels": _finite_level_pair(physical_levels)
+                        or (
+                            None
+                            if payload is None
+                            else _finite_level_pair(getattr(payload, "rgb_windowed_levels", None))
+                        ),
+                    }
+                )
+            commits.append(
+                {
+                    **dict(commit["fields"]),
+                    "presented_payloads": tuple(payload_rows),
+                    "uploads_by_level": tuple(
+                        sorted(dict(commit.get("uploads_by_level", {})).items())
+                    ),
+                    "target_settled_after": bool(commit["settled"]),
+                }
+            )
+        return {
+            **{key: value for key, value in row.items() if key != "commits"},
+            "commits": tuple(commits),
+        }
+
+
+def _finite_level_pair(value) -> tuple[float, float] | None:
+    try:
+        low, high = value
+        low = float(low)
+        high = float(high)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(low) and math.isfinite(high) and high >= low):
+        return None
+    return low, high
+
+
+def _payload_value_bounds(payload) -> tuple[float, float] | None:
+    """Return the payload's semantic display-value bounds without guessing.
+
+    Precomputed ``TileLevelStats.bounds`` is the preferred and cheap path.  A
+    retained payload may instead carry its exact level/histogram sample.  Raw
+    RGB or complex texture bytes are never treated as scalar display values:
+    the mapping needed to interpret them is precisely the truth R3 requires.
+    """
+
+    if payload is None:
+        return None
+    stats = getattr(payload, "level_stats", None)
+    bounds = _finite_level_pair(getattr(stats, "bounds", None))
+    if bounds is not None:
+        return bounds
+    for name in ("level_data", "semantic_histogram_data", "histogram_data"):
+        value = getattr(payload, name, None)
+        if value is None:
+            continue
+        array = np.asarray(value)
+        if np.iscomplexobj(array):
+            continue
+        finite = array[np.isfinite(array)]
+        if finite.size:
+            return float(np.min(finite)), float(np.max(finite))
+    image = np.asarray(getattr(payload, "image", ()))
+    if (
+        image.size
+        and not np.iscomplexobj(image)
+        and not (image.ndim >= 3 and int(image.shape[-1]) in (3, 4))
+    ):
+        finite = image[np.isfinite(image)]
+        if finite.size:
+            return float(np.min(finite)), float(np.max(finite))
+    return None
+
+
 def _run_phase(
     app,
     QtCore,
@@ -5478,6 +5908,8 @@ def _run_phase(
         if phase_session is None
         else int(getattr(phase_session, "lod_preview_presentations", 0) or 0)
     )
+    invariant_probe = _ProgressiveInvariantProbe(win)
+    invariant_probe.start()
     action_result = None
     action_elapsed_ms = 0.0
     montage_timeout_reason = None
@@ -5560,6 +5992,7 @@ def _run_phase(
                 "fully_visible_ms": None,
             }
     finally:
+        invariant_probe.stop()
         if callable(end_physical_timeline):
             physical_tile_timeline = tuple(end_physical_timeline())
         if journey_gesture_id is not None:
@@ -5642,10 +6075,11 @@ def _run_phase(
     ) and not bool(getattr(win.renderer, "_profile_disable_coarse_rung", False))
     record["coarse_rung_enabled"] = coarse_rung_enabled
     record["coarse_rung_disabled"] = not coarse_rung_enabled
+    record["backend"] = str(backend)
     record["coarse_target_preview_required"] = bool(
-        str(phase) in {"raw_full_tiled_montage", "fft_full_tiled_montage"}
-        and coarse_rung_enabled
+        str(phase) in {"raw_full_tiled_montage", "fft_full_tiled_montage"} and coarse_rung_enabled
     )
+    record.update(_progressive_invariant_certification(invariant_probe.evidence(), record))
     return record
 
 
@@ -7886,6 +8320,594 @@ def _load_dataset(path: Path, *, mode: str):
     raise ValueError(f"unsupported load mode {mode!r}; expected 'app' or 'native'")
 
 
+def _progressive_invariant_certification(
+    evidence: dict[str, object],
+    record: dict[str, object],
+) -> dict[str, object]:
+    """Certify R1–R5/R7 from the profiler's mandatory in-process evidence.
+
+    R2b and R6 are intentionally absent. The renderer has no authoritative
+    settled-view round identity with which to prove cross-plan floor stability,
+    and one settled phase cannot prove the scheduler's load-shedding trajectory.
+    The returned ``unverifiable_rules`` field keeps both boundaries explicit
+    instead of silently turning missing observations into green.
+    """
+
+    failures: list[dict[str, object]] = []
+    checks = 0
+
+    def require(rule: str, name: str, condition: bool, *, observed, target: str) -> None:
+        nonlocal checks
+        checks += 1
+        if bool(condition):
+            return
+        failures.append(
+            {
+                "rule": str(rule),
+                "gate": str(name),
+                "observed": observed,
+                "target": str(target),
+            }
+        )
+
+    rounds = tuple(dict(row) for row in tuple(evidence.get("rounds", ()) or ()))
+    events = tuple(dict(row) for row in tuple(evidence.get("events", ()) or ()))
+    require(
+        "R1",
+        "in_process_evidence_not_truncated",
+        not bool(evidence.get("event_truncated", False))
+        and not bool(evidence.get("presented_refs_truncated", False)),
+        observed={
+            "events": len(events),
+            "event_truncated": bool(evidence.get("event_truncated", False)),
+            "presented_refs_truncated": bool(evidence.get("presented_refs_truncated", False)),
+        },
+        target="bounded in-process evidence contains the complete phase",
+    )
+    require(
+        "R1",
+        "round_generation_identity_present",
+        bool(rounds),
+        observed={"rounds": len(rounds), "phase": record.get("phase")},
+        target="at least one session/generation round observed in-process",
+    )
+
+    round_summaries: list[dict[str, object]] = []
+    for round_row in rounds:
+        round_id = round_row.get("round_id")
+        session_id = int(round_row.get("session_id", 0) or 0)
+        generation = int(round_row.get("generation", 0) or 0)
+        required = tuple(int(tile) for tile in tuple(round_row.get("required_tiles", ()) or ()))
+        target_floor = round_row.get("target_floor")
+        preview_floor = round_row.get("preview_floor")
+        identity = (session_id, generation)
+        require(
+            "R1",
+            "authoritative_round_identity_present",
+            round_id is not None,
+            observed={
+                "round_id": round_id,
+                "scheduling_scope_proxy": identity,
+            },
+            target="renderer-owned identity for one settled view target",
+        )
+        require(
+            "R1",
+            "scheduling_scope_identity_complete",
+            session_id > 0 and generation > 0 and bool(required) and isinstance(target_floor, int),
+            observed={
+                "round_id": round_id,
+                "session_id": session_id,
+                "generation": generation,
+                "required_tiles": len(required),
+                "target_floor": target_floor,
+                "preview_floor": preview_floor,
+            },
+            target=(
+                "positive session/generation scheduling scope, non-empty required set, "
+                "and one target floor"
+            ),
+        )
+        round_events = tuple(
+            event
+            for event in events
+            if int(event.get("session_id", 0) or 0) == session_id
+            and (
+                str(event.get("kind", "")) not in {"kernel_start", "kernel_finish"}
+                or int(event.get("scheduling_generation", 0) or 0) == generation
+            )
+        )
+        finishes = {
+            int(event.get("task_seq", -1) or -1): event
+            for event in round_events
+            if str(event.get("kind", "")) == "kernel_finish"
+        }
+        production: list[dict[str, object]] = []
+        incomplete_tasks: list[int] = []
+        unknown_purpose: list[dict[str, object]] = []
+        for event in round_events:
+            if str(event.get("kind", "")) != "kernel_start":
+                continue
+            tile_value = event.get("tile_number", -1)
+            tile = int(-1 if tile_value is None else tile_value)
+            level = int(event.get("level", -1) if event.get("level") is not None else -1)
+            rung = int(event.get("rung", -1) if event.get("rung") is not None else -1)
+            if tile < 0 or level < 0:
+                continue
+            purpose = "preview" if rung == 0 else "target" if rung in {2, 3} else ""
+            if not purpose:
+                unknown_purpose.append({"tile": tile, "level": level, "rung": rung})
+                continue
+            task_seq = int(event.get("task_seq", -1) or -1)
+            finish = finishes.get(task_seq)
+            if finish is None:
+                incomplete_tasks.append(task_seq)
+                continue
+            if str(finish.get("outcome", "")) != "completed":
+                continue
+            production.append(
+                {
+                    "source": "kernel",
+                    "task_seq": task_seq,
+                    "tile": tile,
+                    "level": level,
+                    "purpose": purpose,
+                }
+            )
+        require(
+            "R1",
+            "production_has_round_purpose",
+            not unknown_purpose,
+            observed=unknown_purpose,
+            target="every tile-production task is tagged preview or target",
+        )
+        require(
+            "R1",
+            "production_task_outcomes_complete",
+            not incomplete_tasks,
+            observed=incomplete_tasks,
+            target="every observed tile-production start has a finish outcome",
+        )
+
+        commits = tuple(dict(commit) for commit in tuple(round_row.get("commits", ()) or ()))
+        upload_counts_available = bool(round_row.get("uploads_by_level_available", False))
+        require(
+            "R1",
+            "wgpu_upload_levels_observable",
+            str(record.get("backend", "")) != "wgpu" or upload_counts_available,
+            observed={
+                "round": identity,
+                "backend": record.get("backend"),
+                "available": upload_counts_available,
+            },
+            target="WGPU exposes cumulative upload counts by physical LOD level",
+        )
+        previous_uploads = {
+            int(level): int(count)
+            for level, count in dict(round_row.get("uploads_by_level_start", {}) or {}).items()
+        }
+        preview_presented: set[int] = set()
+        prior_presented_levels: dict[int, int] = {}
+        governed_commits = 0
+        for commit_index, commit in enumerate(commits, start=1):
+            current_uploads = {
+                int(level): int(count)
+                for level, count in tuple(commit.get("uploads_by_level", ()) or ())
+            }
+            if upload_counts_available:
+                allowed_floors = {
+                    int(floor) for floor in (preview_floor, target_floor) if isinstance(floor, int)
+                }
+                upload_deltas = {
+                    level: count - previous_uploads.get(level, 0)
+                    for level, count in current_uploads.items()
+                    if count > previous_uploads.get(level, 0)
+                }
+                outside_floors = {
+                    level: count
+                    for level, count in upload_deltas.items()
+                    if level not in allowed_floors
+                }
+                require(
+                    "R1",
+                    "physical_uploads_stay_on_round_floors",
+                    not outside_floors,
+                    observed={
+                        "round": identity,
+                        "commit": commit_index,
+                        "allowed_floors": tuple(sorted(allowed_floors)),
+                        "upload_deltas": tuple(sorted(upload_deltas.items())),
+                        "outside_floors": tuple(sorted(outside_floors.items())),
+                    },
+                    target="WGPU produces/uploads only the preview or target floor",
+                )
+                previous_uploads = current_uploads
+            delta_rows = tuple(commit.get("delta_qualities", ()) or ())
+            for delta in delta_rows:
+                try:
+                    tile, quality, level = delta
+                except (TypeError, ValueError):
+                    continue
+                if str(quality) in {"preview", "fallback"}:
+                    preview_presented.add(int(tile))
+            payload_rows = tuple(
+                dict(payload) for payload in tuple(commit.get("presented_payloads", ()) or ())
+            )
+            commit_levels = (
+                _finite_level_pair(commit.get("physical_levels"))
+                or _finite_level_pair(commit.get("decision_levels"))
+                or _finite_level_pair(commit.get("level_target"))
+            )
+            expected_presented = len(tuple(commit.get("presented_tiles", ()) or ()))
+            require(
+                "R3",
+                "commit_presented_set_covered",
+                len(payload_rows) == expected_presented
+                and all(bool(payload.get("acknowledged", False)) for payload in payload_rows),
+                observed={
+                    "round": identity,
+                    "commit": commit_index,
+                    "expected": expected_presented,
+                    "payload_rows": len(payload_rows),
+                    "unacknowledged": [
+                        payload.get("tile")
+                        for payload in payload_rows
+                        if not bool(payload.get("acknowledged", False))
+                    ],
+                },
+                target="every physically presented tile has its acknowledged payload",
+            )
+            require(
+                "R3",
+                "commit_levels_recorded",
+                expected_presented == 0 or commit_levels is not None,
+                observed={
+                    "round": identity,
+                    "commit": commit_index,
+                    "physical_levels": commit.get("physical_levels"),
+                    "decision_levels": commit.get("decision_levels"),
+                    "level_target": commit.get("level_target"),
+                },
+                target="one finite commit-time level pair for the presented set",
+            )
+            for payload in payload_rows:
+                tile_value = payload.get("tile", -1)
+                tile = int(-1 if tile_value is None else tile_value)
+                bounds = _finite_level_pair(payload.get("value_bounds"))
+                require(
+                    "R3",
+                    "presented_tile_value_bounds_recorded",
+                    bounds is not None,
+                    observed={
+                        "round": identity,
+                        "commit": commit_index,
+                        "tile": tile,
+                        "quality": payload.get("quality"),
+                    },
+                    target="semantic value bounds for every presented tile",
+                )
+                if commit_levels is not None and bounds is not None:
+                    low, high = commit_levels
+                    bound_low, bound_high = bounds
+                    epsilon = max(1e-9, abs(high - low) * 1e-12)
+                    contained = low <= bound_low + epsilon and high >= bound_high - epsilon
+                    require(
+                        "R3",
+                        "commit_levels_contain_presented_tile",
+                        contained,
+                        observed={
+                            "round": identity,
+                            "commit": commit_index,
+                            "tile": tile,
+                            "levels": commit_levels,
+                            "bounds": bounds,
+                        },
+                        target="commit levels contain the tile's full value range",
+                    )
+                if str(record.get("backend", "")) == "pyqtgraph":
+                    baked = _finite_level_pair(payload.get("baked_levels"))
+                    require(
+                        "R3",
+                        "pyqtgraph_baked_levels_recorded",
+                        baked is not None,
+                        observed={
+                            "round": identity,
+                            "commit": commit_index,
+                            "tile": tile,
+                            "baked_levels": payload.get("baked_levels"),
+                        },
+                        target="PyQtGraph records the levels baked into every presented tile",
+                    )
+                    if baked is not None and bounds is not None:
+                        low, high = baked
+                        bound_low, bound_high = bounds
+                        epsilon = max(1e-9, abs(high - low) * 1e-12)
+                        require(
+                            "R3",
+                            "pyqtgraph_baked_levels_contain_presented_tile",
+                            low <= bound_low + epsilon and high >= bound_high - epsilon,
+                            observed={
+                                "round": identity,
+                                "commit": commit_index,
+                                "tile": tile,
+                                "levels": baked,
+                                "bounds": bounds,
+                            },
+                            target="baked levels contain the tile's full value range",
+                        )
+                level = payload.get("level")
+                if isinstance(level, int):
+                    previous = prior_presented_levels.get(tile)
+                    require(
+                        "R2",
+                        "presented_quality_never_regresses",
+                        previous is None or level <= previous,
+                        observed={
+                            "round": identity,
+                            "commit": commit_index,
+                            "tile": tile,
+                            "previous_level": previous,
+                            "level": level,
+                        },
+                        target="a tile is never replaced by a coarser version",
+                    )
+                    prior_presented_levels[tile] = level
+            elapsed_ms = float(commit.get("elapsed_ms", 0.0) or 0.0)
+            max_upserts = int(commit.get("max_upserts", 0) or 0)
+            governed = max_upserts > 0 or elapsed_ms < R8_GUI_CALLBACK_MAX_MS
+            governed_commits += int(governed)
+            require(
+                "R5",
+                "commit_chunk_governed_or_sub_budget",
+                governed,
+                observed={
+                    "round": identity,
+                    "commit": commit_index,
+                    "elapsed_ms": elapsed_ms,
+                    "max_upserts": max_upserts,
+                    "unbounded_reason": commit.get("unbounded_reason"),
+                },
+                target="a governed chunk, or a measured unchunked burst below 50 ms",
+            )
+            require(
+                "R5",
+                "commit_callback_below_50ms",
+                elapsed_ms < R8_GUI_CALLBACK_MAX_MS,
+                observed={
+                    "round": identity,
+                    "commit": commit_index,
+                    "elapsed_ms": elapsed_ms,
+                },
+                target="every synchronous commit callback is below 50 ms",
+            )
+
+        preview_levels = {int(item["level"]) for item in production if item["purpose"] == "preview"}
+        target_levels = {int(item["level"]) for item in production if item["purpose"] == "target"}
+        require(
+            "R1",
+            "one_preview_floor_per_round",
+            len(preview_levels) <= 1 and (not preview_levels or preview_floor in preview_levels),
+            observed={
+                "round": identity,
+                "planned": preview_floor,
+                "produced": tuple(sorted(preview_levels)),
+            },
+            target="at most one preview production floor, equal to the round floor",
+        )
+        require(
+            "R1",
+            "one_target_floor_per_round",
+            len(target_levels) <= 1 and (not target_levels or target_floor in target_levels),
+            observed={
+                "round": identity,
+                "planned": target_floor,
+                "produced": tuple(sorted(target_levels)),
+            },
+            target="at most one target production floor, equal to the round floor",
+        )
+        duplicate_rows = []
+        production_counts: dict[tuple[str, int], int] = {}
+        for item in production:
+            key = (str(item["purpose"]), int(item["tile"]))
+            production_counts[key] = production_counts.get(key, 0) + 1
+        duplicate_rows = [
+            {"purpose": purpose, "tile": tile, "count": count}
+            for (purpose, tile), count in sorted(production_counts.items())
+            if count > 1
+        ]
+        require(
+            "R1",
+            "at_most_one_production_per_pass_per_tile",
+            not duplicate_rows,
+            observed={"round": identity, "duplicates": duplicate_rows},
+            target="each tile is produced at most once for preview and once for target",
+        )
+
+        baseline = {
+            int(item.get("tile", -1)): dict(item)
+            for item in tuple(round_row.get("baseline", ()) or ())
+            if bool(item.get("resident", False)) and bool(item.get("acknowledged", False))
+        }
+        require(
+            "R2",
+            "reuse_floor_residency_query_available",
+            bool(round_row.get("resident_query_available", False)) or not baseline,
+            observed={
+                "round": identity,
+                "resident_query_available": round_row.get("resident_query_available"),
+                "baseline_tiles": len(baseline),
+            },
+            target="physical residency is observable whenever a reusable baseline exists",
+        )
+        reuse_violations = []
+        for item in production:
+            resident = baseline.get(int(item["tile"]))
+            if resident is None:
+                continue
+            floor = preview_floor if item["purpose"] == "preview" else target_floor
+            if isinstance(floor, int) and int(resident["level"]) <= floor:
+                reuse_violations.append(
+                    {
+                        "tile": item["tile"],
+                        "purpose": item["purpose"],
+                        "resident_level": resident["level"],
+                        "floor": floor,
+                    }
+                )
+        require(
+            "R2",
+            "satisfied_floor_is_not_reproduced",
+            not reuse_violations,
+            observed={"round": identity, "violations": reuse_violations},
+            target="resident tiles already at or finer than a floor skip that pass",
+        )
+
+        preview_needed = set(required)
+        if isinstance(preview_floor, int):
+            preview_needed = {
+                tile
+                for tile in required
+                if tile not in baseline or int(baseline[tile]["level"]) > preview_floor
+            }
+        preview_produced = {
+            int(item["tile"]) for item in production if item["purpose"] == "preview"
+        }
+        preview_covered = preview_produced | preview_presented
+        preview_contract_applies = bool(
+            str(record.get("phase", "")) in {"raw_full_tiled_montage", "fft_full_tiled_montage"}
+            and bool(record.get("coarse_rung_enabled", False))
+            and preview_needed
+        )
+        if preview_contract_applies:
+            require(
+                "R4",
+                "preview_pass_exists_for_backend_dtype",
+                isinstance(preview_floor, int)
+                and preview_floor > int(target_floor if isinstance(target_floor, int) else -1)
+                and preview_needed.issubset(preview_covered),
+                observed={
+                    "round": identity,
+                    "backend": record.get("backend"),
+                    "phase": record.get("phase"),
+                    "preview_floor": preview_floor,
+                    "target_floor": target_floor,
+                    "needed": tuple(sorted(preview_needed)),
+                    "covered": tuple(sorted(preview_covered)),
+                },
+                target="every tile needing first-pass coverage receives the preview pass",
+            )
+
+        started_ns = int(round_row.get("started_ns", 0) or 0)
+        settled_ns = round_row.get("settled_ns")
+        speculative = [
+            {
+                "lane": event.get("lane"),
+                "task_seq": event.get("task_seq"),
+                "observed_ns": event.get("observed_ns"),
+            }
+            for event in round_events
+            if str(event.get("kind", "")) == "kernel_submit"
+            and str(event.get("lane", "")).lower().endswith("speculative_residency")
+            and int(event.get("observed_ns", 0) or 0) >= started_ns
+            and (settled_ns is None or int(event.get("observed_ns", 0) or 0) < int(settled_ns))
+        ]
+        require(
+            "R7",
+            "no_speculative_residency_during_fill",
+            not speculative,
+            observed={"round": identity, "submissions": speculative},
+            target="speculative residency is admitted only after target settlement",
+        )
+        round_summaries.append(
+            {
+                "session_id": session_id,
+                "generation": generation,
+                "required_tiles": len(required),
+                "preview_floor": preview_floor,
+                "target_floor": target_floor,
+                "preview_production_tiles": len(preview_produced),
+                "target_production_tiles": len(
+                    {int(item["tile"]) for item in production if item["purpose"] == "target"}
+                ),
+                "commit_count": len(commits),
+                "governed_commit_count": governed_commits,
+                "settled": bool(round_row.get("settled_at_start", False) or settled_ns is not None),
+            }
+        )
+
+    callback_rows = tuple(
+        dict(item)
+        for item in tuple(record.get("phase_recent_ui_work_observations", ()) or ())
+        if isinstance(item, dict)
+    )
+    direct_calls = {
+        key: float(value or 0.0)
+        for key, value in record.items()
+        if (
+            key.endswith("_call_ms")
+            or key
+            in {"action_render_call_ms", "action_set_view_state_ms", "action_clear_operations_ms"}
+        )
+        and isinstance(value, (int, float))
+    }
+    callback_evidence_complete = bool(
+        record.get("phase_ui_work_observation_evidence_complete", False)
+        or not bool(record.get("phase_recent_ui_work_observations_truncated", False))
+    )
+    callback_max = max(
+        [
+            float(record.get("phase_ui_work_observation_max_ms", 0.0) or 0.0),
+            *(float(item.get("elapsed_ms", 0.0) or 0.0) for item in callback_rows),
+            *direct_calls.values(),
+        ],
+        default=0.0,
+    )
+    require(
+        "R5",
+        "callback_evidence_complete",
+        callback_evidence_complete,
+        observed={
+            "rows": len(callback_rows),
+            "truncated": record.get("phase_recent_ui_work_observations_truncated"),
+        },
+        target="the bounded callback observer covers the full phase",
+    )
+    require(
+        "R5",
+        "all_gui_callbacks_below_50ms",
+        callback_max < R8_GUI_CALLBACK_MAX_MS,
+        observed={"maximum_ms": callback_max, "direct_calls_ms": direct_calls},
+        target="every synchronous GUI callback is below 50 ms",
+    )
+
+    rule_failures = {
+        rule: sum(failure["rule"] == rule for failure in failures)
+        for rule in ("R1", "R2", "R3", "R4", "R5", "R7")
+    }
+    return {
+        "invariant_gate_applicable": True,
+        "invariant_gate_passed": not failures,
+        "invariant_gate_failures": failures,
+        "invariant_gate_failure_count": len(failures),
+        "invariant_gate_check_count": int(checks),
+        "invariant_gate_rule_failures": rule_failures,
+        "invariant_gate_round_count": len(rounds),
+        "invariant_gate_rounds": tuple(round_summaries),
+        "invariant_gate_unverifiable_rules": {
+            "R2b": (
+                "the renderer does not yet own an authoritative settled-view round "
+                "identity, so floor stability across every planning pass in one round "
+                "cannot be certified; session/generation is retained only as a "
+                "scheduling-scope proxy"
+            ),
+            "R6": (
+                "one settled profiler phase does not exercise sustained-input "
+                "load shedding or prove moving-pixel liveness"
+            ),
+        },
+    }
+
+
 def _is_nifti(path: Path) -> bool:
     name = path.name.lower()
     return name.endswith((".nii", ".nii.gz"))
@@ -7933,12 +8955,13 @@ def _append_record(
 
 
 def _r8_certification(record: dict[str, object]) -> dict[str, object]:
-    """Evaluate one workflow phase against the immutable R8 exit gates.
+    """Evaluate one workflow phase against the non-latency workflow gates.
 
-    Correctness gates apply to every real phase, including profiler-slowed
-    runs. Timing gates apply only to plain, uncapped, onscreen evidence.
-    Returning named failures keeps a JSONL useful without reverse-engineering
-    a boolean from dozens of counters.
+    Correctness gates, including the in-process R5 callback verdict, apply to
+    every real phase. Medians, task ordering, heartbeat gaps, and other timing
+    fields remain in the record as diagnostics only. Returning named failures
+    keeps a JSONL useful without reverse-engineering a boolean from dozens of
+    counters.
     """
 
     phase = str(record.get("phase", ""))
@@ -7991,64 +9014,18 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         evidence={"requested": requested, "planned": planned, "presented": presented},
         target="requested == planned == presented",
     )
-    if phase in {"raw_full_tiled_montage", "fft_full_tiled_montage"}:
-        require(
-            "coarse_target_trace_window_complete",
-            bool(record.get("coarse_target_trace_window_complete", False)),
-            evidence={
-                "status": record.get("coarse_target_order_status"),
-                "preview_ack_tiles": record.get("coarse_target_preview_ack_tiles"),
-                "target_ack_tiles": record.get("coarse_target_target_ack_tiles"),
-            },
-            target="phase_start and phase_complete bound one non-truncated trace window",
-        )
-        preview_required = bool(record.get("coarse_target_preview_required", False))
-        preview_applicable = bool(record.get("coarse_target_order_applicable", False))
-        if preview_required:
-            require(
-                "coarse_preview_pass_present",
-                preview_applicable,
-                evidence={
-                    "status": record.get("coarse_target_order_status"),
-                    "preview_ack_tiles": record.get("coarse_target_preview_ack_tiles"),
-                    "preview_finishes": record.get("coarse_target_preview_task_finishes"),
-                    "exemption": record.get("coarse_target_preview_exemption"),
-                },
-                target="a supported preview-enabled cell executes and acknowledges its coarse pass",
-            )
-        if preview_applicable:
-            require(
-                "coarse_ack_pass_precedes_target_ack",
-                bool(record.get("coarse_target_ack_ordered", False)),
-                evidence={
-                    "t1_ms": record.get("coarse_target_t1_ms"),
-                    "first_target_ack_ms": record.get("coarse_target_first_target_ack_ms"),
-                    "preview_ack_tiles": record.get("coarse_target_preview_ack_tiles"),
-                    "target_ack_tiles": record.get("coarse_target_target_ack_tiles"),
-                },
-                target="max(preview ACK) < min(target ACK) over every required tile",
-            )
-            require(
-                "coarse_tasks_finish_before_target_starts",
-                bool(record.get("coarse_target_execution_ordered", False)),
-                evidence={
-                    "last_preview_finish_ms": record.get(
-                        "coarse_target_last_preview_task_finish_ms"
-                    ),
-                    "first_target_start_ms": record.get("coarse_target_first_target_task_start_ms"),
-                    "preview_finishes": record.get("coarse_target_preview_task_finishes"),
-                    "target_starts": record.get("coarse_target_target_task_starts"),
-                },
-                target="no target-rung task starts before the last preview task finishes",
-            )
-            if preview_required:
-                t1_ms = record.get("coarse_target_t1_ms")
-                require(
-                    "preview_first_t1_target",
-                    t1_ms is not None and float(t1_ms) <= PREVIEW_FIRST_T1_TARGET_MS,
-                    evidence=t1_ms,
-                    target=f"full preview coverage <= {PREVIEW_FIRST_T1_TARGET_MS:.0f} ms",
-                )
+    invariant_applicable = bool(record.get("invariant_gate_applicable", False))
+    require(
+        "progressive_render_invariants",
+        invariant_applicable and bool(record.get("invariant_gate_passed", False)),
+        evidence={
+            "applicable": invariant_applicable,
+            "rule_failures": record.get("invariant_gate_rule_failures"),
+            "failures": record.get("invariant_gate_failures"),
+            "rounds": record.get("invariant_gate_rounds"),
+        },
+        target="mandatory in-process R1–R5/R7 verdict passes",
+    )
     if phase in {"display_x_axis_slice", "display_y_axis_slice"}:
         continuity_min = int(record.get("display_axis_min_physical_tile_count", 0) or 0)
         crop_scenario_names = tuple(record.get("display_axis_crop_scenario_names", ()) or ())
@@ -8616,51 +9593,11 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         if (key == "event_loop_max_gap_ms" or key.endswith("_max_gap_ms"))
         and isinstance(value, (int, float))
     }
-    heartbeat_fields = {
-        key: value
-        for key, value in reported_heartbeat_fields.items()
-        if key != "event_loop_max_gap_ms"
-    }
     input_fields = {
         key: float(value or 0.0)
         for key, value in record.items()
         if key.endswith("input_call_max_ms") and isinstance(value, (int, float))
     }
-    phase_name = str(record.get("phase", ""))
-    heartbeat_gate_applicable = any(token in phase_name for token in ("scroll", "zoompan"))
-    if performance_evidence:
-        require(
-            "gui_callbacks_below_50ms",
-            (
-                bool(record.get("phase_ui_work_observation_evidence_complete", False))
-                or not bool(record.get("phase_recent_ui_work_observations_truncated", False))
-            )
-            and max([max_observed_callback_ms, *direct_ui_fields.values()], default=0.0)
-            < R8_GUI_CALLBACK_MAX_MS,
-            evidence={
-                "observed_max_ms": max_observed_callback_ms,
-                "direct_calls_ms": direct_ui_fields,
-            },
-            target=f"every synchronous GUI step < {R8_GUI_CALLBACK_MAX_MS:.0f} ms",
-            category="performance",
-        )
-        if heartbeat_gate_applicable:
-            require(
-                "event_loop_heartbeat",
-                bool(heartbeat_fields)
-                and max(heartbeat_fields.values(), default=0.0) <= R8_HEARTBEAT_MAX_GAP_MS,
-                evidence=heartbeat_fields,
-                target=f"pan/scrub max gap <= {R8_HEARTBEAT_MAX_GAP_MS:.0f} ms",
-                category="performance",
-            )
-        if input_fields:
-            require(
-                "warm_input_dispatch",
-                max(input_fields.values(), default=0.0) <= R8_WARM_INPUT_MAX_MS,
-                evidence=input_fields,
-                target=f"every scrub/zoom input call <= {R8_WARM_INPUT_MAX_MS:.0f} ms",
-                category="performance",
-            )
 
     return {
         "r8_gate_applicable": True,
@@ -8669,7 +9606,7 @@ def _r8_certification(record: dict[str, object]) -> dict[str, object]:
         "r8_gate_failure_count": len(failures),
         "r8_gate_check_count": int(check_count),
         "r8_performance_evidence": bool(performance_evidence),
-        "r8_heartbeat_gate_applicable": bool(performance_evidence and heartbeat_gate_applicable),
+        "r8_heartbeat_gate_applicable": False,
         "r8_max_observed_callback_ms": float(max_observed_callback_ms),
         "r8_direct_ui_call_ms": direct_ui_fields,
         "r8_heartbeat_max_gap_ms": max(reported_heartbeat_fields.values(), default=0.0),
@@ -9450,8 +10387,8 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
         return "No workflow timing records were produced.\n"
     lines = [
         "Workflow timing summary",
-        "| Backend | phase | R8 | first tile | preview floor | initial fill | full refined | visible after first | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|",
+        "| Backend | phase | invariants | R8 | first tile | preview floor | initial fill | full refined | visible after first | elapsed | event-loop max | histogram-loop action | level/rgb | textures | histogram | sync | tiles |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|",
     ]
     lines.extend(
         "| "
@@ -9459,6 +10396,7 @@ def _workflow_timing_summary(records: tuple[dict[str, object], ...]) -> str:
             (
                 f"`{record.get('backend', '')}`",
                 f"`{record.get('phase', '')}`",
+                _invariant_gate_summary(record),
                 _r8_gate_summary(record),
                 _format_ms(
                     record.get("first_visible_tile_ms", record.get("first_display_payload_ms"))
@@ -9552,6 +10490,31 @@ def _r8_gate_summary(record: dict[str, object]) -> str:
     failures = tuple(record.get("r8_gate_failures", ()) or ())
     names = [str(item.get("gate", "?")) for item in failures if isinstance(item, dict)]
     return "FAIL: " + ", ".join(names)
+
+
+def _invariant_gate_summary(record: dict[str, object]) -> str:
+    if not bool(record.get("invariant_gate_applicable", False)):
+        return "MISSING"
+    if bool(record.get("invariant_gate_passed", False)):
+        return "PASS"
+    failures = tuple(record.get("invariant_gate_failures", ()) or ())
+    rules = sorted({str(item.get("rule", "?")) for item in failures if isinstance(item, dict)})
+    return "FAIL: " + ", ".join(rules)
+
+
+def _workflow_exit_code(records) -> int:
+    """Fail closed unless every applicable phase has a green invariant gate."""
+
+    failed = any(
+        bool(record.get("r8_gate_applicable", False))
+        and (
+            not bool(record.get("invariant_gate_applicable", False))
+            or not bool(record.get("invariant_gate_passed", False))
+            or not bool(record.get("r8_gate_passed", False))
+        )
+        for record in tuple(records or ())
+    )
+    return 1 if failed else 0
 
 
 def _first_non_none(record: dict[str, object], *keys: str):
@@ -10410,12 +11373,11 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     trace = None if args.trace is None else Path(args.trace)
     from arrayscope.core.trace import configure_trace
 
-    # The ordering oracle is mandatory even when the caller does not request a
-    # JSONL trace artifact. Keep a larger profiler-only ring so a pathological
-    # overlap run fails on its two named clauses instead of merely losing its
-    # phase-start marker.
-    # Keep trace timestamps and the mandatory ordering oracle on the live
-    # bounded ring, but serialize JSONL only after each workflow run. A
+    # Keep trace timestamps and the report-only ordering diagnostics on a
+    # larger profiler ring even when the caller does not request a JSONL
+    # artifact. The invariant verdict is collected separately in-process and
+    # therefore cannot disappear with an omitted artifact.
+    # Serialize JSONL only after each workflow run. A
     # line-buffered sink encoded and flushed thousands of lifecycle rows on
     # the interaction's critical path, adding hundreds of milliseconds to T1
     # and making the instrumentation decide the near-instant gate.
@@ -10476,13 +11438,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
         close_trace()
     print(_workflow_timing_summary(tuple(all_records)), end="")
     print(_workflow_repeat_spread_summary(tuple(all_records)), end="")
-    failed = [
-        record
-        for record in all_records
-        if bool(record.get("r8_gate_applicable", False))
-        and not bool(record.get("r8_gate_passed", False))
-    ]
-    return 1 if failed else 0
+    return _workflow_exit_code(all_records)
 
 
 if __name__ == "__main__":

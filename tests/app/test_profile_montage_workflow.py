@@ -4,6 +4,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1345,16 +1346,16 @@ def test_profile_montage_build_holds_intermediate_fit_range_signal():
 
 def _passing_r8_phase_record(*, backend="wgpu"):
     evidence_quality = 1 if backend == "wgpu" else 3
-    return {
+    record = {
         "phase": "raw_full_tiled_montage",
         "backend": backend,
         "profiler_type": "plain",
         "pacing_evidence": True,
         "complete": True,
         "requested_grid_fully_visible": True,
-        "requested_tile_count": 272,
-        "active_planned_tile_count": 272,
-        "active_presented_tile_count": 272,
+        "requested_tile_count": 2,
+        "active_planned_tile_count": 2,
+        "active_presented_tile_count": 2,
         "presentation_settled": True,
         "stale_level_tiles": 0,
         "pending_level_tiles": 0,
@@ -1397,8 +1398,8 @@ def _passing_r8_phase_record(*, backend="wgpu"):
         "fit_disable_viewport_mode": "auto_untouched",
         "fit_disable_view_range": [[0.0, 1.0], [0.0, 1.0]],
         "grid_kind": "full",
-        "grid_tile_count": 272,
-        "full_tile_count": 272,
+        "grid_tile_count": 2,
+        "full_tile_count": 2,
         "tile_cap_applied": False,
         "phase_recent_ui_work_observations": [{"elapsed_ms": 7.0}],
         "phase_recent_ui_work_observations_truncated": False,
@@ -1420,11 +1421,110 @@ def _passing_r8_phase_record(*, backend="wgpu"):
         "coarse_target_first_target_ack_ms": 1000.0,
         "coarse_target_last_preview_task_finish_ms": 700.0,
         "coarse_target_first_target_task_start_ms": 900.0,
-        "coarse_target_preview_ack_tiles": 272,
-        "coarse_target_target_ack_tiles": 272,
-        "coarse_target_preview_task_finishes": 272,
-        "coarse_target_target_task_starts": 272,
+        "coarse_target_preview_ack_tiles": 2,
+        "coarse_target_target_ack_tiles": 2,
+        "coarse_target_preview_task_finishes": 2,
+        "coarse_target_target_task_starts": 2,
     }
+    from arrayscope.tools.profile_montage_workflow import (
+        _progressive_invariant_certification,
+    )
+
+    events = []
+    task_seq = 1
+    for _purpose, rung, level in (("preview", 0, 4), ("target", 2, 2)):
+        for tile in (0, 1):
+            events.extend(
+                (
+                    {
+                        "kind": "kernel_start",
+                        "session_id": 7,
+                        "scheduling_generation": 3,
+                        "task_seq": task_seq,
+                        "tile_number": tile,
+                        "rung": rung,
+                        "level": level,
+                    },
+                    {
+                        "kind": "kernel_finish",
+                        "session_id": 7,
+                        "scheduling_generation": 3,
+                        "task_seq": task_seq,
+                        "tile_number": tile,
+                        "rung": rung,
+                        "level": level,
+                        "outcome": "completed",
+                    },
+                )
+            )
+            task_seq += 1
+
+    def payload(tile, *, level, quality, bounds):
+        return {
+            "tile": tile,
+            "acknowledged": True,
+            "level": level,
+            "quality": quality,
+            "source_id": f"tile-{tile}",
+            "value_bounds": bounds,
+            "baked_levels": (-2.0, 8.0) if backend == "pyqtgraph" else None,
+        }
+
+    commits = (
+        {
+            "session_id": 7,
+            "presented_tiles": (0, 1),
+            "delta_qualities": ((0, "preview", 4), (1, "preview", 4)),
+            "presented_payloads": (
+                payload(0, level=4, quality="preview", bounds=(-1.0, 7.0)),
+                payload(1, level=4, quality="preview", bounds=(-1.0, 7.0)),
+            ),
+            "physical_levels": (-2.0, 8.0),
+            "elapsed_ms": 7.0,
+            "max_upserts": 2,
+            "uploads_by_level": ((2, 0), (4, 2)),
+            "target_settled_after": False,
+        },
+        {
+            "session_id": 7,
+            "presented_tiles": (0, 1),
+            "delta_qualities": ((0, "exact", 2), (1, "exact", 2)),
+            "presented_payloads": (
+                payload(0, level=2, quality="exact", bounds=(-2.0, 8.0)),
+                payload(1, level=2, quality="exact", bounds=(-2.0, 8.0)),
+            ),
+            "physical_levels": (-2.0, 8.0),
+            "elapsed_ms": 8.0,
+            "max_upserts": 2,
+            "uploads_by_level": ((2, 2), (4, 2)),
+            "target_settled_after": True,
+        },
+    )
+    evidence = {
+        "events": tuple(events),
+        "rounds": (
+            {
+                "round_id": "round-7",
+                "session_id": 7,
+                "generation": 3,
+                "started_ns": 1,
+                "settled_ns": 2,
+                "required_tiles": (0, 1),
+                "target_floor": 2,
+                "preview_floor": 4,
+                "baseline": (),
+                "resident_query_available": True,
+                "uploads_by_level_available": backend == "wgpu",
+                "uploads_by_level_start": {2: 0, 4: 0},
+                "settled_at_start": False,
+                "commits": commits,
+            },
+        ),
+        "event_truncated": False,
+        "presented_refs_truncated": False,
+    }
+    record.update(_progressive_invariant_certification(evidence, record))
+    return record
 
 
 def test_r8_certification_passes_complete_semantic_and_responsive_phase():
@@ -1437,6 +1537,350 @@ def test_r8_certification_passes_complete_semantic_and_responsive_phase():
         assert result["r8_performance_evidence"] is True
         assert result["r8_gate_passed"] is True
         assert result["r8_gate_failures"] == []
+
+
+def _passing_contract_evidence(*, backend="wgpu"):
+    baked = (-2.0, 8.0) if backend == "pyqtgraph" else None
+    events = (
+        {
+            "kind": "kernel_start",
+            "session_id": 11,
+            "scheduling_generation": 4,
+            "task_seq": 1,
+            "tile_number": 0,
+            "rung": 0,
+            "level": 4,
+        },
+        {
+            "kind": "kernel_finish",
+            "session_id": 11,
+            "scheduling_generation": 4,
+            "task_seq": 1,
+            "tile_number": 0,
+            "rung": 0,
+            "level": 4,
+            "outcome": "completed",
+        },
+        {
+            "kind": "kernel_start",
+            "session_id": 11,
+            "scheduling_generation": 4,
+            "task_seq": 2,
+            "tile_number": 0,
+            "rung": 2,
+            "level": 2,
+        },
+        {
+            "kind": "kernel_finish",
+            "session_id": 11,
+            "scheduling_generation": 4,
+            "task_seq": 2,
+            "tile_number": 0,
+            "rung": 2,
+            "level": 2,
+            "outcome": "completed",
+        },
+    )
+    commits = (
+        {
+            "presented_tiles": (0,),
+            "delta_qualities": ((0, "preview", 4),),
+            "presented_payloads": (
+                {
+                    "tile": 0,
+                    "acknowledged": True,
+                    "level": 4,
+                    "quality": "preview",
+                    "source_id": "source-0",
+                    "value_bounds": (-1.0, 7.0),
+                    "baked_levels": baked,
+                },
+            ),
+            "physical_levels": (-2.0, 8.0),
+            "elapsed_ms": 8.0,
+            "max_upserts": 1,
+            "uploads_by_level": ((2, 0), (4, 1)),
+        },
+        {
+            "presented_tiles": (0,),
+            "delta_qualities": ((0, "exact", 2),),
+            "presented_payloads": (
+                {
+                    "tile": 0,
+                    "acknowledged": True,
+                    "level": 2,
+                    "quality": "exact",
+                    "source_id": "source-0",
+                    "value_bounds": (-2.0, 8.0),
+                    "baked_levels": baked,
+                },
+            ),
+            "physical_levels": (-2.0, 8.0),
+            "elapsed_ms": 9.0,
+            "max_upserts": 1,
+            "uploads_by_level": ((2, 1), (4, 1)),
+        },
+    )
+    return {
+        "events": events,
+        "rounds": (
+            {
+                "round_id": "round-11",
+                "session_id": 11,
+                "generation": 4,
+                "started_ns": 10,
+                "settled_ns": 100,
+                "required_tiles": (0,),
+                "target_floor": 2,
+                "preview_floor": 4,
+                "baseline": (),
+                "resident_query_available": True,
+                "uploads_by_level_available": backend == "wgpu",
+                "uploads_by_level_start": {2: 0, 4: 0},
+                "settled_at_start": False,
+                "commits": commits,
+            },
+        ),
+        "event_truncated": False,
+        "presented_refs_truncated": False,
+    }
+
+
+def _contract_verdict(evidence, *, backend="wgpu", **record_updates):
+    from arrayscope.tools.profile_montage_workflow import (
+        _progressive_invariant_certification,
+    )
+
+    record = {
+        "phase": "raw_full_tiled_montage",
+        "backend": backend,
+        "coarse_rung_enabled": True,
+        "phase_recent_ui_work_observations": ({"elapsed_ms": 5.0},),
+        "phase_recent_ui_work_observations_truncated": False,
+        "action_render_call_ms": 4.0,
+    }
+    record.update(record_updates)
+    return _progressive_invariant_certification(evidence, record)
+
+
+def _failed_invariant_gates(result):
+    return {failure["gate"] for failure in result["invariant_gate_failures"]}
+
+
+def test_progressive_invariant_fixture_carries_a_real_contract_proof():
+    result = _contract_verdict(_passing_contract_evidence())
+
+    assert result["invariant_gate_passed"] is True
+    assert result["invariant_gate_round_count"] == 1
+    assert result["invariant_gate_rule_failures"] == {
+        "R1": 0,
+        "R2": 0,
+        "R3": 0,
+        "R4": 0,
+        "R5": 0,
+        "R7": 0,
+    }
+    assert set(result["invariant_gate_unverifiable_rules"]) == {"R2b", "R6"}
+
+
+def test_progressive_invariant_gate_fails_without_authoritative_round_identity():
+    evidence = deepcopy(_passing_contract_evidence())
+    evidence["rounds"][0]["round_id"] = None
+
+    result = _contract_verdict(evidence)
+
+    assert result["invariant_gate_passed"] is False
+    assert "authoritative_round_identity_present" in _failed_invariant_gates(result)
+
+
+def test_r8_certification_fails_closed_without_in_process_invariant_verdict():
+    from arrayscope.tools.profile_montage_workflow import _r8_certification
+
+    record = _passing_r8_phase_record()
+    for key in tuple(record):
+        if key.startswith("invariant_gate_"):
+            record.pop(key)
+
+    result = _r8_certification(record)
+
+    assert result["r8_gate_passed"] is False
+    assert "progressive_render_invariants" in {
+        failure["gate"] for failure in result["r8_gate_failures"]
+    }
+
+
+def test_workflow_exit_code_requires_invariant_verdict_without_artifact():
+    from arrayscope.tools.profile_montage_workflow import _workflow_exit_code
+
+    assert (
+        _workflow_exit_code(
+            (
+                {
+                    "r8_gate_applicable": True,
+                    "r8_gate_passed": True,
+                    "invariant_gate_applicable": True,
+                    "invariant_gate_passed": True,
+                },
+            )
+        )
+        == 0
+    )
+    assert (
+        _workflow_exit_code(
+            (
+                {
+                    "r8_gate_applicable": True,
+                    "r8_gate_passed": True,
+                },
+            )
+        )
+        == 1
+    )
+    assert (
+        _workflow_exit_code(
+            (
+                {
+                    "r8_gate_applicable": True,
+                    "r8_gate_passed": True,
+                    "invariant_gate_applicable": True,
+                    "invariant_gate_passed": False,
+                },
+            )
+        )
+        == 1
+    )
+
+
+def test_progressive_invariant_gate_rejects_duplicate_target_production():
+    evidence = deepcopy(_passing_contract_evidence())
+    events = list(evidence["events"])
+    events.extend(
+        (
+            {
+                "kind": "kernel_start",
+                "session_id": 11,
+                "scheduling_generation": 4,
+                "task_seq": 3,
+                "tile_number": 0,
+                "rung": 2,
+                "level": 2,
+            },
+            {
+                "kind": "kernel_finish",
+                "session_id": 11,
+                "scheduling_generation": 4,
+                "task_seq": 3,
+                "tile_number": 0,
+                "rung": 2,
+                "level": 2,
+                "outcome": "completed",
+            },
+        )
+    )
+    evidence["events"] = tuple(events)
+
+    result = _contract_verdict(evidence)
+
+    assert "at_most_one_production_per_pass_per_tile" in _failed_invariant_gates(result)
+
+
+def test_progressive_invariant_gate_rejects_wgpu_upload_outside_round_floors():
+    evidence = deepcopy(_passing_contract_evidence())
+    evidence["rounds"][0]["commits"][0]["uploads_by_level"] = (
+        (0, 3),
+        (2, 0),
+        (4, 1),
+    )
+
+    result = _contract_verdict(evidence)
+
+    assert "physical_uploads_stay_on_round_floors" in _failed_invariant_gates(result)
+
+
+def test_progressive_invariant_gate_rejects_reproduction_above_reuse_floor():
+    evidence = deepcopy(_passing_contract_evidence())
+    evidence["rounds"][0]["baseline"] = (
+        {
+            "tile": 0,
+            "level": 2,
+            "quality": "exact",
+            "resident": True,
+            "acknowledged": True,
+        },
+    )
+
+    result = _contract_verdict(evidence)
+
+    assert "satisfied_floor_is_not_reproduced" in _failed_invariant_gates(result)
+
+
+def test_progressive_invariant_gate_rejects_clipped_presented_tile():
+    evidence = deepcopy(_passing_contract_evidence())
+    evidence["rounds"][0]["commits"][0]["physical_levels"] = (0.0, 1.0)
+
+    result = _contract_verdict(evidence)
+
+    assert "commit_levels_contain_presented_tile" in _failed_invariant_gates(result)
+
+
+def test_progressive_invariant_gate_requires_pyqtgraph_tile_value_and_bake_evidence():
+    evidence = deepcopy(_passing_contract_evidence(backend="pyqtgraph"))
+    payload = evidence["rounds"][0]["commits"][0]["presented_payloads"][0]
+    payload["value_bounds"] = None
+    payload["baked_levels"] = None
+
+    result = _contract_verdict(evidence, backend="pyqtgraph")
+
+    assert {
+        "presented_tile_value_bounds_recorded",
+        "pyqtgraph_baked_levels_recorded",
+    }.issubset(_failed_invariant_gates(result))
+
+
+def test_progressive_invariant_gate_rejects_missing_complex_preview_without_exemption():
+    evidence = deepcopy(_passing_contract_evidence(backend="pyqtgraph"))
+    evidence["events"] = tuple(
+        event for event in evidence["events"] if int(event.get("rung", -1)) != 0
+    )
+    evidence["rounds"][0]["commits"] = (evidence["rounds"][0]["commits"][1],)
+
+    result = _contract_verdict(
+        evidence,
+        backend="pyqtgraph",
+        phase="fft_full_tiled_montage",
+    )
+
+    assert "preview_pass_exists_for_backend_dtype" in _failed_invariant_gates(result)
+
+
+def test_progressive_invariant_gate_rejects_unbounded_over_budget_commit():
+    evidence = deepcopy(_passing_contract_evidence())
+    evidence["rounds"][0]["commits"][0].update(elapsed_ms=55.0, max_upserts=0)
+
+    result = _contract_verdict(evidence)
+
+    assert {
+        "commit_chunk_governed_or_sub_budget",
+        "commit_callback_below_50ms",
+    }.issubset(_failed_invariant_gates(result))
+
+
+def test_progressive_invariant_gate_rejects_speculative_residency_inside_fill():
+    evidence = deepcopy(_passing_contract_evidence())
+    evidence["events"] = (
+        *evidence["events"],
+        {
+            "kind": "kernel_submit",
+            "session_id": 11,
+            "lane": "Lane.SPECULATIVE_RESIDENCY",
+            "task_seq": 99,
+            "observed_ns": 50,
+        },
+    )
+
+    result = _contract_verdict(evidence)
+
+    assert "no_speculative_residency_during_fill" in _failed_invariant_gates(result)
 
 
 def test_coarse_target_trace_metrics_rejects_ack_and_worker_overlap():
@@ -2194,7 +2638,7 @@ def test_coarse_target_trace_metrics_does_not_build_t2_from_predecessor_session(
     assert result["coarse_target_ack_ordered"] is False
 
 
-def test_r8_certification_hard_fails_both_coarse_target_order_clauses():
+def test_r8_certification_reports_coarse_target_order_without_gating():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
     record = _passing_r8_phase_record(backend="wgpu")
@@ -2207,11 +2651,12 @@ def test_r8_certification_hard_fails_both_coarse_target_order_clauses():
     result = _r8_certification(record)
 
     failures = {failure["gate"] for failure in result["r8_gate_failures"]}
-    assert "coarse_ack_pass_precedes_target_ack" in failures
-    assert "coarse_tasks_finish_before_target_starts" in failures
+    assert result["r8_gate_passed"] is True
+    assert "coarse_ack_pass_precedes_target_ack" not in failures
+    assert "coarse_tasks_finish_before_target_starts" not in failures
 
 
-def test_r8_certification_requires_supported_enabled_preview_to_exist():
+def test_r8_certification_uses_invariant_preview_verdict_not_order_diagnostic():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
     record = _passing_r8_phase_record(backend="wgpu")
@@ -2228,10 +2673,11 @@ def test_r8_certification_requires_supported_enabled_preview_to_exist():
     result = _r8_certification(record)
 
     failures = {failure["gate"] for failure in result["r8_gate_failures"]}
-    assert "coarse_preview_pass_present" in failures
+    assert result["r8_gate_passed"] is True
+    assert "coarse_preview_pass_present" not in failures
 
 
-def test_r8_certification_requires_pyqtgraph_complex_preview():
+def test_r8_certification_has_no_pyqtgraph_complex_preview_exemption():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
     record = _passing_r8_phase_record(backend="pyqtgraph")
@@ -2251,12 +2697,13 @@ def test_r8_certification_requires_pyqtgraph_complex_preview():
     result = _r8_certification(record)
 
     failures = {failure["gate"] for failure in result["r8_gate_failures"]}
-    assert "coarse_preview_pass_present" in failures
+    assert record["coarse_target_preview_exemption"] is None
+    assert "coarse_preview_pass_present" not in failures
     assert "coarse_ack_pass_precedes_target_ack" not in failures
     assert "coarse_tasks_finish_before_target_starts" not in failures
 
 
-def test_r8_certification_enforces_two_second_preview_target():
+def test_r8_certification_reports_preview_latency_without_gating():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
     record = _passing_r8_phase_record(backend="wgpu")
@@ -2265,7 +2712,8 @@ def test_r8_certification_enforces_two_second_preview_target():
     result = _r8_certification(record)
 
     failures = {failure["gate"] for failure in result["r8_gate_failures"]}
-    assert "preview_first_t1_target" in failures
+    assert result["r8_gate_passed"] is True
+    assert "preview_first_t1_target" not in failures
 
 
 def test_r8_display_axis_wgpu_gate_requires_source_page_reuse():
@@ -2542,7 +2990,7 @@ def test_r8_certification_ignores_outer_window_size_but_still_gates_the_viewport
     }
 
 
-def test_r8_certification_names_first_pixel_and_latency_failures():
+def test_r8_certification_gates_first_pixel_truth_but_reports_latency():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
     record = _passing_r8_phase_record(backend="pyqtgraph")
@@ -2566,9 +3014,11 @@ def test_r8_certification_names_first_pixel_and_latency_failures():
         "first_visible_histogram_populated",
         "first_visible_level_evidence_quality",
         "presentation_continuity",
-        "gui_callbacks_below_50ms",
-        "event_loop_heartbeat",
     }.issubset(failed)
+    assert "gui_callbacks_below_50ms" not in failed
+    assert "event_loop_heartbeat" not in failed
+    assert result["r8_direct_ui_call_ms"]["action_render_call_ms"] == 71.0
+    assert result["r8_heartbeat_max_gap_ms"] == 90.0
 
 
 def test_r8_certification_reports_but_does_not_gate_cold_fill_heartbeat():
@@ -2602,18 +3052,16 @@ def test_r8_certification_gates_deep_zoom_far_scroll_convergence():
     assert "deep_zoom_far_scroll_reaches_target_lod" in failed
 
 
-def test_r8_certification_skips_timing_only_for_profiled_or_smoke_runs():
-    from arrayscope.tools.profile_montage_workflow import _r8_certification
-
-    record = _passing_r8_phase_record()
-    record.update(
-        profiler_type="cprofile", action_render_call_ms=500.0, event_loop_max_gap_ms=500.0
+def test_progressive_invariant_gate_does_not_skip_r5_for_profiled_runs():
+    result = _contract_verdict(
+        _passing_contract_evidence(),
+        profiler_type="cprofile",
+        action_render_call_ms=500.0,
+        event_loop_max_gap_ms=500.0,
     )
 
-    result = _r8_certification(record)
-
-    assert result["r8_performance_evidence"] is False
-    assert result["r8_gate_passed"] is True
+    assert result["invariant_gate_passed"] is False
+    assert "all_gui_callbacks_below_50ms" in _failed_invariant_gates(result)
 
 
 def test_profile_suite_manifest_records_success_and_summary(tmp_path, monkeypatch):
