@@ -238,17 +238,18 @@ were:
 
 | backend / pipeline | median T1 | median T2 | median B | verdict |
 |---|---:|---:|---:|---|
-| WGPU raw | **939 ms (6)** | 3726 ms (6) | 2308 ms (6) | both clauses green 6/6; strict 1 s T1 green 6/6 |
-| WGPU FFT | **1329 ms (3)** | unavailable (1/3 complete) | 4729 ms (3) | both clauses green 3/3; strict 1 s T1 red 3/3 |
-| PyQtGraph raw | **960 ms (6)** | 4390 ms (6) | 3380 ms (6) | both clauses green 6/6; strict 1 s T1 green 6/6 |
+| WGPU raw | **935 ms (6)** | 3830 ms (6) | 2481 ms (6) | both clauses green 6/6; strict 1 s T1 green 6/6 |
+| WGPU FFT | **1270 ms (3)** | unavailable (1/3 complete) | 4546 ms (3) | both clauses green 3/3; strict 1 s T1 red 3/3 |
+| PyQtGraph raw | **957 ms (6)** | 4372 ms (6) | 3493 ms (6) | both clauses green 6/6; strict 1 s T1 green 5/6 (one 1001.7 ms pass) |
 | PyQtGraph FFT | unavailable | unavailable (0/3 complete) | unavailable (0/3 complete) | reduced RGB preview deferred; exact path pre-existing incomplete |
 
 Raw uses `--repeat 3` in fresh processes with A/B/B/A order, giving six
 in-process observations per arm and backend. FFT uses single-run
-processes in A/B/B/A/A/B order. WGPU FFT A reached 256, 272, and 265 target
+processes in A/B/B/A/A/B order. WGPU FFT A reached 253, 254, and 272 target
 ACKs within the bounded runs, so one completion is insufficient to quote a
-T2 median; its target-only arm completed all 272 in 3/3. PyQtGraph complex
-reached 39–47/272 exact ACKs and 14–21 physical tiles in every bounded arm. It
+T2 median; its target-only arm reached all 272 target ACKs in 3/3. PyQtGraph
+complex reached 50–54/272 exact ACKs and 25–29 physical tiles in every
+bounded arm. It
 has no preview row because CPU
 composition produces `(h,w,3)` RGB and the canonical reduced-page formats are
 scalar/complex; inventing a format in this slice would cross the
@@ -256,10 +257,19 @@ display-payload seam that previously froze the application. That
 backend/pipeline cell is explicitly deferred, not silently treated as
 target-only success.
 
-The raw transaction-count and strict near-instant objectives are complete:
-each 272-tile raw preview uses one non-empty commit and every accepted raw pass
-is below the profiler's 1000 ms hard bar. The final structural defect was
-logical fan-out, not pixels: complete preview admission invoked
+Raw T1 and T2 are the trace ACK boundaries, not the later whole-session
+settlement timestamp. In the final PyQtGraph A runs all 272 target ACKs arrived
+by 4.35–4.49 s, while the CPU level-generation sweep still had 80–128 stale
+tiles at the five-second interaction limit. That remaining post-target
+settlement debt does not redefine T2, but it remains an honest convergence
+defect rather than a completed-run claim.
+
+The raw transaction-count and median near-instant objectives are complete:
+each 272-tile raw preview uses one non-empty commit and both backends remain
+below the profiler's 1000 ms bar at the median. WGPU passed the strict bar 6/6;
+PyQtGraph passed 5/6 with one 1001.7 ms boundary result, so strict PyQtGraph
+margin remains open. The final structural T1 defect was logical fan-out, not
+pixels: complete preview admission invoked
 `ensure_floor_payloads` 272 times, and each invocation rebuilt the complete
 visible-tile lookup. Building the floor payloads once for the complete admitted
 scope moved both raw backends under the bar without changing quality,
@@ -383,12 +393,13 @@ local `main` tip before the final matrix.
   action itself. A timeout still closes the trace and writes a structured
   incomplete record with requested/presented/payload/ACK counts; it does not
   erase the evidence by raising before JSONL publication.
-- The red control used local `main` with only trace/oracle instrumentation.
-  WGPU raw started target at 1694.7 ms before the final preview finish at
-  1701.4 ms; WGPU FFT started at 2743.8 ms before the 2754.8 ms finish.
-  PyQtGraph raw had only 184/272 preview ACKs when 84 target ACKs had already
-  arrived. The fixed full-grid A rows in the table above pass both clauses;
-  PyQtGraph FFT remains explicitly `no-preview-pass`.
+- The red control was refreshed on local `main` `90aab674` with only
+  trace/oracle instrumentation. WGPU raw started target at 1659.2 ms before
+  the final preview task finished at 1668.8 ms; WGPU FFT started at 2310.4 ms
+  before the 2313.5 ms finish. PyQtGraph raw had only 188/272 preview ACKs
+  while 88 target ACKs had already arrived. The fixed full-grid A rows in the
+  table above pass both clauses; PyQtGraph FFT remains explicitly
+  `no-preview-pass`.
 - The broad UI ring found a stepped-crop page-identity mismatch after the
   final rebase: a `SourceAnchoring` object with neither axis anchored made the
   reducer use global bins while page planning used a window-local rectangle.

@@ -63,8 +63,8 @@ contract).
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
-- **ADR 0059 exclusive dynamic preview-first — RAW GATE DONE 2026-07-27;
-  WGPU FFT 1 s T1 gate OPEN; product default.**
+- **ADR 0059 exclusive dynamic preview-first — RAW MEDIAN GATE DONE 2026-07-27;
+  PyQtGraph strict margin and WGPU FFT 1 s T1 gates OPEN; product default.**
   Root cause was the successor rule itself: a FLOOR-backed `DESIRED` task still
   used `DISPLAY_PREVIEW`, so phase-only experiments delayed ACK while target
   evaluation consumed coverage workers. Target work now stays on
@@ -78,13 +78,18 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   its exact required set is ready. Ready payloads suppress duplicate FLOOR
   evaluations. Complete preview admission now constructs floor payloads once
   for the admitted scope instead of rebuilding the complete visible lookup
-  272 times. Final post-rebase low-load AC T1/T2/B medians: WGPU raw
-  939/3726/2308 ms (6/6/6 passes), WGPU FFT 1329/unavailable/4729 ms
-  (3/1/3), PyQtGraph raw 960/4390/3380 ms (6/6/6); every A pass passed both
-  clauses and all 12 raw A passes met the strict 1000 ms gate. The WGPU FFT
-  preview remains red because its worker starts only after the operation
-  transition builds the new semantic session; shorten that transition/shared
-  construction path without allowing target work through the barrier.
+  272 times. Final-tip low-load AC trace-ACK T1/T2/B medians: WGPU raw
+  935/3830/2481 ms (6/6/6 passes), WGPU FFT 1270/unavailable/4546 ms
+  (3/1/3), PyQtGraph raw 957/4372/3493 ms (6/6/6); every A pass passed both
+  exclusivity clauses. WGPU raw met the strict 1000 ms T1 gate 6/6;
+  PyQtGraph met it 5/6 with one 1001.7 ms pass, so improve its margin before
+  calling the strict raw gate closed. PyQtGraph reached all target ACKs in all
+  six A passes, but its later CPU level sweep retained 80–128 stale tiles at
+  the five-second limit; keep that convergence debt separate from trace T2.
+  The WGPU FFT preview remains red because its worker starts only after the
+  operation transition builds the new semantic session; shorten that
+  transition/shared construction path without allowing target work through
+  the barrier.
   Target+6 measured slower than target+5. PyQtGraph complex reduced RGB is
   explicitly deferred and its pre-existing exact fill remains incomplete.
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
