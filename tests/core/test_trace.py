@@ -24,8 +24,8 @@ def test_trace_bus_writes_flat_jsonl_and_bounds_ring(tmp_path):
     assert [event["sequence"] for event in snapshot] == [6, 7, 8]
 
 
-def test_live_trace_sink_batches_rows_until_close(tmp_path):
-    """A live evidence sink must not force one GUI-thread write per event."""
+def test_live_trace_sink_hides_buffered_rows_until_close(tmp_path):
+    """Characterize the sink's loss of live row visibility while buffered."""
 
     from arrayscope.core.trace import TraceBus
 

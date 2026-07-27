@@ -4165,7 +4165,7 @@ def _profile_transform_operations(
 
 
 def _hold_fit_for_montage_build(win, *, metrics: dict[str, float] | None = None) -> bool:
-    """Make the full fitted viewport authoritative before admitting build work."""
+    """Apply the profiler's signal-suppressed compound fit/build action."""
 
     fit = getattr(win, "fit_image_to_view", None)
     if not callable(fit):

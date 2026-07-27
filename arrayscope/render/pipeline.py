@@ -436,12 +436,11 @@ class FramePipeline:
         verdict: SchedulingVerdict,
         states: tuple[TileLodState, ...],
     ) -> bool:
-        """Submit one complete coarse montage through the ordinary kernel.
+        """Submit one complete coarse montage as one worker task.
 
-        The batch is still one rung task in ``DISPLAY_PREVIEW`` and therefore
-        obeys the same phase/lane quotas as every per-tile FLOOR. It only
-        removes per-tile scheduler/completion overhead: lifecycle claims and
-        physical acknowledgements remain one per required tile.
+        The task consumes one ``DISPLAY_PREVIEW`` worker slot, but its internal
+        256–512-tile work is not chunked or elapsed-time-governed. Lifecycle
+        claims and physical acknowledgements remain one per required tile.
         """
 
         if int(generation) != int(self._admission_generation):

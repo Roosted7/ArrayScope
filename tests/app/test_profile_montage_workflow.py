@@ -2231,7 +2231,7 @@ def test_r8_certification_requires_supported_enabled_preview_to_exist():
     assert "coarse_preview_pass_present" in failures
 
 
-def test_r8_certification_exempts_deferred_pyqtgraph_complex_preview():
+def test_r8_certification_currently_exempts_deferred_pyqtgraph_complex_preview():
     from arrayscope.tools.profile_montage_workflow import _r8_certification
 
     record = _passing_r8_phase_record(backend="pyqtgraph")

@@ -208,7 +208,9 @@ def test_repeated_partial_evidence_freeze_fails_before_presented_exceeds_coverag
     assert "1→20" in violations[0].description
 
 
-def test_one_partial_evidence_step_within_covered_cohort_is_not_a_freeze():
+def test_snapshot_heuristic_does_not_flag_one_partial_evidence_step():
+    """Characterize the count heuristic; this is not an R3 containment proof."""
+
     snapshots = [
         _snapshot([(2, 272)], presented=1, covered=32, population=272),
         _snapshot([(2, 272)], presented=20, covered=32, population=272),

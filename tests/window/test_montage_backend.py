@@ -1719,14 +1719,13 @@ def test_pyqtgraph_first_pixels_accept_refined_required_subset_honestly():
     assert not tile_layer_first_pixels_wait_for_level_source(window, session, True, required_subset)
 
 
-def test_pyqtgraph_first_pixels_accept_provisional_refined_first_batch():
-    """A cold scope larger than one evidence batch presents on the first batch.
+def test_pyqtgraph_current_predicate_accepts_partial_refined_first_batch():
+    """Characterize the partial-evidence acceptance that violates R3.
 
     272-source montage entry held every evaluated floor behind the full
-    refined sweep (~7 s black window, 2026-07-18 dossier). One refined batch
-    (MONTAGE_LEVEL_STATS_FIRST_CPU_BATCH sources) is an honest provisional
-    window for the whole frame; anything less, or rough-only evidence, still
-    waits.
+    refined sweep (~7 s black window, 2026-07-18 dossier). The current
+    predicate accepts one refined batch for the whole frame even though the
+    test supplies no bounds for the remaining presented tiles.
     """
 
     from arrayscope.core.window_levels import LevelSourceRank
@@ -1788,14 +1787,14 @@ def test_pyqtgraph_first_pixels_accept_provisional_refined_first_batch():
     )
 
 
-def test_pyqtgraph_first_pixels_accept_refined_seed_with_mixed_preview_evidence():
-    """Rough preview rows cannot hide the refined first-frame seed.
+def test_pyqtgraph_current_predicate_accepts_partial_seed_with_mixed_preview_evidence():
+    """Characterize partial-seed acceptance; it is not an R3 containment proof.
 
     A field-scale CPU preview admits rough evidence for every tile while the
     semantic evidence owner samples its first blocking batch.  The aggregate
     summary is consequently mixed (and therefore not globally ``refined``),
     even though the producer has covered the exact 16-source threshold that
-    authorizes the provisional first frame.  Waiting on the aggregate's
+    currently authorizes the provisional first frame. Waiting on the aggregate's
     all-sources flag deadlocks: the producer intentionally parks its remaining
     refinement behind preview acknowledgement, while acknowledgement waits on
     this predicate.
@@ -1843,8 +1842,8 @@ def test_pyqtgraph_first_pixels_accept_refined_seed_with_mixed_preview_evidence(
     assert not tile_layer_first_pixels_wait_for_level_source(window, session, True, mixed)
 
 
-def test_first_cpu_histogram_publishes_provisional_refined_first_batch():
-    """The provisional window source publishes to the histogram/levels widgets.
+def test_first_cpu_histogram_currently_publishes_partial_refined_batch():
+    """Characterize publication of a partial source as the round window.
 
     The first CPU pixels are windowed with the refined first batch, so the
     widgets must carry that same source; sub-batch or rough-only coverage

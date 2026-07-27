@@ -4514,7 +4514,8 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
     if aggregate_preview is not None:
         # The worker batch and scheduling verdict prove this is the complete
         # current FLOOR set; the backend capability proves it becomes one
-        # bounded physical aggregate. Only this explicit pair may bypass the
+        # physical aggregate. This marker does not prove the aggregate fits the
+        # contract's 50 ms bound; the current path nevertheless bypasses the
         # ordinary per-ImageItem cap/deadline.
         batch_limit = max(int(batch_limit), len(aggregate_preview))
     limits = {

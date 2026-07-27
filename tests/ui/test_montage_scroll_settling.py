@@ -175,8 +175,8 @@ def test_wgpu_scalar_scroll_back_settles_retained_fallbacks_to_exact(qtbot):
         restore_default_backend(settings)
 
 
-def test_wgpu_preview_target_warms_native_pages_for_crop_rebind(qtbot):
-    """Preview stays reduced; target refinement establishes warm native pages."""
+def test_wgpu_target_pass_currently_warms_native_pages_for_crop_rebind(qtbot):
+    """Characterize target-pass native warming that the R7 contract forbids."""
 
     settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
     yy = np.arange(336, dtype=np.float32)[:, None, None]

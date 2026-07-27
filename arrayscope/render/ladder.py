@@ -15,8 +15,10 @@ steps into kernel tasks and lifecycle claims.
 
 Rungs (roadmap "unified LOD ladder", ADR 0050/0052/0059 lineage):
 
-    FLOOR    the one coarse preview rung. Its level is chosen for retention;
-             it evaluates reduced display input when that route is available.
+    FLOOR    the one coarse preview rung. This branch currently derives its
+             level from demand and retention inside the per-tile ladder; the
+             progressive-render contract requires that choice to move to the
+             round planner. It evaluates reduced display input when available.
     DESIRED  refinement to the demanded display level.
     EXACT    native resolution. Exact inspection values are ALWAYS computed
              from native data regardless of displayed rung (policy
@@ -54,10 +56,10 @@ def coarse_rung_level(
     demand: LodDemand,
     retention_level: int,
 ) -> int:
-    """Return the preview level required by live screen scale and target quality.
+    """Return this branch's preview level from screen scale and target quality.
 
     Two LOD levels are four times coarser per axis and sixteen times fewer
-    texels. Within that invariant, the preview texel footprint follows the
+    texels. Within that current policy, the preview texel footprint follows the
     continuous viewport scale: one preview texel spans 3–6 screen pixels on
     the dominant axis. A retained level is only reusable when it remains
     inside that screen-space ceiling; tile count never decides image quality.

@@ -303,8 +303,8 @@ def test_evaluate_target_tile_non_native_returns_display_payload_not_native_resu
     assert pages[0].values.shape == (2, 3)
 
 
-def test_reduced_target_warm_carries_native_plane_after_preview():
-    """Target refinement, not the coarse FLOOR, establishes warm L0 pages."""
+def test_reduced_target_currently_carries_speculative_native_plane():
+    """Characterize target-pass native warming that the R7 contract forbids."""
 
     session = _session()
     session.source_anchoring = object()

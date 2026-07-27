@@ -1590,9 +1590,10 @@ class MontageTileLayer:
     ) -> TileLayerUpdateStats | None:
         """Present one complete large raw preview as one physical Qt item.
 
-        The backend deliberately does not acknowledge a prefix.  The render
+        The current backend path does not acknowledge a prefix. The render
         pipeline must deliver the complete current required set in one delta;
-        only then is the immutable atlas candidate built and swapped.
+        only then is the atlas candidate built and swapped. This method does
+        not establish that the unchunked build fits the contract's 50 ms bound.
         """
 
         if tile_delta is None:
