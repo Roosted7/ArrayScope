@@ -669,10 +669,13 @@ class TileCommitReport:
     cpu_windowed_tiles: int = 0
     resident_rebinds: int = 0
     binding_fast_path_commits: int = 0
+    binding_incremental_commits: int = 0
     binding_full_republications: int = 0
     existing_items_shown: int = 0
     relocated_tiles: int = 0
     storage_rebuilds: int = 0
+    pool_growth_ms: float = 0.0
+    executor_initialization_ms: float = 0.0
     vertex_uploads: int = 0
     cold_work_ms: float = 0.0
     visibility_work_ms: float = 0.0
@@ -731,6 +734,7 @@ class TileCommitReport:
             "cpu_windowed_tiles",
             "resident_rebinds",
             "binding_fast_path_commits",
+            "binding_incremental_commits",
             "binding_full_republications",
             "existing_items_shown",
             "relocated_tiles",

@@ -1446,6 +1446,72 @@ def test_plane_rebind_keeps_warm_residency_zero_upload():
     )
 
 
+def test_growing_plane_prefix_appends_without_rebuilding_bound_buffers():
+    executor = WgpuPlaneExecutor(
+        target_size=SP_CANVAS,
+        pool_layers=16,
+        device=_shared_device(),
+    )
+    plane_a = _scalar_plane_binding("A")
+    plane_b = _scalar_plane_binding("B")
+    executor.submit(
+        FrameSubmission(
+            1,
+            (BindContentPlanes((plane_a,)), *_ensure_scalar_plane("A", _scalar_plane(1))),
+        )
+    )
+    bind_epoch = executor._bind_epoch
+    lod_buffer = executor._lod_info_buf
+    plane_buffer = executor._planes_buf
+
+    report = executor.submit(
+        FrameSubmission(
+            2,
+            (
+                BindContentPlanes((plane_a, plane_b)),
+                *_ensure_scalar_plane("B", _scalar_plane(2)),
+            ),
+        )
+    )
+
+    assert report.uploads == SP_W // PAGE
+    assert executor.bound_planes == (plane_a, plane_b)
+    assert executor._bind_epoch == bind_epoch
+    assert executor._lod_info_buf is lod_buffer
+    assert executor._planes_buf is plane_buffer
+    assert all(
+        key in executor.page_table for key in (_scalar_key("A", 0, 0), _scalar_key("B", 0, 0))
+    )
+
+
+def test_growing_plane_prefix_preserves_explicit_committed_page_pins():
+    executor = WgpuPlaneExecutor(
+        target_size=SP_CANVAS,
+        pool_layers=16,
+        device=_shared_device(),
+    )
+    plane_a = _scalar_plane_binding("A")
+    plane_b = _scalar_plane_binding("B")
+    key_a = _scalar_key("A", 0, 0)
+    stale_key = _scalar_key("A", 1, 0)
+    executor.submit(
+        FrameSubmission(
+            1,
+            (
+                BindContentPlanes((plane_a,)),
+                EnsureChunkResident(key_a, _scalar_plane(1)[:PAGE, :PAGE]),
+                EnsureChunkResident(stale_key, _scalar_plane(1)[:PAGE, :PAGE]),
+            ),
+        )
+    )
+
+    assert executor.replace_bound_content_pin_set((key_a,)) == frozenset({key_a})
+    executor.submit(FrameSubmission(2, (BindContentPlanes((plane_a, plane_b)),)))
+
+    assert executor.page_table.is_pinned(key_a)
+    assert not executor.page_table.is_pinned(stale_key)
+
+
 def test_plane_binding_indexes_resident_keys_by_content_family():
     data = _scalar_plane(21)
     wanted = _scalar_plane_binding("wanted")

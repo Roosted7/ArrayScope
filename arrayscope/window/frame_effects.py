@@ -1826,10 +1826,14 @@ class FramePipelineEffects:
             )
             cold_deadline_ms = None
             renderer._last_montage_pass_budget_ms = None
+            renderer._last_montage_governor_details = ()
             if limits:
                 limits = dict(limits)
                 cold_deadline_ms = limits.pop("cold_deadline_ms", None)
                 renderer._last_montage_pass_budget_ms = limits.pop("pass_budget_ms", None)
+                renderer._last_montage_governor_details = tuple(
+                    limits.pop("governor_details", ()) or ()
+                )
             cpu_backend = not bool(capabilities.shader_windowing)
             renderer._last_montage_atomic_successor_pending_before = bool(atomic_successor_pending)
             renderer._last_montage_shader_atomic_successor = bool(shader_atomic_successor)
@@ -2839,12 +2843,13 @@ class FramePipelineEffects:
             session.scheduling_policy.set_coverage_evidence_pending(True)
         if accepted_payloads or gpu_evidence_waiting:
             # Evidence quality can advance only after the backend accepts the
-            # payload. Scan the current active population at that transition
-            # so a bounded final batch can close coherent first-pass evidence.
-            # Re-scanning it on reports with *no* accepted upserts created the
-            # idle level-stats -> presentation feedback loop caught by
-            # trace_verify.
-            renderer._queue_montage_level_stats_for_payloads(session, active_payloads)
+            # payload. Every accepted delta is accumulated by the level
+            # tracker, so rescanning the complete active population on every
+            # bounded target commit adds an O(active tiles) fixed term without
+            # adding evidence. A metadata-only GPU evidence wake still scans
+            # the active population because it has no accepted delta owner.
+            evidence_payloads = accepted_payloads if accepted_payloads else active_payloads
+            renderer._queue_montage_level_stats_for_payloads(session, evidence_payloads)
         first_pass_publication_transition = bool(
             first_pass_histogram_published
             and not bool(getattr(session, "first_pass_histogram_published", False))
@@ -3003,6 +3008,7 @@ class FramePipelineEffects:
             pass_kind=pass_kind,
             pass_chunk_items=len(tuple(tile_delta.upserts)),
             pass_chunk_budget_ms=pass_chunk_budget_ms,
+            governor_details=tuple(getattr(renderer, "_last_montage_governor_details", ()) or ()),
             pass_chunk_within_50ms=bool(renderer._last_montage_tile_commit_ms <= 50.0),
             pass_completed_atomically=pass_completed_atomically,
             presented_tiles=tuple(getattr(report, "presented_tiles", ()) or ()),
@@ -3066,6 +3072,10 @@ class FramePipelineEffects:
             backend_visibility_work_ms=float(getattr(report, "visibility_work_ms", 0.0) or 0.0),
             backend_total_ms=float(getattr(report, "total_ms", 0.0) or 0.0),
             backend_storage_rebuilds=int(getattr(report, "storage_rebuilds", 0) or 0),
+            backend_pool_growth_ms=float(getattr(report, "pool_growth_ms", 0.0) or 0.0),
+            backend_executor_initialization_ms=float(
+                getattr(report, "executor_initialization_ms", 0.0) or 0.0
+            ),
             prepare_ms=float(getattr(renderer, "_last_montage_tile_prepare_apply_ms", 0.0) or 0.0),
             payload_build_ms=float(
                 getattr(renderer, "_last_montage_tile_payload_build_ms", 0.0) or 0.0
@@ -3114,6 +3124,7 @@ class FramePipelineEffects:
             ),
             resident_rebinds=int(getattr(report, "resident_rebinds", 0) or 0),
             binding_fast_path_commits=int(getattr(report, "binding_fast_path_commits", 0) or 0),
+            binding_incremental_commits=int(getattr(report, "binding_incremental_commits", 0) or 0),
             binding_full_republications=int(getattr(report, "binding_full_republications", 0) or 0),
             vertex_uploads=int(getattr(report, "vertex_uploads", 0) or 0),
             level_revision=int(
@@ -3277,6 +3288,19 @@ class FramePipelineEffects:
                 backend_name,
             )
         commit_feedback_ms = renderer._last_montage_tile_commit_ms
+        pool_growth_ms = min(
+            commit_feedback_ms,
+            max(0.0, float(getattr(report, "pool_growth_ms", 0.0) or 0.0)),
+        )
+        executor_initialization_ms = min(
+            max(0.0, commit_feedback_ms - pool_growth_ms),
+            max(
+                0.0,
+                float(getattr(report, "executor_initialization_ms", 0.0) or 0.0),
+            ),
+        )
+        structural_backend_ms = pool_growth_ms + executor_initialization_ms
+        steady_render_feedback_ms = max(0.0, commit_feedback_ms - structural_backend_ms)
         commit_feedback_bytes = texture_upload_bytes
         _observe_ui(
             renderer,
@@ -3308,12 +3332,17 @@ class FramePipelineEffects:
                 if str(getattr(renderer, "_last_montage_pass_kind", "")) == "target"
                 else "montage_render_pass_preview"
             ),
-            commit_feedback_ms,
+            steady_render_feedback_ms,
             max(1, int(getattr(renderer, "_last_montage_commit_delta_upserts", 0) or 0)),
             commit_feedback_bytes,
             "presentation_upsert",
             backend_name,
-            details=details,
+            details=(
+                *details,
+                f"callback_total_ms={commit_feedback_ms:.6f}",
+                f"structural_pool_growth_ms={pool_growth_ms:.6f}",
+                f"structural_executor_initialization_ms={executor_initialization_ms:.6f}",
+            ),
         )
         _observe_ui(
             renderer,
@@ -4565,6 +4594,7 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
         window,
         interactive=interactive,
         pass_token=_render_pass_token(session),
+        remaining_items=_render_pass_remaining_items(session),
     )
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
@@ -4586,6 +4616,7 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
         ),
         "upsert_cost_fn": pyqtgraph_payload_upload_nbytes,
         "pace_resident_retargets": True,
+        "governor_details": tuple(getattr(decision, "details", ()) or ()),
     }
     return limits
 
@@ -4889,6 +4920,7 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         window,
         interactive=interactive,
         pass_token=_render_pass_token(session),
+        remaining_items=_render_pass_remaining_items(session),
     )
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
@@ -4914,6 +4946,7 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
             window, "montage_present_total", decision, interactive=interactive
         ),
         "pace_resident_retargets": True,
+        "governor_details": tuple(getattr(decision, "details", ()) or ()),
     }
     resident = getattr(getattr(window.win, "img_view", None), "tiledPayloadResident", None)
     if callable(resident):
@@ -4930,7 +4963,24 @@ def _render_pass_token(session) -> tuple[int, str, bool]:
     )
 
 
-def _commit_batch_decision(window, *, interactive: bool, pass_token=None):
+def _render_pass_remaining_items(session) -> int:
+    pending = {
+        *tuple(int(tile) for tile in tuple(getattr(session, "dirty_payloads", ()) or ())),
+        *tuple(int(tile) for tile in tuple(getattr(session, "pending_payload_upserts", ()) or ())),
+    }
+    unsettled = getattr(session, "required_target_unsettled_tiles", None)
+    if callable(unsettled):
+        pending.update(int(tile) for tile in tuple(unsettled() or ()))
+    return max(1, len(pending))
+
+
+def _commit_batch_decision(
+    window,
+    *,
+    interactive: bool,
+    pass_token=None,
+    remaining_items: int | None = None,
+):
     governor = getattr(window.win, "resource_governor", None)
     pass_kind = (
         "preview"
@@ -4947,7 +4997,11 @@ def _commit_batch_decision(window, *, interactive: bool, pass_token=None):
         begin_pass(stable_pass_token, pass_kind=pass_kind)
     decide_pass = getattr(governor, "decide_render_pass", None)
     if callable(decide_pass):
-        return decide_pass(interactive=interactive, pass_kind=pass_kind)
+        return decide_pass(
+            interactive=interactive,
+            pass_kind=pass_kind,
+            remaining_items=remaining_items,
+        )
     decide = getattr(governor, "decide_commit_batch", None)
     if callable(decide):
         return decide(interactive=interactive)

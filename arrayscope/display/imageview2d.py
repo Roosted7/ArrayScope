@@ -3198,10 +3198,13 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
         cpu_windowed_tiles=rgb_window_tiles,
         resident_rebinds=resident,
         binding_fast_path_commits=int(getattr(stats, "binding_fast_path_commits", 0) or 0),
+        binding_incremental_commits=int(getattr(stats, "binding_incremental_commits", 0) or 0),
         binding_full_republications=int(getattr(stats, "binding_full_republications", 0) or 0),
         existing_items_shown=existing_items,
         relocated_tiles=relocated,
         storage_rebuilds=int(getattr(stats, "storage_rebuilds", 0) or 0),
+        pool_growth_ms=float(getattr(stats, "pool_growth_ms", 0.0) or 0.0),
+        executor_initialization_ms=float(getattr(stats, "executor_initialization_ms", 0.0) or 0.0),
         cold_work_ms=float(getattr(stats, "upload_ms", 0.0) or 0.0),
     )
 

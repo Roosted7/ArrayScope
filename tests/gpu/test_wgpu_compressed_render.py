@@ -441,6 +441,7 @@ def test_raw_and_codec_arrays_grow_on_demand_without_losing_resident_pages():
     assert executor.pool_grows_total == 2
     expected_copy_bytes = 8 * PAGE * PAGE * 4 + 8 * (PAGE * PAGE // 2)
     assert executor.pool_growth_copy_bytes_total == expected_copy_bytes
+    assert executor.pool_growth_ms_total > 0.0
     assert np.isnan(executor.read_resident_page(keys[9])[0, 0])
     # Each pool is only half its logical maximum after admitting this exact mix.
     assert executor.allocated_pool_bytes < (32 * PAGE * PAGE * 4 + 32 * PAGE * PAGE // 2)

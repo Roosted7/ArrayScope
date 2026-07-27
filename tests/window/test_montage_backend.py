@@ -3845,6 +3845,48 @@ def test_tile_layer_commit_feedback_counts_acknowledged_level_upserts():
     assert montage_commit.tile_layer_commit_processed_count(report) == 3
 
 
+def test_render_pass_feedback_excludes_one_time_pool_growth_but_keeps_total():
+    from arrayscope.display.model.frame import TileCommitReport
+    from arrayscope.window.frame_effects import FramePipelineEffects
+
+    observations = []
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="wgpu",
+                persistent_tile_residency=True,
+                shader_windowing=True,
+            )
+        ),
+        _record_ui_work=lambda channel, ms, **kwargs: observations.append((channel, ms, kwargs)),
+    )
+    renderer = SimpleNamespace(
+        win=window,
+        _last_montage_tile_commit_ms=100.0,
+        _last_montage_commit_delta_upserts=2,
+        _last_montage_pass_kind="target",
+    )
+    effects = FramePipelineEffects(renderer, SimpleNamespace())
+
+    effects._record_commit_feedback(
+        TileCommitReport(
+            presented_tiles=frozenset({0, 1}),
+            committed_upserts=frozenset({0, 1}),
+            texture_upload_bytes=4096,
+            pool_growth_ms=80.0,
+            executor_initialization_ms=5.0,
+        )
+    )
+
+    render_row = next(row for row in observations if row[0] == "montage_render_pass_target")
+    total_row = next(row for row in observations if row[0] == "montage_present_total")
+    assert render_row[1] == 15.0
+    assert total_row[1] == 100.0
+    assert "callback_total_ms=100.000000" in render_row[2]["details"]
+    assert "structural_pool_growth_ms=80.000000" in render_row[2]["details"]
+    assert "structural_executor_initialization_ms=5.000000" in render_row[2]["details"]
+
+
 def test_retained_payload_store_receives_only_accepted_delta_payloads():
     from arrayscope.display.model.frame import (
         DisplayTilePayload,

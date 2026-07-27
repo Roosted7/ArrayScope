@@ -793,6 +793,7 @@ def run_profile_montage_workflow(
     synthetic_shape: tuple[int, int, int] = (192, 256, 40),
     physical_sample_seed: int | None = None,
     repeat_index: int = 0,
+    cold_fill_observation_timeout_s: float | None = None,
 ) -> tuple[dict[str, object], ...]:
     """Run raw full montage, then FFT/shift/iFFT-over-montage-axis montage.
 
@@ -802,6 +803,10 @@ def run_profile_montage_workflow(
     """
 
     timeout_s = bounded_interaction_settle_timeout_s(timeout_s)
+    cold_fill_observation_window_s = max(
+        COLD_FILL_BUILD_TIMEOUT_S,
+        float(cold_fill_observation_timeout_s or 0.0),
+    )
 
     from arrayscope.app.qt_binding import prefer_pyside6
 
@@ -1181,7 +1186,7 @@ def run_profile_montage_workflow(
                 win,
                 probe,
                 phase="raw_full_tiled_montage",
-                timeout_s=COLD_FILL_BUILD_TIMEOUT_S,
+                timeout_s=cold_fill_observation_window_s,
                 action=apply_raw,
                 backend=backend,
                 screenshot_dir=screenshot_dir,
@@ -1239,7 +1244,7 @@ def run_profile_montage_workflow(
                 win,
                 probe,
                 phase="fft_full_tiled_montage",
-                timeout_s=COLD_FILL_BUILD_TIMEOUT_S,
+                timeout_s=cold_fill_observation_window_s,
                 action=apply_fft,
                 backend=backend,
                 screenshot_dir=screenshot_dir,
@@ -6024,6 +6029,14 @@ def _run_phase(
         record.update(action_result)
     record["action_elapsed_ms"] = float(action_elapsed_ms)
     record.update(milestones)
+    target_settled_ms = record.get("required_target_settled_ms")
+    record["interaction_settle_requirement_ms"] = (
+        bounded_interaction_settle_timeout_s(None) * 1000.0
+    )
+    record["interaction_settle_within_budget"] = bool(
+        target_settled_ms is not None
+        and float(target_settled_ms) <= float(record["interaction_settle_requirement_ms"])
+    )
     record.update(
         _physical_tile_timeline_metrics(
             physical_tile_timeline,

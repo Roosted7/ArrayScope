@@ -157,13 +157,23 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   272-tile real-Wayland run acknowledged every level-5 preview identity before
   any level-2 target identity and reached physical preview coverage in
   4175 ms. The former 2985 ms atomic atlas build is removed. Final-code Weston
-  chunk evidence is in the
-  [R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md): scalar
-  PyQtGraph preview/target chunks stayed below 50 ms, WGPU target stayed below
-  50 ms, while late WGPU preview binding republishes reached 62 ms and three
-  indivisible one-tile PyQtGraph FFT updates reached 155 ms. Those residuals
-  fail loudly and remain callback-bar debt; no measured pass completed
-  atomically.
+  chunk and wall-time evidence is in the
+  [R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md). The governor
+  now fits fixed, item, byte, and cohort-curvature cost, and minimizes total
+  fill plus continuous callback-latency and exponential extrapolation prices;
+  50 ms remains a fixed reported requirement, never an adaptive target or a
+  hard cohort boundary. Scalar PyQtGraph preview/target chunks stayed below
+  50 ms; scalar target still has 60–77 ms outliers and completes in
+  5.71–6.26 s. WGPU ordinary deltas no longer reconcile the whole active set
+  and settle in 4.52–4.73 s, but preview median remains 28.3% slower than
+  pre-f11 and the earlier 4.4 s target-settle result is still 0.12–0.33 s away.
+  WGPU now attributes one-time executor initialization and pool growth
+  separately: those times stay in full R5 evidence but do not train the steady
+  fixed/count/byte model. The reusable Weston
+  `render_pass_governor_probe` reports wall-clock completion throughput,
+  callback distributions, and component attribution without JSONL artifacts.
+  Residual cold/warm outliers fail loudly and remain callback-bar debt; no
+  measured pass completed atomically.
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
 - **PyQtGraph full complex montage presentation is broken — OPEN.** Short

@@ -528,8 +528,8 @@ def test_mapping_only_commit_applies_lut_without_rebinding(qt_app):
         view.close()
 
 
-def test_unchanged_upsert_does_not_cross_mapping_only_boundary(qt_app):
-    """Target acknowledgement stays on the full path until the ADR ladder owns it."""
+def test_unchanged_upsert_uses_incremental_not_mapping_only_boundary(qt_app):
+    """An acknowledged upsert remains real delta work without full republication."""
 
     geometry = _montage_geometry((32, 32), 1, 1, loaded=1)
     payload = _typed_scalar_payload(0, np.full((32, 32), 0.2, dtype=np.float32))
@@ -553,7 +553,35 @@ def test_unchanged_upsert_does_not_cross_mapping_only_boundary(qt_app):
         )
 
         assert report.binding_fast_path_commits == 0
-        assert report.binding_full_republications == 1
+        assert report.binding_incremental_commits == 1
+        assert report.binding_full_republications == 0
+    finally:
+        view.close()
+
+
+def test_progressive_upsert_appends_only_new_wgpu_plane(qt_app):
+    geometry = _montage_geometry((32, 32), 2, 1, loaded=2)
+    payloads = {
+        tile: _typed_scalar_payload(
+            tile,
+            np.full((32, 32), 0.2 + 0.2 * tile, dtype=np.float32),
+        )
+        for tile in range(2)
+    }
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        first = _commit(view, geometry, {0: payloads[0]}, levels=(0.0, 1.0))
+        executor = view._wgpu_executor
+        plane_buffer = executor._planes_buf
+
+        second = _commit(view, geometry, payloads, levels=(0.0, 1.0))
+
+        assert first.binding_full_republications == 1
+        assert second.binding_incremental_commits == 1
+        assert second.binding_full_republications == 0
+        assert second.committed_upserts == frozenset({0, 1})
+        assert len(executor.bound_planes) == 2
+        assert executor._planes_buf is plane_buffer
     finally:
         view.close()
 
@@ -588,6 +616,7 @@ def test_forced_mapping_only_bypass_turns_framebuffer_oracle_red(qt_app, monkeyp
             geometry=geometry,
             levels=(0.0, 1.0),
             histogramRange=(0.0, 1.0),
+            montage_dirty_tiles=(),
             montage_tile_payloads={0: successor},
         )
         _rerender_internal(view)
@@ -1312,11 +1341,12 @@ def test_histogram_frontier_evicted_in_same_submission_never_aborts_commit(qt_ap
         counts, _bounds = evidence.readback.resolve()
         assert int(counts.sum()) == 16 * 24
 
-        # The frontier shield is submission-scoped: no permanent pins.
+        # The histogram frontier shield is submission-scoped. The surviving
+        # page is pinned only because it is now committed display content.
         remaining = small.page_table.resident_keys()
         assert remaining
-        assert not any(small.page_table.is_pinned(key) for key in remaining)
-        assert set(small.page_table.eviction_candidates()) == set(remaining)
+        assert all(small.page_table.is_pinned(key) for key in remaining)
+        assert sum(count for _owner, count in small.page_table.pin_owner_counts()) == 1
 
         # Dropped evidence retries via the normal re-queue machinery: a
         # commit that fits the pool delivers tile 0's evidence after all.
@@ -1434,8 +1464,16 @@ def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app
         assert report.texture_uploads == 4
         assert report.presented_identities == {0: fine.tile_identity}
         assert view._wgpu_executor._bound_planes[0].max_lod == 4
-        assert coarse_keys <= set(view._wgpu_executor.page_table.resident_keys())
-        assert all(view._wgpu_executor.page_table.is_pinned(key) for key in coarse_keys)
+        resident_keys = set(view._wgpu_executor.page_table.resident_keys())
+        assert coarse_keys <= resident_keys
+        # The predecessor stays pinned through the synchronous fine upload,
+        # then ownership moves to the committed fine cover. Keeping the
+        # superseded ancestor pinned after that edge would make historical
+        # LODs unevictable even though no visible tile depends on them.
+        assert not any(view._wgpu_executor.page_table.is_pinned(key) for key in coarse_keys)
+        assert all(
+            view._wgpu_executor.page_table.is_pinned(key) for key in resident_keys - coarse_keys
+        )
         assert {
             key.document_generation for key in view._wgpu_executor.page_table.resident_keys()
         } == {view._wgpu_executor._bound_planes[0].document_generation}
@@ -3193,9 +3231,11 @@ def test_pan_reuses_tile_instances_and_skips_the_instance_upload(qt_app):
             executor._set_tiles(panned)
             assert executor._tiles is writes_before, "pan re-uploaded the instance buffer"
 
-        # A real commit still refreshes them.
+        # A real payload commit with unchanged geometry keeps the physical
+        # instance tuple too; only the admitted content binding changes.
         _commit(view, geometry, payloads, levels=(0.0, 0.5))
-        assert view._wgpu_tile_instances() is not instances
+        assert view._wgpu_tile_instances() is instances
+        assert executor._tiles is writes_before
     finally:
         view.close()
 

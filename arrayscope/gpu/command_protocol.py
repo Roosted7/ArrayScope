@@ -317,6 +317,7 @@ class BindContentPlanes:
     """
 
     planes: tuple[ContentPlane, ...]
+    committed_page_keys: tuple[DataChunkKey, ...] | None = None
 
     def __post_init__(self) -> None:
         planes = tuple(self.planes)
@@ -324,6 +325,14 @@ class BindContentPlanes:
             if not isinstance(plane, ContentPlane):
                 raise TypeError(f"bound planes must be ContentPlane, got {type(plane).__name__}")
         object.__setattr__(self, "planes", planes)
+        if self.committed_page_keys is not None:
+            keys = tuple(self.committed_page_keys)
+            for key in keys:
+                if not isinstance(key, DataChunkKey):
+                    raise TypeError(
+                        f"committed page pins must be DataChunkKey, got {type(key).__name__}"
+                    )
+            object.__setattr__(self, "committed_page_keys", keys)
 
 
 @dataclass(frozen=True)

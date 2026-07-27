@@ -7,7 +7,12 @@ from arrayscope.core.memory_policy import (
     SystemMemorySnapshot,
     compute_memory_policy,
 )
-from arrayscope.core.resource_governor import ResourceGovernor, SchedulerBusyState
+from arrayscope.core.resource_governor import (
+    ResourceGovernor,
+    SchedulerBusyState,
+    _render_pass_extrapolation_cost_ms,
+    _render_pass_latency_cost_ms,
+)
 from arrayscope.core.resource_telemetry import CpuSnapshot, ResourceSnapshot
 
 
@@ -75,7 +80,7 @@ def test_commit_batch_knob_covers_last_observed_bytes_per_item():
     assert decision.model == "ewma"
 
 
-def test_render_pass_knob_owns_r5_target_and_adapts_chunk_size():
+def test_render_pass_knob_owns_r5_target_and_adapts_per_item_work():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
 
     cold = governor.decide_render_pass(interactive=False)
@@ -95,6 +100,183 @@ def test_render_pass_knob_owns_r5_target_and_adapts_chunk_size():
     assert adapted.batch_limit == 4
     assert adapted.budget_ms == 32.0
     assert adapted.model == "r5-feedback"
+
+
+def test_render_pass_knob_still_shrinks_per_item_work_after_overrun():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_render_pass_target",
+        80.0,
+        item_count=8,
+        byte_count=8 * 1024,
+        work_class="presentation_upsert",
+        backend="pyqtgraph",
+    )
+
+    adapted = governor.decide_render_pass(
+        interactive=False,
+        pass_kind="target",
+    )
+
+    assert adapted.batch_limit == 4
+    assert adapted.model == "r5-feedback"
+
+
+def test_render_pass_latches_item_independent_cost_and_recovers_floor():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_render_pass_preview",
+        41.64,
+        item_count=2,
+        work_class="presentation_upsert",
+        backend="wgpu",
+    )
+    assert governor.decide_render_pass(interactive=False).batch_limit == 1
+    governor.record_ui_observation(
+        "montage_render_pass_preview",
+        41.48,
+        item_count=1,
+        work_class="presentation_upsert",
+        backend="wgpu",
+    )
+
+    recovered = governor.decide_render_pass(interactive=False, remaining_items=272)
+
+    assert recovered.batch_limit > 2
+    assert any("fixed=" in detail and "item=" in detail for detail in recovered.details)
+    governor.record_ui_observation(
+        "montage_render_pass_preview",
+        47.11,
+        item_count=2,
+        work_class="presentation_upsert",
+        backend="wgpu",
+    )
+    assert governor.decide_render_pass(interactive=False, remaining_items=272).batch_limit >= 2
+
+
+def test_render_pass_splits_identifiable_fixed_item_and_byte_costs():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    observations = (
+        (1, 1, 15.0),
+        (2, 1, 17.0),
+        (1, 2, 18.0),
+        (2, 2, 20.0),
+    )
+    for items, mib, elapsed_ms in observations:
+        governor.record_ui_observation(
+            "montage_render_pass_preview",
+            elapsed_ms,
+            item_count=items,
+            byte_count=mib * 1024 * 1024,
+            work_class="presentation_upsert",
+            backend="wgpu",
+        )
+        decision = governor.decide_render_pass(
+            interactive=False,
+            remaining_items=272,
+        )
+
+    assert any(
+        "fixed=10.00ms item=2.00ms bytes=3.00ms/MiB" in detail for detail in decision.details
+    )
+    assert any("fit-rms=0.00ms r2=1.000 samples=4" in detail for detail in decision.details)
+
+
+def test_render_pass_measures_rising_cohort_cost():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    for items in (1, 4, 8):
+        governor.record_ui_observation(
+            "montage_render_pass_target",
+            10.0 + items + 0.05 * items * items,
+            item_count=items,
+            work_class="presentation_upsert",
+            backend="pyqtgraph",
+        )
+        decision = governor.decide_render_pass(
+            interactive=False,
+            pass_kind="target",
+            remaining_items=272,
+        )
+
+    assert any("cohort2=0.05ms/item2" in detail for detail in decision.details)
+    assert decision.batch_limit < 32
+
+
+def test_render_pass_weights_fill_time_against_continuous_latency_cost():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_render_pass_target",
+        50.0,
+        item_count=1,
+        work_class="presentation_upsert",
+        backend="wgpu",
+    )
+    governor.decide_render_pass(
+        interactive=False,
+        pass_kind="target",
+        remaining_items=272,
+    )
+    governor.record_ui_observation(
+        "montage_render_pass_target",
+        50.1,
+        item_count=2,
+        work_class="presentation_upsert",
+        backend="wgpu",
+    )
+
+    decision = governor.decide_render_pass(
+        interactive=False,
+        pass_kind="target",
+        remaining_items=272,
+    )
+
+    assert 3 < decision.batch_limit < 20
+    assert any(
+        "steering=weighted-fill-latency-extrapolation" in detail for detail in decision.details
+    )
+    assert any("r5-achievable=1" in detail for detail in decision.details)
+
+
+def test_render_pass_latency_cost_is_zero_then_smooth_and_quadratic():
+    assert _render_pass_latency_cost_ms(18.0) == 0.0
+    assert 0.0 < _render_pass_latency_cost_ms(30.0) < _render_pass_latency_cost_ms(45.0)
+    epsilon = 1e-4
+    left_slope = (
+        _render_pass_latency_cost_ms(45.0) - _render_pass_latency_cost_ms(45.0 - epsilon)
+    ) / epsilon
+    right_slope = (
+        _render_pass_latency_cost_ms(45.0 + epsilon) - _render_pass_latency_cost_ms(45.0)
+    ) / epsilon
+    assert abs(left_slope - right_slope) < 1e-3
+    assert _render_pass_latency_cost_ms(60.0) - _render_pass_latency_cost_ms(
+        50.0
+    ) > _render_pass_latency_cost_ms(50.0) - _render_pass_latency_cost_ms(45.0)
+
+
+def test_render_pass_extrapolation_cost_is_smoothly_exponential():
+    assert _render_pass_extrapolation_cost_ms(1.1) == 0.0
+    at_two = _render_pass_extrapolation_cost_ms(2.0)
+    at_ten = _render_pass_extrapolation_cost_ms(10.0)
+    at_hundred = _render_pass_extrapolation_cost_ms(100.0)
+    assert 0.0 < at_two < 5.0
+    assert at_ten > 50.0 * at_two
+    assert at_hundred > 50.0 * at_ten
+
+
+def test_render_pass_requirement_does_not_adapt_downward():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation(
+        "montage_render_pass_target",
+        92.0,
+        item_count=1,
+        work_class="presentation_upsert",
+        backend="wgpu",
+    )
+
+    diagnostics = governor.diagnostics(channels=("montage_render_pass_target",))
+
+    assert diagnostics.feedback_channels[0].budget_ms == 32.0
+    assert diagnostics.recent_ui_work_observations[-1].target_ms == 32.0
 
 
 def test_callback_observations_are_kept_without_decision_ring():

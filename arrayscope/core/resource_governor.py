@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from math import ceil
+from math import ceil, exp, log10
 from time import monotonic
 
 from arrayscope.core.compute_policy import ComputeLane, ComputePolicy
@@ -109,6 +109,29 @@ _PROFILE_TUNING = {
     MemoryProfileChoice.AGGRESSIVE: _ProfileTuning(5.5, 11.0, 18),
     MemoryProfileChoice.CUSTOM: _ProfileTuning(4.0, 8.0, 12),
 }
+
+_RENDER_PASS_REQUIREMENT_MS = 32.0
+_RENDER_PASS_ITEM_INDEPENDENCE_RATIO = 0.9
+_RENDER_PASS_HARD_LIMIT_MS = 50.0
+_MIB = 1024.0 * 1024.0
+
+
+@dataclass(frozen=True)
+class _RenderPassCostModel:
+    fixed_ms: float | None = None
+    item_ms: float | None = None
+    byte_ms_per_mib: float | None = None
+    cohort_quadratic_ms: float | None = None
+    residual_rms_ms: float | None = None
+    r_squared: float | None = None
+    samples: int = 0
+
+    @property
+    def identifiable(self) -> bool:
+        return self.fixed_ms is not None and (
+            self.item_ms is not None or self.byte_ms_per_mib is not None
+        )
+
 
 _PRESSURE_TELEMETRY_ONLY_CHANNELS = frozenset(
     {
@@ -231,11 +254,16 @@ class ResourceGovernor:
         self.latency_feedback.observe(
             channel, feedback_elapsed_ms, count=count, byte_count=byte_count
         )
+        target_ms = (
+            _RENDER_PASS_REQUIREMENT_MS
+            if str(channel).startswith("montage_render_pass_")
+            else float(self.latency_feedback.work_budget_ms(channel, interactive=False))
+        )
         observation = GuiCallbackObservation(
             channel=str(channel),
             work_class=str(work_class or ""),
             backend=str(backend or ""),
-            target_ms=float(self.latency_feedback.work_budget_ms(channel, interactive=False)),
+            target_ms=target_ms,
             warning_ms=WARNING_THRESHOLD_MS,
             item_cap=max(1, count),
             byte_cap=byte_count,
@@ -381,7 +409,11 @@ class ResourceGovernor:
         )
 
     def decide_render_pass(
-        self, *, interactive: bool, pass_kind: str = "preview"
+        self,
+        *,
+        interactive: bool,
+        pass_kind: str = "preview",
+        remaining_items: int | None = None,
     ) -> UiWorkDecision:
         """Own R5 chunk size and deadline for preview and target passes.
 
@@ -397,7 +429,107 @@ class ResourceGovernor:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
         snapshot = self.latency_feedback.channel_snapshot(channel)
         max_batch = max(1, int(self.latency_feedback.tuning.max_batch))
-        if snapshot.last_count <= 0:
+        previous_rows = getattr(self, "_render_pass_previous_observations", None)
+        if previous_rows is None:
+            previous_rows = {}
+            self._render_pass_previous_observations = previous_rows
+        item_independent = getattr(self, "_render_pass_item_independent", None)
+        if item_independent is None:
+            item_independent = set()
+            self._render_pass_item_independent = item_independent
+        sample_rows = getattr(self, "_render_pass_cost_samples", None)
+        if sample_rows is None:
+            sample_rows = {}
+            self._render_pass_cost_samples = sample_rows
+        samples = sample_rows.setdefault(channel, [])
+        previous = previous_rows.get(channel)
+        if (
+            previous is not None
+            and snapshot.last_count < previous[0]
+            and snapshot.last_elapsed_ms
+            >= float(previous[1]) * _RENDER_PASS_ITEM_INDEPENDENCE_RATIO
+        ):
+            item_independent.add(channel)
+        if snapshot.last_count > 0:
+            sample = (
+                int(snapshot.last_count),
+                float(snapshot.last_elapsed_ms),
+                int(snapshot.last_byte_count),
+            )
+            if not samples or samples[-1] != sample:
+                samples.append(sample)
+                del samples[:-8]
+            previous_rows[channel] = (
+                int(snapshot.last_count),
+                float(snapshot.last_elapsed_ms),
+            )
+        model = _render_pass_cost_model(samples)
+        fixed_ms = model.fixed_ms
+        item_ms = model.item_ms
+        byte_ms_per_mib = model.byte_ms_per_mib
+        if fixed_ms is not None:
+            mean_elapsed = sum(row[1] for row in samples) / len(samples)
+            if fixed_ms >= 0.75 * mean_elapsed:
+                item_independent.add(channel)
+        byte_rows = [row for row in samples if row[2] > 0]
+        bytes_per_item = (
+            float(sum(row[2] for row in byte_rows))
+            / max(1.0, float(sum(row[0] for row in byte_rows)))
+            if byte_rows
+            else 0.0
+        )
+        effective_marginal_ms = (
+            max(0.0, float(item_ms or 0.0))
+            + max(0.0, float(byte_ms_per_mib or 0.0)) * bytes_per_item / _MIB
+        )
+        remaining = max(
+            1,
+            int(
+                remaining_items
+                if remaining_items is not None
+                else max((row[0] for row in samples), default=max_batch)
+            ),
+        )
+        steering = "feedback"
+        predicted_ms = None
+        regularization_ms = None
+        extrapolation_ms = None
+        control_achievable = None
+        hard_achievable = None
+        if model.identifiable:
+            batch, predicted_ms, regularization_ms = _render_pass_optimal_point(
+                fixed_ms=max(0.0, float(fixed_ms or 0.0)),
+                marginal_ms=max(0.0, effective_marginal_ms),
+                quadratic_ms=max(0.0, float(model.cohort_quadratic_ms or 0.0)),
+                remaining_items=remaining,
+                observed_item_max=max((int(row[0]) for row in samples), default=1),
+                observed_byte_max=(
+                    max((int(row[2]) for row in byte_rows), default=0)
+                    if byte_ms_per_mib is not None
+                    else 0
+                ),
+                bytes_per_item=bytes_per_item,
+            )
+            steering = "weighted-fill-latency"
+            extrapolation_ms = _render_pass_extrapolation_cost_ms(
+                float(batch) / max(1.0, max((float(row[0]) for row in samples), default=1.0))
+            )
+            if byte_ms_per_mib is not None and byte_rows and bytes_per_item > 0.0:
+                extrapolation_ms += _render_pass_extrapolation_cost_ms(
+                    float(batch) * bytes_per_item / max(1.0, *(float(row[2]) for row in byte_rows))
+                )
+            if extrapolation_ms > 0.0:
+                steering = "weighted-fill-latency-extrapolation"
+            one_item_ms = max(0.0, float(fixed_ms or 0.0)) + max(0.0, effective_marginal_ms)
+            control_achievable = one_item_ms <= _RENDER_PASS_REQUIREMENT_MS
+            hard_achievable = one_item_ms <= _RENDER_PASS_HARD_LIMIT_MS
+            if bytes_per_item > 0.0:
+                desired_bytes = max(1, ceil(float(batch) * bytes_per_item))
+                byte_cap = min(
+                    int(byte_cap),
+                    desired_bytes,
+                )
+        elif snapshot.last_count <= 0:
             # Cold-start at one. The old two-item prediction was already
             # enough to exceed 50 ms for PyQtGraph's FFT windowing on some
             # tiles; growth is earned only by measured sub-20 ms feedback.
@@ -413,16 +545,37 @@ class ResourceGovernor:
         return UiWorkDecision(
             channel,
             batch,
-            32.0,
+            _RENDER_PASS_REQUIREMENT_MS,
             0,
             "R5 governed render-pass target",
             byte_cap,
-            32.0,
+            _RENDER_PASS_REQUIREMENT_MS,
             "r5-feedback",
             (
                 f"snapshot last={snapshot.last_elapsed_ms:.2f}ms/"
                 f"{snapshot.last_count} items/{snapshot.last_byte_count} bytes",
                 f"per-item={_optional_ms(snapshot.per_item_ewma_ms)}",
+                f"item-independent={int(channel in item_independent)}",
+                (
+                    f"fixed={_optional_ms(fixed_ms)} "
+                    f"item={_optional_ms(item_ms)} "
+                    f"bytes={_optional_ms(byte_ms_per_mib)}/MiB "
+                    f"cohort2={_optional_ms(model.cohort_quadratic_ms)}/item2"
+                ),
+                (
+                    f"fit-rms={_optional_ms(model.residual_rms_ms)} "
+                    f"r2={_optional_float(model.r_squared)} samples={model.samples}"
+                ),
+                (
+                    f"steering={steering} remaining={remaining} "
+                    f"predicted={_optional_ms(predicted_ms)} "
+                    f"latency-cost={_optional_ms(regularization_ms)} "
+                    f"extrapolation-cost={_optional_ms(extrapolation_ms)}"
+                ),
+                (
+                    f"control-achievable={_optional_bool(control_achievable)} "
+                    f"r5-achievable={_optional_bool(hard_achievable)}"
+                ),
                 "target=32.00ms hard=50.00ms",
             ),
         )
@@ -438,7 +591,11 @@ class ResourceGovernor:
         if tokens.get(pass_kind) == token:
             return
         tokens[pass_kind] = token
-        self.latency_feedback.reset_channel(f"montage_render_pass_{pass_kind}")
+        channel = f"montage_render_pass_{pass_kind}"
+        self.latency_feedback.reset_channel(channel)
+        getattr(self, "_render_pass_previous_observations", {}).pop(channel, None)
+        getattr(self, "_render_pass_item_independent", set()).discard(channel)
+        getattr(self, "_render_pass_cost_samples", {}).pop(channel, None)
 
     def _decide_budget(self, channel: str, *, interactive: bool, byte_cap: int) -> UiWorkDecision:
         channel = str(channel)
@@ -492,8 +649,10 @@ class ResourceGovernor:
                     elapsed_ewma_ms=snapshot.elapsed_ewma_ms,
                     per_item_ewma_ms=snapshot.per_item_ewma_ms,
                     per_byte_ewma_ms=snapshot.per_byte_ewma_ms,
-                    budget_ms=float(
-                        self.latency_feedback.work_budget_ms(channel, interactive=False)
+                    budget_ms=(
+                        _RENDER_PASS_REQUIREMENT_MS
+                        if str(channel).startswith("montage_render_pass_")
+                        else float(self.latency_feedback.work_budget_ms(channel, interactive=False))
                     ),
                     batch_limit=int(self.latency_feedback.batch_limit(channel, interactive=False)),
                     interval_ms=0,
@@ -665,6 +824,213 @@ def _clamp_float(value: float, low: float, high: float) -> float:
 
 def _optional_ms(value: float | None) -> str:
     return "n/a" if value is None else f"{float(value):.2f}ms"
+
+
+def _optional_float(value: float | None) -> str:
+    return "n/a" if value is None else f"{float(value):.3f}"
+
+
+def _optional_bool(value: bool | None) -> str:
+    return "unknown" if value is None else str(int(bool(value)))
+
+
+def _render_pass_cost_model(
+    samples: list[tuple[int, float, int]],
+) -> _RenderPassCostModel:
+    """Measure fixed, item, and byte-dependent transaction cost.
+
+    Item and byte terms are reported separately only when the observed
+    cohorts vary independently enough to identify both. Proportional
+    item/byte samples deliberately fall back to the one-dimensional item fit
+    instead of inventing a split.
+    """
+
+    if len(samples) < 2:
+        return _RenderPassCostModel(samples=len(samples))
+    counts = [float(row[0]) for row in samples]
+    mib = [float(row[2]) / _MIB for row in samples]
+    elapsed = [float(row[1]) for row in samples]
+    mean_count = sum(counts) / len(counts)
+    mean_mib = sum(mib) / len(mib)
+    mean_elapsed = sum(elapsed) / len(elapsed)
+    item_variance = sum((count - mean_count) ** 2 for count in counts)
+    item_covariance = sum(
+        (count - mean_count) * (duration - mean_elapsed)
+        for count, duration in zip(counts, elapsed, strict=True)
+    )
+    item_ms = max(0.0, item_covariance / item_variance) if item_variance > 0.0 else None
+    byte_ms_per_mib = None
+    fixed = max(0.0, mean_elapsed - float(item_ms or 0.0) * mean_count)
+
+    # Centred two-predictor least squares. The determinant is the evidence
+    # that item count and bytes varied independently; without it their costs
+    # cannot honestly be split.
+    byte_variance = sum((value - mean_mib) ** 2 for value in mib)
+    cross = sum(
+        (count - mean_count) * (value - mean_mib) for count, value in zip(counts, mib, strict=True)
+    )
+    byte_covariance = sum(
+        (value - mean_mib) * (duration - mean_elapsed)
+        for value, duration in zip(mib, elapsed, strict=True)
+    )
+    determinant = item_variance * byte_variance - cross * cross
+    scale = max(1.0, item_variance * byte_variance)
+    if len(samples) >= 4 and determinant > scale * 1e-6:
+        fitted_item = (item_covariance * byte_variance - byte_covariance * cross) / determinant
+        fitted_byte = (byte_covariance * item_variance - item_covariance * cross) / determinant
+        fitted_fixed = mean_elapsed - fitted_item * mean_count - fitted_byte * mean_mib
+        if fitted_item >= 0.0 and fitted_byte >= 0.0 and fitted_fixed >= 0.0:
+            fixed = fitted_fixed
+            item_ms = fitted_item
+            byte_ms_per_mib = fitted_byte
+    elif item_variance <= 0.0 and byte_variance > 0.0:
+        byte_ms_per_mib = max(0.0, byte_covariance / byte_variance)
+        fixed = max(0.0, mean_elapsed - byte_ms_per_mib * mean_mib)
+
+    cohort_quadratic_ms = None
+    if byte_ms_per_mib is None and len(set(counts)) >= 3:
+        quadratic = _nonnegative_quadratic_fit(counts, elapsed)
+        if quadratic is not None:
+            fitted_fixed, fitted_item, fitted_quadratic = quadratic
+            fixed = fitted_fixed
+            item_ms = fitted_item
+            cohort_quadratic_ms = fitted_quadratic
+
+    predicted = [
+        fixed
+        + float(item_ms or 0.0) * count
+        + float(cohort_quadratic_ms or 0.0) * count * count
+        + float(byte_ms_per_mib or 0.0) * value
+        for count, value in zip(counts, mib, strict=True)
+    ]
+    residual_sum = sum(
+        (actual - estimate) ** 2 for actual, estimate in zip(elapsed, predicted, strict=True)
+    )
+    total_sum = sum((actual - mean_elapsed) ** 2 for actual in elapsed)
+    return _RenderPassCostModel(
+        fixed_ms=fixed,
+        item_ms=item_ms,
+        byte_ms_per_mib=byte_ms_per_mib,
+        cohort_quadratic_ms=cohort_quadratic_ms,
+        residual_rms_ms=(residual_sum / len(samples)) ** 0.5,
+        r_squared=(1.0 - residual_sum / total_sum) if total_sum > 0.0 else None,
+        samples=len(samples),
+    )
+
+
+def _nonnegative_quadratic_fit(
+    x_values: list[float],
+    y_values: list[float],
+) -> tuple[float, float, float] | None:
+    """Fit ``fixed + linear*x + quadratic*x²`` without negative cost terms."""
+
+    sums = [sum(value**power for value in x_values) for power in range(5)]
+    rhs = [
+        sum((value**power) * target for value, target in zip(x_values, y_values, strict=True))
+        for power in range(3)
+    ]
+    matrix = [
+        [sums[0], sums[1], sums[2], rhs[0]],
+        [sums[1], sums[2], sums[3], rhs[1]],
+        [sums[2], sums[3], sums[4], rhs[2]],
+    ]
+    for column in range(3):
+        pivot = max(range(column, 3), key=lambda row: abs(matrix[row][column]))
+        if abs(matrix[pivot][column]) <= 1e-12:
+            return None
+        matrix[column], matrix[pivot] = matrix[pivot], matrix[column]
+        divisor = matrix[column][column]
+        matrix[column] = [value / divisor for value in matrix[column]]
+        for row in range(3):
+            if row == column:
+                continue
+            factor = matrix[row][column]
+            matrix[row] = [
+                value - factor * pivot_value
+                for value, pivot_value in zip(matrix[row], matrix[column], strict=True)
+            ]
+    coefficients = tuple(float(matrix[row][3]) for row in range(3))
+    if any(value < 0.0 for value in coefficients):
+        return None
+    return coefficients
+
+
+def _render_pass_latency_cost_ms(elapsed_ms: float) -> float:
+    """Continuous responsiveness price in absolute milliseconds.
+
+    Work below the 18 ms smooth-interaction envelope is unregularized. The
+    price rises gently to 45 ms, then joins a stronger quadratic with matching
+    value and first derivative. There is deliberately no branch at 50 ms:
+    R5 is reported there, while optimization sees the whole smooth curve.
+    """
+
+    elapsed = max(0.0, float(elapsed_ms))
+    if elapsed <= 18.0:
+        return 0.0
+    gentle = 0.01
+    if elapsed <= 45.0:
+        return gentle * (elapsed - 18.0) ** 2
+    at_45 = gentle * (45.0 - 18.0) ** 2
+    slope_at_45 = 2.0 * gentle * (45.0 - 18.0)
+    beyond = elapsed - 45.0
+    return at_45 + slope_at_45 * beyond + 0.5 * beyond**2
+
+
+def _render_pass_extrapolation_cost_ms(ratio: float) -> float:
+    """Smooth evidence-distance price: free to 1.1x, exponential thereafter."""
+
+    ratio = max(0.0, float(ratio))
+    if ratio <= 1.1:
+        return 0.0
+    decades = log10(ratio / 1.1)
+    return 5.0 * (exp(2.0 * decades) - 1.0) ** 2
+
+
+def _render_pass_optimal_point(
+    *,
+    fixed_ms: float,
+    marginal_ms: float,
+    quadratic_ms: float,
+    remaining_items: int,
+    observed_item_max: int,
+    observed_byte_max: int,
+    bytes_per_item: float,
+) -> tuple[int, float, float]:
+    """Minimize predicted fill time plus continuous callback-latency cost."""
+
+    remaining = max(1, int(remaining_items))
+    marginal = max(0.0, float(marginal_ms))
+    quadratic = max(0.0, float(quadratic_ms))
+
+    def latency(items: int) -> float:
+        count = float(items)
+        return float(fixed_ms) + marginal * count + quadratic * count * count
+
+    rows: list[tuple[float, float, int, float]] = []
+    for items in range(1, remaining + 1):
+        chunks = ceil(float(remaining) / float(items))
+        chunk_ms = latency(items)
+        latency_cost = _render_pass_latency_cost_ms(chunk_ms)
+        extrapolation_cost = _render_pass_extrapolation_cost_ms(
+            float(items) / max(1.0, float(observed_item_max))
+        )
+        if observed_byte_max > 0 and bytes_per_item > 0.0:
+            extrapolation_cost += _render_pass_extrapolation_cost_ms(
+                float(items) * float(bytes_per_item) / float(observed_byte_max)
+            )
+        rows.append(
+            (
+                chunks * (chunk_ms + latency_cost + extrapolation_cost),
+                chunk_ms,
+                items,
+                latency_cost,
+            )
+        )
+    selected = min(
+        rows,
+        key=lambda row: (row[0], row[1], -row[2]),
+    )
+    return int(selected[2]), float(selected[1]), float(selected[3])
 
 
 def _diagnostics_only_ui_observation(observation: GuiCallbackObservation) -> bool:

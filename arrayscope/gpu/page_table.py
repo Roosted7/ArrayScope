@@ -281,6 +281,13 @@ class PageTable:
 
         return self._pin_sets.get(owner, frozenset())
 
+    def pin_owner_counts(self) -> tuple[tuple[str, int], ...]:
+        """Return stable, compact pin attribution for failure evidence."""
+
+        return tuple(
+            sorted((str(owner), len(keys)) for owner, keys in self._pin_sets.items() if keys)
+        )
+
     def _replace_owner_key(self, owner: object, key: DataChunkKey, pinned: bool) -> None:
         values = set(self._pin_sets.get(owner, frozenset()))
         if pinned:

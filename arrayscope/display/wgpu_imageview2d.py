@@ -494,6 +494,7 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_committed: dict[str, object] | None = None
         self._wgpu_tiled_binding_signature: _WgpuTiledBindingSignature | None = None
         self._wgpu_binding_fast_path_commits = 0
+        self._wgpu_binding_incremental_commits = 0
         self._wgpu_binding_full_republications = 0
         self._wgpu_tile_instances_cache: tuple[object, tuple[TileInstance, ...]] | None = None
         self._wgpu_last_report_uploads = 0
@@ -1087,6 +1088,13 @@ class WgpuImageView2D(ImageViewShell):
             )
             for tile in sorted(committed["tiles"])
         )
+        if cached is not None and cached[1] == instances:
+            # The executor's identity check deliberately avoids an O(n)
+            # equality scan. Do that scan here while the instances are
+            # already being assembled, then retain the exact tuple so a
+            # target-quality payload replacement with unchanged geometry
+            # performs no full instance-buffer rewrite.
+            instances = cached[1]
         self._wgpu_tile_instances_cache = (committed, instances)
         return instances
 
@@ -1474,6 +1482,10 @@ class WgpuImageView2D(ImageViewShell):
         self._start_upload_timing("wgpu_tile_layer")
         applying = self._applying_presentation
         self._applying_presentation = True
+        previous_executor = self._wgpu_executor
+        pool_growth_ms_before = float(
+            getattr(previous_executor, "pool_growth_ms_total", 0.0) or 0.0
+        )
         try:
             payloads = {
                 int(tile): payload for tile, payload in dict(montage_tile_payloads or {}).items()
@@ -1486,10 +1498,16 @@ class WgpuImageView2D(ImageViewShell):
                 stats = TileLayerUpdateStats(visible_items=0, presented_tiles=())
                 self._record_tile_layer_stats(stats)
                 return stats
+            previous_commit = self._wgpu_committed or {}
+            delta_upserts = {
+                int(tile): payload
+                for tile, payload in dict(getattr(tile_delta, "upserts", {}) or {}).items()
+            }
+            plan_payloads = delta_upserts if previous_commit and delta_upserts else payloads
             source_mapping = shader_mapping
             if source_mapping is None:
                 source_mapping = common_shader_mapping(
-                    getattr(payload, "shader_mapping", None) for payload in payloads.values()
+                    getattr(payload, "shader_mapping", None) for payload in plan_payloads.values()
                 )
             (
                 representation,
@@ -1497,7 +1515,7 @@ class WgpuImageView2D(ImageViewShell):
                 scale,
                 symlog_constant,
                 phase_color,
-            ) = self._wgpu_commit_plan(payloads, source_mapping, rgb_already_windowed)
+            ) = self._wgpu_commit_plan(plan_payloads, source_mapping, rgb_already_windowed)
             level_lo, level_hi = (float(levels[0]), float(levels[1]))
             if not level_hi > level_lo:
                 level_hi = level_lo + 1e-6
@@ -1513,10 +1531,12 @@ class WgpuImageView2D(ImageViewShell):
                 clip_indicator=self._clip_indicator_enabled,
                 minification_filter=self._minification_filter_enabled,
             )
-            physical_identities = _wgpu_physical_payload_identities(payloads)
             layout_identity = _wgpu_layout_identity(geometry, frame_plan=frame_plan)
             transposed = _display_axes_transposed(geometry)
-            if self._wgpu_tiled_binding_reusable(
+            physical_identities = (
+                None if delta_upserts else _wgpu_physical_payload_identities(payloads)
+            )
+            if not delta_upserts and self._wgpu_tiled_binding_reusable(
                 physical_identities=physical_identities,
                 representation=representation,
                 mapping_mode=mode,
@@ -1543,9 +1563,42 @@ class WgpuImageView2D(ImageViewShell):
                     "layout region — refusing to guess destination geometry"
                 )
 
+            display_shape = tile_layout_shape(geometry, frame_plan=frame_plan)
+            incremental_delta = bool(
+                previous_commit
+                and delta_upserts
+                and not tuple(getattr(tile_delta, "removals", ()) or ())
+                and not bool(getattr(tile_delta, "force_refresh", False))
+                and not bool(getattr(tile_delta, "atomic_handoff", False))
+                and previous_commit.get("preview_atlas") is None
+                and str(previous_commit.get("representation", "")) == representation
+                and tuple(previous_commit.get("display_shape", ())) == tuple(display_shape)
+                and previous_commit.get("layout_identity") == layout_identity
+                and bool(previous_commit.get("transposed", False)) == transposed
+                and previous_commit.get("histogram_obligation")
+                == self._wgpu_histogram_evidence_obligation
+                and set(dict(previous_commit.get("tiles", {}) or {})) <= set(payloads)
+                and set(delta_upserts) <= set(payloads)
+            )
+            work_payloads = delta_upserts if incremental_delta else payloads
+            if incremental_delta:
+                signature = self._wgpu_tiled_binding_signature
+                identity_rows = (
+                    {}
+                    if signature is None or signature.payload_identities is None
+                    else dict(signature.payload_identities)
+                )
+                delta_identities = _wgpu_physical_payload_identities(delta_upserts)
+                if identity_rows and delta_identities is not None:
+                    identity_rows.update(delta_identities)
+                    physical_identities = tuple(sorted(identity_rows.items()))
+                else:
+                    physical_identities = _wgpu_physical_payload_identities(payloads)
+            elif physical_identities is None:
+                physical_identities = _wgpu_physical_payload_identities(payloads)
             textures = {
-                tile: self._wgpu_payload_texture(payloads[tile], representation)
-                for tile in payloads
+                tile: self._wgpu_payload_texture(work_payloads[tile], representation)
+                for tile in work_payloads
             }
             planned_count = planned_tile_count(
                 geometry,
@@ -1553,10 +1606,10 @@ class WgpuImageView2D(ImageViewShell):
                 minimum=len(payloads),
             )
             lod_geometry = {
-                tile: _wgpu_payload_declared_lod_geometry(payloads[tile], textures[tile])
-                for tile in payloads
+                tile: _wgpu_payload_declared_lod_geometry(work_payloads[tile], textures[tile])
+                for tile in work_payloads
             }
-            preview_payloads = _wgpu_preview_payloads(payloads)
+            preview_payloads = {} if incremental_delta else _wgpu_preview_payloads(payloads)
             preview_reducers = {
                 _wgpu_payload_lod_reducer(
                     payload,
@@ -1598,7 +1651,7 @@ class WgpuImageView2D(ImageViewShell):
                 if preview_atlas is not None
                 else frozenset()
             )
-            ordinary_tiles = tuple(tile for tile in payloads if tile not in atlas_tiles)
+            ordinary_tiles = tuple(tile for tile in work_payloads if tile not in atlas_tiles)
             # Size the pool for each declared ladder, not merely the payload
             # arriving in this commit.  Otherwise a coarse-first plane can
             # force an executor rebuild when L0 arrives, discarding the very
@@ -1634,11 +1687,13 @@ class WgpuImageView2D(ImageViewShell):
                 # forecasting one ordinary page per planned tile would erase
                 # the allocation win before refinement even starts.
                 pages_needed = sum(capacity_pages_by_tile.values()) + len(preview_atlas.page_keys)
+            executor_ensure_started = perf_counter()
             executor = self._ensure_wgpu_executor(
                 {representation: pages_needed},
                 preferred_pages={representation: pages_preferred},
                 residency_budget_bytes=int(tile_residency_budget_bytes or 0),
             )
+            executor_ensure_ms = (perf_counter() - executor_ensure_started) * 1000.0
             resident_by_plane: dict[tuple[object, object, str], list[object]] = {}
             for key in executor.page_table.resident_keys():
                 resident_by_plane.setdefault(
@@ -1656,8 +1711,10 @@ class WgpuImageView2D(ImageViewShell):
             # plane.  The current payload's level selects the page-table span;
             # tiles continue to request L0 so the shader resolves resident
             # ancestors while refinement is incomplete.
-            planes = []
-            committed_tiles: dict[int, dict[str, object]] = {}
+            planes = list(previous_commit.get("planes", ()) or ()) if incremental_delta else []
+            committed_tiles: dict[int, dict[str, object]] = (
+                dict(previous_commit.get("tiles", {}) or {}) if incremental_delta else {}
+            )
             commands = []
             planned_resident = set(executor.page_table.resident_keys())
             planned_upload_tiles = []
@@ -1725,7 +1782,7 @@ class WgpuImageView2D(ImageViewShell):
                     }
                 if atlas_uploaded:
                     planned_upload_tiles.extend(sorted(atlas_tiles))
-            for tile in sorted(payloads):
+            for tile in sorted(work_payloads):
                 if tile in atlas_tiles:
                     continue
                 payload = payloads[tile]
@@ -1788,17 +1845,21 @@ class WgpuImageView2D(ImageViewShell):
                 )
                 resident_lods = (int(key.lod.level) for key in resident_plane_keys)
                 max_lod = max((physical_lod_level, *resident_lods))
-                plane_index = len(planes)
-                planes.append(
-                    ContentPlane(
-                        plane_identity,
-                        "live",
-                        (source_height, source_width),
-                        max_lod=max_lod,
-                        representation=representation,
-                        lod_reducer=lod_reducer,
-                    )
+                content_plane = ContentPlane(
+                    plane_identity,
+                    "live",
+                    (source_height, source_width),
+                    max_lod=max_lod,
+                    representation=representation,
+                    lod_reducer=lod_reducer,
                 )
+                previous_info = committed_tiles.get(tile) if incremental_delta else None
+                if previous_info is None:
+                    plane_index = len(planes)
+                    planes.append(content_plane)
+                else:
+                    plane_index = int(previous_info["plane_index"])
+                    planes[plane_index] = content_plane
                 page_keys = []
                 will_upload = False
                 for key, (chunk_y, chunk_x) in zip(
@@ -1863,7 +1924,11 @@ class WgpuImageView2D(ImageViewShell):
             histogram_capable = representation != RGB8
             scheduled_evidence_keys = set()
             atlas_missing_prepared_evidence = 0
-            for tile, info in committed_tiles.items():
+            histogram_tiles = (
+                tuple(sorted(work_payloads)) if incremental_delta else tuple(committed_tiles)
+            )
+            for tile in histogram_tiles:
+                info = committed_tiles[tile]
                 if not bool(info["histogram_frontier_eligible"]):
                     info["histogram_evidence_key"] = None
                     if (
@@ -1919,12 +1984,14 @@ class WgpuImageView2D(ImageViewShell):
                 )
 
             self._wgpu_mapping_state = mapping_state
-            display_shape = tile_layout_shape(geometry, frame_plan=frame_plan)
             self._wgpu_committed = {
                 "tiles": committed_tiles,
+                "planes": tuple(planes),
                 "representation": representation,
                 "display_shape": display_shape,
                 "budget_bytes": int(tile_residency_budget_bytes or 0),
+                "layout_identity": layout_identity,
+                "histogram_obligation": self._wgpu_histogram_evidence_obligation,
                 "preview_atlas": preview_atlas,
                 "preview_atlas_active_tiles": tuple(sorted(atlas_tiles)),
                 # Payloads are canonical (sorted image axes); an X/Y swap is a
@@ -1936,8 +2003,31 @@ class WgpuImageView2D(ImageViewShell):
 
             start = perf_counter()
             camera = self._wgpu_camera_command()
+            previous_page_keys = tuple(
+                key
+                for info in (previous_commit.get("tiles", {}) or {}).values()
+                for key in tuple(info.get("page_keys", ()) or ())
+            )
+            committed_page_keys = tuple(
+                key
+                for info in committed_tiles.values()
+                for key in tuple(info.get("page_keys", ()) or ())
+            )
+            atomic_handoff = bool(getattr(tile_delta, "atomic_handoff", False))
+            predecessor_transaction_keys = (
+                previous_page_keys if incremental_delta or atomic_handoff else ()
+            )
+            if incremental_delta:
+                # Preserve exactly the predecessor's visible backing while
+                # this bounded successor delta uploads. Stable plane
+                # descriptors cover every resident LOD and cannot define
+                # presentation ownership.
+                executor.replace_bound_content_pin_set(previous_page_keys)
             submission_commands = [
-                BindContentPlanes(tuple(planes)),
+                BindContentPlanes(
+                    tuple(planes),
+                    committed_page_keys=predecessor_transaction_keys,
+                ),
                 *commands,
                 SetDisplayMapping(self._wgpu_mapping_state),
             ]
@@ -1970,6 +2060,7 @@ class WgpuImageView2D(ImageViewShell):
             # no event-loop interval in which successor pages are unowned.
             executor.replace_resident_pin_set(self._wgpu_atomic_warm_pin_owner, ())
             report = self._submit_wgpu(tuple(submission_commands))
+            executor.replace_bound_content_pin_set(committed_page_keys)
             upload_ms = (perf_counter() - start) * 1000.0
             self._wgpu_last_report_uploads = int(report.uploads)
             for command_index, spec in zip(histogram_indices, histogram_specs, strict=False):
@@ -2012,7 +2103,16 @@ class WgpuImageView2D(ImageViewShell):
                 planned_upload_tiles=tuple(planned_upload_tiles),
                 tile_residency_budget_bytes=tile_residency_budget_bytes,
                 upload_ms=upload_ms,
+                pool_growth_ms=max(
+                    0.0,
+                    float(getattr(executor, "pool_growth_ms_total", 0.0) or 0.0)
+                    - pool_growth_ms_before,
+                ),
+                executor_initialization_ms=(
+                    executor_ensure_ms + upload_ms if previous_executor is None else 0.0
+                ),
                 binding_fast_path=False,
+                binding_incremental=incremental_delta,
             )
             if physical_identities is not None and layout_identity is not None:
                 self._wgpu_tiled_binding_signature = _WgpuTiledBindingSignature(
@@ -2114,6 +2214,7 @@ class WgpuImageView2D(ImageViewShell):
             ),
             upload_ms=upload_ms,
             binding_fast_path=True,
+            binding_incremental=False,
         )
 
     def _finish_wgpu_tiled_presentation(
@@ -2130,7 +2231,10 @@ class WgpuImageView2D(ImageViewShell):
         planned_upload_tiles,
         tile_residency_budget_bytes: int,
         upload_ms: float,
+        pool_growth_ms: float = 0.0,
+        executor_initialization_ms: float = 0.0,
         binding_fast_path: bool,
+        binding_incremental: bool,
     ) -> TileLayerUpdateStats:
         """Finish one tiled commit from either the full or mapping-only path."""
 
@@ -2211,6 +2315,8 @@ class WgpuImageView2D(ImageViewShell):
         existing_items = 0 if binding_fast_path else len(committed_tiles) - len(updated)
         if binding_fast_path:
             self._wgpu_binding_fast_path_commits += 1
+        elif binding_incremental:
+            self._wgpu_binding_incremental_commits += 1
         else:
             self._wgpu_binding_full_republications += 1
         stats = TileLayerUpdateStats(
@@ -2225,6 +2331,8 @@ class WgpuImageView2D(ImageViewShell):
             existing_items_shown=existing_items,
             resident_items=len(presented),
             storage_capacity=executor.pool_budget(representation),
+            pool_growth_ms=float(pool_growth_ms),
+            executor_initialization_ms=float(executor_initialization_ms),
             texture_uploads=uploads,
             texture_upload_bytes=int(report.upload_bytes),
             page_count=len(executor.page_table.resident_keys()),
@@ -2235,7 +2343,8 @@ class WgpuImageView2D(ImageViewShell):
             budget_bytes=int(tile_residency_budget_bytes or 0),
             shader_uniform_updates=1,
             binding_fast_path_commits=int(binding_fast_path),
-            binding_full_republications=int(not binding_fast_path),
+            binding_incremental_commits=int(binding_incremental),
+            binding_full_republications=int(not binding_fast_path and not binding_incremental),
             upload_ms=upload_ms,
         )
         self._record_tile_layer_stats(stats)
@@ -3143,6 +3252,7 @@ class WgpuImageView2D(ImageViewShell):
             "wgpu_residency_binding_cache_hits": int(self._wgpu_residency_binding_cache_hits),
             "wgpu_residency_binding_cache_misses": int(self._wgpu_residency_binding_cache_misses),
             "wgpu_binding_fast_path_commits": int(self._wgpu_binding_fast_path_commits),
+            "wgpu_binding_incremental_commits": int(self._wgpu_binding_incremental_commits),
             "wgpu_binding_full_republications": int(self._wgpu_binding_full_republications),
             "wgpu_atomic_warm_pinned_pages": (
                 0
@@ -3153,6 +3263,9 @@ class WgpuImageView2D(ImageViewShell):
             "wgpu_pool_grows_total": int(getattr(executor, "pool_grows_total", 0) or 0),
             "wgpu_pool_growth_copy_bytes_total": int(
                 getattr(executor, "pool_growth_copy_bytes_total", 0) or 0
+            ),
+            "wgpu_pool_growth_ms_total": float(
+                getattr(executor, "pool_growth_ms_total", 0.0) or 0.0
             ),
             "wgpu_codec_family": str(getattr(executor, "codec_family", "none") or "none"),
             "wgpu_codec_min_psnr_db": float(

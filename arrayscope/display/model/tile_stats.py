@@ -31,6 +31,11 @@ class TileLayerUpdateStats:
     resident_items: int = 0
     storage_capacity: int = 0
     storage_rebuilds: int = 0
+    # Structural, non-steady-state time spent growing backend storage during
+    # this commit. It remains part of upload_ms/full callback diagnostics but
+    # is split out so a pacing model does not learn it as per-cohort cost.
+    pool_growth_ms: float = 0.0
+    executor_initialization_ms: float = 0.0
     storage_evictions: int = 0
     texture_uploads: int = 0
     texture_upload_bytes: int = 0
@@ -66,6 +71,7 @@ class TileLayerUpdateStats:
     # exclusive: the backend either reused the complete physical tile
     # binding or rebuilt/rebound it. CPU backends leave both at zero.
     binding_fast_path_commits: int = 0
+    binding_incremental_commits: int = 0
     binding_full_republications: int = 0
     # Physical presentation truth (P9): count of desired-vs-physical page
     # divergences (stale mapping key/uniform, stale levels, stale per-quad

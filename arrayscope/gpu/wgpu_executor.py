@@ -43,6 +43,7 @@ from __future__ import annotations
 import contextlib
 import struct
 from dataclasses import dataclass, field
+from time import perf_counter
 
 import numpy as np
 
@@ -1798,6 +1799,8 @@ class WgpuPlaneExecutor:
         self.page_table = PageTable()
         self._bound_planes: tuple = ()
         self._plane_grids: list[list[_LodGrid]] = []
+        self._lod_rows: list[tuple[int, int, int, int]] = []
+        self._plane_rows: list[tuple[int, int, int, int]] = []
         self._plane_family_indices: dict[tuple[object, ...], tuple[int, ...]] = {}
         self._plane_lookup_candidates_total = 0
         self._flat_table = np.full(1, -1, dtype=np.int32)
@@ -1825,6 +1828,7 @@ class WgpuPlaneExecutor:
         self._lod_compressed_source_reductions_total = 0
         self._pool_grows_total = 0
         self._pool_growth_copy_bytes_total = 0
+        self._pool_growth_ms_total = 0.0
         self._last_pool_exhaustion = ""
         self._table_dirty = True
         self._tiles: tuple = ()
@@ -1933,26 +1937,28 @@ class WgpuPlaneExecutor:
         # (plane rebind, table growth) so cached bind groups are rebuilt.
         self._bind_epoch = 0
         self._table_buf = d.create_buffer(
-            size=max(16, self._flat_table.nbytes),
+            size=64 * 1024,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
         # Codec side buffers mirror the flat table's length (only bound by the
         # compressed pipeline).  Start at one entry; grown with the table.
         self._codec_flag_buf = d.create_buffer(
-            size=max(16, self._flat_codec.nbytes),
+            size=64 * 1024,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
         self._codec_norm_buf = d.create_buffer(
-            size=max(16, self._flat_norm.nbytes),
+            size=256 * 1024,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
+        self._tiles_cap = 512
         self._lod_info_buf = d.create_buffer(
-            size=16, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
+            size=16 * self._tiles_cap * 16,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
         self._planes_buf = d.create_buffer(
-            size=16, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
+            size=16 * self._tiles_cap,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
-        self._tiles_cap = 512
         self._tiles_buf = d.create_buffer(
             size=48 * self._tiles_cap,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
@@ -2187,6 +2193,7 @@ class WgpuPlaneExecutor:
         page table stays valid because every occupied layer keeps its index.
         """
 
+        started = perf_counter()
         pool = self._pool_by_id(pool_id)
         old_layers = int(pool.allocated_layers)
         if old_layers >= int(pool.layer_count):
@@ -2237,6 +2244,7 @@ class WgpuPlaneExecutor:
         pool.allocated_layers = new_layers
         self._pool_grows_total += 1
         self._pool_growth_copy_bytes_total += old_layers * self._pool_layer_bytes(pool_id)
+        self._pool_growth_ms_total += (perf_counter() - started) * 1000.0
         # Render bind groups capture texture views. Histogram and LOD bind groups
         # are submission-local and will naturally see the replacement view.
         self._bind_epoch += 1
@@ -2471,25 +2479,32 @@ class WgpuPlaneExecutor:
     # ---- plane binding -------------------------------------------------------
 
     def _bind_planes(self, cmd: BindContentPlanes) -> None:
-        wgpu = self._wgpu
-        self._bound_planes = tuple(cmd.planes)
+        planes = tuple(cmd.planes)
+        if self._bound_planes and planes[: len(self._bound_planes)] == self._bound_planes:
+            if len(planes) > len(self._bound_planes):
+                self._append_bound_planes(planes[len(self._bound_planes) :])
+            if cmd.committed_page_keys is not None:
+                self.replace_bound_content_pin_set(cmd.committed_page_keys)
+            return
+
+        self._bound_planes = planes
         self._plane_grids = []
         family_indices: dict[tuple[object, ...], list[int]] = {}
-        lod_rows: list[tuple[int, int, int, int]] = []
-        plane_rows: list[tuple[int, int, int, int]] = []
+        self._lod_rows = []
+        self._plane_rows = []
         base = 0
         for plane_index, plane in enumerate(self._bound_planes):
             h, w = plane.plane_shape
-            lod_base = len(lod_rows)
+            lod_base = len(self._lod_rows)
             grids: list[_LodGrid] = []
             for lod in range(plane.max_lod + 1):
                 gw = -(-w // (PAGE << lod))
                 gh = -(-h // (PAGE << lod))
                 grids.append(_LodGrid(base=base, grid_w=gw, grid_h=gh))
-                lod_rows.append((base, gw, gh, 0))
+                self._lod_rows.append((base, gw, gh, 0))
                 base += gw * gh
             self._plane_grids.append(grids)
-            plane_rows.append(
+            self._plane_rows.append(
                 (
                     _REP_INDEX[plane.representation],
                     plane.max_lod,
@@ -2508,15 +2523,6 @@ class WgpuPlaneExecutor:
             family: tuple(indices) for family, indices in family_indices.items()
         }
 
-        # Bound physical coverage is the active never-black fallback set.
-        # Protect every currently resident page that feeds these plane spans
-        # before later commands in the same submission ensure refinements;
-        # rebinding atomically releases pages of planes that left the view.
-        bound_keys = tuple(
-            key for key in self.page_table.resident_keys() if self._flat_indices(key)
-        )
-        self.page_table.replace_pin_set(_BOUND_PLANES_PIN_OWNER, bound_keys)
-
         self._flat_table = np.full(max(base, 1), -1, dtype=np.int32)
         self._flat_codec = np.zeros(max(base, 1), dtype=np.uint32)
         self._flat_norm = np.zeros((max(base, 1), 4), dtype=np.float32)
@@ -2530,33 +2536,161 @@ class WgpuPlaneExecutor:
                 self._flat_codec[flat] = codec_flag
                 self._flat_norm[flat] = norm
 
+        self._ensure_plane_buffer_capacity()
+        self.device.queue.write_buffer(
+            self._lod_info_buf,
+            0,
+            np.asarray(self._lod_rows or [(0, 0, 0, 0)], np.uint32).tobytes(),
+        )
+        self.device.queue.write_buffer(
+            self._planes_buf,
+            0,
+            np.asarray(self._plane_rows or [(0, 0, 0, 0)], np.uint32).tobytes(),
+        )
+        self._ensure_flat_buffer_capacity()
+        self._table_dirty = True
+        if cmd.committed_page_keys is None:
+            self._refresh_bound_plane_pins()
+        else:
+            self.replace_bound_content_pin_set(cmd.committed_page_keys)
+
+    def _append_bound_planes(self, appended) -> None:
+        """Extend a stable plane prefix without rebuilding existing tables."""
+
+        appended = tuple(appended)
+        if not appended:
+            return
+        old_lod_count = len(self._lod_rows)
+        old_plane_count = len(self._plane_rows)
+        old_flat_count = len(self._flat_table)
+        base = old_flat_count
+        family_indices = {
+            family: list(indices) for family, indices in self._plane_family_indices.items()
+        }
+        for plane in appended:
+            plane_index = len(self._bound_planes)
+            self._bound_planes = (*self._bound_planes, plane)
+            h, w = plane.plane_shape
+            lod_base = len(self._lod_rows)
+            grids = []
+            for lod in range(plane.max_lod + 1):
+                gw = -(-w // (PAGE << lod))
+                gh = -(-h // (PAGE << lod))
+                grids.append(_LodGrid(base=base, grid_w=gw, grid_h=gh))
+                self._lod_rows.append((base, gw, gh, 0))
+                base += gw * gh
+            self._plane_grids.append(grids)
+            self._plane_rows.append(
+                (
+                    _REP_INDEX[plane.representation],
+                    plane.max_lod,
+                    lod_base,
+                    int(plane.lod_reducer == REDUCER_PHASE_VECTOR),
+                )
+            )
+            family = (
+                plane.document_generation,
+                plane.operation_key,
+                plane.representation,
+            )
+            family_indices.setdefault((*family, None), []).append(plane_index)
+            family_indices.setdefault((*family, plane.lod_reducer), []).append(plane_index)
+        self._plane_family_indices = {
+            family: tuple(indices) for family, indices in family_indices.items()
+        }
+
+        growth = base - old_flat_count
+        self._flat_table = np.concatenate((self._flat_table, np.full(growth, -1, dtype=np.int32)))
+        self._flat_codec = np.concatenate((self._flat_codec, np.zeros(growth, dtype=np.uint32)))
+        self._flat_norm = np.concatenate((self._flat_norm, np.zeros((growth, 4), dtype=np.float32)))
+        for key in self.page_table.resident_keys():
+            slot = self.page_table.lookup(key)
+            if slot is None:
+                continue
+            codec_flag, norm = self._page_codec.get(key, (0, (0.0, 0.0, 0.0, 0.0)))
+            for flat in self._flat_indices(key):
+                if flat < old_flat_count:
+                    continue
+                self._flat_table[flat] = slot.page_index
+                self._flat_codec[flat] = codec_flag
+                self._flat_norm[flat] = norm
+
+        self._ensure_plane_buffer_capacity()
+        self.device.queue.write_buffer(
+            self._lod_info_buf,
+            old_lod_count * 16,
+            np.asarray(self._lod_rows[old_lod_count:], np.uint32).tobytes(),
+        )
+        self.device.queue.write_buffer(
+            self._planes_buf,
+            old_plane_count * 16,
+            np.asarray(self._plane_rows[old_plane_count:], np.uint32).tobytes(),
+        )
+        self._ensure_flat_buffer_capacity()
+        self._table_dirty = True
+
+    def _ensure_plane_buffer_capacity(self) -> None:
+        wgpu = self._wgpu
         d = self.device
-        lod_info = np.asarray(lod_rows or [(0, 0, 0, 0)], np.uint32)
-        planes_info = np.asarray(plane_rows or [(0, 0, 0, 0)], np.uint32)
-        self._lod_info_buf = d.create_buffer_with_data(
-            data=lod_info.tobytes(), usage=wgpu.BufferUsage.STORAGE
-        )
-        self._planes_buf = d.create_buffer_with_data(
-            data=planes_info.tobytes(), usage=wgpu.BufferUsage.STORAGE
-        )
+        lod_nbytes = max(16, len(self._lod_rows) * 16)
+        plane_nbytes = max(16, len(self._plane_rows) * 16)
+        recreated = False
+        if lod_nbytes > self._lod_info_buf.size:
+            self._lod_info_buf = d.create_buffer(
+                size=lod_nbytes,
+                usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+            )
+            recreated = True
+        if plane_nbytes > self._planes_buf.size:
+            self._planes_buf = d.create_buffer(
+                size=plane_nbytes,
+                usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+            )
+            recreated = True
+        if recreated:
+            self._bind_epoch += 1
+            self.device.queue.write_buffer(
+                self._lod_info_buf,
+                0,
+                np.asarray(self._lod_rows or [(0, 0, 0, 0)], np.uint32).tobytes(),
+            )
+            self.device.queue.write_buffer(
+                self._planes_buf,
+                0,
+                np.asarray(self._plane_rows or [(0, 0, 0, 0)], np.uint32).tobytes(),
+            )
+
+    def _ensure_flat_buffer_capacity(self) -> None:
+        wgpu = self._wgpu
+        d = self.device
+        recreated = False
         if self._flat_table.nbytes > self._table_buf.size:
             self._table_buf = d.create_buffer(
                 size=self._flat_table.nbytes,
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
             )
+            recreated = True
         if self._codec_engaged:
             if self._flat_codec.nbytes > self._codec_flag_buf.size:
                 self._codec_flag_buf = d.create_buffer(
                     size=self._flat_codec.nbytes,
                     usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
                 )
+                recreated = True
             if self._flat_norm.nbytes > self._codec_norm_buf.size:
                 self._codec_norm_buf = d.create_buffer(
                     size=self._flat_norm.nbytes,
                     usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
                 )
-        self._bind_epoch += 1
-        self._table_dirty = True
+                recreated = True
+        if recreated:
+            self._bind_epoch += 1
+
+    def _refresh_bound_plane_pins(self) -> None:
+        bound_keys = tuple(
+            key for key in self.page_table.resident_keys() if self._flat_indices(key)
+        )
+        self.page_table.replace_pin_set(_BOUND_PLANES_PIN_OWNER, bound_keys)
 
     def _flat_indices(self, key: DataChunkKey) -> tuple[int, ...]:
         """Flat-table entries for ``key`` across every bound plane it feeds."""
@@ -3130,7 +3264,8 @@ class WgpuPlaneExecutor:
             f"pool={pool_id or 'all'} budget={pool.layer_count} "
             f"allocated={pool.allocated_layers} resident={len(resident)} "
             f"pinned={pinned} free={len(pool.free_layers)} "
-            f"unaccounted={len(unaccounted)}"
+            f"unaccounted={len(unaccounted)} "
+            f"pin_owners={self.page_table.pin_owner_counts()!r}"
         )
         raise RuntimeError(self._last_pool_exhaustion)
 
@@ -3826,6 +3961,12 @@ class WgpuPlaneExecutor:
 
         return int(self._pool_growth_copy_bytes_total)
 
+    @property
+    def pool_growth_ms_total(self) -> float:
+        """Host callback time spent replacing physical texture arrays."""
+
+        return float(self._pool_growth_ms_total)
+
     def page_is_compressed(self, key: DataChunkKey) -> bool:
         """Whether ``key``'s resident page lives in a BC pool (page-table truth)."""
 
@@ -3925,6 +4066,17 @@ class WgpuPlaneExecutor:
         resident = frozenset(key for key in keys if key in self.page_table)
         self.page_table.replace_pin_set(owner, resident)
         return resident
+
+    def replace_bound_content_pin_set(self, keys) -> frozenset[DataChunkKey]:
+        """Pin exactly the resident pages that back committed content.
+
+        Plane descriptors cover every LOD that may feed a tile and are broader
+        than presentation truth. Incremental montage commits replace this set
+        at their synchronous transaction boundary so stale resident LODs do
+        not become unevictable merely because their plane stays bound.
+        """
+
+        return self.replace_resident_pin_set(_BOUND_PLANES_PIN_OWNER, keys)
 
     def resident_pin_set(self, owner: object) -> frozenset[DataChunkKey]:
         return self.page_table.pin_set(owner)
