@@ -479,7 +479,7 @@ def test_preview_level_tracks_coarser_viewport_demand():
     session._selected_lod_factor()
 
     assert session.lod_policy_decision.demand.desired_level >= 5
-    assert session.lod_preview_level == session.lod_policy_decision.demand.desired_level + 5
+    assert session.lod_preview_level == session.lod_policy_decision.demand.desired_level + 7
     assert (
         render_effects.preview_evaluation_level(session, session.lod_policy_decision.demand)
         == session.lod_preview_level

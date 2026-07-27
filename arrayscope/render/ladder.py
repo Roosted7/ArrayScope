@@ -46,7 +46,10 @@ from arrayscope.render.progressive_scheduling import SchedulingVerdict
 COARSE_RUNG_ENABLED_DEFAULT = True
 COARSE_RUNG_MIN_LEVEL_DELTA = 2
 COARSE_RUNG_LARGE_MONTAGE_TILES = 256
-COARSE_RUNG_LARGE_MONTAGE_EXTRA_LEVELS = 3
+# A 336² source tile reaches one stored sample at L9. Once a montage is large
+# enough to amortize a complete-scope preview, first coverage values latency
+# over intra-tile detail; target work restores that detail only after ACK.
+COARSE_RUNG_LARGE_MONTAGE_EXTRA_LEVELS = 5
 
 
 def coarse_rung_level(
