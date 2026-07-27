@@ -65,7 +65,8 @@ snapshot stream without importing Qt or renderer implementation state. Its
 detailed output names every failing one-based snapshot index and LOD set;
 `--summary` emits one Markdown verdict row per input trace. A contract-clean
 trace exits zero, any R1/R3 violation exits one, and empty or malformed traces
-fail closed.
+fail closed. R3 covers both a partial evidence count frozen during presentation
+growth and an inactive fill whose evidence starts only afterwards.
 
 The optional pytest gate reads `*.jsonl` from
 `tests/fixtures/progressive-render-contract/` and the gitignored

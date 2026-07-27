@@ -6,6 +6,7 @@ import argparse
 import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 
@@ -16,6 +17,7 @@ class ProgressiveRenderViolation:
     rule: str
     snapshot_index: int
     levels: tuple[int, ...]
+    level_counts: tuple[tuple[int, int], ...]
     description: str
 
 
@@ -37,9 +39,12 @@ class _Snapshot:
     index: int
     session_id: int | None
     levels: tuple[int, ...]
+    level_counts: tuple[tuple[int, int], ...]
     target_level: int
     preview_level: int | None
     presented_tiles: int
+    visible_tiles: int
+    evidence_reason: str
     evidence_covered: int
     evidence_population: int
     level_updates: int
@@ -75,6 +80,8 @@ def check_progressive_render_snapshots(
         else _snapshot_from_mapping(snapshot, index=index)
         for index, snapshot in enumerate(snapshots, start=1)
     )
+    if not normalized:
+        raise ValueError("progressive render snapshot sequence is empty")
     violations = [violation for snapshot in normalized if (violation := _check_r1(snapshot))]
     violations.extend(_check_r3(normalized))
     return tuple(sorted(violations, key=lambda item: (item.snapshot_index, item.rule)))
@@ -88,9 +95,10 @@ def format_progressive_render_violations(result: ProgressiveRenderOracleResult) 
         lines.append("PASS: no R1/R3 violations")
     for violation in result.violations:
         levels = _format_levels(violation.levels)
+        counts = _format_level_counts(violation.level_counts)
         lines.append(
             f"FAIL {violation.rule} snapshot {violation.snapshot_index} "
-            f"levels={levels}: {violation.description}"
+            f"levels={levels} counts={counts}: {violation.description}"
         )
     return "\n".join(lines)
 
@@ -122,6 +130,7 @@ def _check_r1(snapshot: _Snapshot) -> ProgressiveRenderViolation | None:
             rule="R1",
             snapshot_index=snapshot.index,
             levels=snapshot.levels,
+            level_counts=snapshot.level_counts,
             description="more than two resident/presented LOD levels are on screen",
         )
     if len(levels) != 2:
@@ -131,6 +140,7 @@ def _check_r1(snapshot: _Snapshot) -> ProgressiveRenderViolation | None:
             rule="R1",
             snapshot_index=snapshot.index,
             levels=snapshot.levels,
+            level_counts=snapshot.level_counts,
             description="two on-screen levels exist in a round with no preview level",
         )
     expected = {snapshot.target_level, snapshot.preview_level}
@@ -139,6 +149,7 @@ def _check_r1(snapshot: _Snapshot) -> ProgressiveRenderViolation | None:
             rule="R1",
             snapshot_index=snapshot.index,
             levels=snapshot.levels,
+            level_counts=snapshot.level_counts,
             description=(
                 "two on-screen levels are not the round preview/target pair "
                 f"{_format_levels(tuple(sorted(expected)))}"
@@ -148,6 +159,12 @@ def _check_r1(snapshot: _Snapshot) -> ProgressiveRenderViolation | None:
 
 
 def _check_r3(snapshots: Sequence[_Snapshot]) -> tuple[ProgressiveRenderViolation, ...]:
+    return (*_check_r3_frozen_partial_evidence(snapshots), *_check_r3_inactive_evidence(snapshots))
+
+
+def _check_r3_frozen_partial_evidence(
+    snapshots: Sequence[_Snapshot],
+) -> tuple[ProgressiveRenderViolation, ...]:
     violations: list[ProgressiveRenderViolation] = []
     run: list[_Snapshot] = []
 
@@ -156,24 +173,29 @@ def _check_r3(snapshots: Sequence[_Snapshot]) -> tuple[ProgressiveRenderViolatio
             return
         first = run[0]
         maximum = max(run, key=lambda snapshot: snapshot.presented_tiles)
+        growth_steps = sum(
+            current.presented_tiles > previous.presented_tiles
+            for previous, current in pairwise(run)
+        )
         if (
             first.evidence_population <= 0
             or first.evidence_covered >= first.evidence_population
             or maximum.presented_tiles <= first.presented_tiles
-            or maximum.presented_tiles <= first.evidence_covered
+            or (growth_steps < 2 and maximum.presented_tiles <= first.evidence_covered)
         ):
             return
-        updates = sum(snapshot.level_updates for snapshot in run[1:])
         violations.append(
             ProgressiveRenderViolation(
                 rule="R3",
                 snapshot_index=maximum.index,
                 levels=maximum.levels,
+                level_counts=maximum.level_counts,
                 description=(
                     "levels evidence stayed frozen at "
                     f"{first.evidence_covered}/{first.evidence_population} while "
                     f"presented tiles grew {first.presented_tiles}"
-                    f"→{maximum.presented_tiles} ({updates} tile-layer level updates)"
+                    f"→{maximum.presented_tiles} "
+                    f"(snapshot level updates={maximum.level_updates})"
                 ),
             )
         )
@@ -185,6 +207,61 @@ def _check_r3(snapshots: Sequence[_Snapshot]) -> tuple[ProgressiveRenderViolatio
             and snapshot.evidence_population == run[-1].evidence_population
             and snapshot.presented_tiles >= run[-1].presented_tiles
         )
+        if not same_run:
+            finish_run()
+            run = []
+        run.append(snapshot)
+    finish_run()
+    return tuple(violations)
+
+
+def _check_r3_inactive_evidence(
+    snapshots: Sequence[_Snapshot],
+) -> tuple[ProgressiveRenderViolation, ...]:
+    violations: list[ProgressiveRenderViolation] = []
+    run: list[_Snapshot] = []
+
+    def finish_run() -> None:
+        if len(run) < 2:
+            return
+        first = run[0]
+        maximum = max(run, key=lambda snapshot: snapshot.presented_tiles)
+        evidence_started_later = any(
+            snapshot.index > run[-1].index
+            and snapshot.session_id == first.session_id
+            and snapshot.evidence_population > 0
+            for snapshot in snapshots
+        )
+        if (
+            max(snapshot.visible_tiles for snapshot in run) <= 1
+            or maximum.presented_tiles <= first.presented_tiles
+            or not evidence_started_later
+        ):
+            return
+        violations.append(
+            ProgressiveRenderViolation(
+                rule="R3",
+                snapshot_index=maximum.index,
+                levels=maximum.levels,
+                level_counts=maximum.level_counts,
+                description=(
+                    "levels evidence remained inactive while presented tiles grew "
+                    f"{first.presented_tiles}→{maximum.presented_tiles} "
+                    f"(snapshot level updates={maximum.level_updates})"
+                ),
+            )
+        )
+
+    for snapshot in snapshots:
+        same_run = bool(run) and (
+            snapshot.session_id == run[-1].session_id
+            and snapshot.evidence_reason == "inactive"
+            and snapshot.evidence_population == 0
+        )
+        if snapshot.evidence_reason != "inactive" or snapshot.evidence_population != 0:
+            finish_run()
+            run = []
+            continue
         if not same_run:
             finish_run()
             run = []
@@ -220,30 +297,39 @@ def _snapshot_from_mapping(mapping: dict[str, object], *, index: int) -> _Snapsh
         )
     preview_level_value = _required_int(montage, "tile_lod_ladder_floor_level", index=index)
     preview_level = None if preview_level_value < 0 else preview_level_value
-    levels = _resident_levels(montage.get("tile_lod_resident_tile_levels"), snapshot_index=index)
+    level_counts = _resident_level_counts(
+        montage.get("tile_lod_resident_tile_levels"), snapshot_index=index
+    )
     return _Snapshot(
         index=index,
         session_id=_optional_int(montage.get("session_id")),
-        levels=levels,
+        levels=tuple(level for level, count in level_counts if count),
+        level_counts=level_counts,
         target_level=desired_factor.bit_length() - 1,
         preview_level=preview_level,
-        presented_tiles=_required_int(montage, "presented_tiles", index=index),
-        evidence_covered=_required_int(
+        presented_tiles=_required_nonnegative_int(montage, "presented_tiles", index=index),
+        visible_tiles=_required_nonnegative_int(montage, "visible_tiles", index=index),
+        evidence_reason=_required_string(montage, "semantic_evidence_blocking_reason", index=index),
+        evidence_covered=_required_nonnegative_int(
             montage, "semantic_evidence_covered_source_count", index=index
         ),
-        evidence_population=_required_int(
+        evidence_population=_required_nonnegative_int(
             montage, "semantic_evidence_target_population", index=index
         ),
-        level_updates=_optional_int(timing.get("tile_layer_level_updates")) or 0,
+        level_updates=_nonnegative_int(
+            timing.get("tile_layer_level_updates"),
+            field="tile_layer_level_updates",
+            index=index,
+        ),
     )
 
 
-def _resident_levels(value: object, *, snapshot_index: int) -> tuple[int, ...]:
+def _resident_level_counts(value: object, *, snapshot_index: int) -> tuple[tuple[int, int], ...]:
     if not isinstance(value, (list, tuple)):
         raise ValueError(
             f"snapshot {snapshot_index} tile_lod_resident_tile_levels is not a sequence"
         )
-    levels: set[int] = set()
+    level_counts: dict[int, int] = {}
     for row in value:
         if not isinstance(row, (list, tuple)) or len(row) != 2:
             raise ValueError(f"snapshot {snapshot_index} has an invalid resident level/count row")
@@ -251,9 +337,11 @@ def _resident_levels(value: object, *, snapshot_index: int) -> tuple[int, ...]:
         count = _optional_int(row[1])
         if level is None or count is None or level < 0 or count < 0:
             raise ValueError(f"snapshot {snapshot_index} has an invalid resident level/count value")
+        if level in level_counts:
+            raise ValueError(f"snapshot {snapshot_index} repeats resident level {level}")
         if count:
-            levels.add(level)
-    return tuple(sorted(levels))
+            level_counts[level] = count
+    return tuple(sorted(level_counts.items()))
 
 
 def _required_int(mapping: dict[str, object], field: str, *, index: int) -> int:
@@ -263,17 +351,34 @@ def _required_int(mapping: dict[str, object], field: str, *, index: int) -> int:
     return value
 
 
+def _required_nonnegative_int(mapping: dict[str, object], field: str, *, index: int) -> int:
+    return _nonnegative_int(mapping.get(field), field=field, index=index)
+
+
+def _required_string(mapping: dict[str, object], field: str, *, index: int) -> str:
+    value = mapping.get(field)
+    if not isinstance(value, str):
+        raise ValueError(f"snapshot {index} has no string {field}")
+    return value
+
+
+def _nonnegative_int(value: object, *, field: str, index: int) -> int:
+    result = _optional_int(value)
+    if result is None or result < 0:
+        raise ValueError(f"snapshot {index} has no nonnegative integer {field}")
+    return result
+
+
 def _optional_int(value: object) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _format_levels(levels: tuple[int, ...]) -> str:
     return "{" + ", ".join(str(level) for level in levels) + "}"
+
+
+def _format_level_counts(level_counts: tuple[tuple[int, int], ...]) -> str:
+    return "{" + ", ".join(f"{level}:{count}" for level, count in level_counts) + "}"
 
 
 def _read_jsonl(path: Path) -> Iterable[dict[str, object]]:
@@ -307,11 +412,12 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
     try:
         results = tuple(replay_progressive_render_trace(path) for path in args.paths)
     except (OSError, ValueError) as exc:
-        _parser().error(str(exc))
+        parser.error(str(exc))
     if args.summary:
         print(format_progressive_render_summary(results))
     else:

@@ -85,8 +85,8 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   so evidence collection no longer adds hundreds of synchronous writes before
   T1; the crash-oriented trace ring is unchanged. The independent progressive
   contract replay is still **RED** on all five 2026-07-27 field traces: R1
-  fires 5–55 snapshots per trace, while the three PyQtGraph traces expose four
-  frozen R3 evidence runs. This blocks contract acceptance without
+  fires 5–55 snapshots per trace, and R3 exposes eight frozen/inactive evidence
+  runs across both backends. This blocks contract acceptance without
   reclassifying the latency gates.
   Final-tip low-load AC trace-ACK T1/T2/B medians: WGPU raw
   **972/3874/2130 ms (6/6/3 passes)**, WGPU FFT

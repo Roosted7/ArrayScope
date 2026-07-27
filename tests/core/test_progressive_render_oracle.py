@@ -66,6 +66,11 @@ def test_one_target_level_passes_when_round_has_no_preview():
     assert check_progressive_render_snapshots([_snapshot([(2, 10)], preview_level=-1)]) == ()
 
 
+def test_empty_synthetic_sequence_fails_closed():
+    with pytest.raises(ValueError, match="sequence is empty"):
+        check_progressive_render_snapshots([])
+
+
 @pytest.mark.parametrize(
     ("snapshots", "expected_index", "expected_levels"),
     [
@@ -129,6 +134,66 @@ def test_frozen_evidence_during_growing_fill_fails_once():
     assert "1→272" in violations[0].description
 
 
+def test_repeated_partial_evidence_freeze_fails_before_presented_exceeds_coverage():
+    snapshots = [
+        _snapshot([(2, 272)], presented=1, covered=32, population=272),
+        _snapshot([(2, 272)], presented=10, covered=32, population=272),
+        _snapshot([(2, 272)], presented=20, covered=32, population=272),
+    ]
+
+    violations = check_progressive_render_snapshots(snapshots)
+
+    assert len(violations) == 1
+    assert violations[0].rule == "R3"
+    assert violations[0].snapshot_index == 3
+    assert "1→20" in violations[0].description
+
+
+def test_one_partial_evidence_step_within_covered_cohort_is_not_a_freeze():
+    snapshots = [
+        _snapshot([(2, 272)], presented=1, covered=32, population=272),
+        _snapshot([(2, 272)], presented=20, covered=32, population=272),
+    ]
+
+    assert check_progressive_render_snapshots(snapshots) == ()
+
+
+def test_inactive_evidence_during_growing_fill_fails_r3():
+    snapshots = [
+        _snapshot([(5, 40)], presented=40, covered=0, population=0),
+        _snapshot([(5, 200)], presented=200, covered=0, population=0),
+        _snapshot([(2, 72), (5, 200)], presented=272, covered=0, population=0),
+        _snapshot([(2, 272)], presented=272, covered=32, population=272),
+    ]
+    for snapshot in snapshots[:3]:
+        snapshot["diagnostics"]["montage"]["semantic_evidence_blocking_reason"] = "inactive"
+        snapshot["diagnostics"]["montage"]["visible_tiles"] = 272
+    snapshots[-1]["diagnostics"]["montage"]["semantic_evidence_blocking_reason"] = (
+        "worker-in-flight"
+    )
+
+    violations = check_progressive_render_snapshots(snapshots)
+
+    assert len(violations) == 1
+    assert violations[0].rule == "R3"
+    assert violations[0].snapshot_index == 3
+    assert "inactive" in violations[0].description
+    assert "40→272" in violations[0].description
+
+
+def test_superseded_inactive_round_without_later_evidence_is_not_mislabeled():
+    snapshots = [
+        _snapshot([(5, 40)], presented=40, covered=0, population=0),
+        _snapshot([(5, 200)], presented=200, covered=0, population=0),
+        _snapshot([(2, 10)], session_id=2, presented=10, covered=10, population=10),
+    ]
+    for snapshot in snapshots[:2]:
+        snapshot["diagnostics"]["montage"]["semantic_evidence_blocking_reason"] = "inactive"
+        snapshot["diagnostics"]["montage"]["visible_tiles"] = 272
+
+    assert check_progressive_render_snapshots(snapshots) == ()
+
+
 def test_replay_and_formatters_report_snapshot_index_and_markdown_table(tmp_path):
     path = tmp_path / "three-levels.jsonl"
     records = [{"event": "start"}, _snapshot([(0, 11), (2, 39), (5, 222)])]
@@ -137,7 +202,10 @@ def test_replay_and_formatters_report_snapshot_index_and_markdown_table(tmp_path
     result = replay_progressive_render_trace(path)
 
     assert not result.passed
-    assert "FAIL R1 snapshot 1 levels={0, 2, 5}" in format_progressive_render_violations(result)
+    assert (
+        "FAIL R1 snapshot 1 levels={0, 2, 5} counts={0:11, 2:39, 5:222}"
+        in format_progressive_render_violations(result)
+    )
     summary = format_progressive_render_summary([result])
     assert "| Trace | Snapshots | R1 | R3 | Verdict |" in summary
     assert "| `three-levels.jsonl` | 1 | 1 | 0 | FAIL |" in summary
@@ -161,6 +229,16 @@ def test_replay_rejects_empty_trace(tmp_path):
     path.write_text('{"event": "start"}\n', encoding="utf-8")
 
     with pytest.raises(ValueError, match="no snapshot events"):
+        replay_progressive_render_trace(path)
+
+
+def test_replay_rejects_malformed_required_snapshot_field(tmp_path):
+    path = tmp_path / "malformed.jsonl"
+    snapshot = _snapshot([(2, 1)])
+    snapshot["diagnostics"]["montage"]["semantic_evidence_blocking_reason"] = None
+    path.write_text(json.dumps(snapshot) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="semantic_evidence_blocking_reason"):
         replay_progressive_render_trace(path)
 
 
