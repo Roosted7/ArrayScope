@@ -282,8 +282,10 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         if (
             view_range is None
             and pending_restore_range is None
-            and planning_intent.auto_like
-            and not camera_on_this_layout
+            and (
+                planning_intent.fit_locked
+                or (planning_intent.auto_active and not camera_on_this_layout)
+            )
         ) or current_range is None:
             current_range = _initial_montage_planning_view_range(
                 plan,

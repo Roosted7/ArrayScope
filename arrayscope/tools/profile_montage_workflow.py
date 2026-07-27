@@ -4170,8 +4170,25 @@ def _hold_fit_for_montage_build(win, *, metrics: dict[str, float] | None = None)
     fit = getattr(win, "fit_image_to_view", None)
     if not callable(fit):
         return False
+    image_view = getattr(win, "img_view", None)
+    get_view = getattr(image_view, "getView", None)
+    view = get_view() if callable(get_view) else None
+    block_signals = getattr(view, "blockSignals", None)
+    signals_were_blocked = False
     started = perf_counter()
-    fit(True)
+    if callable(block_signals):
+        signals_were_blocked = bool(block_signals(True))
+    try:
+        # This is one compound build action: Fit establishes the successor
+        # camera, then the caller publishes the successor document/view state
+        # and renders it. Delivering sigRangeChanged in the middle admits a
+        # stale-document viewport session whose work competes with the real
+        # full-montage preview. The final render reads the already-updated
+        # ViewBox range directly, so suppress only that intermediate signal.
+        fit(True)
+    finally:
+        if callable(block_signals):
+            block_signals(signals_were_blocked)
     elapsed_ms = (perf_counter() - started) * 1000.0
     if metrics is not None:
         metrics.update(
@@ -4179,6 +4196,7 @@ def _hold_fit_for_montage_build(win, *, metrics: dict[str, float] | None = None)
                 "fit_stretch_enable_call_ms": float(elapsed_ms),
                 "fit_stretch_enable_delivery_ms": 0.0,
                 "fit_stretch_total_ms": float(elapsed_ms),
+                "fit_stretch_compound_signal_hold": bool(callable(block_signals)),
             }
         )
     return True

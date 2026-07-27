@@ -1314,6 +1314,35 @@ def test_profile_fit_stretch_pulse_uses_window_fit_command_and_reports_cost():
     assert metrics["fit_stretch_retarget_delivery_ms"] >= 0.0
 
 
+def test_profile_montage_build_holds_intermediate_fit_range_signal():
+    from arrayscope.tools.profile_montage_workflow import _hold_fit_for_montage_build
+
+    class View:
+        def __init__(self):
+            self.blocked = False
+            self.transitions = []
+
+        def blockSignals(self, blocked):
+            previous = self.blocked
+            self.blocked = bool(blocked)
+            self.transitions.append(self.blocked)
+            return previous
+
+    view = View()
+    observed = []
+    win = SimpleNamespace(
+        img_view=SimpleNamespace(getView=lambda: view),
+        fit_image_to_view=lambda enabled: observed.append((bool(enabled), view.blocked)),
+    )
+    metrics = {}
+
+    assert _hold_fit_for_montage_build(win, metrics=metrics) is True
+    assert observed == [(True, True)]
+    assert view.transitions == [True, False]
+    assert view.blocked is False
+    assert metrics["fit_stretch_compound_signal_hold"] is True
+
+
 def _passing_r8_phase_record(*, backend="wgpu"):
     evidence_quality = 1 if backend == "wgpu" else 3
     return {

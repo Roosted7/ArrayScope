@@ -2502,6 +2502,52 @@ def test_auto_successor_plan_uses_successor_fit_while_predecessor_camera_is_reta
     assert len(viewport_plan.candidate_tiles()) == 272
 
 
+def test_fit_locked_same_layout_plan_uses_full_grid_instead_of_stale_camera():
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.window.frame_controller import FrameControllerMixin
+    from arrayscope.window.montage_viewport import plan_full_view_range
+
+    class Window(FrameControllerMixin):
+        def __init__(self):
+            self.win = self
+
+    win = Window()
+    state = ViewState.from_shape((336, 336, 272)).with_montage_axis(
+        2,
+        columns=21,
+        indices=tuple(range(272)),
+        text=":",
+    )
+    stale_range = ((0.0, 1400.0), (0.0, 1000.0))
+    viewport = SimpleNamespace(
+        is_fit_locked=lambda: True,
+        is_auto_active=lambda: False,
+    )
+    win.img_view = SimpleNamespace(
+        image=np.zeros((1, 1), dtype=np.float32),
+        viewport_controller=viewport,
+        graphicsView=SimpleNamespace(
+            viewport=lambda: SimpleNamespace(size=lambda: QtCore.QSize(1245, 753))
+        ),
+        getView=lambda: SimpleNamespace(viewRange=lambda: stale_range),
+        rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
+    )
+    initial = FrameControllerMixin._montage_viewport_plan(win, state)
+    win._frame_session = SimpleNamespace(
+        montage_axis=2,
+        display_committed=True,
+        plan=initial.plan,
+    )
+
+    viewport_plan = FrameControllerMixin._montage_viewport_plan(win, state)
+
+    assert viewport_plan.plan.geometry == initial.plan.geometry
+    assert viewport_plan.view_range == plan_full_view_range(viewport_plan.plan)
+    assert len(viewport_plan.candidate_tiles()) == 272
+
+
 def test_lod_policy_selects_producer_without_owning_target_debt():
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.lod import (
