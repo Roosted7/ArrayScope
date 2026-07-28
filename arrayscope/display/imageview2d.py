@@ -49,7 +49,8 @@ from arrayscope.display.levels import finite_bounds
 from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.model.tiled_histogram_identity import (
-    histogram_data_from_tile_payloads,
+    histogram_data_and_layout,
+    patched_histogram_data,
     tiled_semantic_histogram_identity,
 )
 from arrayscope.display.overlay_hit_test import RoiHitIndex
@@ -211,7 +212,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self.displayMode = "square_pixels"  # Default to square pixels
         self.histogramSource = None
         self.histogramPlotSource = None
-        self._payload_histogram_cache: tuple[object, object] | None = None
+        self._payload_histogram_cache: tuple[object, object, object] | None = None
         self._histogram_adapter = None
         self._histogram_preview_controller = None
         self._histogram_display_controller = None
@@ -1218,8 +1219,16 @@ class ImageViewShell(QtWidgets.QWidget):
         cached = self._payload_histogram_cache
         if cached is not None and cached[0] == identity:
             return cached[1]
-        data = histogram_data_from_tile_payloads(montage_tile_payloads)
-        self._payload_histogram_cache = (identity, data)
+        data = layout = None
+        if cached is not None:
+            # A bounded commit changes a few tiles' pixels, so rewrite those
+            # slices of the previous buffer instead of concatenating every
+            # tile again. Same values either way; this only decides how much
+            # work the montage-wide source costs per commit.
+            data, layout = patched_histogram_data(cached[1], cached[2], montage_tile_payloads)
+        if data is None:
+            data, layout = histogram_data_and_layout(montage_tile_payloads)
+        self._payload_histogram_cache = (identity, data, layout)
         return data
 
     def _histogram_plot_data(self, fallback):
@@ -1232,8 +1241,13 @@ class ImageViewShell(QtWidgets.QWidget):
         if data.ndim == 1:
             width = max(1, int(np.ceil(np.sqrt(data.size))))
             height = int(np.ceil(data.size / width))
-            padded = np.full(height * width, np.nan, dtype=data.dtype)
+            # Fill the tail rather than NaN-filling the whole buffer and then
+            # overwriting nearly all of it: on a montage-sized histogram
+            # source that second pass is a full extra sweep per commit.
+            padded = np.empty(height * width, dtype=data.dtype)
             padded[: data.size] = data
+            if padded.size > data.size:
+                padded[data.size :] = np.nan
             return padded.reshape(height, width)
         return data
 
