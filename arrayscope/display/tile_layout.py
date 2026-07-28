@@ -25,9 +25,59 @@ class TileLayoutRegion:
         )
 
 
-def tile_layout_regions(geometry, *, frame_plan=None) -> tuple[TileLayoutRegion, ...]:
-    """Return drawable tile placement for either a frame plan or montage geometry."""
+@dataclass(frozen=True)
+class _TileLayout:
+    """Every layout view one commit needs, derived once per geometry."""
 
+    regions: tuple[TileLayoutRegion, ...]
+    region_map: dict[int, TileLayoutRegion]
+    shape: tuple[int, int]
+    planned_count: int
+
+
+# Layout is a pure function of the montage geometry (or frame plan), but every
+# commit asks for it up to three times, and building one ``TileLayoutRegion``
+# per tile made that an O(montage) term on a commit that touched one tile.
+# Both key objects are frozen values, so identity is a sound cache key; the
+# cache holds them alive, which is what makes ``id()`` reuse impossible.
+_LAYOUT_CACHE_LIMIT = 4
+_LAYOUT_CACHE: dict[int, tuple[object, object, tuple[int, ...], _TileLayout]] = {}
+
+
+def _resolve_tile_layout(geometry, frame_plan) -> _TileLayout:
+    montage = getattr(geometry, "montage", None)
+    owner = frame_plan if frame_plan is not None else montage
+    fallback_shape = tuple(int(value) for value in getattr(geometry, "display_shape", (1, 1))[:2])
+    if owner is None:
+        return _TileLayout((), {}, fallback_shape or (1, 1), 1)
+    key = id(owner)
+    cached = _LAYOUT_CACHE.get(key)
+    if (
+        cached is not None
+        and cached[0] is owner
+        and cached[1] is montage
+        and cached[2] == fallback_shape
+    ):
+        return cached[3]
+    regions = _build_tile_layout_regions(geometry, frame_plan)
+    region_map = {int(region.tile_number): region for region in regions}
+    if regions:
+        shape = (
+            max(1, *(int(region.y + region.height) for region in regions)),
+            max(1, *(int(region.x + region.width) for region in regions)),
+        )
+        planned = len(regions)
+    else:
+        shape = fallback_shape or (1, 1)
+        planned = len(tuple(getattr(montage, "indices", ()) or ())) if montage is not None else 0
+    layout = _TileLayout(regions, region_map, shape, planned)
+    if len(_LAYOUT_CACHE) >= _LAYOUT_CACHE_LIMIT:
+        _LAYOUT_CACHE.clear()
+    _LAYOUT_CACHE[key] = (owner, montage, fallback_shape, layout)
+    return layout
+
+
+def _build_tile_layout_regions(geometry, frame_plan) -> tuple[TileLayoutRegion, ...]:
     if frame_plan is not None:
         regions = []
         for region in tuple(getattr(frame_plan, "regions", ()) or ()):
@@ -76,30 +126,28 @@ def tile_layout_regions(geometry, *, frame_plan=None) -> tuple[TileLayoutRegion,
     return tuple(regions)
 
 
+def tile_layout_regions(geometry, *, frame_plan=None) -> tuple[TileLayoutRegion, ...]:
+    """Return drawable tile placement for either a frame plan or montage geometry."""
+
+    return _resolve_tile_layout(geometry, frame_plan).regions
+
+
 def tile_layout_map(geometry, *, frame_plan=None) -> dict[int, TileLayoutRegion]:
-    return {
-        int(region.tile_number): region
-        for region in tile_layout_regions(geometry, frame_plan=frame_plan)
-    }
+    """Tile-keyed placement.
+
+    The returned mapping is shared with the layout cache and must be treated
+    as read-only; callers that need to mutate placement take their own copy.
+    """
+
+    return _resolve_tile_layout(geometry, frame_plan).region_map
 
 
 def tile_layout_shape(geometry, *, frame_plan=None) -> tuple[int, int]:
-    regions = tile_layout_regions(geometry, frame_plan=frame_plan)
-    if not regions:
-        return tuple(int(value) for value in getattr(geometry, "display_shape", (1, 1))[:2])
-    width = max(int(region.x + region.width) for region in regions)
-    height = max(int(region.y + region.height) for region in regions)
-    return max(1, height), max(1, width)
+    return _resolve_tile_layout(geometry, frame_plan).shape
 
 
 def planned_tile_count(geometry, *, frame_plan=None, minimum: int = 1) -> int:
-    regions = tile_layout_regions(geometry, frame_plan=frame_plan)
-    if regions:
-        return max(int(minimum), len(regions))
-    montage = getattr(geometry, "montage", None)
-    if montage is not None:
-        return max(int(minimum), len(tuple(getattr(montage, "indices", ()) or ())))
-    return max(1, int(minimum))
+    return max(int(minimum), _resolve_tile_layout(geometry, frame_plan).planned_count)
 
 
 def filter_layout_ids(layout: Iterable[TileLayoutRegion], ids: Iterable[int]) -> tuple[int, ...]:
