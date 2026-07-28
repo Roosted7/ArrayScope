@@ -475,7 +475,7 @@ whoever picks this up next; update it in place rather than appending.
 | R2b one floor pair per round | Enforced. Round identity is explicit and both floors latch to it. |
 | R3 levels never clip | Enforced. Round levels come from the preview cohort, with an analytic envelope that is exact for realistic k-space. |
 | R4 preview for every backend/dtype | Green on both backends, including PyQtGraph complex and pipelines that cannot reduce their input. |
-| R5 chunked and governed | Governed, with residual measured debt. The fixed per-commit cost is the open item, not the chunk size. |
+| R5 chunked and governed | Governed. The per-commit **bookkeeping** is now delta-proportional; the per-commit **aggregates** are not. See below. |
 | R6 shed quality, never liveness | **Not implemented.** WGPU fast scroll still freezes until idle. |
 | R7 speculative residency is post-settle | **Not implemented.** Level 0 was 82–84% of upload bytes and ran during the fill. |
 
@@ -483,7 +483,9 @@ Open work, roughly in dependency order:
 
 1. **Presentation cost proportional to the delta.** Partly done — the
    whole-montage *bookkeeping* is gone, the whole-montage *aggregates* are
-   not. See "What a bounded commit still costs" below.
+   not. What is left is an incrementally accumulated montage histogram owner
+   and maintained presentation truth; see "What a bounded commit still costs"
+   below for why neither is a loop that can be tightened in place.
 2. **Presentation bookkeeping off the GUI thread.** The thread should validate,
    submit and release buffers; preparation belongs to a worker, behind a
    mailbox that keeps the latest prepared frame and drops stale ones.
@@ -494,6 +496,54 @@ Open work, roughly in dependency order:
    which lets PyQtGraph reuse committed tiles the way WGPU reuses bound ones.
 6. **Tag uploads with their purpose**, which turns the oracle's suspected
    over-production into a decidable rule and makes R7 checkable.
+
+### What a bounded commit still costs
+
+Measured at 272 tiles, the field scale, against the parent revision.
+
+The **bookkeeping** that made a commit O(montage) is gone. Four walks were
+keyed to the montage and are now keyed to the delta, all pinned by counting
+tests in `tests/render/test_commit_cost_scaling.py`. For a one-tile commit,
+against the parent revision those counters read: 272 and 816 rebuilt tile
+layout regions (PyQtGraph and WGPU — WGPU asked three times per commit), 272
+rebuilt GPU tile instances, and 818 re-derived pin ownerships over a 272-page
+resident set. All four are now bounded by the delta.
+
+End to end, the total GUI-thread commit cost of a full 272-tile fill in
+32-tile cohorts fell from ~96.7 ms to ~78.0 ms on WGPU and from ~79 ms to
+~64 ms on PyQtGraph (medians of three sessions, best of three fills each).
+
+What remains is **whole-montage aggregates**, not bookkeeping, and it is the
+larger half on PyQtGraph. After this change, a bounded PyQtGraph commit at 272
+tiles still spends ~28% rebuilding the montage-wide histogram source and ~24%
+re-reading presented-tile identity from Qt, one `isVisible()` call per tile.
+Neither is a loop that can be made cheaper in place:
+
+- The histogram source is a montage-wide aggregate with no owner outside the
+  commit. It is rebuilt because any tile's pixels changing genuinely changes
+  it. Making it delta-proportional means an incrementally accumulated owner —
+  or accepting a coarser repaint cadence during a fill, which changes what the
+  histogram widget shows and is a product decision, not a performance one.
+- Presented-tile identity is read from Qt because `state.visible` and the
+  item's own flag are deliberately allowed to diverge. Maintaining that truth
+  instead of re-reading it is sound, but it moves a correctness invariant into
+  bookkeeping, and this module exists because optimistic bookkeeping is the
+  defect class that strands tiles.
+
+> Two traps, both paid for once here. **The fitted `fixed_ms` the governor
+> steers on is too noisy on this machine to adjudicate a change of this size**:
+> across four repeats it ranged 4.8–59.2 ms before and 0.0–40.5 ms after, a
+> spread larger than the effect, because the fit often has two or three design
+> points. Read it as direction, never as a result; the counting tests and the
+> in-process fill benchmark are the evidence.
+>
+> **A commit benchmark that holds the tile population fixed cannot see the
+> fill.** Refinement (stable population, changing pixels) and coverage
+> (population growing every commit) take different paths. A histogram-reuse
+> cache justified on the refinement benchmark made the fill 14% *worse*,
+> because reuse can never succeed while tiles are arriving and the attempt was
+> being paid for anyway. Benchmark both regimes, or the number is about the
+> wrong one.
 
 ### How to verify a change here
 
