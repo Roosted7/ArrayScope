@@ -188,7 +188,18 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   `render_pass_governor_probe` reports wall-clock completion throughput,
   callback distributions, and component attribution without JSONL artifacts.
   Residual cold/warm outliers fail loudly and remain callback-bar debt; no
-  measured pass completed atomically.
+  measured preview or target pass completed atomically. **Retained-retarget
+  stall fixed 2026-07-28:** the first governed presentation slice is armed
+  directly from the retarget edge, so a fully resident successor no longer
+  waits for a producer completion that will never occur. WGPU's logically and
+  physically retained mappings publish as one visibility transaction while
+  cold payloads keep the governor limits; the strict 60-tile zoom-retarget
+  oracle passes in three fresh Weston processes and the measured atomic mapping
+  cost is 45.2 ms. A post-fix four-repeat WGPU run settled 4/4 with
+  1.308 s preview and 4.302 s settlement medians (5.9% faster than the matched
+  4.571 s base, 1.9% slower than the prior branch median). PyQtGraph's four
+  post-fix runs all censored, so its settlement gate remains red
+  ([R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md)).
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
   **Non-reducible pipelines keep the pass (2026-07-27):** FLOOR no longer

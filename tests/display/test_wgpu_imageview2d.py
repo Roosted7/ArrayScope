@@ -2622,6 +2622,36 @@ def test_residency_predicate_reuses_binding_within_page_table_generation(
         view.close()
 
 
+def test_residency_predicate_fails_closed_for_unbindable_transition_payload(
+    qt_app,
+    monkeypatch,
+):
+    """A mixed-representation retarget is cold truth, not a UI exception."""
+
+    payload = _payload(
+        0,
+        np.ones((8, 8), dtype=np.float32),
+        source_id=("transition", 0),
+    )
+    view = _shown_view(qt_app)
+    try:
+        _commit(
+            view,
+            _montage_geometry((8, 8), 1, 1, loaded=1),
+            {0: payload},
+            levels=(0.0, 1.0),
+        )
+
+        def unsupported(*_args, **_kwargs):
+            raise NotImplementedError("transition representation")
+
+        monkeypatch.setattr(view, "_wgpu_commit_plan", unsupported)
+
+        assert view.tiledPayloadResident(payload) is False
+    finally:
+        view.close()
+
+
 def test_atomic_warm_owns_successor_pages_until_the_bound_plane_swap(qt_app):
     """Unrelated residency churn must evict stale pages, not the successor."""
 

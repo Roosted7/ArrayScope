@@ -281,8 +281,11 @@ def _free_retarget_tiles(
     """
 
     if callable(physical_resident_fn):
+        logical = frozenset(int(tile) for tile in logical_resident_tiles)
         return frozenset(
-            int(tile) for tile, payload in payloads.items() if bool(physical_resident_fn(payload))
+            int(tile)
+            for tile, payload in payloads.items()
+            if int(tile) in logical and bool(physical_resident_fn(payload))
         )
     if pace_resident_retargets:
         return frozenset()
@@ -3995,27 +3998,6 @@ class FrameSession:
                 if int(tile) in coverage_upserts
             }
             resident_retarget_tiles.intersection_update(coverage_upserts)
-        if max_upserts is not None and len(all_candidate_upserts) > int(max_upserts):
-            # Physical residency is backend work, not a free classification
-            # prepass.  Probing every tile before admitting a bounded delta
-            # made a one-item WGPU transaction synchronously inspect the
-            # entire 272-tile round.  Apply the governor's cohort boundary
-            # before asking the backend which members are zero-byte rebinds;
-            # deferred candidates remain dirty for the continuation.
-            governed_candidates = prioritize(all_candidate_upserts)
-            governed_candidates = governed_candidates[: max(1, int(max_upserts))]
-            governed_set = {int(tile) for tile in governed_candidates}
-            all_candidate_upserts = {
-                int(tile): payload
-                for tile, payload in all_candidate_upserts.items()
-                if int(tile) in governed_set
-            }
-            cold_upserts = {
-                int(tile): payload
-                for tile, payload in cold_upserts.items()
-                if int(tile) in governed_set
-            }
-            resident_retarget_tiles.intersection_update(governed_set)
         free_retarget_tiles = _free_retarget_tiles(
             all_candidate_upserts,
             logical_resident_tiles=resident_retarget_tiles,

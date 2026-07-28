@@ -2763,7 +2763,7 @@ def test_wgpu_persistent_upsert_limits_use_governed_upload_limit():
     assert limits["max_upserts"] == 11
     assert limits["max_upsert_bytes"] == 2 * 1024 * 1024
     assert limits["physical_resident_fn"] is resident
-    assert limits["pace_resident_retargets"] is True
+    assert limits["pace_resident_retargets"] is False
     assert limits["cold_deadline_ms"] == 2.0
 
 

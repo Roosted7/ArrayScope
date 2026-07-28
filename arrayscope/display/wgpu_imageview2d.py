@@ -2844,11 +2844,19 @@ class WgpuImageView2D(ImageViewShell):
         ):
             representation = RGB_WINDOWED_RGBA32F
         source_mapping = common_shader_mapping((getattr(payload, "shader_mapping", None),))
-        _representation, mapping_mode, *_mapping = self._wgpu_commit_plan(
-            {int(getattr(payload, "tile_number", 0)): payload},
-            source_mapping,
-            bool(kind == TexturePlaneKind.RGB8 and representation == RGB8),
-        )
+        try:
+            _representation, mapping_mode, *_mapping = self._wgpu_commit_plan(
+                {int(getattr(payload, "tile_number", 0)): payload},
+                source_mapping,
+                bool(kind == TexturePlaneKind.RGB8 and representation == RGB8),
+            )
+        except NotImplementedError:
+            # This method is a physical-residency predicate, including while a
+            # semantic transition temporarily mixes predecessor and successor
+            # representations. A payload the current commit path cannot bind
+            # is not resident for that transaction; probing it must not turn a
+            # normal cold fallback into a swallowed presentation exception.
+            return False
         binding = self._cached_wgpu_residency_binding(
             payload,
             representation=representation,

@@ -925,11 +925,14 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._last_frame_session_setup_ms = (perf_counter() - session_setup_start) * 1000.0
         initial_commit_start = perf_counter()
         try:
-            # The first presentation is subject to the same governed
-            # continuation as every later preview/target chunk. Running it
-            # inline made the initiating render callback perform a whole-plan
-            # reconcile before input or paint could run.
-            self.apply_montage_presentation(session)
+            # Execute the first *governed* slice on the retarget edge. This is
+            # not the former whole-plan reconcile: the governor's item, byte,
+            # and deadline decision already bounds the transaction below.
+            # Deferring even this slice loses the only wakeup when the new
+            # target is fully resident and therefore produces no worker
+            # completion. It also exposes an empty backend between a retained
+            # predecessor and its mapping-only successor.
+            self.commit_frame_session_presentation(session)
         except MemoryError as exc:
             show_status_message(self.win, str(exc), timeout=6000)
             return

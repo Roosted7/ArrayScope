@@ -170,6 +170,37 @@ hard two-hit rebase produced a 3.94 s WGPU median once, but also produced
 128–185 ms preview jumps and a later 4.83 s rerun. It is retained as an
 optimization target, not presented as a stable baseline.
 
+### Retained-retarget stall follow-up (2026-07-28)
+
+`f11ce10b` accidentally made the first governed presentation slice depend on
+the asynchronous continuation. A fully resident zoom retarget has no producer
+completion to provide that wakeup, while the new pre-admission cap also split
+the mapping-only visibility transaction. The result was a ready ledger with an
+idle kernel and zero physically retained tiles. The retarget edge now executes
+the first governed slice synchronously. WGPU classifies only logically retained
+payloads through its physical-residency predicate and publishes that mapping
+set as one visibility transaction; cold payloads remain under the governor's
+item, byte, and deadline decision. An unbindable transition representation
+fails the physical predicate closed instead of throwing from classification.
+
+The exact strict-Wayland regression
+`test_wgpu_expanded_montage_never_hides_retained_sixty` passes in three fresh
+processes (4.46/4.74/4.60 s test runtime), and the focused parallel policy set
+passes 6/6. The measured 60-tile mapping transaction was 45.2 ms, so it fits
+the fixed 50 ms requirement in this workload; it remains one atomic
+mapping-only transaction because publishing a prefix would expose torn
+retained truth.
+
+A fresh four-repeat, low-load Weston rerun after this fix measured WGPU preview
+completion at 1.211/1.274/1.342/1.369 s and settlement at
+4.311/4.294/4.230/4.874 s: medians 1.308 s and 4.302 s, with a 3.059 s target
+phase and 89.0 target tiles/s. That is 5.9% faster settlement than the matched
+4.571 s base, but 1.9% slower than the previous 4.221 s branch median; the
+earlier 3.94 s remains an unstable experimental result, not the baseline.
+PyQtGraph preview callbacks were all below 50 ms, but all four reruns were
+censored at 77/271/268/64 exact tiles. Therefore this rerun supplies no honest
+PyQtGraph wall-time median and keeps its settlement gate red.
+
 ## Result and remaining red evidence
 
 No preview or target pass completed atomically in these runs. The former

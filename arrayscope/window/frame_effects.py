@@ -4953,7 +4953,12 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         "cold_deadline_ms": presentation_upload_control_budget_ms(
             window, "montage_present_total", decision, interactive=interactive
         ),
-        "pace_resident_retargets": True,
+        # Physical page residency is authoritative for WGPU mapping-only
+        # retargets. Those bindings form one visibility transaction: pacing
+        # them through the cold item cohort tears the retained frame and can
+        # leave the ready ledger with no completion to arm its successor.
+        # Cold uploads remain governed by both caps below.
+        "pace_resident_retargets": False,
         "governor_details": tuple(getattr(decision, "details", ()) or ()),
     }
     resident = getattr(getattr(window.win, "img_view", None), "tiledPayloadResident", None)
