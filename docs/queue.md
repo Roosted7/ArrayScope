@@ -204,7 +204,12 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   1.308 s preview and 4.302 s settlement medians (5.9% faster than the matched
   4.571 s base, 1.9% slower than the prior branch median). PyQtGraph's four
   post-fix runs all censored, so its settlement gate remains red
-  ([R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md)).
+  ([R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md)). **Named
+  commit failures restored 2026-07-28:** a backend throw now marks its exact
+  session generation terminal, so late worker completions cannot retry the
+  transaction and overwrite `commit_outcome="raised"`; successor generations
+  remain unpoisoned. The six-test failure-semantics module and the paired live
+  Weston guards pass.
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
   **Non-reducible pipelines keep the pass (2026-07-27):** FLOOR no longer

@@ -102,6 +102,30 @@ def test_presentation_gate_reports_the_throw_and_does_not_re_arm(caplog):
     assert renderer._montage_presentation_gate_owner is None
 
 
+def test_late_completion_cannot_rearm_a_failed_session_generation():
+    """A completion already in flight must not overwrite a terminal throw."""
+
+    effects, renderer, session = _effects()
+    renderer.win = types.SimpleNamespace(render_coordinator=None)
+    try:
+        raise _InjectedCommitFailure("boom")
+    except _InjectedCommitFailure as exc:
+        effects._note_commit_raised(exc)
+
+    effects.request_presentation()
+    effects.commit_pending_session()
+
+    assert renderer._montage_presentation_gate_armed is False
+    assert renderer._montage_presentation_gate_owner is None
+    assert renderer._last_montage_commit_outcome == "raised"
+
+    # Retargeting advances the generation on the same session object. The
+    # terminal mark is not a permanent poison flag: its successor can arm.
+    session.session_id += 1
+    successor_owner = (session.session_id, id(session))
+    assert renderer._montage_commit_failed_owner != successor_owner
+
+
 def test_strict_ui_makes_a_commit_throw_fatal(monkeypatch, caplog):
     """Under ARRAYSCOPE_STRICT_UI the throw stays fatal — and is still logged.
 

@@ -201,6 +201,17 @@ PyQtGraph preview callbacks were all below 50 ms, but all four reruns were
 censored at 77/271/268/64 exact tiles. Therefore this rerun supplies no honest
 PyQtGraph wall-time median and keeps its settlement gate red.
 
+The governed continuation also exposed a second `f11ce10b` regression in
+commit-failure semantics. `_commit_tile_layer` correctly recorded and re-raised
+a backend exception, but worker completions already in flight could arm another
+presentation after the gate's `except` arm. That later commit overwrote
+`commit_outcome="raised"` with `"backend-applied"`, disguising the named failure
+as an ordinary stall. A terminal owner mark now suppresses presentation for the
+exact failed `(session_id, session object)` only; a retargeted successor
+generation is not poisoned. The complete commit-failure guard module passes
+6/6 in parallel, including a new late-completion case, and the live failure
+guard plus retained-retarget oracle pass together under managed Weston.
+
 ## Result and remaining red evidence
 
 No preview or target pass completed atomically in these runs. The former

@@ -1185,6 +1185,12 @@ class FramePipelineEffects:
         """
 
         owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
+        if getattr(self.renderer, "_montage_commit_failed_owner", None) == owner:
+            # Worker completions already in flight can arrive after a commit
+            # throws. They are not permission to retry the failed transaction:
+            # keep the named failure terminal for this session generation.
+            emit_trace("presentation_gate", action="suppressed-failed", owner_session=owner[0])
+            return
         if getattr(self.renderer, "_montage_presentation_gate_owner", None) == owner:
             emit_trace("presentation_gate", action="coalesced", owner_session=owner[0])
             return
@@ -1281,6 +1287,9 @@ class FramePipelineEffects:
 
     def commit_pending_session(self) -> None:
         if not self._session_is_current():
+            return
+        owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
+        if getattr(self.renderer, "_montage_commit_failed_owner", None) == owner:
             return
         if bool(getattr(self.renderer, "_montage_commit_drain_active", False)):
             self.session.final_commit_pending = True
@@ -2401,15 +2410,20 @@ class FramePipelineEffects:
     def _note_commit_raised(self, exc: BaseException, *, dirty_tiles=()) -> None:
         """Record a commit throw as the terminal bail it is.
 
-        Deliberately NOT a wakeup: re-arming would replay a delta that is
-        about to throw again at full flush rate, which is the rescue ADR 0051
-        forbids. The record is the mark; nothing retries, so nothing needs a
-        separate poison flag.
+        Deliberately NOT a wakeup: re-arming would replay a delta that is about
+        to throw again at full flush rate, which the rescue ADR 0051 forbids.
+        In-flight worker completions can nevertheless request presentation
+        after this frame returns, so the terminal mark is generation-scoped:
+        it blocks this failed owner without poisoning a successor generation.
         """
 
         renderer = self.renderer
         session = self.session
         tiles = tuple(int(tile) for tile in tuple(dirty_tiles or ()))
+        renderer._montage_commit_failed_owner = (
+            int(getattr(session, "session_id", 0) or 0),
+            id(session),
+        )
         renderer._last_montage_commit_exception = {
             "type": type(exc).__name__,
             "message": str(exc),
