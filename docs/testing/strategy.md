@@ -185,8 +185,16 @@ surfaces and some initialize GPU device state; one worker per core saturates
 the CPU and makes every worker initialize rendering state simultaneously,
 which has intermittently destabilized the platform stack. Leaving half the
 cores free for each worker's Qt/render threads keeps workers
-stable while still giving a large speedup (full suite ≈150s serial → ≈35s here). On 2-core CI
+stable while still giving a large speedup. On 2-core CI
 runners the cap floors at 2, so CI parallelism is unaffected.
+
+**Sized for the selection, not for the machine.** The same hook caps the pool
+again at the number of test files [change selection](test-selection.md) left,
+because `--dist loadfile` makes files — not tests — the unit of parallelism.
+One file, or under 2.5 s of recorded work, runs in-process: a worker costs
+~1.3 s to boot Qt and the package, which is more than those tests do. Test
+files the map has never seen count as work, never as absence. A `-k`/`-m`/
+`--lf`/node-id run is not narrowed by the map, so it gets the full pool.
 
 **Per-worker filesystem isolation.** Workers share one filesystem, so `tests/conftest.py` gives each
 worker (keyed on `PYTEST_XDIST_WORKER`) its own directory for the two shared on-disk resources:
@@ -199,6 +207,23 @@ worker (keyed on `PYTEST_XDIST_WORKER`) its own directory for the two shared on-
 
 Both redirects are no-ops for serial runs (`-n 0` / no xdist), so CI steps that must publish PNGs to
 the canonical `tests/artifacts/` run those commands with `-n 0`.
+
+**Run order is a schedule, not a contract.** `--dist loadfile` hands out whole
+files and gives a worker the next one when it runs dry, so the order files
+appear in *is* the schedule. `tests/conftest.py` orders them
+sub-500 ms files first (immediate feedback) and then longest-first. Measured,
+that is worth nothing in wall time against the shortest-first order testmon
+applies by itself — a queue model said 100 s and the suite said 0
+([why, with both numbers](test-selection.md#run-order)) — so treat it as a
+latency and determinism choice. Declaration order holds *within* a file. A
+test that depends on what an earlier test left behind must still say so with
+`@pytest.mark.coupled_order("<group>")`; everything else must stand alone.
+
+**Foreign load is reported, not guessed at.** Every run prints the system load
+before the first test and, at the end, the share of it that did not come from
+this run (`tests/load_report.py`). Both the flake advice below and every
+performance number depend on knowing the machine was quiet; that used to be
+established after an hour of bisecting a phantom.
 
 **No fixed-time assertions.** Parallel load makes wall-clock timing nondeterministic. A test that
 launches background work and then asserts state after a *fixed* window — `QTest.qWait(220)`, or a

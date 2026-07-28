@@ -188,6 +188,8 @@ The project’s maintained environment is described by `environment.yml` and act
 PATH=~/miniconda3/bin:$PATH direnv exec . pytest -q tests/core
 ```
 
+`pytest` runs the tests your working tree affects and skips the ones it provably does not — pytest-testmon records which source lines each test executed, so a change selects the tests that reach it wherever they live. `pytest --no-testmon` runs the whole suite, which is what to run before merging. `python tools/test_selection.py` reports the blast radius without running anything. See [change-driven test selection](docs/testing/test-selection.md).
+
 The suite runs in parallel by default (`pytest-xdist`); append `-n 0` to run serially when debugging. See [testing strategy](docs/testing/strategy.md#parallel-execution) for details.
 
 Pull requests run a dedicated coverage job in CI. To reproduce it locally:

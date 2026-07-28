@@ -85,6 +85,9 @@ Test-suite rules:
   `MontageRenderSession`/`ViewState` objects over `SimpleNamespace` stand-ins.
 - Prefer driving the real pipeline and asserting deterministic work counters and committed-frame
   semantics over monkeypatching orchestration internals.
+- Run order is not a contract: workers take files as they come, and change selection reorders what
+  it selected so the quickest tests fail first. A test that depends on what an earlier test left
+  behind must say so with `@pytest.mark.coupled_order("<group>")`; everything else must stand alone.
 - The suite runs in parallel by default (`pytest-xdist`, configured in `pyproject.toml`). Never assert
   on a *fixed* wait window — e.g. `QTest.qWait(220)` after launching background work, or a short
   `qtbot.waitUntil(..., timeout=250)`. Those pass only on an idle CPU and flake under parallel load.
@@ -96,8 +99,30 @@ Test-suite rules:
 
 ## Validation
 
-The suite is parallel by default (`-n auto`, capped at half the cores; see `docs/testing/strategy.md`).
-Run focused tests first, then the broadest affordable layer:
+**`pytest` runs the tests your change affects, in whatever directory they live**
+— pytest-testmon records which source lines each test executed, so a `render/`
+edit selects the `tests/ui` tests that walk through it. Do not hand-pick
+directories; that guess is the thing this replaces. Full reference:
+[`docs/testing/test-selection.md`](docs/testing/test-selection.md).
+
+```bash
+pytest                 # the loop: everything this working tree affects
+pytest --no-testmon    # the gate: the whole suite, before merging
+```
+
+A selected run that passes says *the affected tests* pass. The run prints how
+many mapped tests it skipped and how many known-red tests it did not re-run —
+read those lines before writing "suite green" anywhere, and run the gate before
+claiming it. Selection cannot see into child processes, non-Python inputs, or
+real rendering; rings 3–4 are unchanged.
+
+`python tools/test_selection.py` reports the blast radius without running
+anything — worth quoting in a handoff. `... status` names the known-red tests
+and anything the map does not cover.
+
+The suite is parallel by default (`-n auto`, capped at half the cores and again
+at the number of selected files; see `docs/testing/strategy.md`). Scoping still
+works and narrows further:
 
 ```bash
 pytest -q tests/core tests/operations

@@ -1,6 +1,8 @@
 # Testing — rings, enforcement, and the laws
 
 Front page for test policy. Deep dives:
+[test-selection.md](test-selection.md) (which tests a run executes, and why
+`pytest` no longer runs all of them),
 [strategy.md](strategy.md) (what each layer proves),
 [stress-and-trace-strategy.md](stress-and-trace-strategy.md)
 (drivers × oracles), [manual-regression.md](manual-regression.md),
@@ -39,6 +41,24 @@ the deleted `tests/artifacts/` tree).
    trace or a clamped framebuffer rectangle is vacuous — pair new oracles
    with fault injection (`trace_verify` grew `trace_not_empty` /
    `--expect-targets` for exactly this reason).
+
+## Selection is orthogonal to the rings
+
+`pytest` runs the tests your working tree affects and skips the ones it
+provably does not — including, deliberately, tests in directories the change
+does not resemble. That is a defense against law 1's failure mode, not an
+exception to it: selection changes *which tests a ring runs*, never *which ring
+a claim needs*. Every ring command below still means what it says, and the
+pre-merge run is still the exhaustive one:
+
+```bash
+pytest                 # the loop: everything this change affects
+pytest --no-testmon    # the gate: everything, untraced
+```
+
+Read [test-selection.md](test-selection.md) before trusting a green selected
+run — it names the three dependency classes selection cannot see, and coverage
+runs, CI and artifact regeneration are all exhaustive by policy.
 
 ## The rings
 
