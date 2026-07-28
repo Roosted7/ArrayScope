@@ -271,7 +271,12 @@ class PageTable:
             self._pin_sets[owner] = requested
         else:
             self._pin_sets.pop(owner, None)
-        for key in previous | requested:
+        # Only keys whose membership in THIS owner's set actually changed can
+        # change their pinned state: a key held before and after is still
+        # owned by this owner, and no other owner's set moved in this call.
+        # Walking the union instead made a bounded montage delta re-derive
+        # ownership for every pinned page in the montage.
+        for key in previous ^ requested:
             entry = self._entries.get(key)
             if entry is not None:
                 entry.pinned = bool(self._owners_for(key))
