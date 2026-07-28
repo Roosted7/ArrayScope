@@ -6177,7 +6177,6 @@ def test_non_commuting_desired_with_retained_source_uses_page_claim():
 
     assert effects.prepare_rung(intent, step)
     effects.rung_admitted(intent, step, ("task", "desired"))
-
     claim_identity = effects._preview_claim_identity(intent, session.plan.tiles[0])
     assert session.lifecycle.preview_claim_matches(0, int(Rung.DESIRED), 2, claim_identity)
     assert 0 not in session.active_tile_requests
@@ -6236,8 +6235,9 @@ def test_native_preview_result_makes_target_pass_evaluation_free(monkeypatch, sh
     assert session.rendered_tiles[0] is rendered
 
 
-def test_native_output_payload_is_not_misread_as_shared_preview_rows():
-    """A tuple-shaped page-set key is one payload, not an outer row cohort."""
+@pytest.mark.parametrize("arity", range(8, 12))
+def test_native_output_payload_is_not_misread_as_shared_preview_rows(arity):
+    """A leading page-set key identifies one payload regardless of its arity."""
 
     session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
     rendered = session.rendered_tiles[0]
@@ -6249,11 +6249,12 @@ def test_native_output_payload_is_not_misread_as_shared_preview_rows():
         semantic_source_id=session.tile_semantic_source_id(0),
     )
     pages = _materialized_page_set(key, np.asarray(rendered.image))
-    payload = (key, pages, None, None, None, None, None, None, rendered)
+    payload = (key, pages, *((None,) * (arity - 2)))
     row = (0, *payload)
 
     assert not _looks_like_shared_preview_rows(payload)
-    assert _looks_like_shared_preview_rows((row,))
+    if arity == 9:
+        assert _looks_like_shared_preview_rows((row,))
 
 
 def test_completed_evaluation_keeps_claim_until_gui_delivery():

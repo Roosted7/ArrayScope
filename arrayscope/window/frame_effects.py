@@ -5083,13 +5083,18 @@ def _observe_ui(
 
 
 def _looks_like_shared_preview_rows(payload) -> bool:
+    if (
+        not isinstance(payload, tuple)
+        or not payload
+        or isinstance(payload[0], render_lod.LodPageSetKey)
+    ):
+        return False
     return bool(
-        isinstance(payload, tuple)
-        and payload
-        and all(
+        all(
             isinstance(row, tuple)
             and len(row) in {4, 8, 9, 10}
             and isinstance(row[0], (int, np.integer))
+            and isinstance(row[1], render_lod.LodPageSetKey)
             for row in payload
         )
     )

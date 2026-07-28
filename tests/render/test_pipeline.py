@@ -372,16 +372,13 @@ def test_interactive_native_demand_defers_cold_native_until_noninteractive_repla
     assert (0, 2, 0) in effects.evaluated
 
 
-def test_interactive_opaque_desired_rung_defers_reduce_from_native_work():
+def test_interactive_opaque_pipeline_admits_native_output_floor():
     kernel, effects, pipeline = make_pipeline(tiles=1, reduced_input_available=False)
 
-    assert pipeline.retarget(intent(interactive=True, target_level=1), demand(1), scope(0)) == 0
-    assert effects.evaluated == []
-    assert pipeline.counters.interactive_native_deferred == 1
-
-    assert pipeline.retarget(intent(interactive=False, target_level=1), demand(1), scope(0)) == 1
+    assert pipeline.retarget(intent(interactive=True, target_level=1), demand(1), scope(0)) == 1
     drain(kernel)
     assert effects.evaluated == [(0, 0, 4)]
+    assert pipeline.counters.interactive_native_deferred == 0
 
 
 def test_interactive_retained_native_source_is_correctness_work():
@@ -397,16 +394,16 @@ def test_interactive_retained_native_source_is_correctness_work():
     assert pipeline.counters.interactive_native_deferred == 0
 
 
-def test_interactive_cold_native_stays_deferred_with_preview_lane_available():
+def test_interactive_cold_native_output_floor_runs_in_preview_lane():
     kernel, effects, pipeline = make_pipeline(tiles=1, reduced_input_available=False)
     kernel.set_lane_quota(Lane.DISPLAY_PREVIEW, 1)
     kernel.set_lane_quota(Lane.DISPLAY_PREPARATION, 0)
 
-    assert pipeline.retarget(intent(interactive=True, target_level=1), demand(1), scope(0)) == 0
+    assert pipeline.retarget(intent(interactive=True, target_level=1), demand(1), scope(0)) == 1
     drain(kernel)
 
-    assert effects.evaluated == []
-    assert pipeline.counters.interactive_native_deferred == 1
+    assert effects.evaluated == [(0, 0, 4)]
+    assert pipeline.counters.interactive_native_deferred == 0
 
 
 def test_zoom_out_over_presented_native_submits_no_display_demotions():
@@ -864,30 +861,23 @@ def test_coarse_rung_gate_history_survives_the_plan_that_converges():
     assert history[ladder_module.COARSE_RUNG_PREVIEW_NOT_ALLOWED] == 1
 
 
-def test_interactive_native_deferral_covers_every_step_without_reduced_input():
-    """The whole fill is inside the deferred class when reduced input is absent.
+def test_interactive_native_output_floor_covers_every_tile_without_reduced_input():
+    """R4 keeps FLOOR runnable even when its one evaluation must be native."""
 
-    `reduce_from_native` is `not reduced_input_available`, so on an
-    FFT-shaped montage every DESIRED step qualifies for the interaction
-    deferral — which is why "treat montage entry as unsettled" would pause the
-    fill rather than trim its expensive tail. Measured on the real stage:
-    interactive_native_deferred = 3808 in one run.
-    """
-
-    _kernel, effects, pipeline = make_pipeline(tiles=3, reduced_input_available=False)
+    kernel, effects, pipeline = make_pipeline(tiles=3, reduced_input_available=False)
 
     submitted = pipeline.retarget(
         intent(interactive=True, target_level=2), demand(2), scope(0, 1, 2, missing=3)
     )
+    drain(kernel)
 
-    assert submitted == 0
-    assert pipeline.counters.interactive_native_deferred == 3
-    assert effects.evaluated == []
-    assert pipeline.counters.as_dict()["interactive_native_deferred"] == 3
+    assert submitted == 3
+    assert pipeline.counters.interactive_native_deferred == 0
+    assert effects.evaluated == [(0, 0, 4), (1, 0, 4), (2, 0, 4)]
 
 
-def test_same_plan_admits_everything_once_the_interaction_ends():
-    """The deferral is a pause, not a drop: the identical plan then submits."""
+def test_same_plan_does_not_duplicate_running_native_output_floors():
+    """A noninteractive replan attaches to the already-submitted FLOOR work."""
 
     kernel, effects, pipeline = make_pipeline(tiles=3, reduced_input_available=False)
     pipeline.retarget(
@@ -899,5 +889,5 @@ def test_same_plan_admits_everything_once_the_interaction_ends():
     )
     drain(kernel)
 
-    assert submitted == 3
+    assert submitted == 0
     assert effects.evaluated == [(0, 0, 4), (1, 0, 4), (2, 0, 4)]

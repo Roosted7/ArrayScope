@@ -349,6 +349,7 @@ class RenderedTile:
     eval_ms: float
     slab_shape: tuple[int, ...]
     slab_nbytes: int | None
+    compute_path: str = "direct"
     shader_mapping: ShaderMapping | None = None
     texture_kind: TexturePlaneKind | None = None
     semantic_data: np.ndarray | None = None

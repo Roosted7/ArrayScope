@@ -487,7 +487,9 @@ def evaluate_preview_tile(
     """Evaluate a display-only payload for a cold tile."""
 
     _check_render_cancelled(cancellation_token)
-    if not can_evaluate_preview(session, tile):
+    document = getattr(session, "document", None)
+    view_state = getattr(tile, "view_state", None)
+    if document is None or view_state is None or getattr(view_state, "image_axes", None) is None:
         return None
     level = preview_evaluation_level(session, demand) if level is None else int(level)
     if can_evaluate_reduced_preview(session, tile) and preview_pipeline_is_tile_local(
@@ -1015,6 +1017,7 @@ def rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
         eval_ms=float(getattr(result, "eval_ms", 0.0) or 0.0),
         slab_shape=tuple(getattr(result, "slab_shape", np.shape(value.data))),
         slab_nbytes=getattr(result, "slab_nbytes", None),
+        compute_path=str(getattr(result, "compute_path", "direct") or "direct"),
         shader_mapping=getattr(value, "shader_mapping", None),
         texture_kind=getattr(value, "texture_kind", None),
         semantic_data=getattr(value, "semantic_data", None),

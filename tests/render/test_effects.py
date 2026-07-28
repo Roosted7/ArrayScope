@@ -26,6 +26,7 @@ from arrayscope.operations.pipeline import (
     CenteredIFFT,
     Conjugate,
     FFTShift,
+    Mean,
 )
 from arrayscope.operations.pipeline import (
     evaluate as evaluate_pipeline,
@@ -1128,6 +1129,28 @@ def test_non_reducible_preview_evaluates_once_and_carries_exact_result(monkeypat
     assert pages
     assert isinstance(rendered, RenderedTile)
     assert rendered.tile == tile
+
+
+def test_shape_changing_pipeline_can_evaluate_native_output_preview():
+    base = np.arange(2 * 3 * 5 * 7, dtype=np.float32).reshape(2, 3, 5, 7)
+    session = _session(np.mean(base, axis=1))
+    session.document = ArrayDocument(base, operations=(Mean(axis=1),))
+    tile = session.plan.tiles[0]
+
+    payload = effects.evaluate_preview_tile(
+        session,
+        tile,
+        demand=_demand(1),
+        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+        level=2,
+        cancellation_token=None,
+        shader_display=False,
+        evaluation_context=None,
+    )
+
+    assert payload is not None
+    assert isinstance(payload[-1], RenderedTile)
+    assert payload[-1].image.shape == (2, 5)
 
 
 def test_raw_and_pointwise_pipelines_stay_coarse_ladder_admissible():

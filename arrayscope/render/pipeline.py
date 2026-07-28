@@ -313,8 +313,8 @@ class FramePipeline:
             return False
         if int(step.tile_number) in presented_preview_tiles:
             return False
-        if step.rung == Rung.FLOOR and bool(step.reduce_from_native):
-            return True
+        if step.rung == Rung.FLOOR:
+            return False
         if step.rung == Rung.EXACT:
             return True
         if step.rung != Rung.DESIRED:

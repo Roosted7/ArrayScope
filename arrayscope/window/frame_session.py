@@ -2017,6 +2017,21 @@ class FrameSession:
         """
 
         index = int(rendered.tile.montage_index)
+        eval_ms = max(0.0, float(rendered.eval_ms))
+        if str(rendered.compute_path or "direct") == "stage_backed":
+            self.tile_compute_stage_backed += 1
+            self.tile_compute_stage_backed_ms += eval_ms
+            self.tile_compute_stage_backed_max_ms = max(
+                float(self.tile_compute_stage_backed_max_ms), eval_ms
+            )
+            self.stage_backed_tiles_pending = max(0, int(self.stage_backed_tiles_pending) - 1)
+            self.tile_compute_waiting_for_stage = max(
+                0, int(self.tile_compute_waiting_for_stage) - 1
+            )
+        else:
+            self.tile_compute_direct += 1
+            self.tile_compute_direct_ms += eval_ms
+            self.tile_compute_direct_max_ms = max(float(self.tile_compute_direct_max_ms), eval_ms)
         self.rendered_tiles[index] = rendered
         self.stage_fan_in.tile_stage_keys.pop(index, None)
         self.stage_fan_in.detach_unbound_requests()
