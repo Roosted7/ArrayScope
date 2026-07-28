@@ -84,6 +84,33 @@ not.
 > The instantaneous visible level set is therefore **not** an invariant and
 > must not be asserted as one. The oracle checks production, not residency.
 
+### Skipping production is not skipping presentation
+
+R2 governs **production**. It says nothing about whether a tile reaches the
+screen, and conflating the two strands tiles permanently.
+
+A tile whose resident level already satisfies the round's floor is correctly
+skipped for production — and if it is not currently presented, it still needs a
+**presentation step**. Residency satisfies R2; it does not satisfy the
+lifecycle's physical first-pixel obligation. The ladder must therefore plan
+presentation-only work for a tile that has pixels but is not showing them,
+rather than refusing it as "already covered".
+
+> Observed violation: zoom in, then zoom out. Tiles retained at level 0 from
+> the zoomed-in view satisfy the new coarse target floor, so every replan
+> refused all of them with *"tile already has committable coverage"* — 112
+> replans, that counter climbing 4 344 → 34 808 — while `ledger_target_ready`
+> held 137, `schedulable` and `running` were 0, the kernel was idle, and
+> `tasks_submitted` and `commit_batches` were frozen. The montage settled at
+> 135 of 272 forever. **No stall fired**, because the ledger considered those
+> tiles ready and therefore fine.
+>
+> A test asserting only that the *retained* tiles stay visible passes through
+> this untouched. Coverage of an expansion must assert that the montage
+> **completes**, and must reproduce the zoom-in-then-out sequence — expanding
+> without first zooming in never creates the finer-than-floor residency that
+> triggers it.
+
 ## R2b — The floors are one number each per round
 
 A round has **one** preview floor and **one** target floor, chosen once, before
