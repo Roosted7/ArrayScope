@@ -55,12 +55,27 @@ jobs:
             tests/app/test_operation_benchmarks.py \
             tests/app/test_public_api.py
 
-  linux-gui-tests:
-    name: Linux GUI tests Python 3.12
+  # Change-driven selection (docs/testing/test-selection.md) turns itself off
+  # whenever `CI` is set, which Actions always sets. Every job below therefore
+  # runs the whole suite it names, and no map — stale, absent, or restored from
+  # another branch — can narrow a gate. The one job that opts back in is
+  # `affected-gui-tests`, and it is allowed to because it is a strict subset of
+  # the exhaustive `coverage` job running beside it.
+  affected-gui-tests:
+    name: Affected GUI tests (fast signal)
     runs-on: ubuntu-latest
     env:
       QT_QPA_PLATFORM: offscreen
       PYQTGRAPH_QT_LIB: PySide6
+      # Opt back in to selection. Safe here and only here: everything this job
+      # runs is also run exhaustively by the `coverage` job in the same
+      # workflow, so a map that under-selects costs a late signal, never a
+      # missed regression.
+      ARRAYSCOPE_TESTMON: "1"
+      # Locally a known-red test is not re-run until something it uses changes;
+      # here it must be, or a cached map recorded from a failing run would keep
+      # reporting the same job green while the test stayed broken.
+      ARRAYSCOPE_TESTMON_RERUN_FAILING: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -68,6 +83,20 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
+      # The map is content-addressed and path-relative, so any earlier run's
+      # copy is a valid starting point: whatever differs from this checkout is
+      # invalidated and re-run. The key is per-commit so each run saves its own;
+      # the restore-keys prefix falls back to the newest map recorded against
+      # the same interpreter and dependency set. A different package set makes
+      # testmon discard the map by itself (it is part of the environment key),
+      # which is why hashFiles(pyproject.toml) is enough to keep this honest.
+      - name: Restore test-selection map
+        uses: actions/cache@v4
+        with:
+          path: .testmondata
+          key: testmon-ubuntu-py312-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
+          restore-keys: |
+            testmon-ubuntu-py312-${{ hashFiles('pyproject.toml') }}-
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
@@ -76,7 +105,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,wgpu]"
-      - name: Run GUI and integration tests
+      - name: Run affected GUI and integration tests
+        # First run on a new dependency set records the map instead of using
+        # one; every later run is proportional to the diff.
         run: pytest -q tests/display tests/window tests/ui tests/app
 
   coverage:
