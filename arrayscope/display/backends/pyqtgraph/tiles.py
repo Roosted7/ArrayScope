@@ -669,7 +669,7 @@ def _map_complex_cpu_payload(
     )
 
 
-def assemble_page_backed_payload(payload: DisplayTilePayload, *, levels=None) -> _PageAssembly:
+def resolve_page_backed_assembly(payload: DisplayTilePayload, *, levels=None) -> _PageAssembly:
     """Assemble one payload's pages off any thread.
 
     The public name of the pure work a commit would otherwise do inline. It

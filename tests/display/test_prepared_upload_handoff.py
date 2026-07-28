@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 
 from arrayscope.display.backends.pyqtgraph.tiles import (
-    assemble_page_backed_payload,
     page_assembly_nbytes,
+    resolve_page_backed_assembly,
 )
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.frame import DisplayTilePayload, PageBackedPresentation
@@ -78,7 +78,7 @@ def test_pyqtgraph_takes_a_prepared_assembly_instead_of_assembling_inline():
     layer._prepared_uploads = mailbox
     layer._prepared_assembly_hits = 0
 
-    prepared = assemble_page_backed_payload(payload, levels=levels)
+    prepared = resolve_page_backed_assembly(payload, levels=levels)
     mailbox.publish(
         0,
         prepared_upload_key(payload, levels),
@@ -117,7 +117,7 @@ def test_pyqtgraph_refuses_a_stale_assembly_and_assembles_inline(stale_source_id
     layer._prepared_assembly_hits = 0
 
     other = _page_backed_payload(source_id=stale_source_id, fill=9.0)
-    stale = assemble_page_backed_payload(other, levels=stale_levels)
+    stale = resolve_page_backed_assembly(other, levels=stale_levels)
     # Published into THIS payload's slot under a key that does not match what
     # the commit will ask for -- exactly the race the mailbox exists to lose.
     mailbox.publish(

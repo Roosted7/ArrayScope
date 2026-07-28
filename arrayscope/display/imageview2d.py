@@ -3157,11 +3157,11 @@ def _pyqtgraph_assembly_preparation(mailbox, slot, key, payload, levels):
 
     def prepare() -> None:
         from arrayscope.display.backends.pyqtgraph.tiles import (
-            assemble_page_backed_payload,
             page_assembly_nbytes,
+            resolve_page_backed_assembly,
         )
 
-        assembly = assemble_page_backed_payload(payload, levels=levels)
+        assembly = resolve_page_backed_assembly(payload, levels=levels)
         mailbox.publish(slot, key, assembly, nbytes=page_assembly_nbytes(assembly))
 
     return prepare
