@@ -2971,15 +2971,19 @@ class FrameSession:
             plane_shape=plane_shape,
         )
 
-    def payload_source_anchor_for_rendered(self, rendered, native_shape) -> object | None:
-        """Anchor worker output to its immutable tile view, not live session state."""
+    def payload_source_anchor_for_tile(self, tile, native_shape) -> object | None:
+        """Anchor one immutable plan tile to its source window."""
 
-        tile = rendered.tile
         return self._payload_source_anchor(
             native_shape,
             source_index=int(tile.source_index),
             view_state=tile.view_state,
         )
+
+    def payload_source_anchor_for_rendered(self, rendered, native_shape) -> object | None:
+        """Anchor worker output to its immutable tile view, not live session state."""
+
+        return self.payload_source_anchor_for_tile(rendered.tile, native_shape)
 
     def tile_semantic_source_id(self, source_index) -> tuple[object, ...]:
         """Semantic content identity of one montage tile (ADR 0050).

@@ -506,6 +506,97 @@ def test_wgpu_expanded_montage_never_hides_retained_sixty(qtbot):
         settings.sync()
 
 
+def test_wgpu_zoom_out_completes_finer_resident_montage(qtbot):
+    """Hard zoom -> coarse zoom-out must present every finer resident tile."""
+
+    require_wgpu_adapter()
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.display.backends import surface_for_view
+    from arrayscope.window import ArrayScopeWindow
+
+    tile_count = 32
+    data = np.arange(256 * 256 * tile_count, dtype=np.float32).reshape(
+        256,
+        256,
+        tile_count,
+    )
+
+    settings = QtCore.QSettings()
+    previous_backend = settings.value("image_rendering_backend", "pyqtgraph")
+    settings.setValue("image_rendering_backend", "wgpu")
+    settings.setValue("montage_quality_policy", "resident")
+    settings.sync()
+    win = ArrayScopeWindow(data)
+    win.resize(1200, 700)
+    win.show()
+    qtbot.addWidget(win)
+    try:
+        win._set_view_state(
+            win.view_state.with_montage_axis(
+                2,
+                columns=4,
+                indices=tuple(range(tile_count)),
+                text=":",
+            )
+        )
+        win.update_image_view()
+        surface = surface_for_view(win.img_view)
+
+        def physical_count() -> int:
+            return int(
+                surface.presentation_diagnostics().get("physically_visible_tile_count", 0) or 0
+            )
+
+        qtbot.waitUntil(
+            lambda: bool(
+                win.renderer._frame_session.visible_plan_complete()
+                and physical_count() == tile_count
+            ),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+        session = win.renderer._frame_session
+        display_height, display_width = tuple(
+            int(value) for value in session.plan.display_shape[:2]
+        )
+        tile_height, tile_width = tuple(int(value) for value in session.plan.tile_shape[:2])
+        win.img_view.getView().setRange(
+            xRange=(0.0, float(tile_width)),
+            yRange=(0.0, float(tile_height)),
+            padding=0,
+        )
+        win.renderer.apply_montage_viewport_retarget()
+        qtbot.waitUntil(
+            lambda: any(
+                identity.lod.level == 0
+                for identity in _visible_backend_acknowledgements(win, "wgpu").values()
+            ),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+
+        win.img_view.getView().setRange(
+            xRange=(0.0, float(display_width)),
+            yRange=(0.0, float(display_height)),
+            padding=0,
+        )
+        win.update_image_view()
+        session = win.renderer._frame_session
+        qtbot.waitUntil(
+            lambda: bool(
+                session.visible_plan_complete()
+                and session.required_target_settled()
+                and physical_count() == tile_count
+            ),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+        assert set(_visible_backend_acknowledgements(win, "wgpu")) == set(range(tile_count))
+    finally:
+        win.close()
+        settings.setValue("image_rendering_backend", previous_backend)
+        settings.sync()
+
+
 @pytest.mark.parametrize("backend", ["pyqtgraph", "wgpu"])
 def test_pre_event_loop_complex_montage_eventually_fits_committed_plan(qtbot, backend):
     _clear_arrayscope_settings()

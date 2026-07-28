@@ -37,6 +37,7 @@ from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import ClaimOwner, TileLifecycle, TileTarget
 from arrayscope.render import effects
 from arrayscope.render import lod as render_lod
+from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung
 from arrayscope.render.lod import LodPageSetKey
 from arrayscope.render.stages import LodAdmissionScope
 
@@ -1638,6 +1639,68 @@ def test_unpresented_native_residency_is_not_presented_target_quality():
     assert state.allow_preview is True
     assert state.floor_available is True
     assert state.presentation_pending is False
+
+
+def test_resident_floor_from_predecessor_crop_requires_current_window_production():
+    """A source match cannot make different source-window pixels presentable."""
+
+    session = _session()
+    tile = session.plan.tiles[0]
+    session.output_dtype = np.dtype(np.float32)
+    session.canonical_orientation = False
+    session._lod_page_set_key_cache = {}
+    session.lod_page_cache = LodPageCache(max_entries=8)
+    demand = _demand(1)
+    session.lod_policy_decision = SimpleNamespace(demand=demand)
+    source_rect = [0, 4, 0, 6]
+    content_key = (
+        "src-anchored",
+        session.tile_semantic_source_id(tile.source_index),
+        ("display-plane",),
+    )
+    session.payload_source_anchor_for_tile = lambda _tile, _shape: PayloadSourceAnchor(
+        content_key=content_key,
+        source_rect=tuple(source_rect),
+        plane_shape=(8, 6),
+    )
+    predecessor_key = effects.render_lod.page_set_key_for_tile(
+        session,
+        tile,
+        demand=demand,
+        level=1,
+    )
+    _admit_page_set(
+        session.lod_page_cache,
+        predecessor_key,
+        np.arange(24, dtype=np.float32).reshape(4, 6),
+    )
+    session.lifecycle.level_claimed(0, predecessor_key, ClaimOwner.EVALUATION)
+    session.lifecycle.level_resident(0, predecessor_key)
+    source_rect[:] = (2, 6, 0, 6)
+    session._best_floor_key = lambda source_index, tile_number=None: (
+        effects.render_lod.best_floor_key(
+            session,
+            source_index,
+            tile_number=tile_number,
+        )
+    )
+    session.pending_payload_upserts = {}
+    session.dirty_payloads = {}
+
+    state = effects.tile_lod_states(session, demand, tile_numbers=(0,))[0]
+    steps = LodLadder(LadderPolicy()).plan(
+        (state,),
+        demand,
+        preview_level=1,
+        target_level=1,
+    )
+
+    assert effects.render_lod.page_set_source_rect(predecessor_key) == (0, 4, 0, 6)
+    assert state.resident_levels == ()
+    assert state.floor_available is False
+    assert len(steps) == 1
+    assert steps[0].rung is Rung.DESIRED
+    assert steps[0].presentation_only is False
 
 
 def test_pipeline_effects_tile_states_uses_lifecycle_snapshot():

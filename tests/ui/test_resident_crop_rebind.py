@@ -56,6 +56,14 @@ def _preparation_completed(win) -> int:
     return int((lanes.get("display_preparation") or {}).get("completed", 0) or 0)
 
 
+def _display_producers_completed(win) -> int:
+    lanes = win.kernel.diagnostics().lanes
+    return sum(
+        int((lanes.get(lane) or {}).get("completed", 0) or 0)
+        for lane in ("display_preview", "display_preparation")
+    )
+
+
 def _busy_pump_until(predicate, budget_s, label) -> None:
     # A busy pump, not qtbot.waitUntil: a real event loop never idles, so the
     # low-priority planning continuations only run under sustained queue
@@ -192,14 +200,14 @@ def test_crop_scrub_without_the_capability_still_evaluates(qtbot):
             for key in win.img_view._wgpu_executor.page_table.resident_keys()
         ), "a crop-local commit must not warm canonical source-plane pages when off"
 
-        before = _preparation_completed(win)
+        before = _display_producers_completed(win)
         win._on_slice_text_changed(0, "96:296")
         _busy_pump_until(
             lambda: _crop_settled(win, 96),
             INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
             "cold scrub",
         )
-        assert _preparation_completed(win) - before > 0, (
+        assert _display_producers_completed(win) - before > 0, (
             "a non-resident crop window must still schedule its producers"
         )
         totals = dict(getattr(win.renderer, "resident_crop_rebind_totals", None) or {})

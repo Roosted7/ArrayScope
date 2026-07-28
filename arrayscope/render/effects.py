@@ -860,6 +860,7 @@ def tile_lod_states(
                 source_id=session.tile_semantic_source_id(int(tile.source_index)),
                 tile_id=int(tile.source_index),
                 page_cache=preview_cache,
+                source_rect=render_lod.tile_source_rect(session, tile),
             )
         )
         payload = payloads.get(tile_number)
@@ -1046,6 +1047,7 @@ def _resident_levels_from_lifecycle(
     source_id=None,
     tile_id=None,
     page_cache=None,
+    source_rect=None,
 ) -> tuple[int, ...]:
     if record is None:
         return ()
@@ -1067,6 +1069,10 @@ def _resident_levels_from_lifecycle(
         if source_id is not None and getattr(key, "source_id", None) != source_id:
             continue
         if tile_id is not None and int(getattr(key, "tile_id", -1)) != int(tile_id):
+            continue
+        if not isinstance(key, render_lod.LodPageSetKey):
+            continue
+        if source_rect is not None and render_lod.page_set_source_rect(key) != tuple(source_rect):
             continue
         if page_cache is not None and not render_lod._page_set_exact(page_cache, key):
             continue

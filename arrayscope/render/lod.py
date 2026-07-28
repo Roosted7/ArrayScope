@@ -572,6 +572,33 @@ def page_plans_for_rendered(
     )
 
 
+def tile_source_rect(session, tile) -> tuple[int, int, int, int]:
+    """Native-source window required by one immutable plan tile."""
+
+    plan_shape = getattr(getattr(session, "plan", None), "tile_shape", None)
+    if plan_shape is None:
+        height, width = int(tile.height), int(tile.width)
+        axes = tuple(
+            int(axis)
+            for axis in (getattr(getattr(session, "view_state", None), "image_axes", None) or ())
+        )
+        if (
+            bool(getattr(session, "canonical_orientation", False))
+            and len(axes) == 2
+            and axes[0] > axes[1]
+        ):
+            height, width = width, height
+    else:
+        height, width = (int(value) for value in canonical_source_tile_shape(session)[:2])
+    anchor_fn = getattr(session, "payload_source_anchor_for_tile", None)
+    if not callable(anchor_fn):
+        return (0, height, 0, width)
+    source_anchor = anchor_fn(tile, (height, width))
+    if source_anchor is None:
+        return (0, height, 0, width)
+    return tuple(int(value) for value in source_anchor.source_rect)
+
+
 def page_set_key_for_tile(session, tile, *, demand, level: int) -> LodPageSetKey:
     """Plan an unrendered montage tile from session-owned semantic facts."""
 
@@ -641,6 +668,24 @@ def page_set_key_for_tile(session, tile, *, demand, level: int) -> LodPageSetKey
     if route_cache is not None:
         route_cache[cache_key] = key
     return key
+
+
+def page_set_source_rect(key: LodPageSetKey) -> tuple[int, int, int, int]:
+    """Native-source footprint represented by one complete page set."""
+
+    plans = tuple(key.plans)
+    return (
+        min(int(plan.valid_source_rect_yx[0]) for plan in plans),
+        max(int(plan.valid_source_rect_yx[1]) for plan in plans),
+        min(int(plan.valid_source_rect_yx[2]) for plan in plans),
+        max(int(plan.valid_source_rect_yx[3]) for plan in plans),
+    )
+
+
+def page_set_matches_tile_source(session, tile, key: LodPageSetKey) -> bool:
+    """Whether ``key`` is directly presentable for this tile's source window."""
+
+    return page_set_source_rect(key) == tile_source_rect(session, tile)
 
 
 # --------------------------------------------------------------------------
@@ -1408,6 +1453,7 @@ def _compute_best_floor_key(
         )
         candidates.append(row)
 
+    tile = _plan_tile_for_source(session, int(source_index), tile_number)
     records = () if tile_number is None else (session.lifecycle.peek(int(tile_number)),)
     for rec in records:
         if rec is None:
@@ -1417,11 +1463,12 @@ def _compute_best_floor_key(
                 continue
             if key.source_id != semantic_id or int(key.tile_id) != int(source_index):
                 continue
+            if tile is not None and not page_set_matches_tile_source(session, tile, key):
+                continue
             resolved = _page_set_resolution(pyramid, key)
             if resolved is not None:
                 add_candidate(key, resolved, owner=entry.owner)
 
-    tile = _plan_tile_for_source(session, int(source_index), tile_number)
     if tile is not None:
         preview_level = int(getattr(session, "lod_preview_level", 0) or 0)
         exact_levels = tuple(
@@ -1437,6 +1484,8 @@ def _compute_best_floor_key(
             if level <= 0:
                 continue
             key = page_set_key_for_tile(session, tile, demand=demand, level=level)
+            if not page_set_matches_tile_source(session, tile, key):
+                continue
             resolved = _page_set_resolution(pyramid, key)
             if resolved is not None and resolved.exact:
                 add_candidate(key, resolved)
@@ -1462,9 +1511,10 @@ def _compute_best_floor_key(
                 demand=demand,
                 level=fallback_level,
             )
-            resolved = _page_set_resolution(pyramid, key)
-            if resolved is not None:
-                add_candidate(key, resolved)
+            if page_set_matches_tile_source(session, tile, key):
+                resolved = _page_set_resolution(pyramid, key)
+                if resolved is not None:
+                    add_candidate(key, resolved)
 
     if not candidates:
         return None
