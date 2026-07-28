@@ -39,6 +39,10 @@ Thumbs.db
 
 # Testing
 .pytest_cache/
+# pytest-testmon's recorded test->source map. Machine- and checkout-specific
+# (it fingerprints this working tree's files), rebuilt by running the suite.
+.testmondata
+.testmondata-*
 .coverage
 .coverage.*
 coverage.xml

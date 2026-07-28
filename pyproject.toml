@@ -102,6 +102,10 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=6.0.0",
     "pytest-qt>=4.4.0",
+    # Change-driven test selection (on by default; docs/testing/test-selection.md).
+    # 2.2 is the first release that records under pytest-xdist and keys the map
+    # by environment; both are load-bearing here.
+    "pytest-testmon>=2.2,<3",
     "pytest-xdist>=3.5.0",
     "tomli>=2.0.0; python_version < '3.11'",
     "twine>=4.0.0",
@@ -119,8 +123,24 @@ dev = [
 # Per-worker filesystem isolation (QSettings + artifacts) lives in
 # tests/conftest.py; see docs/testing/strategy.md for the rationale.
 addopts = "-n auto --dist loadfile"
+# Resolve a bare `pytest` to the suite. Besides being the obvious default, this
+# is what makes tests/conftest.py an *initial* conftest, so its worker-sizing
+# and selection hooks are registered before xdist fixes the pool size.
+testpaths = ["tests"]
+# One recorded map per behavioral regime. The same test executes different code
+# offscreen and on a real compositor, under strict UI, and under the stress
+# rings, so their dependencies must not be merged into one set of fingerprints:
+# a ring-1 run would otherwise be able to mark a ring-4 test "unaffected".
+# tests/conftest.py sets QT_QPA_PLATFORM at import time, before this is read.
+environment_expression = """(
+    os.environ.get('QT_QPA_PLATFORM', 'offscreen')
+    + ('+strict-ui' if os.environ.get('ARRAYSCOPE_STRICT_UI') else '')
+    + ('+gpu' if os.environ.get('ARRAYSCOPE_GPU_TESTS') else '')
+    + ('+stress' if os.environ.get('ARRAYSCOPE_STRESS') else '')
+)"""
 markers = [
     "real_system_memory: opt out of the pinned deterministic system-memory snapshot",
+    "coupled_order(group): these tests only mean anything in sequence — keep them adjacent and in declaration order (tests/conftest.py). Use it only for a test that observes what a previous one left behind; everything else must stand alone.",
     "gpu_interaction: onscreen real-hardware interaction tests (ARRAYSCOPE_GPU_TESTS=1, run with -n 0; see tests/gpu_interaction/conftest.py)",
 ]
 

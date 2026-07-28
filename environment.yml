@@ -38,6 +38,13 @@ dependencies:
   - pip:
       - -e .
       - build
+      # Change-driven test selection: records which source lines each test
+      # executed, so an edit selects the tests that actually reach it, in
+      # whatever directory they live. On by default -- see
+      # docs/testing/test-selection.md. Via pip, not conda-forge: that channel
+      # still carries 0.9.18, which predates both the xdist support and the
+      # environment keying this repository depends on.
+      - pytest-testmon>=2.2,<3
       - pytest-qt>=4.4.0
       - qt-material-icons>=0.3.0
       - tomli>=2.0.0
