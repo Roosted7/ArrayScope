@@ -496,7 +496,12 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_binding_fast_path_commits = 0
         self._wgpu_binding_incremental_commits = 0
         self._wgpu_binding_full_republications = 0
-        self._wgpu_tile_instances_cache: tuple[object, tuple[TileInstance, ...]] | None = None
+        self._wgpu_tile_instances_cache: (
+            tuple[int, tuple[TileInstance, ...], tuple[int, ...]] | None
+        ) = None
+        # Names each committed record so a successor can point at the record
+        # it was derived from without holding a reference to it.
+        self._wgpu_commit_serial = 0
         self._wgpu_last_report_uploads = 0
         self._wgpu_last_draw_error: str = ""
         self._wgpu_histogram_evidence_required = False
@@ -1066,28 +1071,58 @@ class WgpuImageView2D(ImageViewShell):
 
         Cached on the committed-set identity: ``_wgpu_committed`` is only
         ever replaced wholesale, never mutated in place.
+
+        A bounded delta replaces the whole committed record but changes only
+        the descriptors it upserted, so the successor names its predecessor
+        and its changed tiles.  When the tile population is unchanged the
+        instances are patched at those positions instead of rebuilt, which is
+        what keeps this O(delta) rather than O(montage) during a fill.
         """
 
         committed = self._wgpu_committed
         if not committed or self._montage_display_mode != "wgpu_tile_layer":
             return ()
+        serial = committed.get("serial")
         cached = self._wgpu_tile_instances_cache
-        if cached is not None and cached[0] is committed:
+        if cached is not None and serial is not None and cached[0] == serial:
             return cached[1]
         transposed = bool(committed.get("transposed", False))
-        instances = tuple(
-            TileInstance(
-                tuple(float(value) for value in committed["tiles"][tile]["world_rect"]),
-                tuple(
-                    float(value) for value in committed["tiles"][tile].get("src_origin", (0.0, 0.0))
-                ),
-                tuple(float(value) for value in committed["tiles"][tile]["src_size"]),
+        tiles = committed["tiles"]
+        order = tuple(sorted(tiles))
+
+        def instance_for(tile):
+            info = tiles[tile]
+            return TileInstance(
+                tuple(float(value) for value in info["world_rect"]),
+                tuple(float(value) for value in info.get("src_origin", (0.0, 0.0))),
+                tuple(float(value) for value in info["src_size"]),
                 0,
-                plane_index=int(committed["tiles"][tile]["plane_index"]),
+                plane_index=int(info["plane_index"]),
                 transposed=transposed,
             )
-            for tile in sorted(committed["tiles"])
-        )
+
+        base_serial = committed.get("base_serial")
+        changed = committed.get("changed_tiles")
+        instances = None
+        if (
+            cached is not None
+            and base_serial is not None
+            and changed is not None
+            and cached[0] == base_serial
+            and cached[2] == order
+        ):
+            positions = {tile: index for index, tile in enumerate(order)}
+            patched = list(cached[1])
+            for tile in changed:
+                index = positions.get(int(tile))
+                if index is None:
+                    patched = None
+                    break
+                patched[index] = instance_for(int(tile))
+            if patched is not None:
+                instances = tuple(patched)
+        if instances is None:
+            instances = tuple(instance_for(tile) for tile in order)
         if cached is not None and cached[1] == instances:
             # The executor's identity check deliberately avoids an O(n)
             # equality scan. Do that scan here while the instances are
@@ -1095,7 +1130,7 @@ class WgpuImageView2D(ImageViewShell):
             # target-quality payload replacement with unchanged geometry
             # performs no full instance-buffer rewrite.
             instances = cached[1]
-        self._wgpu_tile_instances_cache = (committed, instances)
+        self._wgpu_tile_instances_cache = (serial, instances, order)
         return instances
 
     # ---- native overlay translation ----------------------------------------
@@ -1984,6 +2019,8 @@ class WgpuImageView2D(ImageViewShell):
                 )
 
             self._wgpu_mapping_state = mapping_state
+            commit_serial = int(self._wgpu_commit_serial) + 1
+            self._wgpu_commit_serial = commit_serial
             self._wgpu_committed = {
                 "tiles": committed_tiles,
                 "planes": tuple(planes),
@@ -1994,6 +2031,21 @@ class WgpuImageView2D(ImageViewShell):
                 "histogram_obligation": self._wgpu_histogram_evidence_obligation,
                 "preview_atlas": preview_atlas,
                 "preview_atlas_active_tiles": tuple(sorted(atlas_tiles)),
+                # Which descriptors this commit rewrote, and the record they
+                # were rewritten from.  A bounded delta only touches the tiles
+                # it committed, so downstream per-tile derivations (the
+                # instance buffer) patch instead of rebuilding the montage.
+                # The predecessor is named by serial rather than held: a
+                # reference would chain every commit to all of its ancestors.
+                "serial": commit_serial,
+                "base_serial": (
+                    int(previous_commit.get("serial", -1)) if incremental_delta else None
+                ),
+                "changed_tiles": (
+                    frozenset(int(tile) for tile in (*work_payloads, *atlas_tiles))
+                    if incremental_delta
+                    else None
+                ),
                 # Payloads are canonical (sorted image axes); an X/Y swap is a
                 # display transform the vertex shader applies via a UV axis swap
                 # (world rects stay display-oriented, source windows canonical).
