@@ -150,21 +150,26 @@ class LodLadder:
         policy = self.policy
         if policy.mode == "native-only":
             return COARSE_RUNG_NATIVE_ONLY
+        needs_presentation = bool(
+            state.presented_level is None
+            and not state.presentation_pending
+            and (state.floor_available or state.ready_level is not None)
+        )
+        if needs_presentation:
+            lane = Lane.DISPLAY_PREVIEW
+            if verdict is not None and not verdict.admits_lane(lane):
+                return COARSE_RUNG_LANE_NOT_ADMITTED
+            return COARSE_RUNG_PLANNED
         if not policy.coarse_rung_enabled:
             return COARSE_RUNG_DISABLED
         if not bool(state.allow_preview):
             return COARSE_RUNG_PREVIEW_NOT_ALLOWED
-        needs_presentation = bool(
-            state.presented_level is None
-            and not state.presentation_pending
-            and state.floor_available
-        )
         cold = bool(
             state.presented_level is None
             and state.ready_level is None
             and not state.resident_levels
         )
-        if cold or needs_presentation:
+        if cold:
             lane = Lane.DISPLAY_PREVIEW
             if verdict is not None and not verdict.admits_lane(lane):
                 return COARSE_RUNG_LANE_NOT_ADMITTED
@@ -247,13 +252,16 @@ class LodLadder:
         )
         # 1) FLOOR — the one coarse rung while the tile is blank, or a
         # presentation-only step when its pixels already exist but are not on
-        # screen. Residency satisfies R2 production; it does not satisfy the
-        # lifecycle's physical first-pixel obligation.
+        # screen. Residency or a lifecycle-ready payload satisfies R2
+        # production; neither satisfies the physical first-pixel obligation
+        # unless a commit is actually pending.
         cold_floor = presented is None and ready is None and not resident
-        resident_presentation = bool(
-            presented is None and not state.presentation_pending and state.floor_available
+        unowned_presentation = bool(
+            presented is None
+            and not state.presentation_pending
+            and (state.floor_available or ready is not None)
         )
-        if (cold_floor or resident_presentation) and cheap_pre_native:
+        if (cold_floor and cheap_pre_native) or unowned_presentation:
             steps.append(
                 RungStep(
                     tile_number=state.tile_number,
@@ -268,12 +276,14 @@ class LodLadder:
                     lane=Lane.DISPLAY_PREVIEW,
                     priority=Priority.INTERACTIVE,
                     reason=(
-                        "resident floor presentation"
-                        if resident_presentation
+                        "ready payload presentation"
+                        if ready is not None
+                        else "resident floor presentation"
+                        if unowned_presentation
                         else "cold floor fill"
                     ),
                     scheduling_rank=int(state.scheduling_rank),
-                    presentation_only=resident_presentation,
+                    presentation_only=unowned_presentation,
                 )
             )
 
@@ -392,7 +402,30 @@ class LodLadder:
             "preview",
             "fallback",
         }
-        if state.presented_level == 0 or 0 in set(state.resident_levels) or ready_native:
+        if state.presented_level == 0:
+            return ()
+        unowned_presentation = bool(
+            not state.presentation_pending and (state.floor_available or ready_native)
+        )
+        if unowned_presentation:
+            return (
+                RungStep(
+                    tile_number=state.tile_number,
+                    rung=Rung.EXACT,
+                    level=0,
+                    reduce_from_native=True,
+                    lane=Lane.DISPLAY_PREPARATION,
+                    priority=Priority.VISIBLE_IMAGE,
+                    reason=(
+                        "ready payload presentation"
+                        if ready_native
+                        else "resident floor presentation"
+                    ),
+                    scheduling_rank=int(state.scheduling_rank),
+                    presentation_only=True,
+                ),
+            )
+        if 0 in set(state.resident_levels) or ready_native:
             return ()
         return (
             RungStep(

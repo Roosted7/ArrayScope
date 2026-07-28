@@ -174,15 +174,71 @@ def test_converged_tile_plans_nothing():
 
 def test_ready_unacknowledged_preview_is_not_recomputed_during_commit_gap():
     ladder = LodLadder(LadderPolicy())
-    floor_ready = TileLodState(tile_number=0, ready_level=4, ready_quality="fallback")
+    floor_ready = TileLodState(
+        tile_number=0,
+        ready_level=4,
+        ready_quality="fallback",
+        presentation_pending=True,
+    )
     assert rungs(plan_tile(ladder, floor_ready, demand(1))) == [(Rung.DESIRED, 1)]
 
 
 def test_ready_unacknowledged_target_is_converged_for_admission():
     ladder = LodLadder()
-    state = TileLodState(tile_number=0, ready_level=1, ready_quality="exact")
+    state = TileLodState(
+        tile_number=0,
+        ready_level=1,
+        ready_quality="exact",
+        presentation_pending=True,
+    )
 
     assert plan_tile(ladder, state, demand(1)) == ()
+
+
+def test_ready_target_without_a_commit_owner_plans_presentation_not_production():
+    ladder = LodLadder()
+    state = TileLodState(
+        tile_number=0,
+        ready_level=1,
+        ready_quality="exact",
+        presentation_pending=False,
+    )
+
+    steps = plan_tile(ladder, state, demand(1))
+
+    assert len(steps) == 1
+    assert steps[0].rung == Rung.FLOOR
+    assert steps[0].presentation_only is True
+    assert steps[0].reason == "ready payload presentation"
+
+
+def test_ready_presentation_is_not_blocked_by_preview_production_policy():
+    ladder = LodLadder(LadderPolicy(coarse_rung_enabled=False))
+    state = TileLodState(
+        tile_number=0,
+        ready_level=1,
+        ready_quality="exact",
+        allow_preview=False,
+    )
+
+    steps = plan_tile(ladder, state, demand(1))
+
+    assert len(steps) == 1
+    assert steps[0].rung == Rung.FLOOR
+    assert steps[0].presentation_only is True
+    assert ladder.coarse_rung_refusal(state, demand(1)) == ""
+
+
+def test_native_only_ready_payload_still_gets_a_presentation_owner():
+    ladder = LodLadder(LadderPolicy(mode="native-only"))
+    state = TileLodState(tile_number=0, ready_level=0, ready_quality="exact")
+
+    steps = plan_tile(ladder, state, demand(0))
+
+    assert len(steps) == 1
+    assert steps[0].rung == Rung.EXACT
+    assert steps[0].presentation_only is True
+    assert steps[0].reason == "ready payload presentation"
 
 
 def test_zoom_in_refines_progressively():

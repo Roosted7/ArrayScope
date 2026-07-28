@@ -218,7 +218,16 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   272-tile WGPU zoom/pan return changes from a permanent 1/272 presentation
   (271 target-ready, kernel and commit queues idle) to 272/272; final zoom-out
   takes 1.208 s and settles in 0.912 s with zero coarse-target producer starts
-  ([R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md)).
+  ([R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md)). **Orphan
+  ready-payload strand fixed 2026-07-28:** lifecycle-ready is no longer
+  assumed to mean commit-pending. A ready, current payload with no dirty/upsert
+  owner gets the same presentation-only handoff; a stale or unrecoverable
+  payload falls through to normal production. The field capture moves from
+  93/100 presented with seven target-ready orphans to full physical
+  presentation in the reproduced interaction. A separate final-refinement
+  wedge remains: the 272-tile profiler can leave 6–7 already-visible preview
+  payloads dirty with no gate armed. It reproduces identically before this
+  ready-payload change at `9ef3d373`, so it remains an independent follow-up.
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
   **Non-reducible pipelines keep the pass (2026-07-27):** FLOOR no longer

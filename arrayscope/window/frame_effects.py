@@ -736,18 +736,31 @@ class FramePipelineEffects:
             return False
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
-        if self._step_produces_page_payload(step, tile):
-            if step.rung == Rung.FLOOR and bool(getattr(step, "presentation_only", False)):
-                # R2 has already proved that resident pixels satisfy this
-                # demand. Rebuild only their lightweight payload wrapper and
-                # arm presentation; submitting another numeric producer would
-                # turn "resident but not drawn" into duplicate work.
+        if bool(getattr(step, "presentation_only", False)):
+            # R2 has already proved that pixels satisfy this demand, either
+            # as a resident page or a lifecycle-ready payload whose
+            # completion lost its commit owner. Recover only a current
+            # wrapper and arm presentation. If recovery fails, continue
+            # into the ordinary producer path rather than stranding the
+            # tile behind an unprovable "ready" claim.
+            if step.rung == Rung.FLOOR:
                 self.session._ensure_floor_payloads((tile_number,), max_count=1)
-                payload = self.session.display_tile_payloads.get(tile_number)
-                if payload is not None:
-                    self.session._rearm_required_first_pixel_payloads()
+            payload = self.session.display_tile_payloads.get(tile_number)
+            lifecycle = self.session.lifecycle
+            if not lifecycle.payload_is_current(tile_number, payload):
+                payload = lifecycle.current_presentable_payload(tile_number)
+            if lifecycle.payload_is_current(tile_number, payload):
+                self.session.display_tile_payloads[tile_number] = payload
+                rearmed = self.session._rearm_required_first_pixel_payloads()
+                presentation_armed = bool(
+                    tile_number in rearmed
+                    or tile_number in getattr(self.session, "dirty_payloads", ())
+                    or tile_number in getattr(self.session, "pending_payload_upserts", ())
+                )
+                if presentation_armed:
                     self.request_presentation()
                     return False
+        if self._step_produces_page_payload(step, tile):
             if step.rung == Rung.FLOOR and self._display_payload_covers_preview_step(
                 tile_number, tile, step
             ):

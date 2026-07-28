@@ -6041,6 +6041,11 @@ def test_resident_floor_step_arms_presentation_without_a_numeric_task(monkeypatc
 
     monkeypatch.setattr(session, "_ensure_floor_payloads", ensure_floor)
     monkeypatch.setattr(
+        session.lifecycle,
+        "payload_is_current",
+        lambda tile_number, candidate: candidate is payload,
+    )
+    monkeypatch.setattr(
         session,
         "_rearm_required_first_pixel_payloads",
         lambda: calls.append(("rearm",)) or (0,),
@@ -6050,6 +6055,140 @@ def test_resident_floor_step_arms_presentation_without_a_numeric_task(monkeypatc
     assert effects.prepare_rung(intent, step) is False
     assert calls == [("ensure", (0,), 1), ("rearm",), ("present",)]
     assert session.active_tile_requests == set()
+
+
+def test_orphan_ready_floor_step_recovers_lifecycle_payload_for_commit(monkeypatch):
+    """Ready without dirty/upsert ownership must be rearmed, not called covered."""
+
+    session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.FLOOR,
+        level=2,
+        reduce_from_native=False,
+        lane=Lane.DISPLAY_PREVIEW,
+        priority=Priority.INTERACTIVE,
+        reason="ready payload presentation",
+        presentation_only=True,
+    )
+    payload = object()
+    calls = []
+
+    monkeypatch.setattr(
+        session,
+        "_ensure_floor_payloads",
+        lambda tile_numbers, *, max_count=None: calls.append(
+            ("ensure", tuple(tile_numbers), max_count)
+        ),
+    )
+    monkeypatch.setattr(
+        session.lifecycle,
+        "payload_is_current",
+        lambda tile_number, candidate: candidate is payload,
+    )
+    monkeypatch.setattr(
+        session.lifecycle,
+        "current_presentable_payload",
+        lambda tile_number: payload,
+    )
+
+    def rearm():
+        calls.append(("rearm",))
+        session.dirty_payloads[0] = None
+        session.pending_payload_upserts[0] = None
+        return (0,)
+
+    monkeypatch.setattr(session, "_rearm_required_first_pixel_payloads", rearm)
+    monkeypatch.setattr(effects, "request_presentation", lambda: calls.append(("present",)))
+
+    assert effects.prepare_rung(intent, step) is False
+    assert session.display_tile_payloads[0] is payload
+    assert calls == [("ensure", (0,), 1), ("rearm",), ("present",)]
+    assert session.active_tile_requests == set()
+
+
+def test_native_only_ready_step_recovers_payload_before_numeric_routing(monkeypatch):
+    """Presentation ownership is independent of which rung produces pixels."""
+
+    session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    effects = FramePipelineEffects(_RungPrepareRenderer(), session)
+    intent = _pipeline_intent_for(session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.EXACT,
+        level=0,
+        reduce_from_native=True,
+        lane=Lane.DISPLAY_PREPARATION,
+        priority=Priority.VISIBLE_IMAGE,
+        reason="ready payload presentation",
+        presentation_only=True,
+    )
+    payload = object()
+
+    monkeypatch.setattr(
+        effects,
+        "scheduling_verdict",
+        lambda: SimpleNamespace(admits_lane=lambda lane: True),
+    )
+    monkeypatch.setattr(
+        session.lifecycle,
+        "payload_is_current",
+        lambda tile_number, candidate: candidate is payload,
+    )
+    monkeypatch.setattr(
+        session.lifecycle,
+        "current_presentable_payload",
+        lambda tile_number: payload,
+    )
+    monkeypatch.setattr(session, "_rearm_required_first_pixel_payloads", lambda: (0,))
+    presentation_requests = []
+    monkeypatch.setattr(
+        effects,
+        "request_presentation",
+        lambda: presentation_requests.append(0),
+    )
+
+    assert effects.prepare_rung(intent, step) is False
+    assert session.display_tile_payloads[0] is payload
+    assert presentation_requests == [0]
+
+
+def test_unrecoverable_presentation_step_falls_back_to_numeric_work(monkeypatch):
+    """A stale ready claim must not turn presentation recovery into a no-op."""
+
+    session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.FLOOR,
+        level=2,
+        reduce_from_native=False,
+        lane=Lane.DISPLAY_PREVIEW,
+        priority=Priority.INTERACTIVE,
+        reason="ready payload presentation",
+        presentation_only=True,
+    )
+
+    monkeypatch.setattr(session, "_ensure_floor_payloads", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        session.lifecycle,
+        "current_presentable_payload",
+        lambda tile_number: None,
+    )
+
+    assert effects.prepare_rung(intent, step) is True
+    claim_identity = effects._preview_claim_identity(intent, session.plan.tiles[0])
+    assert session.lifecycle.preview_claim_matches(
+        0,
+        int(Rung.FLOOR),
+        2,
+        claim_identity,
+    )
 
 
 def test_rejected_current_reduced_completion_replans_after_releasing_claim(monkeypatch):

@@ -233,6 +233,26 @@ preview or target task starts. The broader workflow still reports its standing
 R1/R2/R2b/R5 failures; this evidence closes the no-progress defect, not those
 independent contract rows.
 
+The resident fix exposed the same ownership gap for lifecycle-ready payloads.
+One field capture freezes at 93/100 physically presented with exactly seven
+target-ready tiles, no dirty/upsert owner, an idle kernel, and unchanged task
+and commit counters. `TileLodState` now distinguishes materialized readiness
+from `presentation_pending`: only a current wrapper already in dirty/upsert
+state suppresses a presentation step. Otherwise the effects layer recovers the
+current lifecycle payload, arms it through the ordinary governed commit path,
+and requests presentation. Recovery is fail-safe rather than optimistic: if
+the payload is stale or cannot be rearmed, the normal numeric producer path
+remains available. This presentation obligation is independent of preview
+production admission, including coarse-rung-disabled and native-only policies.
+
+The repeated real workflow also identifies a separate, pre-existing final
+refinement wedge after physical completion. Both `9ef3d373` and the fixed
+branch reach 272/272 with target settlement, then leave respectively six and
+seven already-visible preview replacements dirty, with `flush_pending` and
+`final_commit_pending` true but no presentation gate armed. That is not the
+blank-tile defect or a profiler-only failure: the dirty maps are real commit
+debt. It remains open and is excluded from the ready-payload fix.
+
 ## Result and remaining red evidence
 
 No preview or target pass completed atomically in these runs. The former
