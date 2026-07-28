@@ -41,6 +41,10 @@ class TileLayerUpdateStats:
     texture_upload_bytes: int = 0
     texture_prepare_ms: float = 0.0
     texture_submit_ms: float = 0.0
+    # The subset of preparation that is pure array work over immutable
+    # payloads -- packing and page extraction. This is what a worker can own;
+    # the rest of preparation walks live presentation state.
+    texture_pack_ms: float = 0.0
     vertex_uploads: int = 0
     level_updates: int = 0
     estimated_gpu_bytes: int = 0

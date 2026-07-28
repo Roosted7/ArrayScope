@@ -39,6 +39,7 @@ from arrayscope.display.shader_mapping import (
 from arrayscope.display.tile_layout import tile_layout_map
 from arrayscope.gpu.keys import REDUCER_PHASE_VECTOR, DataChunkKey
 from arrayscope.gpu.page_table import PageResolution
+from arrayscope.presentation.prepared_uploads import prepared_upload_key
 
 RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 PYQTGRAPH_PREVIEW_ATLAS_MIN_TILES = 256
@@ -668,6 +669,24 @@ def _map_complex_cpu_payload(
     )
 
 
+def assemble_page_backed_payload(payload: DisplayTilePayload, *, levels=None) -> _PageAssembly:
+    """Assemble one payload's pages off any thread.
+
+    The public name of the pure work a commit would otherwise do inline. It
+    reads only the payload's own immutable backing and allocates its own
+    output, so a worker may call it while the GUI thread is busy elsewhere.
+    """
+
+    return _resolve_page_backed_payload(payload, levels=levels)
+
+
+def page_assembly_nbytes(assembly: _PageAssembly) -> int:
+    """Size of an assembly's pixels, for the prepared-upload byte bound."""
+
+    image = getattr(assembly.payload, "image", None)
+    return int(getattr(image, "nbytes", 0) or 0)
+
+
 def _assemble_page_backed_payload(
     payload: DisplayTilePayload,
     *,
@@ -816,6 +835,7 @@ class MontageTileLayer:
         record_upload_timing: Callable[[str, float], None],
         histogram_levels_for_display: Callable,
         is_rgb_image: Callable[[object], bool],
+        prepared_uploads=None,
     ):
         self.layer_owner = layer_owner
         self._set_image_item_data = set_image_item_data
@@ -835,15 +855,28 @@ class MontageTileLayer:
         self._preview_atlas_item: _CompactPreviewAtlasItem | None = None
         self._preview_atlas_decline_reason = ""
         self._payload_prepare_ms = 0.0
+        self._prepared_uploads = prepared_uploads
+        self._prepared_assembly_hits = 0
 
     def _resolve_payload(self, payload: DisplayTilePayload, *, levels):
-        """Assemble one payload, charging the time to preparation.
+        """Assemble one payload, taking a worker's result when one is waiting.
 
         Page assembly is pure array work on an immutable payload — the part of
-        a PyQtGraph commit that does not need the GUI thread. Accounting for it
-        separately is what makes the hand-off split measurable.
+        a PyQtGraph commit that does not need the GUI thread. A worker may have
+        done it already; the mailbox hands the result over only under the exact
+        identity and levels this commit is submitting, so a miss or a stale
+        entry falls through to assembling here, exactly as before.
         """
 
+        mailbox = self._prepared_uploads
+        if mailbox is not None:
+            prepared = mailbox.take(
+                int(payload.tile_number),
+                prepared_upload_key(payload, (float(levels[0]), float(levels[1]))),
+            )
+            if prepared is not None:
+                self._prepared_assembly_hits += 1
+                return prepared
         started = perf_counter()
         try:
             return _resolve_page_backed_payload(payload, levels=levels)

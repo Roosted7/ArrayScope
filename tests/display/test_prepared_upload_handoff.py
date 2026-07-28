@@ -1,0 +1,242 @@
+"""Ring 1. Backends take worker-prepared buffers only under the exact identity.
+
+The hand-off seam described in `docs/architecture/progressive-render-contract.md`
+(R5, "the budget is a bookkeeping budget"): a worker packs a payload's upload
+buffer, the GUI thread submits it. This pins the half that can go wrong —
+a buffer prepared for one payload must never be presented for another, and both
+backends must fall back to preparing inline when the mailbox cannot help.
+
+Ring 1 because the seam is pure array/mailbox logic: no compositor is needed to
+tell a matched key from a mismatched one.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from arrayscope.display.backends.pyqtgraph.tiles import (
+    assemble_page_backed_payload,
+    page_assembly_nbytes,
+)
+from arrayscope.display.lod import LodInfo
+from arrayscope.display.model.frame import DisplayTilePayload, PageBackedPresentation
+from arrayscope.display.pyramid import materialize_source_grid_pages, plan_source_grid_pages
+from arrayscope.display.wgpu_imageview2d import (
+    _wgpu_preparable_representation,
+    wgpu_packed_payload_texture,
+)
+from arrayscope.gpu.keys import COMPLEX_RG32F, SCALAR_R32F
+from arrayscope.presentation.prepared_uploads import (
+    PreparedUploadMailbox,
+    prepared_upload_key,
+)
+
+CONTENT = ("src-anchored", ("doc", 1), ("op", "identity"))
+RECT = (0, 4, 0, 6)
+
+
+def _page_backed_payload(*, tile_number: int = 0, source_id=("tile", 0), fill: float = 1.0):
+    """A payload whose pixels must be assembled from pages before display."""
+
+    values = np.full((RECT[1] - RECT[0], RECT[3] - RECT[2]), fill, dtype=np.float32)
+    plans = plan_source_grid_pages(
+        content_key=CONTENT,
+        valid_source_rect_yx=RECT,
+        reduction_yx=(0, 0),
+        stored_page_shape=(2, 3),
+        dtype="float32",
+        representation=SCALAR_R32F,
+        reducer="native",
+    )
+    pages = materialize_source_grid_pages(values, source_origin_yx=(0, 0), plans=plans)
+    lod = LodInfo(0, 1, values.shape, values.shape, 0)
+    return DisplayTilePayload(
+        tile_number,
+        tile_number,
+        values,
+        values,
+        source_id,
+        semantic_data=values,
+        texture_data=values,
+        lod=lod,
+        page_backing=PageBackedPresentation(plans, pages, RECT, lod),
+    )
+
+
+# --- PyQtGraph: page assembly -------------------------------------------------
+
+
+def test_pyqtgraph_takes_a_prepared_assembly_instead_of_assembling_inline():
+    from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
+
+    payload = _page_backed_payload()
+    levels = (0.0, 2.0)
+    mailbox = PreparedUploadMailbox()
+    layer = MontageTileLayer.__new__(MontageTileLayer)
+    layer._payload_prepare_ms = 0.0
+    layer._prepared_uploads = mailbox
+    layer._prepared_assembly_hits = 0
+
+    prepared = assemble_page_backed_payload(payload, levels=levels)
+    mailbox.publish(
+        0,
+        prepared_upload_key(payload, levels),
+        prepared,
+        nbytes=page_assembly_nbytes(prepared),
+    )
+
+    resolved = layer._resolve_payload(payload, levels=levels)
+
+    assert resolved is prepared
+    assert layer._prepared_assembly_hits == 1
+    # Nothing was assembled on the calling thread.
+    assert layer.consume_payload_prepare_ms() == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    ("stale_source_id", "stale_levels"),
+    [
+        # A buffer prepared for a different payload identity.
+        (("tile", 99), (0.0, 2.0)),
+        # A buffer baked against different round levels (R3).
+        (("tile", 0), (0.0, 5.0)),
+    ],
+)
+def test_pyqtgraph_refuses_a_stale_assembly_and_assembles_inline(stale_source_id, stale_levels):
+    """A stale prepared frame is dropped, never presented."""
+
+    from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
+
+    payload = _page_backed_payload(fill=1.0)
+    committing_levels = (0.0, 2.0)
+    mailbox = PreparedUploadMailbox()
+    layer = MontageTileLayer.__new__(MontageTileLayer)
+    layer._payload_prepare_ms = 0.0
+    layer._prepared_uploads = mailbox
+    layer._prepared_assembly_hits = 0
+
+    other = _page_backed_payload(source_id=stale_source_id, fill=9.0)
+    stale = assemble_page_backed_payload(other, levels=stale_levels)
+    # Published into THIS payload's slot under a key that does not match what
+    # the commit will ask for -- exactly the race the mailbox exists to lose.
+    mailbox.publish(
+        0,
+        prepared_upload_key(other, stale_levels),
+        stale,
+        nbytes=page_assembly_nbytes(stale),
+    )
+
+    resolved = layer._resolve_payload(payload, levels=committing_levels)
+
+    assert resolved is not stale
+    assert layer._prepared_assembly_hits == 0
+    assert mailbox.counters().stale == 1
+    # The pixels are this payload's, not the stale buffer's.
+    assert float(np.asarray(resolved.payload.image).ravel()[0]) == pytest.approx(1.0)
+    # And it was genuinely assembled here.
+    assert layer.consume_payload_prepare_ms() > 0.0
+
+
+def test_pyqtgraph_assembles_inline_when_the_mailbox_is_empty():
+    from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
+
+    payload = _page_backed_payload()
+    layer = MontageTileLayer.__new__(MontageTileLayer)
+    layer._payload_prepare_ms = 0.0
+    layer._prepared_uploads = PreparedUploadMailbox()
+    layer._prepared_assembly_hits = 0
+
+    resolved = layer._resolve_payload(payload, levels=(0.0, 2.0))
+
+    assert resolved is not None
+    assert layer._prepared_assembly_hits == 0
+    assert float(np.asarray(resolved.payload.image).ravel()[0]) == pytest.approx(1.0)
+
+
+# --- WGPU: upload packing -----------------------------------------------------
+
+
+def test_wgpu_pack_is_pure_and_matches_what_a_worker_would_publish():
+    """The worker and the inline path must produce the same plane."""
+
+    payload = _page_backed_payload(fill=3.0)
+
+    worker_result = wgpu_packed_payload_texture(payload, SCALAR_R32F)
+    inline_result = wgpu_packed_payload_texture(payload, SCALAR_R32F)
+
+    np.testing.assert_array_equal(worker_result, inline_result)
+    assert worker_result.dtype == np.float32
+
+
+def test_wgpu_takes_a_prepared_plane_only_under_its_own_representation():
+    from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
+
+    payload = _page_backed_payload(fill=3.0)
+    mailbox = PreparedUploadMailbox()
+    view = WgpuImageView2D.__new__(WgpuImageView2D)
+    view._prepared_tiled_uploads = mailbox
+
+    prepared = wgpu_packed_payload_texture(payload, SCALAR_R32F)
+    mailbox.publish(0, prepared_upload_key(payload, SCALAR_R32F), prepared)
+
+    assert view._wgpu_payload_texture(payload, SCALAR_R32F) is prepared
+    assert mailbox.counters().hits == 1
+
+
+def test_wgpu_refuses_a_plane_prepared_for_another_representation():
+    """Representation is part of the promise; a mismatch packs inline."""
+
+    from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
+
+    payload = _page_backed_payload(fill=3.0)
+    mailbox = PreparedUploadMailbox()
+    view = WgpuImageView2D.__new__(WgpuImageView2D)
+    view._prepared_tiled_uploads = mailbox
+
+    prepared = wgpu_packed_payload_texture(payload, SCALAR_R32F)
+    mailbox.publish(0, prepared_upload_key(payload, COMPLEX_RG32F), prepared)
+
+    packed = view._wgpu_payload_texture(payload, SCALAR_R32F)
+
+    assert packed is not prepared
+    assert mailbox.counters().stale == 1
+    np.testing.assert_array_equal(packed, wgpu_packed_payload_texture(payload, SCALAR_R32F))
+
+
+def test_wgpu_refuses_a_plane_prepared_for_another_payload():
+    from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
+
+    committing = _page_backed_payload(source_id=("tile", 0), fill=1.0)
+    other = _page_backed_payload(source_id=("tile", 99), fill=9.0)
+    mailbox = PreparedUploadMailbox()
+    view = WgpuImageView2D.__new__(WgpuImageView2D)
+    view._prepared_tiled_uploads = mailbox
+
+    mailbox.publish(
+        0,
+        prepared_upload_key(other, SCALAR_R32F),
+        wgpu_packed_payload_texture(other, SCALAR_R32F),
+    )
+
+    packed = view._wgpu_payload_texture(committing, SCALAR_R32F)
+
+    assert mailbox.counters().stale == 1
+    assert float(packed.ravel()[0]) == pytest.approx(1.0)
+
+
+def test_the_representation_a_preparation_targets_matches_the_commit_plan():
+    """Preparing under the wrong representation would only ever miss."""
+
+    payload = _page_backed_payload()
+
+    assert _wgpu_preparable_representation(payload, True) == SCALAR_R32F
+    assert _wgpu_preparable_representation(payload, False) == SCALAR_R32F
+
+
+def test_an_unpackable_payload_is_skipped_rather_than_guessed_at():
+    class _Opaque:
+        texture_data = None
+        image = None
+
+    assert _wgpu_preparable_representation(_Opaque(), False) is None

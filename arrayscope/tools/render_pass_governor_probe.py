@@ -37,6 +37,7 @@ _COMPONENTS = (
     "prepare_ms",
     "backend_apply_ms",
     "backend_texture_prepare_ms",
+    "backend_texture_pack_ms",
     "backend_texture_submit_ms",
     "backend_pool_growth_ms",
     "backend_executor_initialization_ms",

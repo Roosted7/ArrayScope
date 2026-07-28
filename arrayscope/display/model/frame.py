@@ -680,6 +680,7 @@ class TileCommitReport:
     # preparation that needs no GUI thread, and the submission that does.
     texture_prepare_ms: float = 0.0
     texture_submit_ms: float = 0.0
+    texture_pack_ms: float = 0.0
     vertex_uploads: int = 0
     cold_work_ms: float = 0.0
     visibility_work_ms: float = 0.0

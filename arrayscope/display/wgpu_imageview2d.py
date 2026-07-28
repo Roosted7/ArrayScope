@@ -110,6 +110,7 @@ from arrayscope.gpu.keys import (
     RGB_WINDOWED_RGBA32F,
     SCALAR_R32F,
 )
+from arrayscope.presentation.prepared_uploads import prepared_upload_key
 
 #: Complex shader components → protocol mapping modes.
 _WGPU_COMPONENT_MODES = {
@@ -1556,6 +1557,7 @@ class WgpuImageView2D(ImageViewShell):
         # command in this callback is built before ``_submit_wgpu`` runs, so
         # the boundary below is exactly the line a worker could take over.
         apply_started = perf_counter()
+        self._wgpu_pack_ms = 0.0
         try:
             payloads = {
                 int(tile): payload for tile, payload in dict(montage_tile_payloads or {}).items()
@@ -1666,10 +1668,12 @@ class WgpuImageView2D(ImageViewShell):
                     physical_identities = _wgpu_physical_payload_identities(payloads)
             elif physical_identities is None:
                 physical_identities = _wgpu_physical_payload_identities(payloads)
+            pack_started = perf_counter()
             textures = {
                 tile: self._wgpu_payload_texture(work_payloads[tile], representation)
                 for tile in work_payloads
             }
+            self._wgpu_pack_ms += (perf_counter() - pack_started) * 1000.0
             planned_count = planned_tile_count(
                 geometry,
                 frame_plan=frame_plan,
@@ -1950,17 +1954,15 @@ class WgpuImageView2D(ImageViewShell):
                             will_upload = True
                             # CPU-produced payload remains the fallback for
                             # cold content and non-mean reducer families.
-                            commands.append(
-                                EnsureChunkResident(
-                                    key,
-                                    self._wgpu_page_block(
-                                        upload_texture,
-                                        chunk_y,
-                                        chunk_x,
-                                        representation,
-                                    ),
-                                )
+                            page_started = perf_counter()
+                            page_block = self._wgpu_page_block(
+                                upload_texture,
+                                chunk_y,
+                                chunk_x,
+                                representation,
                             )
+                            self._wgpu_pack_ms += (perf_counter() - page_started) * 1000.0
+                            commands.append(EnsureChunkResident(key, page_block))
                             planned_resident.add(key)
                 if will_upload:
                     planned_upload_tiles.append(tile)
@@ -2218,6 +2220,7 @@ class WgpuImageView2D(ImageViewShell):
                     0.0, (submit_started - apply_started) * 1000.0 - executor_ensure_ms
                 ),
                 texture_submit_ms=submit_ms,
+                texture_pack_ms=self._wgpu_pack_ms,
             )
             if physical_identities is not None and layout_identity is not None:
                 self._wgpu_tiled_binding_signature = _WgpuTiledBindingSignature(
@@ -2342,6 +2345,7 @@ class WgpuImageView2D(ImageViewShell):
         binding_incremental: bool,
         texture_prepare_ms: float = 0.0,
         texture_submit_ms: float = 0.0,
+        texture_pack_ms: float = 0.0,
     ) -> TileLayerUpdateStats:
         """Finish one tiled commit from either the full or mapping-only path."""
 
@@ -2455,6 +2459,7 @@ class WgpuImageView2D(ImageViewShell):
             upload_ms=upload_ms,
             texture_prepare_ms=float(texture_prepare_ms),
             texture_submit_ms=float(texture_submit_ms),
+            texture_pack_ms=float(texture_pack_ms),
         )
         self._record_tile_layer_stats(stats)
         self._record_upload_timing("tile_layer_upload_ms", upload_ms)
@@ -2548,30 +2553,43 @@ class WgpuImageView2D(ImageViewShell):
         return representation, "real", scale, symlog_constant, False
 
     def _wgpu_payload_texture(self, payload, representation) -> np.ndarray:
-        texture = payload.texture_data if payload.texture_data is not None else payload.image
-        texture = _wgpu_assembled_page_texture(payload, texture)
-        if representation == RGB_WINDOWED_RGBA32F:
-            base = pack_texture_data(texture, TexturePlaneKind.RGB8)
-            scalar = getattr(payload, "histogram_data", None)
-            if scalar is None:
-                rgb = np.asarray(texture, dtype=np.float32)[..., :3]
-                scalar = 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
-            scalar = np.asarray(scalar, dtype=np.float32)
-            if scalar.shape != base.shape[:2]:
-                raise ValueError(
-                    "wgpu windowable RGB scalar plane must match the RGB tile; "
-                    f"got {scalar.shape} versus {base.shape[:2]}"
-                )
-            packed = np.empty((*base.shape[:2], 4), np.float32)
-            packed[..., :3] = base.astype(np.float32) / 255.0
-            packed[..., 3] = scalar
-            return np.ascontiguousarray(packed)
-        kind = {
-            SCALAR_R32F: TexturePlaneKind.SCALAR_R32F,
-            COMPLEX_RG32F: TexturePlaneKind.COMPLEX_RG32F,
-            RGB8: TexturePlaneKind.RGB8,
-        }[representation]
-        return pack_texture_data(texture, kind)
+        """Packed upload plane for one payload, from a worker where possible.
+
+        The mailbox hands over a worker-built plane only under the identity and
+        representation this commit is submitting; anything else is dropped and
+        packed here, exactly as before the hand-off existed.
+        """
+
+        prepared = self.preparedTiledUploads.take(
+            int(payload.tile_number),
+            prepared_upload_key(payload, representation),
+        )
+        if prepared is not None:
+            return prepared
+        return wgpu_packed_payload_texture(payload, representation)
+
+    def tiledUploadPreparations(self, payloads, *, levels, rgb_already_windowed: bool = False):
+        """Pack each payload into its upload plane ahead of the commit.
+
+        The representation is derived exactly as ``_wgpu_commit_plan`` derives
+        it, so a plane prepared here carries the key the commit will ask for. A
+        payload whose kind is not packable is skipped rather than guessed at:
+        the commit's own validation stays the single place that refuses.
+        """
+
+        del levels
+        mailbox = self.preparedTiledUploads
+        rows = []
+        for tile, payload in dict(payloads or {}).items():
+            representation = _wgpu_preparable_representation(payload, bool(rgb_already_windowed))
+            if representation is None:
+                continue
+            slot = int(getattr(payload, "tile_number", tile))
+            key = prepared_upload_key(payload, representation)
+            rows.append(
+                (slot, key, _wgpu_pack_preparation(mailbox, slot, key, payload, representation))
+            )
+        return tuple(rows)
 
     def _wgpu_reusable_native_texture(
         self,
@@ -2715,6 +2733,7 @@ class WgpuImageView2D(ImageViewShell):
         self.imageItem.setVisible(False)
 
     def reset_tiled_residency(self, reason: str) -> None:
+        self.discardPreparedTiledUploads()
         executor = self._wgpu_executor
         if executor is not None:
             executor.replace_resident_pin_set(self._wgpu_atomic_warm_pin_owner, ())
@@ -4102,6 +4121,68 @@ def _wgpu_plan_lod_page_generation(
     commands.append(GenerateLodPages(tuple(child_keys), destination))
     available.add(destination)
     return True
+
+
+def _wgpu_preparable_representation(payload, rgb_already_windowed: bool):
+    """The representation a commit would pack ``payload`` into, or None.
+
+    Mirrors the derivation in ``_wgpu_commit_plan``. Returning None means "do
+    not prepare this ahead" -- never "this payload is invalid"; the commit's
+    validation is unchanged and stays the only place that refuses.
+    """
+
+    try:
+        kind = _wgpu_payload_kind(payload)
+    except Exception:
+        return None
+    representation = _WGPU_REP_BY_KIND.get(kind)
+    if representation == RGB8 and not rgb_already_windowed:
+        return RGB_WINDOWED_RGBA32F
+    return representation
+
+
+def _wgpu_pack_preparation(mailbox, slot, key, payload, representation):
+    """Build the worker callable that packs one payload's upload plane."""
+
+    def prepare() -> None:
+        mailbox.publish(slot, key, wgpu_packed_payload_texture(payload, representation))
+
+    return prepare
+
+
+def wgpu_packed_payload_texture(payload, representation) -> np.ndarray:
+    """Pack one payload into its upload plane, off any thread.
+
+    Pure over an immutable payload: it assembles the payload's own pages and
+    converts them to the representation's texel layout, allocating its own
+    output. Nothing here touches the view, the executor, or Qt, which is what
+    lets a worker run it while the GUI thread is submitting something else.
+    """
+
+    texture = payload.texture_data if payload.texture_data is not None else payload.image
+    texture = _wgpu_assembled_page_texture(payload, texture)
+    if representation == RGB_WINDOWED_RGBA32F:
+        base = pack_texture_data(texture, TexturePlaneKind.RGB8)
+        scalar = getattr(payload, "histogram_data", None)
+        if scalar is None:
+            rgb = np.asarray(texture, dtype=np.float32)[..., :3]
+            scalar = 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
+        scalar = np.asarray(scalar, dtype=np.float32)
+        if scalar.shape != base.shape[:2]:
+            raise ValueError(
+                "wgpu windowable RGB scalar plane must match the RGB tile; "
+                f"got {scalar.shape} versus {base.shape[:2]}"
+            )
+        packed = np.empty((*base.shape[:2], 4), np.float32)
+        packed[..., :3] = base.astype(np.float32) / 255.0
+        packed[..., 3] = scalar
+        return np.ascontiguousarray(packed)
+    kind = {
+        SCALAR_R32F: TexturePlaneKind.SCALAR_R32F,
+        COMPLEX_RG32F: TexturePlaneKind.COMPLEX_RG32F,
+        RGB8: TexturePlaneKind.RGB8,
+    }[representation]
+    return pack_texture_data(texture, kind)
 
 
 def _wgpu_assembled_page_texture(payload, fallback) -> np.ndarray:

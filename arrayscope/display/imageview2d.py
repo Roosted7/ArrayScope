@@ -73,6 +73,10 @@ from arrayscope.display.viewport import (
     ViewportPolicy,
     constrain_view_range,
 )
+from arrayscope.presentation.prepared_uploads import (
+    PreparedUploadMailbox,
+    prepared_upload_key,
+)
 
 if TYPE_CHECKING:
     from arrayscope.display.model.frame import (
@@ -858,9 +862,25 @@ class ImageViewShell(QtWidgets.QWidget):
         raise NotImplementedError
 
     def reset_tiled_residency(self, reason: str) -> None:
-        """Backend contract: destroy retained tile residency (reset boundary)."""
+        """Backend contract: destroy retained tile residency (reset boundary).
+
+        Backends must call ``discardPreparedTiledUploads`` from their override:
+        a reset invalidates the payloads any pending preparation was built for.
+        """
 
         raise NotImplementedError
+
+    def discardPreparedTiledUploads(self) -> None:
+        """Drop every prepared buffer at a residency reset boundary.
+
+        Prepared buffers are keyed by payload identity, so a leftover could
+        never be presented for the wrong pixels — but it would hold bytes for
+        a round that no longer exists.
+        """
+
+        mailbox = getattr(self, "_prepared_tiled_uploads", None)
+        if mailbox is not None:
+            mailbox.clear()
 
     def setTiledPresentation(
         self,
@@ -990,6 +1010,35 @@ class ImageViewShell(QtWidgets.QWidget):
         """Backend hook: the physical tiled-presentation layer, if any."""
 
         return None
+
+    @property
+    def preparedTiledUploads(self) -> PreparedUploadMailbox:
+        """Keep-latest hand-off of worker-prepared upload buffers.
+
+        Created lazily so every backend — including ones with nothing to
+        prepare — has the same surface for diagnostics and teardown.
+        """
+
+        mailbox = getattr(self, "_prepared_tiled_uploads", None)
+        if mailbox is None:
+            mailbox = PreparedUploadMailbox()
+            self._prepared_tiled_uploads = mailbox
+        return mailbox
+
+    def tiledUploadPreparations(self, payloads, *, levels, rgb_already_windowed: bool = False):
+        """Describe upload work a worker can do for ``payloads``, if any.
+
+        Returns ``(slot, key, fn)`` rows. ``fn`` takes no arguments, touches no
+        Qt and no GUI-owned state, and publishes its result into
+        ``preparedTiledUploads`` itself — so the caller only has to get it onto
+        a worker, with no completion to fan back in.
+
+        A backend with nothing worth preparing ahead returns no rows. That is
+        not a fallback: it means this backend's commit callback has no pure
+        array work to hand off.
+        """
+
+        return ()
 
     def tiledPayloadResident(self, payload) -> bool:
         """Report physical tile residency without changing backend state."""
@@ -2799,7 +2848,36 @@ class ImageView2D(ImageViewShell):
             record_upload_timing=self._record_upload_timing,
             histogram_levels_for_display=self._histogram_levels_for_display,
             is_rgb_image=self._is_rgb_image,
+            prepared_uploads=self.preparedTiledUploads,
         )
+
+    def tiledUploadPreparations(self, payloads, *, levels, rgb_already_windowed: bool = False):
+        """Page assembly for each page-backed payload.
+
+        Assembly is the whole of this backend's commit-time preparation and it
+        reads nothing but the payload's own immutable backing, so every row here
+        is work the GUI thread never has to do. Payloads with no page backing
+        assemble to themselves — there is nothing to prepare, so they are
+        skipped rather than queued as no-ops.
+        """
+
+        del rgb_already_windowed
+        bounds = (float(levels[0]), float(levels[1]))
+        mailbox = self.preparedTiledUploads
+        rows = []
+        for tile, payload in dict(payloads or {}).items():
+            if getattr(payload, "page_backing", None) is None:
+                continue
+            slot = int(getattr(payload, "tile_number", tile))
+            key = prepared_upload_key(payload, bounds)
+            rows.append(
+                (
+                    slot,
+                    key,
+                    _pyqtgraph_assembly_preparation(mailbox, slot, key, payload, bounds),
+                )
+            )
+        return tuple(rows)
 
     def _tiled_presentation_layer(self):
         return self._montage_tile_layer
@@ -2826,6 +2904,7 @@ class ImageView2D(ImageViewShell):
         self.imageItem.setVisible(True)
 
     def reset_tiled_residency(self, reason: str) -> None:
+        self.discardPreparedTiledUploads()
         self.hide_tiled_presentation(reason)
 
     def _apply_backend_tiled_presentation(
@@ -2905,6 +2984,9 @@ class ImageView2D(ImageViewShell):
                     texture_submit_ms=max(
                         0.0, (perf_counter() - apply_started) * 1000.0 - prepare_ms
                     ),
+                    # PyQtGraph's preparation IS its array work: page assembly
+                    # over an immutable payload and nothing else.
+                    texture_pack_ms=prepare_ms,
                 )
             self._record_tile_layer_stats(stats)
             histogram_key = self._tile_layer_histogram_key(
@@ -3064,6 +3146,25 @@ class ImageView2D(ImageViewShell):
     def _backend_display_lut_changed(self, lut: np.ndarray) -> None:
         if self._montage_tile_layer is not None:
             self._montage_tile_layer.set_lookup_table(lut)
+
+
+def _pyqtgraph_assembly_preparation(mailbox, slot, key, payload, levels):
+    """Build the worker callable that assembles one payload's pages.
+
+    Deliberately a module-level factory: the closure captures a mailbox, a
+    payload and two floats, and nothing that belongs to the GUI thread.
+    """
+
+    def prepare() -> None:
+        from arrayscope.display.backends.pyqtgraph.tiles import (
+            assemble_page_backed_payload,
+            page_assembly_nbytes,
+        )
+
+        assembly = assemble_page_backed_payload(payload, levels=levels)
+        mailbox.publish(slot, key, assembly, nbytes=page_assembly_nbytes(assembly))
+
+    return prepare
 
 
 def _image_origin(geometry) -> tuple[float, float]:
@@ -3252,6 +3353,7 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
         executor_initialization_ms=float(getattr(stats, "executor_initialization_ms", 0.0) or 0.0),
         texture_prepare_ms=float(getattr(stats, "texture_prepare_ms", 0.0) or 0.0),
         texture_submit_ms=float(getattr(stats, "texture_submit_ms", 0.0) or 0.0),
+        texture_pack_ms=float(getattr(stats, "texture_pack_ms", 0.0) or 0.0),
         cold_work_ms=float(getattr(stats, "upload_ms", 0.0) or 0.0),
     )
 

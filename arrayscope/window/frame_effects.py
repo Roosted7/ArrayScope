@@ -1195,7 +1195,83 @@ class FramePipelineEffects:
             # wakeup; a presentation wake alone can strand the visible tile at
             # its fallback LOD when the resident backend needs no new upsert.
             self.renderer.request_montage_replan(self.session)
+        self._prepare_backend_uploads(batch.upserts)
         self.request_presentation()
+
+    def _prepare_backend_uploads(self, upserts) -> None:
+        """Hand each admitted payload's upload preparation to a worker.
+
+        Admission is the earliest moment the exact pixels of a future commit
+        are known, and the commit that consumes them is several governed chunks
+        away, so there is real time to use. The GUI thread does no preparation
+        here: it only describes the work and submits it.
+
+        Every part of this is best-effort by construction. A task that is
+        superseded, dropped, or simply slower than the commit costs nothing but
+        worker time — the backend's inline path is unchanged and still owns
+        correctness. Nothing downstream may wait on a preparation.
+        """
+
+        rows = tuple(upserts or ())
+        if not rows:
+            return
+        window = getattr(self.renderer, "win", None)
+        view = getattr(window, "img_view", None)
+        plan = getattr(view, "tiledUploadPreparations", None)
+        kernel = getattr(window, "kernel", None)
+        if not callable(plan) or kernel is None:
+            return
+        payloads = {}
+        for row in rows:
+            payload = row[1] if isinstance(row, tuple) and len(row) == 2 else None
+            if payload is None:
+                continue
+            tile = getattr(payload, "tile_number", None)
+            if tile is not None:
+                payloads[int(tile)] = payload
+        if not payloads:
+            return
+        session = self.session
+        levels = normalize_bounds(
+            getattr(getattr(session, "level_generation", None), "target_levels", None)
+        )
+        if levels is None:
+            # Levels are not settled yet, so any PyQtGraph assembly prepared now
+            # would bake against a window this round will not use (R3). WGPU
+            # ignores the value; skipping is the conservative shared answer.
+            return
+        session_id = int(getattr(session, "session_id", 0) or 0)
+        try:
+            preparations = plan(
+                payloads,
+                levels=levels,
+                # Same session-derived form the residency warm path uses for
+                # ahead-of-commit work (montage_prefetch): the frame's own
+                # flag does not exist until the commit builds it, and a wrong
+                # guess only costs a mailbox miss.
+                rgb_already_windowed=not bool(getattr(session, "shader_display", False)),
+            )
+        except Exception as exc:  # pragma: no cover - defensive, never fatal
+            handle_ui_exception("montage upload preparation planning", exc)
+            return
+        for slot, key, prepare in preparations:
+            kernel.submit(
+                TaskSpec(
+                    key=("prepared-upload", session_id, slot, key),
+                    fn=prepare,
+                    lane=WorkLane.DISPLAY_PREPARATION,
+                    # Below every rung that produces pixels: preparing ahead
+                    # must never delay the payload a commit is waiting for.
+                    priority=Priority.PREFETCH,
+                    scope=f"montage:{session_id}",
+                    session_id=session_id,
+                    tile_number=int(slot),
+                    supersession=Supersession(
+                        family=("prepared-upload", session_id, slot),
+                        value=key,
+                    ),
+                ),
+            )
 
     def request_presentation(self) -> None:
         """Coalesced presentation continuation: at most one per loop turn.
@@ -3158,6 +3234,7 @@ class FramePipelineEffects:
             # could have prepared, and what only the GUI thread can submit.
             backend_texture_prepare_ms=float(getattr(report, "texture_prepare_ms", 0.0) or 0.0),
             backend_texture_submit_ms=float(getattr(report, "texture_submit_ms", 0.0) or 0.0),
+            backend_texture_pack_ms=float(getattr(report, "texture_pack_ms", 0.0) or 0.0),
             acknowledge_ms=float(
                 getattr(renderer, "_last_montage_tile_acknowledge_ms", 0.0) or 0.0
             ),
