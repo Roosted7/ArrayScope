@@ -111,9 +111,14 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   measured 21.81 and 131.04 ms for those reference revisions. On the bundled
   336×336×272 NIfTI, the envelope and true FFT magnitude maximum were both
   340233.619; its symmetric real-component window was 1.495× the exact span.
-  On the first 60 planes they were both 98878.992 and 1.577×. The independent
-  progressive contract replay is still **RED** on all five 2026-07-27 field
-  traces: R3
+  On the first 60 planes they were both 98878.992 and 1.577×.
+  **Per-rule state lives in one place: the Status section of
+  [the progressive render contract](architecture/progressive-render-contract.md).**
+  Update it there, not here — R1–R4 are now enforced, R5 carries measured
+  residual debt, and R6/R7 are unimplemented. The historical readings below are
+  kept because they name the measurements, not because they are current.
+  The independent progressive contract replay was **RED** on all five
+  2026-07-27 field traces: R3
   exposes eight frozen/inactive evidence runs across both backends, and R1
   fires 15 (WGPU FFT) and 11 (WGPU scalar) snapshots of production below the
   round's target floor — level 0 uploads of +176, +128 and +256 in rounds that
