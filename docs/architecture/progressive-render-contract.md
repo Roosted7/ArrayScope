@@ -225,17 +225,63 @@ not an extra computation.
 ## R5 — All bulk work is chunked and governed
 
 Any operation over the round's tile set is chunked under a governor, on both
-passes. A pass may complete in a single unchunked burst **only** if that burst
-fits inside one 50 ms budget.
-
-This applies equally to the preview pass. A preview that appears all at once is
-correct only when it genuinely cost less than 50 ms; the same code path must
-chunk when it costs more. "Preview is cheap" is not a licence to bypass the
-governor — it is a prediction the governor must verify.
+passes. A pass may complete in one unchunked burst **only** if the governor
+predicts it fits; "preview is cheap" is not a licence to bypass the governor,
+it is a prediction the governor must verify.
 
 > Observed violation: scalar preview presents every tile in one step
 > irrespective of cost; the PyQtGraph FFT second pass is unchunked and freezes
 > the UI until it completes.
+
+### 50 ms is a ceiling on blocking, not a target update rate
+
+The 50 ms number is the **maximum a GUI-thread callback may block**, and
+nothing else. It was read for a while as a target cadence, and a scheduler
+built to hit it collapsed: it shrank the cohort toward one tile, which did not
+shorten the callback because the dominant cost was fixed rather than per-item,
+and it shrank the budget it was measuring against at the same time. Both levers
+saturated and the fill never recovered.
+
+So the governor does **not** minimize distance to 50 ms. It fits a measured
+cost model — fixed, per-item, per-byte — and minimizes one smooth objective:
+predicted fill time, plus a responsiveness price that is zero below 18 ms,
+rises gently to 45 ms, and then climbs quadratically, plus a price for
+extrapolating beyond the cohort sizes it has actually measured.
+
+Two consequences that look wrong and are not:
+
+- **Deliberately exceeding 50 ms can be correct.** If one tile costs 49.9 ms
+  and each additional tile costs 0.1 ms, the objective picks ~136 tiles at
+  ~63 ms, because two chunks of 63 ms beat 272 chunks of 50 ms by two orders of
+  magnitude of fill time. R5 still *reports* the overrun; optimization sees the
+  whole smooth curve rather than a cliff.
+- **Model risk is charged once per decision, not per chunk.** Extrapolating to
+  an unmeasured cohort size is a property of taking the step, not of every
+  chunk that follows. Multiplying it by the chunk count made a few milliseconds
+  of risk read as hundreds and pinned the cohort at whatever size had already
+  been measured — the same bias toward tiny cohorts, arriving by a different
+  route.
+
+### Cadence is a product property, not a latency bound
+
+A montage that completes in less total time but appears all at once feels worse
+than one that visibly progresses. Some update cadence is wanted for its own
+sake. It is not obtained by capping chunk size: it belongs in the objective as
+a preference, alongside fill time and responsiveness.
+
+### The budget is a bookkeeping budget, not a compute budget
+
+Array compute is already off the GUI thread. What remains in a 50 ms callback
+is presentation state, payload iteration, residency bookkeeping, geometry, and
+GPU resource allocation — one measured warm WGPU callback was 107.1 ms of which
+50.9 ms was pool growth, and 63–69% of a commit was iterating every presented
+payload, so an empty-delta commit still cost ~90 ms.
+
+That is why no chunk size satisfies R5 on its own: **chunking work whose cost
+does not depend on the chunk cannot help.** The fixed term must come down
+(commit cost proportional to the delta) and what remains should not be on the
+GUI thread at all — that thread should validate, submit, and release buffers,
+with preparation owned by a worker.
 
 ## R6 — Falling behind degrades quality, never liveness
 
@@ -389,3 +435,50 @@ Tagging uploads with their purpose (round production vs speculative warm) is
 the change that turns this from a suspicion into a decidable rule, and it makes
 R7 checkable at the same time: warm traffic inside a round's fill window is a
 violation regardless of its level.
+
+## Status, 2026-07-28
+
+Where each rule stands after the preview-first recovery program. Written for
+whoever picks this up next; update it in place rather than appending.
+
+| Rule | State |
+|---|---|
+| R1 two production passes | Enforced. Oracle keys on round id; `authoritative_round_identity_present` now passes, so a red R1 is informative again. |
+| R2 floors are minimums | Enforced for skip and free reuse. The **tolerance ladder is not implemented** — see below. |
+| R2b one floor pair per round | Enforced. Round identity is explicit and both floors latch to it. |
+| R3 levels never clip | Enforced. Round levels come from the preview cohort, with an analytic envelope that is exact for realistic k-space. |
+| R4 preview for every backend/dtype | Green on both backends, including PyQtGraph complex and pipelines that cannot reduce their input. |
+| R5 chunked and governed | Governed, with residual measured debt. The fixed per-commit cost is the open item, not the chunk size. |
+| R6 shed quality, never liveness | **Not implemented.** WGPU fast scroll still freezes until idle. |
+| R7 speculative residency is post-settle | **Not implemented.** Level 0 was 82–84% of upload bytes and ran during the fill. |
+
+Open work, roughly in dependency order:
+
+1. **Presentation cost proportional to the delta.** The blocker under R5 — an
+   empty-delta commit cost ~90 ms and 63–69% of a commit iterated every
+   presented payload. Until this lands, no scheduler can satisfy R5.
+2. **Presentation bookkeeping off the GUI thread.** The thread should validate,
+   submit and release buffers; preparation belongs to a worker, behind a
+   mailbox that keeps the latest prepared frame and drops stale ones.
+3. **R6 load shedding** on WGPU fast scroll.
+4. **R7 post-settle prefetch**, with the warm ladder breadth-first at coarse
+   levels rather than native-first.
+5. **The R3 tolerance ladder** (±20% free-reuse, ±10% preview, ±2% target),
+   which lets PyQtGraph reuse committed tiles the way WGPU reuses bound ones.
+6. **Tag uploads with their purpose**, which turns the oracle's suspected
+   over-production into a decidable rule and makes R7 checkable.
+
+### How to verify a change here
+
+- `python -m arrayscope.tools.progressive_render_oracle --summary TRACE.jsonl`
+  replays recorded diagnostics against R1/R2b/R3. A clean run means "no
+  violation detected by a snapshot heuristic", never "the contract holds".
+- `arrayscope.tools.profile_montage_workflow` gates its exit on an in-process
+  R1–R5/R7 verdict. Medians are report-only and must stay that way.
+- `arrayscope.tools.render_pass_governor_probe` reports wall time, throughput,
+  chunk distributions and cost attribution — use it rather than building
+  another harness.
+- Run `tests/ui` and **diff the sorted failure list against the base commit**.
+  A raw count cannot distinguish a stall from xdist noise, and this ring
+  carries genuine flakes: re-run any delta serially before believing it.
+  `tests/gpu` and `tests/ui` contend for the GPU — never run them concurrently.
