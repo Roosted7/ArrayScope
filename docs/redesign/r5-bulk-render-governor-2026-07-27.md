@@ -245,13 +245,26 @@ the payload is stale or cannot be rearmed, the normal numeric producer path
 remains available. This presentation obligation is independent of preview
 production admission, including coarse-rung-disabled and native-only policies.
 
-The repeated real workflow also identifies a separate, pre-existing final
-refinement wedge after physical completion. Both `9ef3d373` and the fixed
-branch reach 272/272 with target settlement, then leave respectively six and
-seven already-visible preview replacements dirty, with `flush_pending` and
-`final_commit_pending` true but no presentation gate armed. That is not the
-blank-tile defect or a profiler-only failure: the dirty maps are real commit
-debt. It remains open and is excluded from the ready-payload fix.
+The repeated real workflow also identified a separate, pre-existing final
+refinement wedge after physical completion. Both `9ef3d373` and the
+ready-payload fix reached 272/272 with target settlement, then left
+respectively six and seven already-visible preview replacements dirty, with
+`flush_pending` and `final_commit_pending` true but no presentation gate
+armed. That was not the blank-tile defect or a profiler-only failure: the dirty
+maps were real commit debt.
+
+The presentation trace showed two class inversions. A stale floor-first wave
+hint could suppress exact wrapper construction after physical first-pixel
+coverage had already completed. After that was corrected, concrete dirty
+wrappers were globally re-prioritized with already-current lifecycle change
+notifications at both the build and admission boundaries. The no-op
+notifications consumed the governor's item cohort and recurred forever.
+Physical first-pixel truth now releases wrapper refinement even if the wave
+hint lags, and concrete dirty/upsert obligations retain class precedence while
+each class remains spatially prioritized. The same 272-tile workflow now
+drains to completion. It is not yet a performance pass: the zoom/pan scalar
+phase takes 24.326 s, records a 513 ms maximum event-loop interval, and retains
+the standing R1/R2/R2b/R5 failures.
 
 ## Result and remaining red evidence
 

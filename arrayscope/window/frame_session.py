@@ -3662,6 +3662,25 @@ class FrameSession:
                 context=priority_context,
             )
 
+        def prioritize_obligation_classes(tiles) -> tuple[int, ...]:
+            """Order concrete commit debt before notification-only rows."""
+
+            allowed = {int(tile) for tile in tiles}
+            concrete = tuple(
+                dict.fromkeys(
+                    int(tile)
+                    for obligations in (self.dirty_payloads, self.pending_payload_upserts)
+                    for tile in obligations
+                    if int(tile) in allowed
+                )
+            )
+            concrete_set = set(concrete)
+            notifications = tuple(int(tile) for tile in tiles if int(tile) not in concrete_set)
+            return (
+                *prioritize(concrete),
+                *prioritize(notifications),
+            )
+
         lifecycle_change_tiles = tuple(
             int(command.tile_number) for command in self.lifecycle.presentation_changes()
         )
@@ -3678,7 +3697,14 @@ class FrameSession:
             )
         )
         if max_upserts is not None or max_upsert_bytes is not None or stale_level_tiles:
-            dirty_payload_tiles = prioritize(dirty_payload_tiles)
+            # Preserve obligation class before spatial priority. A lifecycle
+            # change can name an already-current payload; if those no-op rows
+            # sort ahead of concrete dirty/upsert debt, ``attempted`` consumes
+            # the whole governed build cohort without producing one candidate.
+            # The same rows then recur forever. First-pixel recovery has
+            # already entered dirty/pending above, so this class also retains
+            # the required coverage-before-refinement ordering.
+            dirty_payload_tiles = prioritize_obligation_classes(dirty_payload_tiles)
         # Payload construction is bounded by the same admission budget that
         # caps uploads: a retarget/scrub step marks every tile dirty, and
         # building all N wrappers synchronously before admitting 4 of them
@@ -3718,7 +3744,11 @@ class FrameSession:
             if build_limit is not None and governed_progress >= build_limit:
                 break
             attempted += 1
-            if floor_first_fill_active and int(tile_number) in planned_numbers:
+            if (
+                floor_first_fill_active
+                and unpresented_tiles
+                and int(tile_number) in planned_numbers
+            ):
                 if not bool(self.atomic_successor_pending):
                     # The worker-backed preview pass owns missing floors.
                     # Ordinary first-fill commits consume only floors already
@@ -3785,7 +3815,7 @@ class FrameSession:
             )
         )
         if max_upserts is not None or max_upsert_bytes is not None or stale_level_tiles:
-            dirty_payload_tiles = prioritize(dirty_payload_tiles)
+            dirty_payload_tiles = prioritize_obligation_classes(dirty_payload_tiles)
         timing_unpresented_done = perf_counter()
         presented_preview_tiles = tuple(
             int(tile)

@@ -3541,6 +3541,81 @@ def test_acknowledged_preview_with_exact_result_rearms_exact_refinement():
     assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
 
 
+def test_stale_floor_first_hint_cannot_block_exact_after_all_first_pixels(monkeypatch):
+    """Physical coverage, not a stale wave hint, unlocks wrapper refinement."""
+
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    for rendered in tuple(session.rendered_tiles.values()):
+        semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+        key = page_set_key_for_rendered(
+            rendered,
+            demand=demand,
+            level=2,
+            semantic_source_id=semantic_id,
+        )
+        _admit_page_set(pyramid, key, np.asarray(rendered.image))
+        _claim_preview_resident(session, rendered.tile.montage_index, key)
+
+    _state, preview_delta = session.build_tile_presentation({}, max_upserts=2)
+    _acknowledge(session, preview_delta)
+    session.mark_presented(tuple(preview_delta.upserts))
+    session.mark_preview_refinements_dirty((0, 1))
+    monkeypatch.setattr(
+        session,
+        "_lod_preview_floor_first_fill_active",
+        lambda planned_numbers: True,
+    )
+
+    _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
+
+    assert session.required_first_pixels_presented()
+    assert set(exact_delta.upserts) == {0, 1}
+    assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
+
+
+def test_lifecycle_noop_cannot_consume_dirty_wrapper_build_cohort(monkeypatch):
+    """Concrete commit debt precedes a recurring already-current notification."""
+
+    pyramid = LodPageCache(max_bytes=1 << 24)
+    session = _session(pyramid=pyramid, count=2)
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    for rendered in tuple(session.rendered_tiles.values()):
+        semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
+        key = page_set_key_for_rendered(
+            rendered,
+            demand=demand,
+            level=2,
+            semantic_source_id=semantic_id,
+        )
+        _admit_page_set(pyramid, key, np.asarray(rendered.image))
+        _claim_preview_resident(session, rendered.tile.montage_index, key)
+
+    _state, preview_delta = session.build_tile_presentation({}, max_upserts=2)
+    _acknowledge(session, preview_delta)
+    session.mark_presented(tuple(preview_delta.upserts))
+    session.mark_preview_refinements_dirty((0,))
+    _state, first_exact = session.build_tile_presentation({}, max_upserts=1)
+    _acknowledge(session, first_exact)
+    session.mark_presented(tuple(first_exact.upserts))
+    exact_tile = next(iter(first_exact.upserts))
+    preview_tile = next(iter({0, 1} - {exact_tile}))
+    session.dirty_payloads.clear()
+    session.pending_payload_upserts.clear()
+    session.mark_preview_refinements_dirty((preview_tile,))
+    monkeypatch.setattr(
+        session.lifecycle,
+        "presentation_changes",
+        lambda: (SimpleNamespace(tile_number=exact_tile),),
+    )
+
+    _state, second_exact = session.build_tile_presentation({}, max_upserts=1)
+
+    assert tuple(second_exact.upserts) == (preview_tile,)
+    assert second_exact.upserts[preview_tile].quality == "exact"
+
+
 def test_offscreen_floor_claim_cannot_block_required_exact_atomic_successor():
     """Reproduce session 39: required L4 pixels must advance in REFINE.
 

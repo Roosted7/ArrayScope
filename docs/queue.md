@@ -225,9 +225,15 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   payload falls through to normal production. The field capture moves from
   93/100 presented with seven target-ready orphans to full physical
   presentation in the reproduced interaction. A separate final-refinement
-  wedge remains: the 272-tile profiler can leave 6–7 already-visible preview
-  payloads dirty with no gate armed. It reproduces identically before this
-  ready-payload change at `9ef3d373`, so it remains an independent follow-up.
+  wedge reproduced identically before this ready-payload change at
+  `9ef3d373`: the 272-tile profiler left 6–7 already-visible preview payloads
+  dirty with no gate armed. **Fixed 2026-07-28:** concrete dirty/upsert debt
+  now keeps its class precedence at both wrapper-build and admission
+  boundaries; recurring already-current lifecycle notifications can no longer
+  consume the governed cohort with no delta. The real workflow drains and
+  completes 272/272, but performance remains red: the zoom/pan scalar phase
+  takes 24.326 s with a 513 ms maximum event-loop interval and still fails
+  R1/R2/R2b/R5. This closes a permanent wedge, not the governor tuning row.
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
   **Non-reducible pipelines keep the pass (2026-07-27):** FLOOR no longer
