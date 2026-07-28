@@ -509,9 +509,17 @@ layout regions (PyQtGraph and WGPU — WGPU asked three times per commit), 272
 rebuilt GPU tile instances, and 818 re-derived pin ownerships over a 272-page
 resident set. All four are now bounded by the delta.
 
-End to end, the total GUI-thread commit cost of a full 272-tile fill in
-32-tile cohorts fell from ~96.7 ms to ~78.0 ms on WGPU and from ~79 ms to
-~64 ms on PyQtGraph (medians of three sessions, best of three fills each).
+End to end, the total GUI-thread commit cost of a full 272-tile fill in 32-tile
+cohorts fell from 79.1 ms to 70.9 ms on WGPU (−10%) and from 66.8 ms to 64.3 ms
+on PyQtGraph (−4%). Those are means of six order-balanced interleaved rounds
+per revision; on WGPU every after-round beat every before-round, on PyQtGraph
+one round overlapped.
+
+Interleaving is not optional here. Run sequentially — all of one revision, then
+all of the other — the same benchmark reported −19% and −18%, because this
+machine drifts by more than the effect over the minutes such a comparison
+takes. Alternate revisions within one sweep and balance the order, or the
+number measures the clock, not the change.
 
 What remains is **whole-montage aggregates**, not bookkeeping, and it is the
 larger half on PyQtGraph. After this change, a bounded PyQtGraph commit at 272
@@ -537,13 +545,18 @@ Neither is a loop that can be made cheaper in place:
 > points. Read it as direction, never as a result; the counting tests and the
 > in-process fill benchmark are the evidence.
 >
-> **A commit benchmark that holds the tile population fixed cannot see the
-> fill.** Refinement (stable population, changing pixels) and coverage
-> (population growing every commit) take different paths. A histogram-reuse
-> cache justified on the refinement benchmark made the fill 14% *worse*,
-> because reuse can never succeed while tiles are arriving and the attempt was
-> being paid for anyway. Benchmark both regimes, or the number is about the
-> wrong one.
+> **A commit benchmark that reuses one object cannot see the app.** Two
+> separate caches were justified on benchmarks whose regime made them free,
+> and both cost more than they saved in the real workflow. A histogram-reuse
+> cache measured on a *fixed* tile population made a fill slower, because
+> reuse can never succeed while tiles are still arriving and the attempt was
+> paid for regardless — 336 payload inspections per commit where one pass is
+> 168. A layout cache keyed on object *identity* measured a 9% hit rate (40
+> hits, 412 misses) against the app, which rebuilds geometry every step, while
+> eager derivation made each of those misses more expensive than having no
+> cache at all; keyed by value and derived lazily it is 443 hits / 8 misses.
+> Benchmark the regime the app is actually in, and reuse the objects the app
+> actually reuses.
 
 ### How to verify a change here
 

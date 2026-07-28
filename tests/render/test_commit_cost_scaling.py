@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from dataclasses import replace
 from statistics import median
 from time import perf_counter
 
@@ -220,6 +221,40 @@ def test_bounded_commit_does_not_rederive_montage_geometry(backend, qt_app, monk
     )
 
 
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_placement_is_reused_across_rebuilt_geometry(backend, qt_app, monkeypatch):
+    """Equal-but-new geometry must reuse placement, not rebuild it.
+
+    The app does not hand the same ``DisplayGeometry`` object to consecutive
+    commits — a crop or slice sweep constructs one per step, equal in every
+    field that affects placement.  A cache keyed on object identity therefore
+    misses every time; measured in the real workflow it hit 40 times and
+    missed 412, while making each miss more expensive than having no cache.
+
+    The test above cannot see that, because it reuses one geometry object
+    forever.  This one rebuilds the geometry between commits, which is the
+    regime that matters.
+    """
+
+    montage = _Montage(backend, FIELD_TILES)
+    counter = _Counter(monkeypatch, tile_layout, "TileLayoutRegion")
+
+    for _ in range(4):
+        montage.geometry = replace(
+            montage.geometry,
+            montage=replace(montage.geometry.montage),
+            montage_tile_states=tuple(montage.geometry.montage_tile_states),
+        )
+        montage.commit((0,))
+
+    assert counter.count == 0, (
+        f"four 1-tile commits with rebuilt (but equal) geometry into a "
+        f"{FIELD_TILES}-tile montage rebuilt {counter.count} tile layout "
+        "regions; placement is a function of the geometry's VALUE, so an "
+        "equal geometry must reuse it"
+    )
+
+
 @pytest.mark.skipif("wgpu" not in _BACKENDS, reason="no wgpu adapter on this machine")
 def test_wgpu_instance_rebuild_tracks_the_delta_not_the_montage(qt_app, monkeypatch):
     """The GPU instance buffer is patched at the changed tiles only.
@@ -285,7 +320,8 @@ def test_growing_montage_inspects_each_payload_once_per_commit(qt_app, monkeypat
     population, so the montage histogram source cannot be patched from the
     previous buffer — it has to be rebuilt.  Deciding that by scanning the
     payloads first and only then discovering the population moved made a fill
-    14% MORE expensive than not trying at all: every scan was thrown away.
+    measurably MORE expensive than not trying at all — every scan was thrown
+    away, two passes where one was needed.
 
     The refusal is therefore decided from the payload key order, before any
     payload is inspected.  This pins that: one pass over the payloads per
