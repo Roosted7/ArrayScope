@@ -538,12 +538,20 @@ Neither is a loop that can be made cheaper in place:
   bookkeeping, and this module exists because optimistic bookkeeping is the
   defect class that strands tiles.
 
-> Two traps, both paid for once here. **The fitted `fixed_ms` the governor
-> steers on is too noisy on this machine to adjudicate a change of this size**:
-> across four repeats it ranged 4.8–59.2 ms before and 0.0–40.5 ms after, a
-> spread larger than the effect, because the fit often has two or three design
-> points. Read it as direction, never as a result; the counting tests and the
-> in-process fill benchmark are the evidence.
+The governor's fitted `fixed_ms` — the term the scheduler actually steers on —
+moved on the target pass and not on the preview pass. Medians of four repeats,
+before → after: PyQtGraph target **16.3 → 12.3 ms**, WGPU target
+**45.1 → 40.3 ms**; both preview terms stayed within noise (≈6.6 → 7.1 and
+7.3 → 6.9). Read those as direction only. The per-run spread is comparable to
+the effect (PyQtGraph target ranged 12.1–37.6 before and 12.0–16.4 after; WGPU
+target 23.5–59.2 before and 27.4–43.7 after), because the fit often has two or
+three design points. The distribution does tighten on both backends, which is
+the more trustworthy half of that signal.
+
+> **So do not adjudicate a change of this size on `fixed_ms`.** It is the
+> number the scheduler steers on, not a number a change can be measured by at
+> this sample size. The counting tests and the in-process fill benchmark are
+> the evidence here; the fit is the consequence.
 >
 > **A commit benchmark that reuses one object cannot see the app.** Two
 > separate caches were justified on benchmarks whose regime made them free,
