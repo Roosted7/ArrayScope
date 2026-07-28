@@ -278,6 +278,43 @@ def test_empty_delta_commit_is_cheaper_than_one_that_does_work(backend, qt_app):
     )
 
 
+def test_growing_montage_inspects_each_payload_once_per_commit(qt_app, monkeypatch):
+    """A reuse attempt that cannot succeed must not cost a scan.
+
+    While tiles are still arriving, every commit grows the payload
+    population, so the montage histogram source cannot be patched from the
+    previous buffer — it has to be rebuilt.  Deciding that by scanning the
+    payloads first and only then discovering the population moved made a fill
+    14% MORE expensive than not trying at all: every scan was thrown away.
+
+    The refusal is therefore decided from the payload key order, before any
+    payload is inspected.  This pins that: one pass over the payloads per
+    commit, never two.  It is a regression this change introduced and then
+    removed, which is exactly why it is pinned rather than trusted.
+    """
+
+    from arrayscope.display.model import tiled_histogram_identity
+
+    montage = _Montage("pyqtgraph", FIELD_TILES)
+    # Re-enter the coverage regime: a population that grows commit over
+    # commit, the state a fill is in for its whole duration.
+    montage.payloads = {tile: montage.payloads[tile] for tile in range(FIELD_TILES // 2)}
+    montage.tiles = FIELD_TILES // 2
+    montage.commit(())
+
+    counter = _Counter(monkeypatch, tiled_histogram_identity, "payload_histogram_display_source")
+    montage.tiles = FIELD_TILES // 2 + 32
+    for tile in range(FIELD_TILES // 2, montage.tiles):
+        montage.payloads[tile] = _payload(tile, montage.revision)
+    montage.commit(range(FIELD_TILES // 2, montage.tiles))
+
+    assert counter.count <= montage.tiles, (
+        f"a commit that grew the montage to {montage.tiles} tiles inspected "
+        f"{counter.count} payload histogram sources — more than one pass, so a "
+        "reuse attempt that could not succeed was paid for anyway"
+    )
+
+
 @pytest.mark.skipif("wgpu" not in _BACKENDS, reason="no wgpu adapter on this machine")
 def test_wgpu_residency_pins_are_rederived_per_delta_not_per_montage(qt_app, monkeypatch):
     """Re-pinning committed pages costs the delta, not the resident set.

@@ -64,21 +64,24 @@ def histogram_data_and_layout(payloads):
     """``histogram_data_from_tile_payloads`` plus where each tile landed.
 
     The layout is what lets a bounded commit rewrite only the tiles it
-    changed.  It is a tuple of ``(tile, source_id, start, stop)`` in build
-    order, or ``None`` when the result is not a concatenation this module
-    laid out (no contributing tile, or the single-part passthrough below).
+    changed.  It is ``(population, rows)`` where ``population`` is the
+    payload key order this buffer was built from and ``rows`` are the
+    contributing ``(tile, source_id, start, stop)`` in build order — or
+    ``None`` when the result is not a concatenation this module laid out (no
+    contributing tile, or the single-part passthrough below).
     """
 
+    payload_map = dict(payloads or {})
     parts = []
-    layout = []
+    rows = []
     offset = 0
-    for tile, payload in dict(payloads or {}).items():
+    for tile, payload in payload_map.items():
         source = payload_histogram_display_source(payload)
         if source is None:
             continue
         source = np.asarray(source)
         parts.append(source)
-        layout.append((int(tile), id(source), offset, offset + source.size))
+        rows.append((int(tile), id(source), offset, offset + source.size))
         offset += source.size
     if not parts:
         return None, None
@@ -86,7 +89,8 @@ def histogram_data_and_layout(payloads):
         # Passthrough: the caller receives the tile's own array, not a copy,
         # so there is no concatenated buffer to patch later.
         return parts[0], None
-    return np.concatenate([np.ravel(part) for part in parts]), tuple(layout)
+    population = tuple(int(tile) for tile in payload_map)
+    return np.concatenate([np.ravel(part) for part in parts]), (population, tuple(rows))
 
 
 def patched_histogram_data(previous, previous_layout, payloads):
@@ -97,41 +101,49 @@ def patched_histogram_data(previous, previous_layout, payloads):
     rebuild.  A reusable buffer yields a NEW array with identical values, so
     a consumer keyed on array identity still sees a changed source.
 
-    This is what makes the montage histogram source cost the delta rather
-    than the montage: concatenating every tile's pixels on every bounded
-    commit was the largest single term in a PyQtGraph commit.
+    This reduces the montage histogram source to the tiles that changed while
+    the tile population is stable — the refinement regime.  It cannot help
+    while tiles are still arriving, and it must not COST anything there
+    either: refusal is decided from the payload key order alone, before any
+    payload is inspected.  Deciding it by scanning first made a fill 14%
+    more expensive, because during coverage every commit grows the
+    population and every scan was thrown away.
     """
 
     if previous is None or previous_layout is None:
         return None, None
+    previous_population, previous_rows = previous_layout
+    payload_map = dict(payloads or {})
+    population = tuple(int(tile) for tile in payload_map)
+    if population != previous_population:
+        return None, None
     rows = []
     offset = 0
     changed = []
-    for tile, payload in dict(payloads or {}).items():
+    for tile, payload in payload_map.items():
         source = payload_histogram_display_source(payload)
         if source is None:
             continue
         source = np.asarray(source)
-        rows.append((int(tile), id(source), offset, offset + source.size))
         if source.dtype != previous.dtype:
             return None, None
+        rows.append((int(tile), id(source), offset, offset + source.size))
         offset += source.size
     layout = tuple(rows)
-    if len(layout) != len(previous_layout) or offset != int(previous.size):
+    if len(layout) != len(previous_rows) or offset != int(previous.size):
         return None, None
-    for row, previous_row in zip(layout, previous_layout, strict=True):
+    for row, previous_row in zip(layout, previous_rows, strict=True):
         if row[0] != previous_row[0] or row[2] != previous_row[2] or row[3] != previous_row[3]:
             return None, None
         if row[1] != previous_row[1]:
             changed.append(row)
     if not changed:
         return previous, previous_layout
-    payload_map = dict(payloads or {})
     patched = previous.copy()
     for tile, _source_id, start, stop in changed:
         source = payload_histogram_display_source(payload_map[tile])
         patched[start:stop] = np.ravel(np.asarray(source))
-    return patched, layout
+    return patched, (population, layout)
 
 
 def tiled_semantic_histogram_identity(tile_payloads):

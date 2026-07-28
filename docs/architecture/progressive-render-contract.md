@@ -481,9 +481,9 @@ whoever picks this up next; update it in place rather than appending.
 
 Open work, roughly in dependency order:
 
-1. **Presentation cost proportional to the delta.** The blocker under R5 — an
-   empty-delta commit cost ~90 ms and 63–69% of a commit iterated every
-   presented payload. Until this lands, no scheduler can satisfy R5.
+1. **Presentation cost proportional to the delta.** Partly done — the
+   whole-montage *bookkeeping* is gone, the whole-montage *aggregates* are
+   not. See "What a bounded commit still costs" below.
 2. **Presentation bookkeeping off the GUI thread.** The thread should validate,
    submit and release buffers; preparation belongs to a worker, behind a
    mailbox that keeps the latest prepared frame and drops stale ones.
