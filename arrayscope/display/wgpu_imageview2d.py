@@ -1552,6 +1552,10 @@ class WgpuImageView2D(ImageViewShell):
         pool_growth_ms_before = float(
             getattr(previous_executor, "pool_growth_ms_total", 0.0) or 0.0
         )
+        # Prepare/submit attribution for the GUI-thread hand-off split: every
+        # command in this callback is built before ``_submit_wgpu`` runs, so
+        # the boundary below is exactly the line a worker could take over.
+        apply_started = perf_counter()
         try:
             payloads = {
                 int(tile): payload for tile, payload in dict(montage_tile_payloads or {}).items()
@@ -2154,7 +2158,9 @@ class WgpuImageView2D(ImageViewShell):
             # transaction owner at this synchronous submission edge: there is
             # no event-loop interval in which successor pages are unowned.
             executor.replace_resident_pin_set(self._wgpu_atomic_warm_pin_owner, ())
+            submit_started = perf_counter()
             report = self._submit_wgpu(tuple(submission_commands))
+            submit_ms = (perf_counter() - submit_started) * 1000.0
             executor.replace_bound_content_pin_set(committed_page_keys)
             upload_ms = (perf_counter() - start) * 1000.0
             self._wgpu_last_report_uploads = int(report.uploads)
@@ -2208,6 +2214,10 @@ class WgpuImageView2D(ImageViewShell):
                 ),
                 binding_fast_path=False,
                 binding_incremental=incremental_delta,
+                texture_prepare_ms=max(
+                    0.0, (submit_started - apply_started) * 1000.0 - executor_ensure_ms
+                ),
+                texture_submit_ms=submit_ms,
             )
             if physical_identities is not None and layout_identity is not None:
                 self._wgpu_tiled_binding_signature = _WgpuTiledBindingSignature(
@@ -2330,6 +2340,8 @@ class WgpuImageView2D(ImageViewShell):
         executor_initialization_ms: float = 0.0,
         binding_fast_path: bool,
         binding_incremental: bool,
+        texture_prepare_ms: float = 0.0,
+        texture_submit_ms: float = 0.0,
     ) -> TileLayerUpdateStats:
         """Finish one tiled commit from either the full or mapping-only path."""
 
@@ -2441,6 +2453,8 @@ class WgpuImageView2D(ImageViewShell):
             binding_incremental_commits=int(binding_incremental),
             binding_full_republications=int(not binding_fast_path and not binding_incremental),
             upload_ms=upload_ms,
+            texture_prepare_ms=float(texture_prepare_ms),
+            texture_submit_ms=float(texture_submit_ms),
         )
         self._record_tile_layer_stats(stats)
         self._record_upload_timing("tile_layer_upload_ms", upload_ms)

@@ -3154,6 +3154,10 @@ class FramePipelineEffects:
             backend_apply_ms=float(
                 getattr(renderer, "_last_montage_tile_layer_apply_ms", 0.0) or 0.0
             ),
+            # The hand-off split inside the backend callback: what a worker
+            # could have prepared, and what only the GUI thread can submit.
+            backend_texture_prepare_ms=float(getattr(report, "texture_prepare_ms", 0.0) or 0.0),
+            backend_texture_submit_ms=float(getattr(report, "texture_submit_ms", 0.0) or 0.0),
             acknowledge_ms=float(
                 getattr(renderer, "_last_montage_tile_acknowledge_ms", 0.0) or 0.0
             ),

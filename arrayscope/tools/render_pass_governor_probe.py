@@ -36,6 +36,8 @@ _COMPONENTS = (
     "payload_build_ms",
     "prepare_ms",
     "backend_apply_ms",
+    "backend_texture_prepare_ms",
+    "backend_texture_submit_ms",
     "backend_pool_growth_ms",
     "backend_executor_initialization_ms",
     "acknowledge_ms",

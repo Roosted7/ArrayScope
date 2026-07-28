@@ -834,6 +834,28 @@ class MontageTileLayer:
         self._lookup_table = default_gray_lut()
         self._preview_atlas_item: _CompactPreviewAtlasItem | None = None
         self._preview_atlas_decline_reason = ""
+        self._payload_prepare_ms = 0.0
+
+    def _resolve_payload(self, payload: DisplayTilePayload, *, levels):
+        """Assemble one payload, charging the time to preparation.
+
+        Page assembly is pure array work on an immutable payload — the part of
+        a PyQtGraph commit that does not need the GUI thread. Accounting for it
+        separately is what makes the hand-off split measurable.
+        """
+
+        started = perf_counter()
+        try:
+            return _resolve_page_backed_payload(payload, levels=levels)
+        finally:
+            self._payload_prepare_ms += (perf_counter() - started) * 1000.0
+
+    def consume_payload_prepare_ms(self) -> float:
+        """Read and reset the assembly time charged since the last commit."""
+
+        elapsed = float(self._payload_prepare_ms)
+        self._payload_prepare_ms = 0.0
+        return elapsed
 
     @property
     def states(self) -> dict[int, TileLayerItemState]:
@@ -1117,7 +1139,7 @@ class MontageTileLayer:
                 getattr(payload, "tile_identity", None) or payload.source_id,
                 target_identities.get(int(tile)),
             ):
-                assembly = _resolve_page_backed_payload(payload, levels=levels)
+                assembly = self._resolve_payload(payload, levels=levels)
                 drawable_payloads[int(tile)] = assembly.payload
                 page_assemblies[int(tile)] = assembly
             elif int(tile) in requested_upserts:
@@ -1871,7 +1893,7 @@ class MontageTileLayer:
             if region is None or not isinstance(payload, DisplayTilePayload):
                 items_skipped += 1
                 continue
-            assembly = _resolve_page_backed_payload(payload, levels=levels)
+            assembly = self._resolve_payload(payload, levels=levels)
             payload = assembly.payload
             tile_data = np.asarray(payload.image)
             if tile_data.ndim < 2:

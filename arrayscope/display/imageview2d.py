@@ -2877,6 +2877,13 @@ class ImageView2D(ImageViewShell):
                 self.setHistogramDataBounds(histogramRange)
             self._montage_display_mode = "tile_layer"
             self.imageItem.setVisible(False)
+            # Prepare/submit attribution for the GUI-thread hand-off split.
+            # ``apply_started`` covers the whole backend callback; page
+            # assembly reports itself, and the remainder is Qt scene work.
+            apply_started = perf_counter()
+            layer = self._montage_tile_layer
+            if layer is not None:
+                layer.consume_payload_prepare_ms()
             stats = self._update_montage_tile_layer_items(
                 img,
                 histogramData=histogramData,
@@ -2890,6 +2897,15 @@ class ImageView2D(ImageViewShell):
                 tile_residency_budget_bytes=tile_residency_budget_bytes,
                 frame_plan=frame_plan,
             )
+            if layer is not None:
+                prepare_ms = layer.consume_payload_prepare_ms()
+                stats = replace(
+                    stats,
+                    texture_prepare_ms=prepare_ms,
+                    texture_submit_ms=max(
+                        0.0, (perf_counter() - apply_started) * 1000.0 - prepare_ms
+                    ),
+                )
             self._record_tile_layer_stats(stats)
             histogram_key = self._tile_layer_histogram_key(
                 histogramData,
@@ -3234,6 +3250,8 @@ def _tile_commit_report(tile_payloads, tile_delta, stats) -> TileCommitReport:
         storage_rebuilds=int(getattr(stats, "storage_rebuilds", 0) or 0),
         pool_growth_ms=float(getattr(stats, "pool_growth_ms", 0.0) or 0.0),
         executor_initialization_ms=float(getattr(stats, "executor_initialization_ms", 0.0) or 0.0),
+        texture_prepare_ms=float(getattr(stats, "texture_prepare_ms", 0.0) or 0.0),
+        texture_submit_ms=float(getattr(stats, "texture_submit_ms", 0.0) or 0.0),
         cold_work_ms=float(getattr(stats, "upload_ms", 0.0) or 0.0),
     )
 
