@@ -310,6 +310,42 @@ does not depend on the chunk cannot help.** The fixed term must come down
 GUI thread at all — that thread should validate, submit, and release buffers,
 with preparation owned by a worker.
 
+### What the callback is actually made of
+
+The 107.1 ms figure above was one warm callback early in the recovery. Measured
+again at 272 tiles after pre-reservation landed, the split is different enough
+to change what is worth moving. Per-callback medians, three interleaved runs:
+
+| | WGPU preview | WGPU target | PyQtGraph preview | PyQtGraph target |
+|---|---:|---:|---:|---:|
+| whole callback | 32–44 | 39–42 | 20–29 | 27–32 |
+| backend apply | 19–26 | 26–28 | 13–18 | 14–18 |
+| ├ array packing | 0.3–0.8 | 0.8–2.4 | 2.4–4.8 | 3.7–4.9 |
+| ├ other preparation | 7–9 | 6–12 | 0 | 0 |
+| └ submission | 4–10 | 9–10 | 7–10 | 3–4 |
+| presentation delta build | 5.6–7.0 | 6.3–6.9 | 4.8 | 5.6–8.0 |
+| state publish | 2.7–3.2 | 2.9–3.1 | 0.7–0.8 | 1.2–1.9 |
+
+Three things follow, and they are not what the 107.1 ms number suggested:
+
+- **Pool growth is no longer a per-callback cost.** `ensure_raw_pool_capacity`
+  pre-reserves the planned montage, so growth is once per target pass (26–45 ms
+  total) with a per-callback median of 0. It still spikes — one 46 ms growth
+  landed in a single-tile callback — but it is not the fixed term the governor
+  is fitting.
+- **Array packing is small on WGPU and not small on PyQtGraph.** Scalar float32
+  packing is a no-copy passthrough, so WGPU's median is under 2.5 ms; PyQtGraph
+  must assemble pages every time. Both have heavy tails (60–100 ms).
+- **What is left of WGPU preparation is the O(montage) walk**, not array work —
+  which is the delta-proportionality item, not a threading one.
+
+Only the array-packing row is pure over an immutable payload. It is prepared on
+a worker and handed over through `arrayscope.presentation.prepared_uploads`:
+keep-latest per tile, taken only under the exact acknowledgement identity and
+round levels the commit is submitting, dropped otherwise. Everything else in
+the table reads or mutates live presentation state and stays on the GUI thread
+until that state has an off-thread owner.
+
 ## R6 — Falling behind degrades quality, never liveness
 
 When the scheduler cannot keep up with incoming rounds, it sheds work in this
@@ -486,9 +522,26 @@ Open work, roughly in dependency order:
    not. What is left is an incrementally accumulated montage histogram owner
    and maintained presentation truth; see "What a bounded commit still costs"
    below for why neither is a loop that can be tightened in place.
-2. **Presentation bookkeeping off the GUI thread.** The thread should validate,
-   submit and release buffers; preparation belongs to a worker, behind a
-   mailbox that keeps the latest prepared frame and drops stale ones.
+2. **Presentation bookkeeping off the GUI thread.** *Seam built, one row moved.*
+   `arrayscope.presentation.prepared_uploads` is the hand-off: a worker
+   publishes a prepared buffer under the payload's acknowledgement identity,
+   the GUI thread takes it only under the identity it is about to submit, and a
+   mismatch is dropped rather than presented. Admission triggers preparation on
+   `DISPLAY_PREPARATION` at `PREFETCH`, so it can never delay a rung that
+   produces pixels; a miss falls through to preparing inline. Measured on a
+   272-tile PyQtGraph fill: 272 preparations published, 146 consumed by the
+   commit that wanted them, per-commit page assembly 10.7 ms → 8.6 ms. WGPU is
+   neutral — scalar packing there was already a no-copy passthrough.
+   What is still on the GUI thread, and why: **the presentation delta build**
+   (`FrameSession.build_tile_presentation`, 5.6–8.0 ms per callback) mutates
+   session state throughout and has no off-thread owner, so moving it is a
+   re-architecture rather than a hand-off; **the rest of WGPU's preparation**
+   (6–12 ms) is the O(montage) walk, which belongs to item 1; **pool growth**
+   is already pre-reserved per round and has a per-callback median of 0, but
+   still spikes to 46 ms in a single callback, and moving it means calling
+   `create_texture`/`copy_texture_to_texture` off the GUI thread beside a live
+   surface — unvalidated here. The seam is in place for all of these; nothing
+   about the mailbox is specific to array packing.
 3. **R6 load shedding** on WGPU fast scroll.
 4. **R7 post-settle prefetch**, with the warm ladder breadth-first at coarse
    levels rather than native-first.
