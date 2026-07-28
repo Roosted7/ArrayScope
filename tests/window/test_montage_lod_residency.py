@@ -6015,6 +6015,43 @@ def test_commuting_desired_reduced_input_uses_preview_claim_not_native():
     assert session.lifecycle.evaluating_tiles == frozenset()
 
 
+def test_resident_floor_step_arms_presentation_without_a_numeric_task(monkeypatch):
+    """Better-than-demanded resident pixels belong to presentation, not compute."""
+
+    session = _session(count=1, pyramid=LodPageCache(max_bytes=1 << 20))
+    renderer = _RungPrepareRenderer()
+    effects = FramePipelineEffects(renderer, session)
+    intent = _pipeline_intent_for(session)
+    step = RungStep(
+        tile_number=0,
+        rung=Rung.FLOOR,
+        level=4,
+        reduce_from_native=False,
+        lane=Lane.DISPLAY_PREVIEW,
+        priority=Priority.INTERACTIVE,
+        reason="resident floor presentation",
+        presentation_only=True,
+    )
+    payload = object()
+    calls = []
+
+    def ensure_floor(tile_numbers, *, max_count=None):
+        calls.append(("ensure", tuple(tile_numbers), max_count))
+        session.display_tile_payloads[0] = payload
+
+    monkeypatch.setattr(session, "_ensure_floor_payloads", ensure_floor)
+    monkeypatch.setattr(
+        session,
+        "_rearm_required_first_pixel_payloads",
+        lambda: calls.append(("rearm",)) or (0,),
+    )
+    monkeypatch.setattr(effects, "request_presentation", lambda: calls.append(("present",)))
+
+    assert effects.prepare_rung(intent, step) is False
+    assert calls == [("ensure", (0,), 1), ("rearm",), ("present",)]
+    assert session.active_tile_requests == set()
+
+
 def test_rejected_current_reduced_completion_replans_after_releasing_claim(monkeypatch):
     """An obsolete LOD result must leave a producer wakeup for the new demand."""
 

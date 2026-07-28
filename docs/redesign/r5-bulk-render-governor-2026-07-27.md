@@ -212,6 +212,27 @@ generation is not poisoned. The complete commit-failure guard module passes
 6/6 in parallel, including a new late-completion case, and the live failure
 guard plus retained-retarget oracle pass together under managed Weston.
 
+A third zoom-retarget strand was then unmasked: ladder state treated a
+backend-resident level as if it were physically presented. R2 correctly
+suppressed duplicate production, but no presentation owner existed, leaving
+target-ready tiles absent with an idle kernel and no dirty/upsert backlog.
+`TileLodState.target_quality_available` now requires lifecycle-presented truth,
+and the ladder distinguishes an already-pending presentation from a resident
+floor that still needs its first physical publication. The latter produces a
+presentation-only FLOOR step: `FramePipelineEffects` rebuilds only the
+lightweight wrapper for the finest suitable resident page, arms the governed
+commit, and submits no numeric task. Better-than-demanded quality is published
+immediately; once acknowledged, the later target round skips it normally.
+
+The full 336×336×272 NIfTI WGPU zoom/pan workflow with
+`--scroll-max-tiles 272` reproduces the defect on pre-fix `main`: 1/272
+presented, 271 target-ready, zero active/loading/dirty/upserts, with resident
+levels `(3, 9)`. The identical fixed run reaches 272/272; its final zoom-out
+return takes 1.208 s and final settlement 0.912 s, with zero coarse-target
+preview or target task starts. The broader workflow still reports its standing
+R1/R2/R2b/R5 failures; this evidence closes the no-progress defect, not those
+independent contract rows.
+
 ## Result and remaining red evidence
 
 No preview or target pass completed atomically in these runs. The former

@@ -737,6 +737,17 @@ class FramePipelineEffects:
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
         if self._step_produces_page_payload(step, tile):
+            if step.rung == Rung.FLOOR and bool(getattr(step, "presentation_only", False)):
+                # R2 has already proved that resident pixels satisfy this
+                # demand. Rebuild only their lightweight payload wrapper and
+                # arm presentation; submitting another numeric producer would
+                # turn "resident but not drawn" into duplicate work.
+                self.session._ensure_floor_payloads((tile_number,), max_count=1)
+                payload = self.session.display_tile_payloads.get(tile_number)
+                if payload is not None:
+                    self.session._rearm_required_first_pixel_payloads()
+                    self.request_presentation()
+                    return False
             if step.rung == Rung.FLOOR and self._display_payload_covers_preview_step(
                 tile_number, tile, step
             ):

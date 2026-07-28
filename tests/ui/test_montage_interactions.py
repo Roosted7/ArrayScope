@@ -490,6 +490,16 @@ def test_wgpu_expanded_montage_never_hides_retained_sixty(qtbot):
         assert observations
         assert min(count for count, _missing in observations) >= 60, observations
         assert all(not missing for _count, missing in observations), observations
+        session = win.renderer._frame_session
+        qtbot.waitUntil(
+            lambda: bool(
+                session.visible_plan_complete()
+                and session.required_target_settled()
+                and physical_count() == 272
+            ),
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+        )
+        assert set(_visible_backend_acknowledgements(win, "wgpu")) == set(range(272))
     finally:
         win.close()
         settings.setValue("image_rendering_backend", previous_backend)

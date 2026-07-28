@@ -300,6 +300,29 @@ def test_foreign_retained_levels_are_reused_without_a_third_production_rung():
     assert {step.level for step in steps} <= {2, 5}
 
 
+def test_unpresented_finer_residency_plans_only_a_presentation_step():
+    """R2 skips production, but physical first pixels still need an owner."""
+
+    ladder = LodLadder(LadderPolicy())
+    state = TileLodState(
+        tile_number=0,
+        resident_levels=(0,),
+        presented_level=None,
+        floor_available=True,
+        allow_preview=True,
+    )
+
+    steps = ladder.plan((state,), demand(4), preview_level=5, target_level=4)
+
+    assert len(steps) == 2
+    assert steps[0].rung == Rung.FLOOR
+    assert steps[0].level == 5
+    assert steps[0].presentation_only is True
+    assert steps[1].rung == Rung.DESIRED
+    assert steps[1].level == 4
+    assert ladder.coarse_rung_refusal(state, demand(4)) == ""
+
+
 def test_ladder_carries_canonical_tile_rank_across_every_rung():
     ladder = LodLadder(LadderPolicy())
     steps = plan_tile(

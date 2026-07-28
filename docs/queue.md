@@ -209,7 +209,16 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   session generation terminal, so late worker completions cannot retry the
   transaction and overwrite `commit_outcome="raised"`; successor generations
   remain unpoisoned. The six-test failure-semantics module and the paired live
-  Weston guards pass.
+  Weston guards pass. **Resident-but-unpresented floor strand fixed
+  2026-07-28:** R2 residency no longer impersonates lifecycle-presented truth.
+  An unpresented tile with a suitable resident floor gets a presentation-only
+  FLOOR step: the finest suitable resident payload is wrapped and committed
+  with no new numeric task, so better-than-demanded pixels appear immediately
+  and later rounds skip them after ACK. On the full 336×336×272 NIfTI, the
+  272-tile WGPU zoom/pan return changes from a permanent 1/272 presentation
+  (271 target-ready, kernel and commit queues idle) to 272/272; final zoom-out
+  takes 1.208 s and settles in 0.912 s with zero coarse-target producer starts
+  ([R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md)).
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
   **Non-reducible pipelines keep the pass (2026-07-27):** FLOOR no longer

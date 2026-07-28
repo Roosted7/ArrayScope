@@ -831,6 +831,8 @@ def tile_lod_states(
     active_request_numbers = set(getattr(session, "active_tile_requests", ()) or ())
     backend_identities = dict(getattr(session.lifecycle, "backend_presented_identities", {}) or {})
     presented_numbers = set(getattr(session.lifecycle, "presented_tiles", ()) or ())
+    pending_upsert_numbers = set(getattr(session, "pending_payload_upserts", ()) or ())
+    dirty_numbers = set(getattr(session, "dirty_payloads", ()) or ())
     preview_cache = getattr(session, "lod_page_cache", None)
     plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
     # Walk the ALLOWED tiles, not the whole montage. Filtering inside the loop
@@ -876,6 +878,11 @@ def tile_lod_states(
             tile.source_index
         ):
             pending_wrapper = None
+        presentation_pending = bool(
+            tile_number not in presented_numbers
+            and pending_wrapper is not None
+            and (tile_number in pending_upsert_numbers or tile_number in dirty_numbers)
+        )
         payload_current = False
         if payload is not None and int(getattr(payload, "source_index", -1)) == int(
             tile.source_index
@@ -963,15 +970,18 @@ def tile_lod_states(
         )
         desired = 0 if demand is None else max(0, int(getattr(demand, "desired_level", 0) or 0))
         target_quality_available = bool(
-            tile_number in getattr(session, "rendered_tiles", {})
-            or any(int(level) <= desired for level in resident_levels)
-            or (
-                presented_level is not None
-                and int(presented_level) <= desired
-                and presented_quality != "preview"
+            tile_number in presented_numbers
+            and (
+                tile_number in getattr(session, "rendered_tiles", {})
+                or any(int(level) <= desired for level in resident_levels)
+                or (
+                    presented_level is not None
+                    and int(presented_level) <= desired
+                    and presented_quality != "preview"
+                )
             )
         )
-        blank = payload is None and not resident_levels
+        blank = tile_number not in presented_numbers and not presentation_pending
         visible_missing_count = int(getattr(scope, "visible_missing_count", 0) or 0)
         allow_preview = bool((blank and not target_quality_available) or visible_missing_count >= 2)
         states.append(
@@ -985,6 +995,7 @@ def tile_lod_states(
                 current_presentation_quality=presented_quality,
                 allow_preview=allow_preview,
                 target_quality_available=target_quality_available,
+                presentation_pending=presentation_pending,
                 floor_available=_floor_available(
                     session, tile, demand, preview_cache=preview_cache
                 ),

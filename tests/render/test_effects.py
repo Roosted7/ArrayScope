@@ -12,6 +12,7 @@ from arrayscope.display.lod import LodDemand, LodInfo
 from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
 from arrayscope.display.montage import MontageTile, RenderedTile, make_montage_plan
 from arrayscope.display.pyramid import (
+    REDUCER_NATIVE,
     LodPageCache,
     MaterializedLodPage,
     materialize_lod_page,
@@ -97,6 +98,7 @@ def _session(data=None):
 
 def _page_set(*, tile=0, level=2, source_id=None):
     source_id = ("semantic", int(tile)) if source_id is None else source_id
+    reducer = REDUCER_NATIVE if int(level) == 0 else "mean"
     plans = plan_source_grid_pages(
         content_key=("test-page-set", source_id),
         valid_source_rect_yx=(0, 4, 0, 6),
@@ -104,13 +106,13 @@ def _page_set(*, tile=0, level=2, source_id=None):
         stored_page_shape=(256, 256),
         dtype="float32",
         representation="scalar_r32f",
-        reducer="mean",
+        reducer=reducer,
     )
     return LodPageSetKey(
         source_id=source_id,
         tile_id=int(tile),
         level_xy=(int(level), int(level)),
-        reducer="mean",
+        reducer=reducer,
         plans=plans,
     )
 
@@ -1605,6 +1607,37 @@ def test_tile_lod_states_reads_page_cache_and_preview_floor_residency():
     # ladder's resident truth; the rendered native tile is only its source.
     assert state.resident_levels == (3,)
     assert state.floor_available is True
+
+
+def test_unpresented_native_residency_is_not_presented_target_quality():
+    """Resident data cannot close the physical presentation obligation."""
+
+    session = _session()
+    tile = session.plan.tiles[0]
+    source_id = session.tile_semantic_source_id(tile.source_index)
+    key = _page_set(tile=tile.source_index, level=0, source_id=source_id)
+    session.lod_page_cache = LodPageCache(max_entries=8)
+    source = np.asarray(session.document.base_data[:, :, int(tile.source_index)])
+    _admit_page_set(session.lod_page_cache, key, source)
+    session.lifecycle.level_claimed(0, key, ClaimOwner.EVALUATION)
+    session.lifecycle.level_resident(0, key)
+    session.rendered_tiles[0] = object()
+    session._best_floor_key = lambda *_args, **_kwargs: (
+        key,
+        key.level,
+        session.lod_page_cache,
+    )
+    session.pending_payload_upserts = {}
+    session.dirty_payloads = {}
+
+    state = effects.tile_lod_states(session, _demand(4), tile_numbers=(0,))[0]
+
+    assert state.resident_levels == (0,)
+    assert state.presented_level is None
+    assert state.target_quality_available is False
+    assert state.allow_preview is True
+    assert state.floor_available is True
+    assert state.presentation_pending is False
 
 
 def test_pipeline_effects_tile_states_uses_lifecycle_snapshot():

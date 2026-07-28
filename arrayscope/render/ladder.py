@@ -70,6 +70,7 @@ class TileLodState:
     ready_level: int | None = None
     ready_quality: str = ""
     floor_available: bool = False
+    presentation_pending: bool = False
     presented_quality: str = "exact"
     current_presentation_quality: str = "exact"
     allow_preview: bool = True
@@ -92,6 +93,7 @@ class RungStep:
     priority: Priority
     reason: str
     scheduling_rank: int = 0
+    presentation_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -152,12 +154,17 @@ class LodLadder:
             return COARSE_RUNG_DISABLED
         if not bool(state.allow_preview):
             return COARSE_RUNG_PREVIEW_NOT_ALLOWED
-        blank = (
+        needs_presentation = bool(
+            state.presented_level is None
+            and not state.presentation_pending
+            and state.floor_available
+        )
+        cold = bool(
             state.presented_level is None
             and state.ready_level is None
             and not state.resident_levels
         )
-        if blank:
+        if cold or needs_presentation:
             lane = Lane.DISPLAY_PREVIEW
             if verdict is not None and not verdict.admits_lane(lane):
                 return COARSE_RUNG_LANE_NOT_ADMITTED
@@ -238,8 +245,15 @@ class LodLadder:
             and bool(state.allow_preview)
             and preview_target_has_finer_followup
         )
-        # 1) FLOOR — the one coarse rung, only while the tile is blank.
-        if presented is None and ready is None and not resident and cheap_pre_native:
+        # 1) FLOOR — the one coarse rung while the tile is blank, or a
+        # presentation-only step when its pixels already exist but are not on
+        # screen. Residency satisfies R2 production; it does not satisfy the
+        # lifecycle's physical first-pixel obligation.
+        cold_floor = presented is None and ready is None and not resident
+        resident_presentation = bool(
+            presented is None and not state.presentation_pending and state.floor_available
+        )
+        if (cold_floor or resident_presentation) and cheap_pre_native:
             steps.append(
                 RungStep(
                     tile_number=state.tile_number,
@@ -254,9 +268,12 @@ class LodLadder:
                     lane=Lane.DISPLAY_PREVIEW,
                     priority=Priority.INTERACTIVE,
                     reason=(
-                        "retained floor commit" if state.floor_available else "cold floor fill"
+                        "resident floor presentation"
+                        if resident_presentation
+                        else "cold floor fill"
                     ),
                     scheduling_rank=int(state.scheduling_rank),
+                    presentation_only=resident_presentation,
                 )
             )
 
