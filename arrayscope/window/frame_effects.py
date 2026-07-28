@@ -5083,6 +5083,19 @@ def _observe_ui(
 
 
 def _looks_like_shared_preview_rows(payload) -> bool:
+    """Whether this is a cohort of per-tile rows rather than one tile's payload.
+
+    Discriminate on WHERE the page-set key sits, not on tuple length: a cohort
+    row is ``(tile_number, key, pages, ...)`` and a single payload is
+    ``(key, pages, ...)``. The length set below is only a secondary guard.
+
+    That distinction is load bearing because ``LodPageSetKey`` is itself
+    tuple-shaped, so a single payload whose leading key happened to match a row
+    arity was read as a cohort. Adding one field to the native-output preview
+    payload was enough to trigger it, and any future field on either shape
+    moves the lengths again. The key's position does not move.
+    """
+
     if (
         not isinstance(payload, tuple)
         or not payload
