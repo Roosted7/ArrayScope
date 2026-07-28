@@ -147,6 +147,19 @@ class PreparedUploadMailbox:
             self._hits += 1
             return entry.buffer
 
+    def holds(self, slot, key) -> bool:
+        """Whether this exact preparation is already waiting.
+
+        Callers submit preparation whenever a payload is admitted, and the same
+        payload is legitimately re-offered many times while a governed fill
+        works through it. Without this check each re-offer would repeat work a
+        worker has already done and published.
+        """
+
+        with self._lock:
+            entry = self._entries.get(slot)
+            return entry is not None and entry.key == key
+
     def discard(self, slot) -> None:
         """Drop one slot's entry, if any."""
 

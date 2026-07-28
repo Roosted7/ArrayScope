@@ -84,6 +84,25 @@ def test_keep_latest_replaces_an_older_preparation_for_the_same_slot():
     assert mailbox.take(2, ("id-b", "scalar")) is fresh_buffer
 
 
+def test_holds_reports_an_exact_waiting_preparation_only():
+    """The submitter's dedupe: re-offering an admitted payload must not repeat work.
+
+    Without this, a payload that stays dirty across a governed fill is prepared
+    again on every completion drain -- measured at 21 588 assemblies for a
+    272-tile montage before the check existed.
+    """
+
+    mailbox = PreparedUploadMailbox()
+    mailbox.publish(4, ("id-a", "scalar"), _buffer())
+
+    assert mailbox.holds(4, ("id-a", "scalar")) is True
+    assert mailbox.holds(4, ("id-b", "scalar")) is False
+    assert mailbox.holds(5, ("id-a", "scalar")) is False
+    # Asking does not consume: the commit still gets its buffer.
+    assert mailbox.take(4, ("id-a", "scalar")) is not None
+    assert mailbox.holds(4, ("id-a", "scalar")) is False
+
+
 def test_a_miss_is_an_ordinary_outcome_and_is_counted_separately():
     mailbox = PreparedUploadMailbox()
 

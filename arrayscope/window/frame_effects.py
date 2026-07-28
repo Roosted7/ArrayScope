@@ -1212,8 +1212,7 @@ class FramePipelineEffects:
         correctness. Nothing downstream may wait on a preparation.
         """
 
-        rows = tuple(upserts or ())
-        if not rows:
+        if not tuple(upserts or ()):
             return
         window = getattr(self.renderer, "win", None)
         view = getattr(window, "img_view", None)
@@ -1221,17 +1220,27 @@ class FramePipelineEffects:
         kernel = getattr(window, "kernel", None)
         if not callable(plan) or kernel is None:
             return
+        session = self.session
+        # The batch rows carry rung results, not display payloads — admission is
+        # what turns one into the other. Take the tiles this batch just admitted
+        # and read the payload the lifecycle now holds for each. Deliberately
+        # not the whole dirty set: a payload stays dirty across many governed
+        # chunks, and re-offering it every drain repeats work already published.
+        lifecycle = session.lifecycle
         payloads = {}
-        for row in rows:
-            payload = row[1] if isinstance(row, tuple) and len(row) == 2 else None
-            if payload is None:
+        for row in tuple(upserts or ()):
+            if not isinstance(row, tuple) or len(row) != 2 or row[1] is None:
                 continue
-            tile = getattr(payload, "tile_number", None)
-            if tile is not None:
+            tile = getattr(row[0], "tile_number", None)
+            if tile is None:
+                continue
+            payload = lifecycle.current_presentable_payload(int(tile))
+            if payload is None:
+                payload = session.display_tile_payloads.get(int(tile))
+            if payload is not None:
                 payloads[int(tile)] = payload
         if not payloads:
             return
-        session = self.session
         levels = normalize_bounds(
             getattr(getattr(session, "level_generation", None), "target_levels", None)
         )
@@ -1254,7 +1263,10 @@ class FramePipelineEffects:
         except Exception as exc:  # pragma: no cover - defensive, never fatal
             handle_ui_exception("montage upload preparation planning", exc)
             return
+        mailbox = view.preparedTiledUploads
         for slot, key, prepare in preparations:
+            if mailbox.holds(slot, key):
+                continue
             kernel.submit(
                 TaskSpec(
                     key=("prepared-upload", session_id, slot, key),
@@ -3235,6 +3247,10 @@ class FramePipelineEffects:
             backend_texture_prepare_ms=float(getattr(report, "texture_prepare_ms", 0.0) or 0.0),
             backend_texture_submit_ms=float(getattr(report, "texture_submit_ms", 0.0) or 0.0),
             backend_texture_pack_ms=float(getattr(report, "texture_pack_ms", 0.0) or 0.0),
+            # Whether the worker hand-off is actually landing. A commit that
+            # packs inline because preparation never arrived looks identical to
+            # one with no preparation at all, so say which it was.
+            **_prepared_upload_counters(renderer),
             acknowledge_ms=float(
                 getattr(renderer, "_last_montage_tile_acknowledge_ms", 0.0) or 0.0
             ),
@@ -4412,6 +4428,23 @@ def _shader_successor_transaction_payload_marker(payload) -> tuple:
         _base_source_id(getattr(payload, "source_id", None)),
         int(getattr(payload, "source_index", -1)),
     )
+
+
+def _prepared_upload_counters(renderer) -> dict[str, int]:
+    """Mailbox hit/stale/miss counts for the commit trace, or nothing."""
+
+    view = getattr(getattr(renderer, "win", None), "img_view", None)
+    mailbox = getattr(view, "_prepared_tiled_uploads", None)
+    if mailbox is None:
+        return {}
+    counters = mailbox.counters()
+    return {
+        "prepared_upload_published": int(counters.published),
+        "prepared_upload_hits": int(counters.hits),
+        "prepared_upload_stale": int(counters.stale),
+        "prepared_upload_misses": int(counters.misses),
+        "prepared_upload_resident": int(counters.resident_entries),
+    }
 
 
 def _prepared_atomic_transaction_current(session, prepared) -> bool:
