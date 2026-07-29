@@ -85,7 +85,16 @@ if _wgpu_adapter_available():
 
 
 def _payload(tile: int, generation: object) -> DisplayTilePayload:
-    image = np.full((TILE, TILE), float(tile), dtype=np.float32)
+    # Deliberately NOT a constant fill.  Every pixel is distinct within the
+    # tile and across tiles and generations, so a patch that writes the right
+    # bytes to the wrong place — or the wrong order — is visible.  A constant
+    # tile makes reordering undetectable, which is how a scrambling bug can
+    # pass an oracle that compares values.
+    image = (
+        float(tile) * 1e4
+        + float(hash((tile, generation)) % 997)
+        + np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE)
+    ).astype(np.float32)
     return DisplayTilePayload(
         tile_number=tile,
         source_index=tile,
@@ -329,6 +338,90 @@ def test_wgpu_instance_equality_checks_track_the_delta(qt_app, monkeypatch):
         f"a 1-tile commit compared {comparisons} tile instances; equality "
         "reuse must inspect the delta, not scan the montage"
     )
+
+
+def test_bounded_commit_inspects_only_the_delta_for_the_histogram(qt_app, monkeypatch):
+    """The montage histogram source is maintained, not re-derived.
+
+    A tiled montage has no bound ImageItem, so its histogram source is built
+    from the committed payloads.  Rebuilding that from every payload on every
+    bounded commit was the largest single term in a PyQtGraph commit — and
+    even deciding whether the previous buffer could be reused meant a
+    montage-wide identity scan, so the cache HIT was montage-proportional too.
+
+    The delta already says which tiles changed, so nothing else needs looking
+    at.  This counts payload inspections in the refinement regime, where the
+    population is stable and every commit could in principle reuse.
+    """
+
+    from arrayscope.display.model import tiled_histogram_identity
+
+    montage = _Montage("pyqtgraph", FIELD_TILES)
+    montage.commit((0,))  # settle the maintained buffer
+
+    counter = _Counter(monkeypatch, tiled_histogram_identity, "payload_histogram_display_source")
+    montage.commit((0,))
+
+    assert counter.count <= 4, (
+        f"a 1-tile commit into a {FIELD_TILES}-tile montage inspected "
+        f"{counter.count} payload histogram sources; the delta names the only "
+        "tile whose contribution can have changed"
+    )
+
+
+def test_histogram_source_matches_a_full_rebuild(qt_app):
+    """The maintained histogram source must equal a from-scratch build.
+
+    This one feeds drawn output, so a bounded patch that diverges is a wrong
+    picture, not a slow one.  The oracle rebuilds from the committed payloads
+    independently of the maintained buffer and compares values across the
+    delta shapes that could break the mapping.
+
+    PyQtGraph only: a tiled montage has no bound ImageItem to read a histogram
+    from, so the CPU-LUT backend derives one from the payloads.  WGPU carries
+    histogram evidence through the shader path instead.
+    """
+
+    backend = "pyqtgraph"
+
+    from arrayscope.display.model.tiled_histogram_identity import (
+        histogram_plot_source_and_layout,
+    )
+
+    montage = _Montage(backend, FIELD_TILES)
+
+    def check(label):
+        maintained = montage.view.histogramPlotSource
+        expected = histogram_plot_source_and_layout(montage.payloads)[0]
+        if maintained is None or expected is None:
+            assert maintained is expected, f"[{label}] one source is None and the other is not"
+            return
+        maintained = np.asarray(maintained)
+        expected = np.asarray(expected)
+        assert maintained.shape == expected.shape, (
+            f"[{label}] maintained histogram source has shape {maintained.shape}, "
+            f"a full rebuild gives {expected.shape}"
+        )
+        assert np.array_equal(maintained, expected, equal_nan=True), (
+            f"[{label}] the maintained histogram source diverged from a full rebuild"
+        )
+
+    check("initial")
+    montage.commit((0,))
+    check("first tile")
+    montage.commit((FIELD_TILES - 1,))
+    check("last tile")
+    montage.commit(range(8))
+    check("eight tiles")
+    montage.commit(())
+    check("empty delta")
+    montage.commit((5,), refresh_payloads=False)
+    check("re-presented unchanged payload")
+    montage.commit((), removals=(FIELD_TILES - 1,), active=range(FIELD_TILES - 1))
+    montage.tiles = FIELD_TILES - 1
+    check("removal")
+    montage.commit((3,), active=range(FIELD_TILES - 1))
+    check("after removal")
 
 
 def _instances_rebuilt_from_scratch(view):
