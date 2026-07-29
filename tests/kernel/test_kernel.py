@@ -994,3 +994,84 @@ def test_failed_task_still_reports_the_time_its_body_burned(monkeypatch):
     assert finish["outcome"] == "failed"
     assert finish["rung"] == 2
     assert finish["fn_ns"] >= 10_000_000
+
+
+def test_speculative_preparation_yields_the_pool_to_pending_visible_work():
+    """A started task cannot be recalled, so it must not start in the first place.
+
+    This is the hole a prepared-upload task fell through while it was submitted
+    on a visible lane. `Priority.PREFETCH` orders *selection* from the ready
+    set; it says nothing once a worker is already inside the closure, and no
+    priority or quota can take that thread back. On a recorded cold scroll that
+    cost 458 ms of worker time held away from pixel-producing tasks.
+
+    Being non-visible is what closes it: the speculative gate refuses to start
+    the task at all while any visible work is queued or running.
+    """
+
+    kernel, backend = make_manual()
+    order = []
+    kernel.submit(
+        TaskSpec(
+            key="prepare",
+            fn=lambda: order.append("prepare"),
+            lane=Lane.SPECULATIVE_RESIDENCY,
+            priority=Priority.PREFETCH,
+        )
+    )
+    kernel.submit(
+        TaskSpec(
+            key="produce",
+            fn=lambda: order.append("produce"),
+            lane=Lane.VISIBLE_MATERIALIZATION,
+            priority=Priority.VISIBLE_IMAGE,
+        )
+    )
+
+    # `take` leaves the producer running, which is the state that matters: a
+    # second worker asking for work while visible work is in flight must be
+    # given nothing rather than the preparation.
+    producer = backend.take()
+    assert producer is not None and producer.spec.key == "produce"
+    assert backend.take() is None
+
+    # Once the visible work finishes the preparation is released, not dropped.
+    kernel._execute(producer)
+    drain(kernel)
+    assert backend.run_all() == 1
+    assert order == ["produce", "prepare"]
+
+
+def test_a_visible_preparation_lane_would_have_taken_the_worker():
+    """The counter-case, so the test above cannot pass for the wrong reason.
+
+    Submitted on a visible lane the same task starts immediately despite its
+    PREFETCH priority, because the ready heap only orders what is selected next
+    and there is a free worker to select it onto.
+    """
+
+    kernel, backend = make_manual()
+    order = []
+    kernel.submit(
+        TaskSpec(
+            key="prepare",
+            fn=lambda: order.append("prepare"),
+            lane=Lane.DISPLAY_PREPARATION,
+            priority=Priority.PREFETCH,
+        )
+    )
+    kernel.submit(
+        TaskSpec(
+            key="produce",
+            fn=lambda: order.append("produce"),
+            lane=Lane.VISIBLE_MATERIALIZATION,
+            priority=Priority.VISIBLE_IMAGE,
+        )
+    )
+
+    producer = backend.take()
+    assert producer is not None and producer.spec.key == "produce"
+    # The hole: a free worker is handed the preparation while the producer is
+    # still running, and nothing can take that thread back.
+    preparation = backend.take()
+    assert preparation is not None and preparation.spec.key == "prepare"

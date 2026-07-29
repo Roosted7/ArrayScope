@@ -1796,7 +1796,11 @@ def test_backend_upload_preparation_is_submitted_as_superseded_prefetch():
     assert mailbox.counters().published == 0
     assert len(submitted) == 1
     spec = submitted[0]
-    assert spec.lane is Lane.DISPLAY_PREPARATION
+    # Non-visible is the load-bearing property, not the lane name: it is what
+    # subjects preparation to the kernel's speculative governor, so that a
+    # started task can no longer hold a worker a pixel-producing task wants.
+    assert spec.lane is Lane.SPECULATIVE_RESIDENCY
+    assert not spec.visible
     assert spec.priority is Priority.PREFETCH
     assert spec.supersession.family == ("prepared-upload", 7, 2)
     assert spec.supersession.value == preparation_key

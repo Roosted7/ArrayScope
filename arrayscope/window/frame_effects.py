@@ -1250,9 +1250,8 @@ class FramePipelineEffects:
             mailbox.note_resident(resident_skips)
         if not payloads:
             return
-        levels = normalize_bounds(
-            getattr(getattr(session, "level_generation", None), "target_levels", None)
-        )
+        level_generation = getattr(session, "level_generation", None)
+        levels = normalize_bounds(getattr(level_generation, "target_levels", None))
         if levels is None:
             # Levels are not settled yet, so any PyQtGraph assembly prepared now
             # would bake against a window this round will not use (R3). WGPU
@@ -1281,9 +1280,17 @@ class FramePipelineEffects:
                 TaskSpec(
                     key=("prepared-upload", session_id, slot, key),
                     fn=prepare,
-                    lane=WorkLane.DISPLAY_PREPARATION,
-                    # Below every rung that produces pixels: preparing ahead
-                    # must never delay the payload a commit is waiting for.
+                    # Speculative, not visible. Priority orders *selection*
+                    # from the ready set; it cannot reclaim a worker already
+                    # inside a task, so a preparation on a visible lane could
+                    # and did hold a thread a pixel-producing task wanted —
+                    # 458 ms of it across one recorded cold scroll, delaying
+                    # 39 producers by up to 21 ms each. A non-visible lane is
+                    # what makes the kernel's existing speculative governor
+                    # apply: parked while any visible work is queued or
+                    # running, capped at a fraction of the pool, and sorted
+                    # behind every visible task rather than merely below it.
+                    lane=WorkLane.SPECULATIVE_RESIDENCY,
                     priority=Priority.PREFETCH,
                     scope=f"montage:{session_id}",
                     session_id=session_id,
