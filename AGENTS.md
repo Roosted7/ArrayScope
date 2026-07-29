@@ -107,14 +107,21 @@ directories; that guess is the thing this replaces. Full reference:
 
 ```bash
 pytest                 # the loop: everything this working tree affects
+pytest --since         # everything this whole branch changed, vs its baseline
 pytest --no-testmon    # the gate: the whole suite, before merging
 ```
 
 A selected run that passes says *the affected tests* pass. The run prints how
-many mapped tests it skipped and how many known-red tests it did not re-run —
-read those lines before writing "suite green" anywhere, and run the gate before
-claiming it. Selection cannot see into child processes, non-Python inputs, or
-real rendering; rings 3–4 are unchanged.
+many mapped tests it skipped, which reds it inherited, and — under a
+`BROKEN HERE` heading — any test that was passing in this checkout and is not.
+Read those before writing "suite green" anywhere, and run the gate before
+claiming it. A test you broke is never skipped, whatever the map says; inherited
+reds are. Selection cannot see into child processes, non-Python inputs, or real
+rendering; rings 3–4 are unchanged.
+
+`pytest --since` exists because the map only knows what changed since the *last
+run*: after iterating it reports nothing affected while the branch has changed
+twenty files. It resolves its baseline (upstream, then `main`) and says which.
 
 `python tools/test_selection.py` reports the blast radius without running
 anything — worth quoting in a handoff. `... status` names the known-red tests

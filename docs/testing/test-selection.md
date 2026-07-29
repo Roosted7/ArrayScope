@@ -53,10 +53,12 @@ passes says the affected tests pass — a strictly smaller claim.
 | Goal | Command |
 |---|---|
 | Inner loop | `pytest` |
+| Everything this whole branch changed | `pytest --since` |
 | The whole suite (pre-merge, or after anything below) | `pytest --no-testmon` |
 | Blast radius without running anything | `python tools/test_selection.py` |
-| What the map does *not* cover, and which tests are known red | `python tools/test_selection.py status` |
-| Re-run the known-red tests too | `ARRAYSCOPE_TESTMON_RERUN_FAILING=1 pytest` |
+| What the map does *not* cover, which reds are yours | `python tools/test_selection.py status` |
+| The current reds are not yours (stale worktree, stacked branch) | `python tools/test_selection.py accept-reds` |
+| Re-run the inherited reds too | `ARRAYSCOPE_TESTMON_RERUN_FAILING=1 pytest` |
 | Rebuild the map from scratch | `rm .testmondata && pytest` |
 | Re-record without deselecting | `pytest --testmon-noselect` |
 | Coverage, artifacts, CI | already exhaustive — see below |
@@ -205,35 +207,101 @@ SQLite serializing their runs on top of that.
 
 Set `ARRAYSCOPE_TESTMON_SEED=0` to opt out and record from scratch.
 
-## Tests that were already red
+## Tests that were already red, and tests you just broke
 
 testmon's own rule is that a test which failed last time re-runs unconditionally,
-whatever changed. The reasoning is sound in general: a failed test stops at the
-failure, so the lines it recorded are the lines of a run that ended early, and
-its dependency set may be short of the file that would fix it.
-
-ArrayScope does not do that by default, because the cost is not theoretical.
-Branches here carry documented incumbent failures, and re-running them measured
-**124 s on an otherwise clean tree** — an entire inner loop spent re-confirming
-what everybody already knew. So a red test whose dependencies did not change is
-treated like any other unaffected test, and every run says how many:
+whatever changed. Doing that here measured **124 s on an otherwise clean tree** —
+an entire inner loop spent re-confirming what everybody already knew. But
+skipping every unchanged red has a hole big enough to drive the feature into:
 
 ```
-test selection: 10 of those were already failing before this run and nothing
-they use changed, so they were not re-run (ARRAYSCOPE_TESTMON_RERUN_FAILING=1
-re-runs them; python tools/test_selection.py status names them).
+edit foo.py  ->  test T runs, fails, and the map records T as failed
+edit bar.py  ->  T's dependencies are unchanged *since the map was written*,
+                 so T is skipped — two minutes after you broke it
 ```
 
-`tools/test_selection.py status` lists them with the time they would cost.
+The map cannot close that hole, because the map is rewritten by every run,
+including the run that introduced the red. So the two cases are told apart by
+observation rather than inference. Every time a test *transitions* into failing —
+from passing, or from not existing — [`tests/red_ledger.py`](../../tests/red_ledger.py)
+writes it down. A test in that ledger is never skipped and is named at the end of
+every run until it passes again:
 
-Turn it back on while you are actually fixing one of them:
+```
+BROKEN HERE (1): these were passing in this checkout and are not; they run on
+every selected run until they pass again.
+    tests/render/test_effects.py::test_pyqtgraph_shared_fft_preview_retains_...
+```
+
+That makes the baseline exactly right: whatever was already failing when this
+checkout's map arrived (usually seeded from `main`) is inherited and stays quiet;
+everything that broke afterwards is yours and stays loud. Nothing to bootstrap —
+an absent ledger means "nothing has broken here yet", which is the correct
+reading of a checkout that has not run anything.
+
+Measured end to end: break a function in `render/lod.py`, then edit
+`kernel/scheduler.py` — an unrelated file. The run is **2 tests in 1.65 s**: the
+one the unrelated edit affected, plus the one you broke, with the 14 inherited
+reds still skipped. Selection stays optimal; it just stops lying.
+
+### When the reds are not yours
+
+The ledger infers ownership from transitions observed *here*, which is right
+while you work and wrong after the ground moves underneath it — a worktree that
+jumps fifty commits, a branch stacked on another branch's reds, a feature branch
+split in two. The failures are real but not yours, and left alone they re-run
+forever. One command says so:
+
+```bash
+python tools/test_selection.py accept-reds
+```
+
+They become ordinary inherited reds. Anything that breaks from then on is yours
+again.
+
+To go the other way and re-run the inherited ones too — the right choice while
+you are actually fixing one, since the fix can land outside the truncated
+dependency set of the run that failed:
 
 ```bash
 ARRAYSCOPE_TESTMON_RERUN_FAILING=1 pytest
 ```
 
-A red test whose dependencies *did* change is affected like anything else and
-runs either way — skipping known reds never reaches a test your change touches.
+## `--since`: what this whole branch changed
+
+The map answers *what changed since the last run*. That is the right question in
+an edit loop and the wrong one before merging: by then every file has been
+recorded, so the map reports nothing affected while the branch has changed twenty
+files. Measured on this branch — plain `pytest` selects **1 test**; `--since`
+selects **65**.
+
+```bash
+pytest --since                  # resolve the baseline (below)
+pytest --since origin/release   # or name it
+```
+
+Merge-base semantics (`ref...HEAD`), plus the working tree and untracked files,
+so it answers "what has this branch done" rather than "how does it differ from
+wherever `ref` has got to since".
+
+**The baseline is resolved, not assumed**, and the run prints which ref it used.
+In order: `ARRAYSCOPE_BASELINE_REF`, then the branch's upstream, then `main`,
+then `origin/main`. The upstream comes first so a branch stacked on another
+branch measures against its parent rather than inheriting the parent's whole
+diff; a branch with no inferable parent — split in two, cut from somewhere
+unusual — should be told, either per run or once via the environment variable. An
+unresolvable baseline is an error, never a silent fallback to the wrong branch.
+
+Comparison is **method-level**, using testmon's own fingerprints against the
+branch point, not "any test that recorded a changed file". On a four-file diff
+including `tests/conftest.py` that is 41 tests against 55, and the gap grows with
+how widely the touched code is executed. Non-Python changes — a fixture array, an
+icon — have no method structure, so they fall back to reaching every test that
+recorded them.
+
+`--since` is the cheap step between an inner-loop run and the full
+`--no-testmon` gate. It is not a replacement for the gate: it still cannot see
+the three blind spots above.
 
 ## When the machine is busy
 
