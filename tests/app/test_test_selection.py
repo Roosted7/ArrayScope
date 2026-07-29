@@ -335,6 +335,9 @@ class _FakePluginManager:
         return self._plugin if name == "TestmonSelect" else None
 
 
+_RED = "tests/b/test_b.py::test_red"
+
+
 def _config_with_known_red():
     """testmon's view after a run that left one test red: it stays selected."""
 
@@ -343,8 +346,12 @@ def _config_with_known_red():
         deselected_files=["tests/a/test_a.py"],
     )
     data = SimpleNamespace(
-        stable_test_names={"tests/a/test_a.py::test_green", "tests/b/test_b.py::test_red"},
+        stable_test_names={"tests/a/test_a.py::test_green", _RED},
         stable_files={"tests/a/test_a.py", "tests/b/test_b.py"},
+        all_tests={
+            "tests/a/test_a.py::test_green": {"failed": False},
+            _RED: {"failed": True},
+        },
     )
     config = SimpleNamespace(
         pluginmanager=_FakePluginManager(plugin),
@@ -354,27 +361,46 @@ def _config_with_known_red():
     return config, plugin
 
 
-def test_known_red_tests_are_not_re_run_by_default(monkeypatch):
-    """A red test whose dependencies did not change tells you nothing new.
+def test_an_inherited_red_is_not_re_run(monkeypatch):
+    """A red that was already failing here tells you nothing new.
 
-    Re-running the incumbent failures measured 124 s on an otherwise clean
-    tree — the whole inner loop, spent re-confirming known reds.
+    Re-running all of them measured 124 s on an otherwise clean tree — the
+    whole inner loop, spent re-confirming what everybody already knew.
     """
 
     monkeypatch.delenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", raising=False)
     config, plugin = _config_with_known_red()
 
-    assert testmon_policy.apply_known_red_policy(config) == 1
-    assert "tests/b/test_b.py::test_red" in plugin.deselected_tests
+    assert testmon_policy.apply_known_red_policy(config, new_reds=set()) == 1
+    assert _RED in plugin.deselected_tests
     assert "tests/b/test_b.py" in plugin.deselected_files
 
 
-def test_the_flag_restores_the_re_run(monkeypatch):
+def test_a_red_this_checkout_broke_always_runs(monkeypatch):
+    """The hazard this exists for: the map cannot vouch for a red it recorded.
+
+    Break T, then edit something unrelated. T's dependencies are unchanged
+    *since the map was written* -- but the map was written by the run that broke
+    it, so "unchanged" is worthless evidence and skipping T would hide the
+    regression minutes after introducing it.
+    """
+
+    monkeypatch.delenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", raising=False)
+    config, plugin = _config_with_known_red()
+
+    assert testmon_policy.apply_known_red_policy(config, new_reds={_RED}) == 0
+    assert _RED not in plugin.deselected_tests
+    assert "tests/b/test_b.py" not in plugin.deselected_files, (
+        "the file has to stay collectable or the red inside it cannot run"
+    )
+
+
+def test_the_flag_re_runs_the_inherited_ones_too(monkeypatch):
     monkeypatch.setenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", "1")
     config, plugin = _config_with_known_red()
 
-    assert testmon_policy.apply_known_red_policy(config) == 0
-    assert "tests/b/test_b.py::test_red" not in plugin.deselected_tests
+    assert testmon_policy.apply_known_red_policy(config, new_reds=set()) == 0
+    assert _RED not in plugin.deselected_tests
 
 
 def test_an_exhaustive_run_is_left_untouched(monkeypatch):
@@ -391,7 +417,7 @@ def test_an_exhaustive_run_is_left_untouched(monkeypatch):
     config.testmon_config = SimpleNamespace(select=False, collect=True)
     before = list(plugin.deselected_tests)
 
-    assert testmon_policy.apply_known_red_policy(config) == 0
+    assert testmon_policy.apply_known_red_policy(config, new_reds=set()) == 0
     assert plugin.deselected_tests == before
 
 
@@ -403,12 +429,202 @@ def test_a_red_test_whose_dependencies_changed_still_runs(monkeypatch):
     config = SimpleNamespace(
         pluginmanager=_FakePluginManager(plugin),
         # An affected test is absent from the stable sets by construction.
-        testmon_data=SimpleNamespace(stable_test_names=set(), stable_files=set()),
+        testmon_data=SimpleNamespace(stable_test_names=set(), stable_files=set(), all_tests={}),
         testmon_config=SimpleNamespace(select=True, collect=True),
     )
 
-    testmon_policy.apply_known_red_policy(config)
+    testmon_policy.apply_known_red_policy(config, new_reds=set())
     assert not plugin.deselected_tests
+
+
+def test_the_baseline_prefers_the_upstream_over_main(monkeypatch):
+    """A branch stacked on another branch measures itself against its parent.
+
+    Against ``main`` it would inherit the parent branch's entire diff, and
+    ``--since`` would report the parent's work as this branch's.
+    """
+
+    asked = []
+
+    def fake_git(rootdir, *arguments, binary=False):
+        asked.append(arguments)
+        return "abc123\n" if arguments[0] == "merge-base" else None
+
+    monkeypatch.delenv("ARRAYSCOPE_BASELINE_REF", raising=False)
+    monkeypatch.setattr(testmon_policy, "_git", fake_git)
+    ref, merge_base = testmon_policy.resolve_baseline(REPO_ROOT, None)
+
+    assert ref == "@{upstream}"
+    assert merge_base == "abc123"
+
+
+def test_an_explicit_baseline_wins(monkeypatch):
+    """A branch split in two has no inferable parent; naming one is the answer."""
+
+    monkeypatch.setattr(
+        testmon_policy,
+        "_git",
+        lambda rootdir, *arguments, binary=False: "deadbeef\n",
+    )
+    assert testmon_policy.resolve_baseline(REPO_ROOT, "origin/release")[0] == "origin/release"
+
+
+def test_the_baseline_can_be_pinned_per_worktree(monkeypatch):
+    monkeypatch.setenv("ARRAYSCOPE_BASELINE_REF", "feature/parent")
+    monkeypatch.setattr(
+        testmon_policy,
+        "_git",
+        lambda rootdir, *arguments, binary=False: "cafe\n",
+    )
+    assert testmon_policy.resolve_baseline(REPO_ROOT, None)[0] == "feature/parent"
+
+
+def test_an_unresolvable_baseline_is_an_error_not_a_silent_default(monkeypatch):
+    """Silently falling back would report the wrong branch's work as yours."""
+
+    monkeypatch.delenv("ARRAYSCOPE_BASELINE_REF", raising=False)
+    monkeypatch.setattr(testmon_policy, "_git", lambda rootdir, *a, binary=False: None)
+    with pytest.raises(testmon_policy.UsageError, match="no baseline"):
+        testmon_policy.resolve_baseline(REPO_ROOT, None)
+
+
+def test_since_compares_methods_not_whole_files(monkeypatch):
+    """File-level would drag in every test that merely recorded the file.
+
+    Measured on a four-file diff including tests/conftest.py: 41 tests
+    method-level against 55 file-level, and the gap grows with how widely the
+    touched code is executed.
+    """
+
+    from testmon.db import checksums_to_blob
+
+    unchanged, changed = 111, 222
+
+    class _Row(dict):
+        def __getitem__(self, key):
+            return dict.__getitem__(self, key)
+
+    data = SimpleNamespace(
+        exec_id=1,
+        db=SimpleNamespace(
+            _test_execution_fk_column=lambda: "environment_id",
+            con=SimpleNamespace(
+                execute=lambda *args: SimpleNamespace(
+                    fetchall=lambda: [
+                        _Row(
+                            test_name="t.py::untouched",
+                            filename="src.py",
+                            method_checksums=checksums_to_blob([unchanged]),
+                        ),
+                        _Row(
+                            test_name="t.py::touched",
+                            filename="src.py",
+                            method_checksums=checksums_to_blob([changed]),
+                        ),
+                    ]
+                )
+            ),
+        ),
+    )
+
+    reached = testmon_policy.tests_reached_since_baseline(data, {"src.py": [unchanged]})
+    assert reached == {"t.py::touched"}
+
+
+def test_a_non_python_change_reaches_everything_that_uses_it(monkeypatch):
+    """A fixture array or an icon has no method structure to compare.
+
+    ``None`` checksums are what testmon's comparison reads as "all of it
+    changed", so the file-level fallback falls out of the same code path
+    instead of needing a second one.
+    """
+
+    def fake_git(rootdir, *arguments, binary=False):
+        if arguments[0] == "diff":
+            return "tests/fixtures/trace.jsonl\narrayscope/render/lod.py\n"
+        if arguments[0] == "ls-files":
+            return ""
+        return None  # `git show` is never reached for a non-Python path
+
+    monkeypatch.setattr(testmon_policy, "_git", fake_git)
+    checksums = testmon_policy.baseline_method_checksums(REPO_ROOT, "abc123")
+
+    assert checksums["tests/fixtures/trace.jsonl"] is None
+    assert checksums["arrayscope/render/lod.py"] is None, "unreadable at the baseline == changed"
+
+
+def _ledger(tmp_path, previous, populated=True):
+    from tests import red_ledger
+
+    return red_ledger.RedLedger.load(
+        tmp_path / ".testmondata", "offscreen", previous, map_was_populated=populated
+    )
+
+
+def test_a_test_that_used_to_pass_here_is_recorded_as_broken(tmp_path):
+    ledger = _ledger(tmp_path, {"t.py::a": False})
+    ledger.record("t.py::a", failed=True)
+    assert ledger.new_reds == {"t.py::a"}
+
+
+def test_a_test_that_was_already_failing_here_is_not(tmp_path):
+    """The incumbent reds are the whole reason the exemption exists."""
+
+    ledger = _ledger(tmp_path, {"t.py::a": True})
+    ledger.record("t.py::a", failed=True)
+    assert ledger.new_reds == set()
+
+
+def test_a_new_test_born_failing_counts_as_broken(tmp_path):
+    """Otherwise a test you just wrote and left red goes quiet after one run."""
+
+    ledger = _ledger(tmp_path, {"other.py::x": False})
+    ledger.record("t.py::brand_new", failed=True)
+    assert ledger.new_reds == {"t.py::brand_new"}
+
+
+def test_the_first_recording_pass_is_an_inventory_not_a_regression(tmp_path):
+    """With an empty map every test is unseen; none of them just broke."""
+
+    ledger = _ledger(tmp_path, {}, populated=False)
+    ledger.record("t.py::a", failed=True)
+    assert ledger.new_reds == set()
+
+
+def test_a_fixed_test_leaves_the_ledger(tmp_path):
+    ledger = _ledger(tmp_path, {"t.py::a": False})
+    ledger.record("t.py::a", failed=True)
+    ledger.save()
+
+    later = _ledger(tmp_path, {"t.py::a": True})
+    assert later.new_reds == {"t.py::a"}
+    later.record("t.py::a", failed=False)
+    later.save()
+
+    assert _ledger(tmp_path, {"t.py::a": False}).new_reds == set()
+
+
+def test_the_ledger_is_kept_per_environment(tmp_path):
+    """A wayland red is not an offscreen red; the map keys them apart too."""
+
+    from tests import red_ledger
+
+    offscreen = _ledger(tmp_path, {"t.py::a": False})
+    offscreen.record("t.py::a", failed=True)
+    offscreen.save()
+
+    wayland = red_ledger.RedLedger.load(
+        tmp_path / ".testmondata", "wayland+gpu", {"t.py::a": False}, map_was_populated=True
+    )
+    assert wayland.new_reds == set()
+    assert red_ledger.read_new_reds(tmp_path / ".testmondata", "offscreen") == {"t.py::a"}
+
+
+def test_an_unreadable_ledger_reads_as_empty(tmp_path):
+    from tests import red_ledger
+
+    red_ledger.ledger_path(tmp_path / ".testmondata").write_text("{ not json", encoding="utf-8")
+    assert red_ledger.read_new_reds(tmp_path / ".testmondata", "offscreen") == set()
 
 
 def test_seeding_never_overwrites_an_existing_map(tmp_path, monkeypatch):

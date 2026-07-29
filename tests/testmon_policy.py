@@ -224,23 +224,24 @@ def map_path(rootdir: os.PathLike[str] | str) -> Path:
 
 
 def rerun_known_red_tests() -> bool:
-    """Whether a test that failed last time re-runs even if nothing it uses changed.
+    """Whether *every* previously-failing test re-runs, changed or not.
 
     testmon's own answer is always yes: a failed test stops at the failure, so
     the lines it recorded are the lines of a run that ended early, and treating
     that truncated set as its full dependencies would be unsound.
 
-    ArrayScope's answer is no by default, because the premise does not hold
-    here. Branches carry documented incumbent failures (see
-    ``docs/testing/README.md``), and re-running them measured **124 s on an
-    otherwise clean tree** — an inner loop that costs two minutes to tell you
-    nothing new is an inner loop nobody uses. The residual risk is narrow: a fix
-    landing in a file outside the red test's truncated dependency set would not
-    select it. So the count is reported on every run, the names are one command
-    away, and ``pytest --no-testmon`` before merging still runs them.
+    ArrayScope's answer is "only the ones that broke here" — see
+    ``tests/red_ledger.py``. Re-running *all* of them measured **124 s on an
+    otherwise clean tree**, and an inner loop that costs two minutes to
+    re-confirm what everybody already knows is an inner loop nobody uses. A red
+    that was already failing when this checkout's map arrived stays quiet; a red
+    that this checkout broke is never skipped, because "its dependencies have
+    not moved since the map was written" is worthless evidence when the map was
+    written by the run that broke it.
 
-    Set ``ARRAYSCOPE_TESTMON_RERUN_FAILING=1`` to restore testmon's behavior —
-    the right choice while you are actually fixing one of those tests.
+    Set ``ARRAYSCOPE_TESTMON_RERUN_FAILING=1`` to re-run the inherited ones as
+    well — the right choice while you are fixing one of them, since the fix can
+    land outside the truncated dependency set of the run that failed.
     """
 
     return os.environ.get("ARRAYSCOPE_TESTMON_RERUN_FAILING", "").strip().lower() in {
@@ -255,7 +256,9 @@ def known_red_tests(config) -> set[str]:
     """Mapped tests that failed last time and whose dependencies are unchanged.
 
     Derived from the map rather than from what any process deselected, so the
-    controller and a serial run report the same number.
+    controller and a serial run report the same number. This is the *candidate*
+    set; the ledger in ``tests/red_ledger.py`` decides which of them are
+    inherited and may actually be skipped.
     """
 
     data = getattr(config, "testmon_data", None)
@@ -272,13 +275,18 @@ def known_red_tests(config) -> set[str]:
         return set()
 
 
-def apply_known_red_policy(config) -> int:
-    """Deselect known-red tests whose dependencies are unchanged. Returns the count.
+def apply_known_red_policy(config, new_reds: set[str]) -> int:
+    """Stop re-running the *inherited* reds. Returns how many were dropped.
 
     testmon decides its deselection lists once, in ``TestmonSelect.__init__``,
-    exempting every previously-failing test. This narrows that exemption back to
-    the ordinary rule — "unchanged dependencies means unaffected" — by handing
-    the plugin the stable sets it already computed, without the exemption.
+    exempting every previously-failing test from deselection. Most of that
+    exemption is worth keeping and one third of it is not:
+
+    * A red whose dependencies changed is affected like anything else and runs.
+    * A red this checkout broke (``new_reds``) runs whatever the map says. The
+      map cannot vouch for it — the map was written by the run that broke it.
+    * What is left failed on code that was already failing when this checkout's
+      map arrived. Re-running it says nothing new and measured 124 s.
 
     Runs before collection, so both the file-level ignore and the item-level
     deselection see it.
@@ -299,17 +307,26 @@ def apply_known_red_policy(config) -> int:
     data = getattr(config, "testmon_data", None)
     if plugin is None or data is None:
         return 0
-    stable_tests = set(data.stable_test_names or ())
-    stable_files = set(data.stable_files or ())
+
+    inherited = known_red_tests(config) - set(new_reds)
+    if not inherited:
+        return 0
+    keep_collecting = {red.split("::", 1)[0] for red in new_reds}
     try:
-        skipped = len(stable_tests) - len(set(plugin.deselected_tests))
         # Sets, not the lists testmon builds: both are membership-tested once
         # per collected item, which is 3500 linear scans over 3500 names.
-        plugin.deselected_tests = stable_tests
-        plugin.deselected_files = stable_files
+        plugin.deselected_tests = set(plugin.deselected_tests) | inherited
+        # A file only becomes skippable wholesale once it holds no red this
+        # checkout owns; otherwise its collection has to happen so that red
+        # can run.
+        plugin.deselected_files = {
+            name
+            for name in (set(data.stable_files or ()) | set(plugin.deselected_files))
+            if name not in keep_collecting
+        }
     except (AttributeError, TypeError):  # a testmon upgrade renamed them
         return 0
-    return max(0, skipped)
+    return len(inherited)
 
 
 def seed_map(rootdir: os.PathLike[str] | str) -> str | None:
@@ -528,6 +545,193 @@ def inject_out_of_process_dependencies(report, rootdir: os.PathLike[str] | str) 
             lines = _whole_file_lines(rootdir, relative)
             if lines:
                 files_lines[relative] = set(lines)
+
+
+class UsageError(Exception):
+    """Raised for a flag the developer can fix; conftest turns it into pytest's."""
+
+
+#: Refs tried, in order, when ``--since`` is given without one. The upstream
+#: comes first so a branch stacked on another branch measures itself against its
+#: parent rather than against ``main`` — otherwise every stacked branch inherits
+#: its parent's whole diff. ``ARRAYSCOPE_BASELINE_REF`` overrides the lot, which
+#: is the answer for a worktree whose parent git cannot infer (a branch split in
+#: two, a temporary branch cut from somewhere unusual).
+_BASELINE_REFS = ("@{upstream}", "main", "origin/main")
+
+#: Above this many changed files, reading and AST-parsing each one's baseline
+#: revision stops being cheap — and a sweep that large reaches everything
+#: anyway, so the honest answer is to run the whole suite.
+_MAX_BASELINE_FILES = 400
+
+
+def _git(rootdir, *arguments, binary: bool = False):
+    """Run one git command in ``rootdir``. ``None`` on any failure."""
+
+    import subprocess
+
+    try:
+        finished = subprocess.run(
+            ("git", *arguments),
+            cwd=str(rootdir),
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if finished.returncode != 0:
+        return None
+    return finished.stdout if binary else finished.stdout.decode("utf-8", "replace")
+
+
+def resolve_baseline(rootdir, explicit: str | None) -> tuple[str, str]:
+    """``(ref, merge_base_sha)`` for the branch point. Raises ``UsageError`` if none.
+
+    Reported by the caller rather than assumed, because "what counts as the
+    baseline" is a real choice on a stacked or split branch and a silent default
+    would be the wrong kind of convenient.
+    """
+
+    candidates = [explicit] if explicit else []
+    if not explicit:
+        env_ref = os.environ.get("ARRAYSCOPE_BASELINE_REF", "").strip()
+        candidates = ([env_ref] if env_ref else []) + list(_BASELINE_REFS)
+    for ref in candidates:
+        merge_base = _git(rootdir, "merge-base", ref, "HEAD")
+        if merge_base and merge_base.strip():
+            return ref, merge_base.strip()
+    tried = ", ".join(candidates)
+    raise UsageError(
+        f"--since: no baseline could be resolved (tried {tried}). Name one "
+        "explicitly, e.g. `--since origin/main`, or set ARRAYSCOPE_BASELINE_REF."
+    )
+
+
+def baseline_method_checksums(rootdir, merge_base: str) -> dict[str, list | None] | None:
+    """``{path: checksums at the branch point}`` for everything the branch touched.
+
+    ``None`` for a path that is not Python, or did not exist at the branch
+    point, which testmon's comparison reads as "all of it changed" — the right
+    fallback for a fixture array or an icon, which have no method structure to
+    compare.
+    """
+
+    from testmon.process_code import Module
+
+    tracked = _git(rootdir, "diff", "--name-only", merge_base)
+    untracked = _git(rootdir, "ls-files", "--others", "--exclude-standard")
+    if tracked is None or untracked is None:
+        return None
+
+    changed = {line.strip() for line in (tracked + untracked).splitlines() if line.strip()}
+    if len(changed) > _MAX_BASELINE_FILES:
+        return None
+
+    checksums: dict[str, list | None] = {}
+    for path in changed:
+        source = (
+            _git(rootdir, "show", f"{merge_base}:{path}", binary=True)
+            if path.endswith(".py")
+            else None
+        )
+        if source is None:
+            checksums[path] = None
+            continue
+        try:
+            checksums[path] = Module(
+                source_code=source.decode("utf-8", "replace"),
+                filename=path,
+                rootdir=str(rootdir),
+            ).method_checksums
+        except Exception:  # unparseable back there: treat as fully changed
+            checksums[path] = None
+    return checksums
+
+
+def tests_reached_since_baseline(data, checksums) -> frozenset[str] | None:
+    """Recorded tests whose executed code this branch actually changed.
+
+    Method-level, using testmon's own fingerprint comparison against the branch
+    point, rather than "any test that recorded a changed file". Measured on a
+    four-file diff that includes ``tests/conftest.py``: 41 tests method-level
+    against 55 file-level. The gap grows with how widely the touched code is
+    executed, and it is the difference between a targeted pre-merge run and a
+    flag nobody uses.
+
+    (It is *not* the difference between 41 and the whole suite: a test's record
+    for ``conftest.py`` covers only the fixture blocks it actually executed, so
+    even the file-level answer is far short of everything. The earlier version
+    of this comment claimed otherwise and the measurement refuted it.)
+
+    Read-only, so it works on an xdist worker too, whose database connection is
+    not writable and where testmon's own ``determine_tests`` would fail.
+    """
+
+    if not checksums:
+        return frozenset()
+    from testmon.db import blob_to_checksums, check_fingerprint_db
+
+    names = sorted(checksums)
+    try:
+        column = data.db._test_execution_fk_column()
+        placeholders = ",".join("?" * len(names))
+        rows = data.db.con.execute(
+            f"""
+            SELECT te.test_name, f.filename, f.method_checksums
+            FROM test_execution te, test_execution_file_fp te_ffp, file_fp f
+            WHERE te.{column} = ?
+              AND te.id = te_ffp.test_execution_id
+              AND te_ffp.fingerprint_id = f.id
+              AND f.filename IN ({placeholders})
+            """,
+            [data.exec_id, *names],
+        ).fetchall()
+    except Exception:  # schema moved; tests/app/test_test_selection.py guards this
+        return None
+    return frozenset(
+        row["test_name"]
+        for row in rows
+        if not check_fingerprint_db(
+            checksums, row["filename"], blob_to_checksums(row["method_checksums"])
+        )
+    )
+
+
+def apply_since_baseline(config, explicit_ref: str | None) -> tuple[str, int]:
+    """Un-deselect everything this branch changed since its baseline.
+
+    The map answers "what changed since the last run", which is the right
+    question during an edit loop and the wrong one before merging: by then every
+    file has been recorded, so the map reports *nothing* affected while the
+    branch has changed twenty files. ``--since`` asks the other question, and is
+    the cheap step between an inner-loop run and the full ``--no-testmon`` gate.
+    """
+
+    ref, merge_base = resolve_baseline(config.rootdir, explicit_ref)
+    plugin = config.pluginmanager.get_plugin("TestmonSelect")
+    data = getattr(config, "testmon_data", None)
+    if plugin is None or data is None:
+        return ref, 0
+
+    checksums = baseline_method_checksums(config.rootdir, merge_base)
+    if checksums is None:
+        raise UsageError(
+            f"--since {ref}: this branch changed more than {_MAX_BASELINE_FILES} files, "
+            "which reaches everything anyway. Run `pytest --no-testmon`."
+        )
+    reached = tests_reached_since_baseline(data, checksums)
+    if reached is None:
+        return ref, 0
+    try:
+        plugin.deselected_tests = set(plugin.deselected_tests) - reached
+        keep = {name.split("::", 1)[0] for name in reached}
+        plugin.deselected_files = {
+            name for name in set(plugin.deselected_files) if name not in keep
+        }
+    except (AttributeError, TypeError):  # a testmon upgrade renamed them
+        return ref, 0
+    return ref, len(reached)
 
 
 COUPLED_MARKER = "coupled_order"

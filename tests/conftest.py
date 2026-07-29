@@ -47,13 +47,34 @@ if _XDIST_WORKER:
     os.environ.setdefault("ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_config_root, "artifacts"))
 
 
-from tests import load_report, testmon_policy
+from tests import load_report, red_ledger, testmon_policy
+
+#: Written by the controller (or a serial run) only; workers read the file.
+_red_ledger = None
+#: Node ids this run collected, gathered from wherever collection happened.
+_collected: set[str] = set()
 
 # A worker process here is not free: it imports Qt, pyqtgraph and the whole
 # arrayscope package before it runs anything, which measures ~1.3 s wall. Below
 # this much recorded work, starting even one of them costs more than the tests
 # it would run, so a small selection runs in-process instead.
 _SERIAL_BELOW_SECONDS = 2.5
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--since",
+        metavar="REF",
+        nargs="?",
+        const="",
+        default=None,
+        help=(
+            "Also run everything this branch changed since REF (merge-base semantics). "
+            "Bare --since resolves the baseline itself: ARRAYSCOPE_BASELINE_REF, then "
+            "the branch's upstream, then main. The map only knows what changed since "
+            "the last run, which before merging is the wrong question."
+        ),
+    )
 
 
 def pytest_xdist_auto_num_workers(config):
@@ -105,6 +126,10 @@ def _selection_workload(config):
     _ensure_map_seeded(config)
     if not testmon_policy.selects(config):
         return None
+    if config.getoption("since") is not None:
+        # --since widens the run by an amount only collection can know, so the
+        # map's answer would under-provision the pool.
+        return None
     try:
         environment = testmon_policy.resolve_environment(config.getini("environment_expression"))
         peek = testmon_policy.peek(
@@ -120,18 +145,43 @@ def _selection_workload(config):
     paths = testmon_policy.path_arguments(config)
     affected = {name for name in peek.affected_files if testmon_policy.under(name, paths)}
     seconds = peek.affected_seconds
+    # Reds run whether or not anything they use changed, so they are part of the
+    # workload the pool has to cover — leaving them out is how a thirteen-file
+    # re-run ends up running in one process. Which reds run depends on the
+    # policy: the ones this checkout broke always, the inherited ones only under
+    # the flag.
+    forced_files = {red.split("::", 1)[0] for red in _new_reds(config)}
     if testmon_policy.rerun_known_red_tests():
-        # These run whether or not anything they use changed, so they are part
-        # of the workload the pool has to cover — leaving them out is how a
-        # thirteen-file re-run ends up running in one process.
-        affected |= {name for name in peek.forced_files if testmon_policy.under(name, paths)}
+        forced_files |= set(peek.forced_files)
         seconds += peek.forced_seconds
+    affected |= {name for name in forced_files if testmon_policy.under(name, paths)}
     unmapped = {
         name
         for name in testmon_policy.collect_test_files(config.rootdir, paths)
         if name not in peek.mapped_files
     }
     return len(affected | unmapped), seconds, len(unmapped)
+
+
+def _new_reds(config):
+    """Tests this checkout broke, from the ledger. Cached per run.
+
+    Read from disk rather than passed down, because the two places that need it
+    — worker sizing on the controller, and the deselection that happens on each
+    xdist worker — are in different processes. The controller writes the file
+    once, after every test has finished, so it is stable for the whole run.
+    """
+
+    cached = getattr(config, "arrayscope_new_reds", None)
+    if cached is not None:
+        return cached
+    try:
+        environment = testmon_policy.resolve_environment(config.getini("environment_expression"))
+        found = red_ledger.read_new_reds(testmon_policy.map_path(config.rootdir), environment)
+    except Exception:  # an unreadable ledger costs a re-run, never a wrong result
+        found = set()
+    config.arrayscope_new_reds = found
+    return found
 
 
 def _ensure_map_seeded(config):
@@ -187,7 +237,15 @@ def pytest_collection(session):
     controller reports the count from the map instead of from the mutation.
     """
 
-    testmon_policy.apply_known_red_policy(session.config)
+    config = session.config
+    testmon_policy.apply_known_red_policy(config, _new_reds(config))
+    since = config.getoption("since")
+    if since is not None and _selection_is_narrowing(config):
+        try:
+            ref, reached = testmon_policy.apply_since_baseline(config, since or None)
+        except testmon_policy.UsageError as error:
+            raise pytest.UsageError(str(error)) from error
+        config.arrayscope_since = (ref, reached)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -232,6 +290,61 @@ def _selection_is_narrowing(config):
     return bool(testmon_config) and bool(testmon_config.select)
 
 
+def pytest_sessionstart(session):
+    """Open the red ledger, once testmon's map is readable and before any test.
+
+    Not in ``pytest_configure``: that hook runs ``tryfirst`` here so the default
+    is in place before testmon reads it, which means testmon's own configure —
+    and therefore ``config.testmon_data`` — does not exist yet.
+
+    Only the controller (or a serial run) opens it. Worker reports are forwarded
+    to the controller's ``pytest_runtest_logreport``, so it sees every outcome,
+    and one writer means no lock and no lost update.
+    """
+
+    global _red_ledger
+    _red_ledger = None
+    config = session.config
+    testmon_config = getattr(config, "testmon_config", None)
+    if _XDIST_WORKER or not testmon_config or not testmon_config.collect:
+        return
+    data = getattr(config, "testmon_data", None)
+    if data is None:
+        return
+    try:
+        previous = {
+            name: bool((report or {}).get("failed")) for name, report in data.all_tests.items()
+        }
+        _red_ledger = red_ledger.RedLedger.load(
+            testmon_policy.map_path(config.rootdir),
+            data.environment,
+            previous,
+            map_was_populated=bool(previous),
+        )
+    except Exception:  # a missing ledger costs a re-run, never a wrong result
+        _red_ledger = None
+
+
+def pytest_collection_finish(session):
+    """Serial runs collect here; xdist collects on the workers (see below)."""
+
+    if _red_ledger is not None:
+        _collected.update(item.nodeid for item in session.items)
+
+
+def pytest_xdist_node_collection_finished(node, ids):
+    """The controller's only view of what was collected, since it never collects."""
+
+    if _red_ledger is not None:
+        _collected.update(ids)
+
+
+def pytest_sessionfinish(session):
+    if _red_ledger is not None:
+        _red_ledger.forget_missing(_collected)
+        _red_ledger.save()
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_logreport(report):
     """Record the dependencies coverage cannot see, before testmon stores them.
@@ -247,6 +360,13 @@ def pytest_runtest_logreport(report):
     """
 
     testmon_policy.inject_out_of_process_dependencies(report, testmon_policy.REPO_ROOT)
+    if _red_ledger is not None:
+        if report.failed:
+            # Any phase counts: a fixture that raises in setup breaks the test
+            # just as thoroughly as a failing assertion.
+            _red_ledger.record(report.nodeid, failed=True)
+        elif report.when == "call" and report.passed:
+            _red_ledger.record(report.nodeid, failed=False)
     yield
 
 
@@ -306,22 +426,52 @@ def pytest_terminal_summary(terminalreporter, config):
     unaffected = len(getattr(data, "stable_test_names", ()) or ())
     if not mapped or not unaffected:
         return
-    known_red = len(testmon_policy.known_red_tests(config))
-    skipped = unaffected if not testmon_policy.rerun_known_red_tests() else unaffected - known_red
+    since = getattr(config, "arrayscope_since", None)
+    reached = 0
+    if since is not None:
+        ref, reached = since
+        terminalreporter.write_line(
+            f"test selection: --since {ref} added {reached} tests this branch changed "
+            "since its baseline, on top of what the map called affected.",
+            bold=True,
+        )
+
+    new_reds = _red_ledger.new_reds if _red_ledger is not None else _new_reds(config)
+    inherited = testmon_policy.known_red_tests(config) - new_reds
+    # Every count here is "of the tests the map called unaffected", so anything
+    # pulled back in — by --since, or by the flag that re-runs inherited reds —
+    # has to come back out, or the line claims a gap that was already closed.
+    skipped = unaffected - reached
+    if testmon_policy.rerun_known_red_tests():
+        skipped -= len(inherited)
+    skipped = max(0, skipped)
     terminalreporter.write_line(
         f"test selection: {skipped} of {mapped} mapped tests were unaffected by this "
         "working tree and did not run. The whole suite is `pytest --no-testmon`.",
         bold=True,
     )
-    if known_red and not testmon_policy.rerun_known_red_tests():
+    if inherited and not testmon_policy.rerun_known_red_tests():
         terminalreporter.write_line(
-            f"test selection: {known_red} of those were already failing before this run and "
-            "nothing they use changed, so they were not re-run "
+            f"test selection: {len(inherited)} of those were already failing when this "
+            "checkout's map arrived and nothing they use changed, so they were not re-run "
             "(`ARRAYSCOPE_TESTMON_RERUN_FAILING=1` re-runs them; "
             "`python tools/test_selection.py status` names them).",
             bold=True,
             yellow=True,
         )
+    if new_reds:
+        # Printed whether or not they ran this time. They are never deselected,
+        # so normally they are in the failure list above — but a run scoped with
+        # -k or a path can still miss them, and then this is the only place the
+        # regression is named.
+        terminalreporter.write_line(
+            f"BROKEN HERE ({len(new_reds)}): these were passing in this checkout and are "
+            "not; they run on every selected run until they pass again.",
+            bold=True,
+            red=True,
+        )
+        for nodeid in sorted(new_reds):
+            terminalreporter.write_line(f"    {nodeid}", red=True)
 
 
 # Keep direct-import test modules from replacing the real package in sys.modules.
