@@ -71,6 +71,7 @@ class PassSummary:
     component_p50_ms: dict[str, float]
     maximum_cohort: int
     maximum_component_ms: dict[str, float]
+    prepared_upload: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -240,6 +241,16 @@ def _pass_summary(
         maximum_component_ms=(
             {component: float(maximum_row.get(component, 0.0) or 0.0) for component in _COMPONENTS}
             if maximum_row is not None
+            else {}
+        ),
+        # Cumulative, so the last row of the pass carries the whole run.
+        prepared_upload=(
+            {
+                key[len("prepared_upload_") :]: int(value or 0)
+                for key, value in rows[-1].items()
+                if key.startswith("prepared_upload_")
+            }
+            if rows
             else {}
         ),
     )
@@ -494,6 +505,17 @@ def _print_markdown(
             f"  cohorts={','.join(str(value) for value in row.cohort_sequence)}; "
             f"model={' | '.join(row.final_governor_details)}"
         )
+        if row.prepared_upload:
+            # Whether the worker hand-off actually paid, in counts rather than
+            # milliseconds: a commit that packed inline because no preparation
+            # arrived is indistinguishable in the timings from one on a build
+            # with no hand-off at all.
+            print(
+                "  prepared-upload: "
+                + ", ".join(
+                    f"{name}={value}" for name, value in sorted(row.prepared_upload.items())
+                )
+            )
 
 
 def _build_parser() -> argparse.ArgumentParser:
