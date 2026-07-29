@@ -64,6 +64,7 @@ class PreparedUploadCounters:
     over the whole population, so wasted work has nowhere to hide:
 
         planned = submitted + deduped + skipped_resident + skipped_no_work
+                  + skipped_stale_round
         submitted = executed + superseded_before_execution
         executed ≈ published + rejected
         published = hits + stale + replaced + evicted + resident_entries
@@ -80,6 +81,7 @@ class PreparedUploadCounters:
     deduped: int = 0
     skipped_resident: int = 0
     skipped_no_work: int = 0
+    skipped_stale_round: int = 0
     # Execution: what the workers did with what they were given.
     executed: int = 0
     published: int = 0
@@ -142,6 +144,7 @@ class PreparedUploadMailbox:
         self._deduped = 0
         self._skipped_resident = 0
         self._skipped_no_work = 0
+        self._skipped_stale_round = 0
         self._executed = 0
         self._published = 0
         self._rejected = 0
@@ -191,6 +194,17 @@ class PreparedUploadMailbox:
 
         with self._lock:
             self._skipped_no_work += max(0, int(count))
+
+    def note_stale_round(self, count: int = 1) -> None:
+        """Planning skipped payloads whose round levels have not caught up.
+
+        Distinct from every other skip: these are payloads the hand-off *would*
+        have prepared, refused because the buffer would be guaranteed stale
+        rather than merely unlikely to be used.
+        """
+
+        with self._lock:
+            self._skipped_stale_round += max(0, int(count))
 
     def note_executed(self, count: int = 1) -> None:
         """A worker entered a preparation closure.
@@ -306,6 +320,7 @@ class PreparedUploadMailbox:
                 deduped=self._deduped,
                 skipped_resident=self._skipped_resident,
                 skipped_no_work=self._skipped_no_work,
+                skipped_stale_round=self._skipped_stale_round,
                 executed=self._executed,
                 published=self._published,
                 rejected=self._rejected,

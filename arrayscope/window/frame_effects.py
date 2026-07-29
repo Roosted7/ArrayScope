@@ -1257,6 +1257,17 @@ class FramePipelineEffects:
             # would bake against a window this round will not use (R3). WGPU
             # ignores the value; skipping is the conservative shared answer.
             return
+        if getattr(level_generation, "semantic_key", None) != getattr(session, "level_key", None):
+            # Present levels, but belonging to the *previous* round. Preparing
+            # against them is not a gamble that sometimes pays: the commit will
+            # ask under this round's window and refuse every buffer as stale,
+            # so it is a guaranteed miss bought with worker time. Measured on a
+            # cold scroll: 36 preparations, 36 stale takes, zero hits, all of
+            # them baked at the pre-scroll (0, 71) while the commit wanted
+            # (36, 107). The same predicate the commit path uses to decide the
+            # level generation has caught up with the round.
+            mailbox.note_stale_round(len(payloads))
+            return
         session_id = int(getattr(session, "session_id", 0) or 0)
         try:
             preparations = plan(
@@ -4462,6 +4473,7 @@ def _prepared_upload_counters(renderer) -> dict[str, int]:
         "prepared_upload_deduped": int(counters.deduped),
         "prepared_upload_skipped_resident": int(counters.skipped_resident),
         "prepared_upload_skipped_no_work": int(counters.skipped_no_work),
+        "prepared_upload_skipped_stale_round": int(counters.skipped_stale_round),
         # Execution: what a worker did, and what the scheduler dropped first.
         "prepared_upload_executed": int(counters.executed),
         "prepared_upload_superseded_before_execution": int(counters.superseded_before_execution),
