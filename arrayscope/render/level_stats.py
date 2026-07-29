@@ -2467,8 +2467,14 @@ class LevelStatsService:
             pending_sources.discard(int(source_index))
         metadata_improved = False
         if stats is not None:
-            self._montage_level_tracker().update_from_stats(level_key, stats, aggregate=False)
-            summary = self._montage_level_tracker().summary_for(level_key)
+            tracker = self._montage_level_tracker()
+            # This queue is intentionally CPU-windowed only:
+            # _queue_montage_level_refinement declines shader displays because
+            # PyQtGraph re-bakes the payload when its levels change. WGPU's
+            # source refinement is owned by the semantic-evidence sweep and its
+            # presented-pixel containment belongs at shader publication time.
+            tracker.update_from_stats(level_key, stats, aggregate=False)
+            summary = tracker.summary_for(level_key)
             first_cpu_frame_ready = bool(
                 summary is not None
                 and not session.display_committed

@@ -56,7 +56,13 @@ from arrayscope.display.montage import (
     montage_rect_for_viewport,
 )
 from arrayscope.display.pyramid import MaterializedLodPage
-from arrayscope.display.shader_mapping import TexturePlaneKind
+from arrayscope.display.shader_mapping import (
+    TexturePlaneKind,
+    extract_component,
+)
+from arrayscope.display.shader_mapping import (
+    apply_scale as apply_shader_scale,
+)
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import (
     ClaimOwner,
@@ -2646,6 +2652,10 @@ class FrameSession:
                 source_anchor=new_anchor,
                 tile_identity=new_identity,
                 level_evidence_window_stale=True,
+                rebind_current_value_bounds=_rebind_current_plane_value_bounds(
+                    previous,
+                    planes,
+                ),
                 **planes,
             )
             # The residency seam returns True only when the binding is
@@ -5295,6 +5305,46 @@ def plan_presentation_transition(
     # still owns a compatible predecessor. Hand off every required on-screen
     # slot together so no partial successor replaces that complete frame.
     return PresentationTransitionDecision(True, True, "montage-compatible")
+
+
+def _rebind_current_plane_value_bounds(previous, planes) -> tuple[float, float] | None:
+    """Exact display-value bounds for planes cut to a rebound window."""
+
+    values = planes.get("semantic_histogram_data")
+    if values is None:
+        values = planes.get("histogram_data")
+    if values is None:
+        semantic = planes.get("semantic_data")
+        mapping = getattr(previous, "shader_mapping", None)
+        if semantic is not None and mapping is not None:
+            values = extract_component(
+                np.asarray(semantic),
+                getattr(mapping, "component", "real"),
+            )
+            values = apply_shader_scale(
+                values,
+                getattr(mapping, "scale", "linear"),
+                symlog_constant=float(getattr(mapping, "symlog_constant", 0.0) or 0.0),
+            )
+        elif semantic is not None and not np.iscomplexobj(semantic):
+            values = semantic
+    if values is None:
+        image = np.asarray(planes.get("image", ()))
+        if (
+            image.size
+            and not np.iscomplexobj(image)
+            and not (image.ndim >= 3 and int(image.shape[-1]) in (3, 4))
+        ):
+            values = image
+    if values is None:
+        return None
+    array = np.asarray(values)
+    if np.iscomplexobj(array):
+        return None
+    finite = array[np.isfinite(array)]
+    if not finite.size:
+        return None
+    return float(np.min(finite)), float(np.max(finite))
 
 
 def _window_local_semantics_outlive_anchor(payload, new_anchor) -> bool:

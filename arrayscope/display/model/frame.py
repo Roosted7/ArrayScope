@@ -322,6 +322,10 @@ class DisplayTilePayload:
     # so level-evidence consumers must ignore them and wait for the semantic
     # evidence owner's window-exact sample.
     level_evidence_window_stale: bool = False
+    # Exact CPU-plane rebinds can prove the values of the newly sliced window
+    # even though their carried level_stats/level_data are predecessor-owned.
+    # Computed once at the rebind seam; page-backed rebinds leave it absent.
+    rebind_current_value_bounds: tuple[float, float] | None = None
 
     def __post_init__(self) -> None:
         quality = str(self.quality or "exact")
@@ -400,6 +404,14 @@ class DisplayTilePayload:
                 object.__setattr__(self, "rgb_windowed_levels", (float(low), float(high)))
             except Exception as exc:
                 raise ValueError("rgb_windowed_levels must be a 2-tuple of finite levels") from exc
+        if self.rebind_current_value_bounds is not None:
+            try:
+                low, high = (float(value) for value in self.rebind_current_value_bounds)
+            except Exception as exc:
+                raise ValueError("rebind current value bounds must be a finite pair") from exc
+            if not (np.isfinite(low) and np.isfinite(high) and high >= low):
+                raise ValueError("rebind current value bounds must be an ordered finite pair")
+            object.__setattr__(self, "rebind_current_value_bounds", (low, high))
         page_backing = self.page_backing
         if page_backing is not None:
             if not isinstance(page_backing, PageBackedPresentation):

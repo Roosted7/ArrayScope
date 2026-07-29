@@ -1842,6 +1842,49 @@ def test_progressive_invariant_gate_rejects_clipped_presented_tile():
     assert "commit_levels_contain_presented_tile" in _failed_invariant_gates(result)
 
 
+def test_r3_rejects_only_stale_rebind_evidence_and_uses_current_plane():
+    """A re-sliced CPU plane remains current when carried stats do not."""
+
+    import numpy as np
+
+    from arrayscope.display.model.montage_levels import TileLevelStats
+    from arrayscope.tools.profile_montage_workflow import _presented_payload_value_bounds
+
+    payload = SimpleNamespace(
+        level_evidence_window_stale=True,
+        level_stats=TileLevelStats(
+            source_index=7,
+            bounds=(0.0, 10.0),
+            sample=np.asarray([0.0, 10.0], dtype=np.float32),
+        ),
+        level_data=np.asarray([0.0, 10.0], dtype=np.float32),
+        semantic_data=np.asarray([[3.0, 4.0]], dtype=np.float32),
+        semantic_histogram_data=None,
+        histogram_data=None,
+        image=np.asarray([[3.0, 4.0]], dtype=np.float32),
+        page_backing=None,
+    )
+    assert _presented_payload_value_bounds(payload) == (
+        (3.0, 4.0),
+        "stale-stats-rejected-plane-used",
+    )
+
+    page_backed = SimpleNamespace(
+        level_evidence_window_stale=True,
+        level_stats=payload.level_stats,
+        level_data=payload.level_data,
+        semantic_data=None,
+        semantic_histogram_data=None,
+        histogram_data=None,
+        image=np.asarray((), dtype=np.float32),
+        page_backing=object(),
+    )
+    assert _presented_payload_value_bounds(page_backed) == (
+        None,
+        "page-backed-rebind-no-current-plane",
+    )
+
+
 def test_progressive_invariant_gate_requires_pyqtgraph_tile_value_and_bake_evidence():
     evidence = deepcopy(_passing_contract_evidence(backend="pyqtgraph"))
     payload = evidence["rounds"][0]["commits"][0]["presented_payloads"][0]

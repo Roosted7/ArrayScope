@@ -545,6 +545,31 @@ class FramePipelineEffects:
             remember_canonical=self._remember_canonical_plane_payload,
         )
         if rebound:
+            # Arm the fail-safe before the asynchronous evidence producer (and
+            # therefore before its presentation wakeup).  A rebound commit can
+            # otherwise reuse the predecessor target once with the new-window
+            # wrappers and only discover their exact bounds on the following
+            # commit -- one physically clipped frame.
+            source = getattr(self.session, "applied_level_source", None)
+            if source is None:
+                source = getattr(
+                    getattr(self.session, "level_generation", None),
+                    "target_source",
+                    None,
+                )
+            clamped = _shader_level_source_covering_presented_payloads(
+                self.session,
+                source,
+                prospective_tiles=rebound,
+            )
+            if clamped is not None and normalize_bounds(
+                getattr(clamped, "levels", None)
+            ) != normalize_bounds(getattr(source, "levels", None)):
+                self.session.applied_level_source = clamped
+                self.session.begin_level_presentation_update(
+                    clamped.levels,
+                    source=clamped,
+                )
             # A rebound window is presented without any evaluation sampling it,
             # so the only producer that can anchor its levels is the semantic
             # evidence owner.  Arm it here, at the seam that knows the window
@@ -2065,6 +2090,17 @@ class FramePipelineEffects:
                         )
                         .as_level_source()
                     )
+                    current_level_source = _shader_level_source_covering_presented_payloads(
+                        session,
+                        current_level_source,
+                        prospective_tiles=(
+                            *(int(tile) for tile in dirty_tiles),
+                            *(
+                                int(tile)
+                                for tile in getattr(session, "pending_payload_upserts", ())
+                            ),
+                        ),
+                    )
                     # The applied source and convergence target are separate:
                     # the target may already name these levels while a prior
                     # display decision still owns the applied source. Publish
@@ -2377,6 +2413,15 @@ class FramePipelineEffects:
                     if not bool(capabilities.shader_windowing)
                     else 0
                 ),
+            )
+            # The presentation decision runs its controller once more from
+            # ``applied_level_source`` to ``semantic_source``.  Feeding the
+            # unclamped refined source here would immediately undo the R3
+            # clamp selected above on the very transaction that introduces
+            # the rebound/outlying payload.
+            semantic_source = _shader_semantic_source_with_presented_clamp(
+                session,
+                semantic_source,
             )
             renderer._last_montage_tile_prepare_source_ms = (
                 perf_counter() - prepare_source_start
@@ -4395,7 +4440,168 @@ def shader_commit_level_source(renderer, session, *, rehydrate_max_count: int | 
         applied_source = getattr(session, "applied_level_source", None)
         if getattr(applied_source, "semantic_key", None) == session.level_key:
             current_level_source = applied_source
+    clamp = getattr(session, "_shader_presented_bounds_clamp", None)
+    if (
+        current_level_source is not None
+        and isinstance(clamp, dict)
+        and clamp.get("semantic_key") == getattr(current_level_source, "semantic_key", None)
+    ):
+        presented_bounds, _observations = _shader_presented_payload_bounds(session)
+        true_bounds = normalize_bounds(clamp.get("true_bounds"))
+        clamp_still_required = bool(
+            presented_bounds is not None
+            and true_bounds is not None
+            and (presented_bounds[0] < true_bounds[0] or presented_bounds[1] > true_bounds[1])
+        )
+        if clamp_still_required:
+            applied_source = getattr(session, "applied_level_source", None)
+            if getattr(applied_source, "semantic_key", None) == getattr(
+                current_level_source, "semantic_key", None
+            ) and normalize_bounds(getattr(applied_source, "levels", None)) == normalize_bounds(
+                clamp.get("published_bounds")
+            ):
+                return applied_source
+        else:
+            session._shader_presented_bounds_clamp = None
     return current_level_source
+
+
+def _shader_presented_payload_bounds(session, *, prospective_tiles=()):
+    covered = None
+    observations = []
+    lifecycle = getattr(session, "lifecycle", None)
+    presented_tiles = {int(tile) for tile in tuple(getattr(lifecycle, "presented_tiles", ()) or ())}
+    admitted_payloads = dict(getattr(session, "display_tile_payloads", {}) or {})
+    prospective_tiles = {int(tile) for tile in tuple(prospective_tiles or ())}
+    required_tiles = tuple(
+        sorted(presented_tiles | prospective_tiles | {int(tile) for tile in admitted_payloads})
+    )
+    for tile in required_tiles:
+        # Prefer the wrapper admitted for this transaction.  The level source
+        # is chosen before the CPU delta is built, so consulting only the
+        # previously acknowledged payload protects the frame *after* the
+        # rebound one and leaves the rebound commit itself exposed.
+        payload = admitted_payloads.get(tile)
+        presentation_state = "admitted"
+        current_presentable = getattr(lifecycle, "current_presentable_payload", None)
+        if payload is None and tile in prospective_tiles and callable(current_presentable):
+            payload = current_presentable(tile)
+            presentation_state = "prospective"
+        if payload is None:
+            payload = render_effects.presented_first_pixel_payload(session, tile)
+            presentation_state = "acknowledged"
+        if payload is None:
+            continue
+        window_stale = bool(getattr(payload, "level_evidence_window_stale", False))
+        if window_stale:
+            bounds = normalize_bounds(getattr(payload, "rebind_current_value_bounds", None))
+        else:
+            stats = getattr(payload, "level_stats", None)
+            bounds = normalize_bounds(getattr(stats, "bounds", None))
+        if bounds is None:
+            continue
+        covered = (
+            bounds if covered is None else (min(covered[0], bounds[0]), max(covered[1], bounds[1]))
+        )
+        observations.append(
+            {
+                "tile": int(tile),
+                "source_index": int(getattr(payload, "source_index", -1)),
+                "presented_level": int(
+                    getattr(
+                        payload,
+                        "conservative_actual_lod_level",
+                        getattr(getattr(payload, "lod", None), "level", 0),
+                    )
+                    or 0
+                ),
+                "presented_bounds": tuple(float(value) for value in bounds),
+                "presentation_state": presentation_state,
+            }
+        )
+    return covered, tuple(observations)
+
+
+def _shader_semantic_source_with_presented_clamp(session, semantic_source):
+    presented_clamp = getattr(session, "_shader_presented_bounds_clamp", None)
+    applied_source = getattr(session, "applied_level_source", None)
+    if (
+        bool(getattr(session, "shader_display", False))
+        and isinstance(presented_clamp, dict)
+        and getattr(applied_source, "semantic_key", None)
+        == getattr(semantic_source, "semantic_key", None)
+        == presented_clamp.get("semantic_key")
+    ):
+        return applied_source
+    return semantic_source
+
+
+def _shader_level_source_covering_presented_payloads(session, source, *, prospective_tiles=()):
+    """Keep a WGPU refinement honest for the payloads it will restate.
+
+    The semantic-evidence owner may finish after a coarser preview payload was
+    acknowledged. Its refined source is the true target window, but it does
+    not describe a preview value that lies outside that window. WGPU changes
+    one levels uniform without re-baking those pixels, so the offered source
+    must temporarily include every acknowledged or admitted payload's bounds.
+
+    This is a presentation clamp, not tracker policy. The tracker retains the
+    narrower refined source, and the clamp deliberately reports target-quality
+    evidence while it is wider. Once the outlying preview is replaced, the
+    refined source is strictly more mature and the controller may converge to
+    its true range. PyQtGraph never enters this helper: its level change
+    re-bakes the payload, and its tile-refinement queue may narrow directly.
+    """
+
+    if source is None or not bool(getattr(session, "shader_display", False)):
+        return source
+    source_levels = normalize_bounds(getattr(source, "levels", None))
+    if source_levels is None:
+        return source
+    presented_bounds, observations = _shader_presented_payload_bounds(
+        session,
+        prospective_tiles=prospective_tiles,
+    )
+    covered = (
+        source_levels
+        if presented_bounds is None
+        else (
+            min(source_levels[0], presented_bounds[0]),
+            max(source_levels[1], presented_bounds[1]),
+        )
+    )
+    if covered == source_levels:
+        return source
+    emit_trace(
+        "shader_refinement_presented_bounds_clamp",
+        session_id=int(getattr(session, "session_id", 0) or 0),
+        refined_bounds=tuple(float(value) for value in source_levels),
+        published_bounds=tuple(float(value) for value in covered),
+        observations=tuple(
+            row
+            for row in observations
+            if row["presented_bounds"][0] < source_levels[0]
+            or row["presented_bounds"][1] > source_levels[1]
+        ),
+    )
+    session._shader_presented_bounds_clamp = {
+        "semantic_key": getattr(source, "semantic_key", None),
+        "true_bounds": source_levels,
+        "published_bounds": covered,
+    }
+    histogram = normalize_bounds(getattr(source, "histogram_range", None)) or source_levels
+    return replace(
+        source,
+        levels=covered,
+        histogram_range=(
+            min(histogram[0], covered[0]),
+            max(histogram[1], covered[1]),
+        ),
+        evidence_quality=min(
+            int(getattr(source, "evidence_quality", 0) or 0),
+            int(LevelEvidenceQuality.ROUGH_TARGET),
+        ),
+    )
 
 
 def _compatible_successor_payload_count(session) -> int:

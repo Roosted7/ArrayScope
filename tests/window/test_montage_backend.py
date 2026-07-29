@@ -1901,6 +1901,268 @@ def test_first_cpu_histogram_publishes_only_complete_round_evidence():
     assert published[0]["levels"] == (0.0, 272.0)
 
 
+def test_shader_refinement_narrows_when_presented_payload_is_inside_true_range(monkeypatch):
+    """WGPU keeps legal narrowing when the presented current plane fits."""
+
+    from arrayscope.core.window_levels import LevelSource, LevelSourceRank
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        TileLevelStats,
+    )
+    from arrayscope.window import frame_effects
+    from arrayscope.window.frame_session import _rebind_current_plane_value_bounds
+
+    rebind_bounds = _rebind_current_plane_value_bounds(
+        SimpleNamespace(shader_mapping=None),
+        {"semantic_data": np.asarray([[2.0, 5.0, 8.0]], dtype=np.float32)},
+    )
+    payload = SimpleNamespace(
+        source_index=7,
+        quality="exact",
+        lod=SimpleNamespace(level=0),
+        level_evidence_window_stale=True,
+        rebind_current_value_bounds=rebind_bounds,
+        level_stats=TileLevelStats(
+            source_index=7,
+            bounds=(0.0, 10.0),
+            sample=np.asarray([0.0, 10.0], dtype=np.float32),
+            evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+        ),
+    )
+    session = SimpleNamespace(
+        shader_display=True,
+        session_id=3,
+        lifecycle=SimpleNamespace(
+            presented_tiles=set(),
+            backend_presented_identities={},
+            current_presentable_payload=lambda tile: payload if tile == 4 else None,
+        ),
+        tile_presentation_state=SimpleNamespace(payloads={}),
+        display_tile_payloads={},
+    )
+    source = LevelSource(
+        levels=(1.0, 9.0),
+        histogram_range=(1.0, 9.0),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        source_count=1,
+        expected_count=1,
+        semantic_key=("levels", "presented-cohort"),
+        evidence_quality=LevelEvidenceQuality.REFINED,
+    )
+    events = []
+    monkeypatch.setattr(
+        frame_effects,
+        "emit_trace",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    published = frame_effects._shader_level_source_covering_presented_payloads(
+        session,
+        source,
+        prospective_tiles=(4,),
+    )
+
+    assert published == source
+    assert published.levels == (1.0, 9.0)
+    assert published.evidence_quality == LevelEvidenceQuality.REFINED
+    assert events == []
+
+
+def test_shader_refinement_covers_outlying_presented_payload_then_converges(monkeypatch):
+    """R3 clamp is temporary presentation evidence, not a frozen tracker range."""
+
+    from arrayscope.core.window_levels import (
+        LevelMode,
+        LevelSource,
+        LevelSourceRank,
+        WindowLevelController,
+    )
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        TileLevelStats,
+    )
+    from arrayscope.window import frame_effects
+
+    payload = SimpleNamespace(
+        source_index=7,
+        quality="preview",
+        lod=SimpleNamespace(level=5),
+        level_evidence_window_stale=False,
+        level_stats=TileLevelStats(
+            source_index=7,
+            bounds=(0.0, 10.0),
+            sample=np.asarray([0.0, 10.0], dtype=np.float32),
+            evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+        ),
+    )
+    session = SimpleNamespace(
+        shader_display=True,
+        session_id=3,
+        lifecycle=SimpleNamespace(presented_tiles={4}, backend_presented_identities={}),
+        tile_presentation_state=SimpleNamespace(payloads={4: payload}),
+        display_tile_payloads={4: payload},
+    )
+    source = LevelSource(
+        levels=(1.0, 9.0),
+        histogram_range=(1.0, 9.0),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        source_count=1,
+        expected_count=1,
+        semantic_key=("levels", "presented-cohort"),
+        evidence_quality=LevelEvidenceQuality.REFINED,
+    )
+    events = []
+    monkeypatch.setattr(
+        frame_effects,
+        "emit_trace",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    clamped = frame_effects._shader_level_source_covering_presented_payloads(
+        session,
+        source,
+    )
+
+    assert clamped.levels == (0.0, 10.0)
+    assert clamped.evidence_quality == LevelEvidenceQuality.ROUGH_TARGET
+    session.applied_level_source = clamped
+    assert frame_effects._shader_semantic_source_with_presented_clamp(session, source) is clamped
+    assert events == [
+        (
+            "shader_refinement_presented_bounds_clamp",
+            {
+                "session_id": 3,
+                "refined_bounds": (1.0, 9.0),
+                "published_bounds": (0.0, 10.0),
+                "observations": (
+                    {
+                        "tile": 4,
+                        "source_index": 7,
+                        "presented_level": 5,
+                        "presented_bounds": (0.0, 10.0),
+                        "presentation_state": "admitted",
+                    },
+                ),
+            },
+        )
+    ]
+
+    replacement = SimpleNamespace(
+        source_index=7,
+        quality="exact",
+        lod=SimpleNamespace(level=0),
+        level_evidence_window_stale=False,
+        level_stats=TileLevelStats(
+            source_index=7,
+            bounds=(2.0, 8.0),
+            sample=np.asarray([2.0, 8.0], dtype=np.float32),
+            refined=True,
+            evidence_quality=LevelEvidenceQuality.REFINED,
+        ),
+    )
+    session.tile_presentation_state.payloads[4] = replacement
+    session.display_tile_payloads[4] = replacement
+    refined_decision = (
+        WindowLevelController()
+        .decide(
+            previous=clamped,
+            candidate=source,
+            mode=LevelMode.RELATIVE,
+        )
+        .as_level_source()
+    )
+    converged = frame_effects._shader_level_source_covering_presented_payloads(
+        session,
+        refined_decision,
+    )
+    assert converged.levels == (1.0, 9.0)
+    assert converged.evidence_quality == LevelEvidenceQuality.REFINED
+
+
+def test_shader_commit_holds_the_presented_clamp_then_releases_it():
+    """The release edge is what bounds the clamp; without it the window stays wide.
+
+    ``_shader_level_source_covering_presented_payloads`` only arms the clamp.
+    Every subsequent commit re-offers it from ``shader_commit_level_source``,
+    so that seam owns both halves of the contract: hold the widened window
+    while an outlying payload is still presented, and hand the refined source
+    back — clamp cleared — the moment it is replaced. A clamp that armed and
+    never cleared would freeze the round window exactly as monotonic tracker
+    widening did.
+    """
+
+    from arrayscope.core.window_levels import LevelSource, LevelSourceRank
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        TileLevelStats,
+    )
+    from arrayscope.window import frame_effects
+
+    level_key = ("levels", "presented-cohort")
+
+    def presented_payload(bounds):
+        return SimpleNamespace(
+            source_index=7,
+            quality="preview",
+            lod=SimpleNamespace(level=5),
+            level_evidence_window_stale=False,
+            level_stats=TileLevelStats(
+                source_index=7,
+                bounds=bounds,
+                sample=np.asarray(bounds, dtype=np.float32),
+                evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+            ),
+        )
+
+    refined_source = LevelSource(
+        levels=(1.0, 9.0),
+        histogram_range=(1.0, 9.0),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        source_count=1,
+        expected_count=1,
+        semantic_key=level_key,
+        evidence_quality=LevelEvidenceQuality.REFINED,
+    )
+    clamped_source = LevelSource(
+        levels=(0.0, 10.0),
+        histogram_range=(0.0, 10.0),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        source_count=1,
+        expected_count=1,
+        semantic_key=level_key,
+        evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+    )
+    outlying = presented_payload((0.0, 10.0))
+    session = SimpleNamespace(
+        shader_display=True,
+        session_id=3,
+        level_key=level_key,
+        first_pass_histogram_published=False,
+        lifecycle=SimpleNamespace(presented_tiles={4}, backend_presented_identities={}),
+        tile_presentation_state=SimpleNamespace(payloads={4: outlying}),
+        display_tile_payloads={4: outlying},
+        applied_level_source=clamped_source,
+        _shader_presented_bounds_clamp={
+            "semantic_key": level_key,
+            "true_bounds": (1.0, 9.0),
+            "published_bounds": (0.0, 10.0),
+        },
+    )
+    renderer = SimpleNamespace(
+        _montage_level_source_for_session=lambda session, **kwargs: refined_source
+    )
+
+    assert frame_effects.shader_commit_level_source(renderer, session) is clamped_source
+    assert session._shader_presented_bounds_clamp is not None
+
+    inside = presented_payload((2.0, 8.0))
+    session.tile_presentation_state.payloads[4] = inside
+    session.display_tile_payloads[4] = inside
+
+    assert frame_effects.shader_commit_level_source(renderer, session) is refined_source
+    assert session._shader_presented_bounds_clamp is None
+
+
 def test_shader_first_pixels_wait_for_rough_source_but_not_complete_source():
     from arrayscope.core.window_levels import LevelSourceRank
     from arrayscope.display.model.montage_levels import LevelEvidenceQuality, MontageLevelStats

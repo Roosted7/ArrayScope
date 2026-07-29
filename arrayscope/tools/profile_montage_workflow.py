@@ -5737,7 +5737,13 @@ class _ProgressiveInvariantProbe:
         commits = []
         for commit in tuple(row.get("commits", ()) or ()):
             payload_rows = []
-            for tile, payload, backend_identity, physical_levels in tuple(commit["payload_rows"]):
+            for (
+                tile,
+                payload,
+                backend_identity,
+                physical_levels,
+            ) in tuple(commit["payload_rows"]):
+                value_bounds, value_bounds_source = _presented_payload_value_bounds(payload)
                 payload_rows.append(
                     {
                         "tile": int(tile),
@@ -5766,7 +5772,8 @@ class _ProgressiveInvariantProbe:
                             if payload is None
                             else _trace_identity(getattr(payload, "source_id", None))
                         ),
-                        "value_bounds": _payload_value_bounds(payload),
+                        "value_bounds": value_bounds,
+                        "value_bounds_source": value_bounds_source,
                         "baked_levels": _finite_level_pair(physical_levels)
                         or (
                             None
@@ -5803,22 +5810,35 @@ def _finite_level_pair(value) -> tuple[float, float] | None:
     return low, high
 
 
-def _payload_value_bounds(payload) -> tuple[float, float] | None:
+def _presented_payload_value_bounds(
+    payload,
+) -> tuple[tuple[float, float] | None, str]:
     """Return the payload's semantic display-value bounds without guessing.
 
     Precomputed ``TileLevelStats.bounds`` is the preferred and cheap path.  A
     retained payload may instead carry its exact level/histogram sample.  Raw
     RGB or complex texture bytes are never treated as scalar display values:
     the mapping needed to interpret them is precisely the truth R3 requires.
+
+    A resident crop rebind marks only evidence it could not re-slice as stale.
+    Exact CPU planes are re-sliced to the current window and remain usable;
+    page-backed wrappers have no current CPU plane and fail closed distinctly.
     """
 
     if payload is None:
-        return None
-    stats = getattr(payload, "level_stats", None)
-    bounds = _finite_level_pair(getattr(stats, "bounds", None))
-    if bounds is not None:
-        return bounds
-    for name in ("level_data", "semantic_histogram_data", "histogram_data"):
+        return None, "unavailable"
+    window_stale = bool(getattr(payload, "level_evidence_window_stale", False))
+    if not window_stale:
+        stats = getattr(payload, "level_stats", None)
+        bounds = _finite_level_pair(getattr(stats, "bounds", None))
+        if bounds is not None:
+            return bounds, "payload-level-stats"
+    for name in (
+        *(() if window_stale else ("level_data",)),
+        "semantic_histogram_data",
+        "histogram_data",
+        "semantic_data",
+    ):
         value = getattr(payload, name, None)
         if value is None:
             continue
@@ -5827,7 +5847,8 @@ def _payload_value_bounds(payload) -> tuple[float, float] | None:
             continue
         finite = array[np.isfinite(array)]
         if finite.size:
-            return float(np.min(finite)), float(np.max(finite))
+            source = "stale-stats-rejected-plane-used" if window_stale else name
+            return (float(np.min(finite)), float(np.max(finite))), source
     image = np.asarray(getattr(payload, "image", ()))
     if (
         image.size
@@ -5836,8 +5857,13 @@ def _payload_value_bounds(payload) -> tuple[float, float] | None:
     ):
         finite = image[np.isfinite(image)]
         if finite.size:
-            return float(np.min(finite)), float(np.max(finite))
-    return None
+            source = "stale-stats-rejected-plane-used" if window_stale else "image"
+            return (float(np.min(finite)), float(np.max(finite))), source
+    if window_stale and getattr(payload, "page_backing", None) is not None:
+        return None, "page-backed-rebind-no-current-plane"
+    if window_stale:
+        return None, "stale-stats-rejected-no-current-plane"
+    return None, "unavailable"
 
 
 def _run_phase(
@@ -8634,6 +8660,7 @@ def _progressive_invariant_certification(
                         "commit": commit_index,
                         "tile": tile,
                         "quality": payload.get("quality"),
+                        "value_bounds_source": payload.get("value_bounds_source"),
                     },
                     target="semantic value bounds for every presented tile",
                 )
@@ -8652,6 +8679,7 @@ def _progressive_invariant_certification(
                             "tile": tile,
                             "levels": commit_levels,
                             "bounds": bounds,
+                            "value_bounds_source": payload.get("value_bounds_source"),
                         },
                         target="commit levels contain the tile's full value range",
                     )

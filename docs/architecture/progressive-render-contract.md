@@ -503,7 +503,7 @@ the change that turns this from a suspicion into a decidable rule, and it makes
 R7 checkable at the same time: warm traffic inside a round's fill window is a
 violation regardless of its level.
 
-## Status, 2026-07-28
+## Status, 2026-07-30
 
 Where each rule stands after the preview-first recovery program. Written for
 whoever picks this up next; update it in place rather than appending.
@@ -513,7 +513,7 @@ whoever picks this up next; update it in place rather than appending.
 | R1 two production passes | Enforced. Oracle keys on round id; `authoritative_round_identity_present` now passes, so a red R1 is informative again. |
 | R2 floors are minimums | Enforced for skip and free reuse. The **tolerance ladder is not implemented** — see below. |
 | R2b one floor pair per round | Enforced. Round identity is explicit and both floors latch to it. |
-| R3 levels never clip | Enforced. Round levels come from the preview cohort, with an analytic envelope that is exact for realistic k-space. |
+| R3 levels never clip | Enforced, with one named red. Round preview levels use the complete cohort's analytic envelope. The R3 newly reported beside `cac3fa6c` is **not merely newly reachable**: exact crop-rebound payloads can be judged from the CPU planes `_rebind_reslice_planes` cut to the current window, but a page-backed rebound payload has no current CPU plane while WGPU rebinds current-window resident pages under predecessor levels. An exact rebind now records its current-plane bounds once at that seam and WGPU includes them in the same temporary presentation clamp used for refinement. The probe independently rejects only stale `level_stats`/`level_data`, reports exact-plane evidence as `stale-stats-rejected-plane-used`, and keeps the page-backed case red as `page-backed-rebind-no-current-plane`; the open physical-proof/fail-safe work is queue row 2. Separately, a completing scalar zoom/pan control recorded the refinement mechanism: source 82/tile 36 was presented at L2 with bounds `(0.1296716332, 1.0)` when refined evidence proposed `(0.1321790963, 1.0)`. WGPU now clamps that publication to acknowledged payload bounds without mutating the refined tracker; the clamp is target-quality/provisional, so replacement of the outlying payload lets the refined source re-anchor to the true range. PyQtGraph needs no clamp because a level change re-bakes its payload. The same control now has zero R3 failures. |
 | R4 preview for every backend/dtype | Green on both backends, including PyQtGraph complex and pipelines that cannot reduce their input. |
 | R5 chunked and governed | Governed. The known whole-montage bookkeeping and aggregates are now delta-proportional; one pure preparation row runs on a worker. Stateful delta construction and genuine per-item submission remain on the GUI thread. |
 | R6 shed quality, never liveness | **Not implemented.** WGPU fast scroll still freezes until idle. |
