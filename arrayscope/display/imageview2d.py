@@ -49,9 +49,8 @@ from arrayscope.display.levels import finite_bounds
 from arrayscope.display.model.frame import TileCommitReport
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.model.tiled_histogram_identity import (
-    histogram_data_and_layout,
-    patched_histogram_data,
-    tiled_semantic_histogram_identity,
+    histogram_plot_source_and_layout,
+    patched_histogram_plot_source,
 )
 from arrayscope.display.overlay_hit_test import RoiHitIndex
 from arrayscope.display.overlays import MontageTileOverlayItem
@@ -1207,28 +1206,42 @@ class ImageViewShell(QtWidgets.QWidget):
     def _is_rgb_image(self, img):
         return isinstance(img, np.ndarray) and img.ndim == 3 and img.shape[-1] in (3, 4)
 
-    def _payload_derived_histogram_plot_data(self, montage_tile_payloads):
-        """Histogram source built from tile payloads, cached by semantic identity.
+    def _payload_derived_histogram_plot_data(self, montage_tile_payloads, tile_delta=None):
+        """Histogram source built from tile payloads, maintained across commits.
 
         Returns the same array object across commits whose semantic histogram
         inputs are unchanged, so the id-keyed tile-layer histogram cache does
         not needlessly recompute across a progressive stream (ADR 0050).
+
+        The montage-wide source is *maintained*, not re-derived: the delta says
+        which tiles changed, so a bounded commit rewrites those slices of the
+        previous buffer and inspects no other payload.  The cache is keyed on
+        the presentation revision it was built at, and only a delta whose base
+        is that revision may patch it — the same discipline the WGPU commit
+        record uses, and what makes "nothing else changed" a fact rather than
+        an assumption.
+
+        Determining *which* tiles changed used to mean rebuilding a semantic
+        identity over every payload on every commit, so even a cache hit was
+        montage-proportional.
         """
 
-        identity = tiled_semantic_histogram_identity(montage_tile_payloads)
         cached = self._payload_histogram_cache
-        if cached is not None and cached[0] == identity:
-            return cached[1]
-        data = layout = None
-        if cached is not None:
-            # A bounded commit changes a few tiles' pixels, so rewrite those
-            # slices of the previous buffer instead of concatenating every
-            # tile again. Same values either way; this only decides how much
-            # work the montage-wide source costs per commit.
-            data, layout = patched_histogram_data(cached[1], cached[2], montage_tile_payloads)
-        if data is None:
-            data, layout = histogram_data_and_layout(montage_tile_payloads)
-        self._payload_histogram_cache = (identity, data, layout)
+        base_revision = None if tile_delta is None else int(tile_delta.base_revision)
+        target_revision = None if tile_delta is None else int(tile_delta.target_revision)
+        if cached is not None and base_revision is not None and cached[0] == base_revision:
+            data, layout = patched_histogram_plot_source(
+                cached[1],
+                cached[2],
+                montage_tile_payloads,
+                upserts=tuple(dict(getattr(tile_delta, "upserts", {}) or {})),
+                removals=tuple(getattr(tile_delta, "removals", ()) or ()),
+            )
+            if data is not None:
+                self._payload_histogram_cache = (target_revision, data, layout)
+                return data
+        data, layout = histogram_plot_source_and_layout(montage_tile_payloads)
+        self._payload_histogram_cache = (target_revision, data, layout)
         return data
 
     def _histogram_plot_data(self, fallback):
@@ -2855,7 +2868,9 @@ class ImageView2D(ImageViewShell):
                 # of truth used by shader backends — so the CPU-LUT histogram is populated
                 # instead of staying empty.  Cached by semantic identity so an
                 # unchanged montage keeps a stable array id (skip-upload works).
-                histogramPlotData = self._payload_derived_histogram_plot_data(montage_tile_payloads)
+                histogramPlotData = self._payload_derived_histogram_plot_data(
+                    montage_tile_payloads, tile_delta
+                )
             if not loading_only:
                 self.histogramSource = histogramData
                 self.histogramPlotSource = histogramPlotData
