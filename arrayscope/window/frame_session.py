@@ -4565,6 +4565,7 @@ class FrameSession:
         presented = {int(tile) for tile in self.lifecycle.presented_tiles}
         visible = {int(tile) for tile in self.visible_tile_numbers}
         target_unsettled = {int(tile) for tile in self.required_target_unsettled_tiles()}
+        required = {int(tile) for tile in self.required_tile_numbers()}
         loading = {int(tile) for tile in self.loading_tiles}
         active = {int(tile) for tile in self.active_tile_requests}
         dirty = {int(tile) for tile in self.dirty_payloads}
@@ -4719,6 +4720,7 @@ class FrameSession:
                     "rendered": tile_number in self.rendered_tiles,
                     "presented": tile_number in presented,
                     "target_unsettled": tile_number in target_unsettled,
+                    "required": tile_number in required,
                     "loading": tile_number in loading,
                     "active": tile_number in active,
                     "dirty": tile_number in dirty,

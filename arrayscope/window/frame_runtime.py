@@ -1400,7 +1400,15 @@ def _stall_tile_probe_row_actionable(row: dict[str, object]) -> bool:
         return True
     if live_work:
         return True
-    return bool(row.get("target_unsettled")) and not bool(row.get("visible_first_pixel_complete"))
+    # A pixel-less row is a defect exactly when the tile is still one the round
+    # must render. Scoping this to REQUIRED rather than to target_unsettled
+    # matters: target_unsettled is the subset of required whose ledger record
+    # is not yet settled, so keying on it also suppresses a required tile the
+    # ledger calls settled while nothing plan-matching is on screen — which is
+    # the shape of the stranding this probe exists to catch (R2, "skipping
+    # production is not skipping presentation"). Released tiles that left the
+    # required scope stay quiet either way, which is the noise that was fixed.
+    return bool(row.get("required")) and not bool(row.get("visible_first_pixel_complete"))
 
 
 def _interactive_active(window) -> bool:
