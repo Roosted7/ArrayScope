@@ -1282,12 +1282,12 @@ class FramePipelineEffects:
         except Exception as exc:  # pragma: no cover - defensive, never fatal
             handle_ui_exception("montage upload preparation planning", exc)
             return
-        for slot, key, prepare in preparations:
+        for task, prepare in preparations:
+            slot, key = task.slot, task.key
             if mailbox.holds(slot, key):
                 mailbox.note_deduped()
                 continue
-            mailbox.note_submitted()
-            kernel.submit(
+            handle = kernel.submit(
                 TaskSpec(
                     key=("prepared-upload", session_id, slot, key),
                     fn=prepare,
@@ -1296,9 +1296,8 @@ class FramePipelineEffects:
                     # inside a task, so a preparation on a visible lane could
                     # and did hold a thread a pixel-producing task wanted —
                     # 47.9 ms of worker time across one recorded cold scroll,
-                    # which is 75% of everything preparation ran that round,
-                    # delaying 39 producers by up to 18.9 ms each. A
-                    # non-visible lane is
+                    # 75% of everything preparation ran that round, delaying 39
+                    # producers by up to 18.9 ms each. A non-visible lane is
                     # what makes the kernel's existing speculative governor
                     # apply: parked while any visible work is queued or
                     # running, capped at a fraction of the pool, and sorted
@@ -1313,7 +1312,18 @@ class FramePipelineEffects:
                         value=key,
                     ),
                 ),
+                # Terminal outcome for a task the scheduler drops while queued.
+                # It only takes the mailbox's own lock — no Qt-owned state is
+                # touched from a completion handler.
+                on_stale=task.dropped,
             )
+            if handle is None:
+                # Refused at the door (shutting down). It never became pending,
+                # so counting it as submitted would leave the task equation
+                # permanently short by one.
+                task.submit_rejected()
+            else:
+                task.submitted()
 
     def request_presentation(self) -> None:
         """Coalesced presentation continuation: at most one per loop turn.
@@ -4477,19 +4487,29 @@ def _prepared_upload_counters(renderer) -> dict[str, int]:
         "prepared_upload_skipped_no_work": int(counters.skipped_no_work),
         "prepared_upload_skipped_stale_round": int(counters.skipped_stale_round),
         # Execution: what a worker did, and what the scheduler dropped first.
-        "prepared_upload_executed": int(counters.executed),
-        "prepared_upload_superseded_before_execution": int(counters.superseded_before_execution),
-        "prepared_upload_superseded_publish": int(counters.superseded_publish),
+        "prepared_upload_submit_rejected": int(counters.submit_rejected),
+        "prepared_upload_pending": int(counters.pending),
+        "prepared_upload_started": int(counters.started),
         "prepared_upload_published": int(counters.published),
+        "prepared_upload_publication_refused": int(counters.publication_refused),
+        "prepared_upload_failed_after_start": int(counters.failed_after_start),
+        "prepared_upload_dropped_before_start": int(counters.dropped_before_start),
+        "prepared_upload_superseded_publish": int(counters.superseded_publish),
+        "prepared_upload_oversized": int(counters.oversized),
         # Displacement and consumption.
         "prepared_upload_replaced": int(counters.replaced),
         "prepared_upload_evicted": int(counters.evicted),
+        "prepared_upload_reset_discarded": int(counters.reset_discarded),
         "prepared_upload_hits": int(counters.hits),
         "prepared_upload_stale": int(counters.stale),
         "prepared_upload_misses": int(counters.misses),
         "prepared_upload_inline_fallbacks": int(counters.inline_fallbacks),
         "prepared_upload_resident": int(counters.resident_entries),
         "prepared_upload_peak_in_flight": int(counters.peak_in_flight),
+        # Both must be zero at every commit, not merely at settle. A non-zero
+        # value means a task or a buffer left without a terminal outcome.
+        "prepared_upload_task_accounting_error": int(counters.task_accounting_error()),
+        "prepared_upload_buffer_accounting_error": int(counters.buffer_accounting_error()),
     }
 
 

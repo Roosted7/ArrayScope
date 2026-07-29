@@ -425,10 +425,14 @@ def test_the_wgpu_planner_still_prepares_a_payload_with_real_work():
     )
 
     assert len(rows) == 1
-    slot, key, prepare = rows[0]
-    assert slot == 2
+    task, prepare = rows[0]
+    assert task.slot == 2
+    task.submitted()
     prepare()
-    assert view.preparedTiledUploads.take(2, key) is not None
+    assert view.preparedTiledUploads.take(2, task.key) is not None
+    counters = view.preparedTiledUploads.counters()
+    assert counters.published == 1
+    assert counters.task_accounting_error() == 0
 
 
 class _StubWgpuView:

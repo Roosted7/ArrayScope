@@ -269,17 +269,21 @@ def test_an_equal_or_newer_generation_still_replaces_its_slot():
 
 
 def test_counters_account_for_every_planned_preparation():
-    """The taxonomy closes: nothing planned disappears without a counter."""
+    """The taxonomy closes: nothing planned disappears without an outcome."""
 
     mailbox = PreparedUploadMailbox()
     mailbox.note_resident(3)
     mailbox.note_no_work(2)
+    mailbox.note_stale_round(4)
     mailbox.note_deduped()
-    mailbox.note_submitted(4)
-    # Three of the four submitted reach a worker; one was dropped while queued.
-    for index in range(3):
-        mailbox.note_executed()
-        mailbox.publish(index, ("id", index), _buffer(), generation=index + 1)
+    tasks = [mailbox.plan(index, ("id", index)) for index in range(4)]
+    for task in tasks:
+        task.submitted()
+    # Three reach a worker and publish; one is dropped while still queued.
+    for task in tasks[:3]:
+        with task:
+            task.publish(_buffer())
+    tasks[3].dropped()
     mailbox.take(0, ("id", 0))  # consumed
     mailbox.take(1, ("id", "other"))  # stale
     mailbox.take(99, ("id", 99))  # miss
@@ -287,46 +291,144 @@ def test_counters_account_for_every_planned_preparation():
     counters = mailbox.counters()
     assert counters.skipped_resident == 3
     assert counters.skipped_no_work == 2
+    assert counters.skipped_stale_round == 4
     assert counters.deduped == 1
     assert counters.submitted == 4
-    assert counters.executed == 3
-    assert counters.superseded_before_execution == 1
+    assert counters.started == 3
     assert counters.published == 3
+    assert counters.dropped_before_start == 1
+    assert counters.pending == 0
     assert counters.hits == 1
     assert counters.stale == 1
     assert counters.misses == 1
     assert counters.inline_fallbacks == 2
-    # One published buffer was never asked for and is still held.
     assert counters.resident_entries == 1
+    assert counters.task_accounting_error() == 0
+    assert counters.buffer_accounting_error() == 0
 
 
-def test_in_flight_gauge_bounds_output_allocation_the_byte_budget_cannot_see():
-    """Between entering a closure and publishing, a worker holds an allocation.
+def test_accounting_closes_while_work_is_still_pending():
+    """The equations must hold mid-flight, not only at a favourable snapshot.
 
-    The mailbox budget bounds *published* bytes only. The concurrent output of
-    running preparations is bounded instead by how many closures are inside
-    that window at once, so that count has to be observable.
+    The previous derivation read "submitted minus executed" as the superseded
+    population, so every task merely sitting in the scheduler was counted as
+    dropped. Pending is a state now, and this pins it at each transition.
     """
 
     mailbox = PreparedUploadMailbox()
-    for _ in range(3):
-        mailbox.note_executed()
-    assert mailbox.counters().in_flight == 3
-    assert mailbox.counters().peak_in_flight == 3
+    first, second, third = (mailbox.plan(index, ("id", index)) for index in range(3))
+    for task in (first, second, third):
+        task.submitted()
 
+    counters = mailbox.counters()
+    assert (counters.pending, counters.started) == (3, 0)
+    assert counters.dropped_before_start == 0
+    assert counters.task_accounting_error() == 0
+
+    with first:
+        # Inside the closure: one running, two still queued.
+        counters = mailbox.counters()
+        assert (counters.pending, counters.started, counters.in_flight) == (2, 1, 1)
+        assert counters.task_accounting_error() == 0
+        first.publish(_buffer())
+
+    second.dropped()
+    counters = mailbox.counters()
+    assert (counters.pending, counters.published, counters.dropped_before_start) == (1, 1, 1)
+    assert counters.task_accounting_error() == 0
+
+    # And after the last one settles, with nothing left pending.
+    with third:
+        third.publish(_buffer())
+    counters = mailbox.counters()
+    assert counters.pending == 0
+    assert counters.task_accounting_error() == 0
+
+
+def test_a_closure_that_raises_still_closes_its_in_flight_window():
+    """The gauge is only a bound if an exception cannot leak it.
+
+    The previous code incremented in-flight at the top of the closure and
+    decremented inside publish, so a failure between the two left the gauge
+    permanently high — in exactly the case an in-flight bound exists for.
+    """
+
+    mailbox = PreparedUploadMailbox()
+    task = mailbox.plan(1, ("id", 1))
+    task.submitted()
+
+    with pytest.raises(ValueError):
+        with task:
+            raise ValueError("assembly failed")
+
+    counters = mailbox.counters()
+    assert counters.in_flight == 0
+    assert counters.failed_after_start == 1
+    assert counters.published == 0
+    assert counters.task_accounting_error() == 0
+
+
+def test_a_task_the_scheduler_refuses_never_becomes_pending():
+    """`Kernel.submit` returns None when it will not take the task at all."""
+
+    mailbox = PreparedUploadMailbox()
+    task = mailbox.plan(1, ("id", 1))
+    task.submit_rejected()
+
+    counters = mailbox.counters()
+    assert counters.submit_rejected == 1
+    assert counters.submitted == 0
+    assert counters.pending == 0
+    assert counters.task_accounting_error() == 0
+
+
+def test_dropping_a_task_that_already_ran_is_not_a_second_outcome():
+    """The kernel reports staleness for work that completed and was superseded."""
+
+    mailbox = PreparedUploadMailbox()
+    task = mailbox.plan(1, ("id", 1))
+    task.submitted()
+    with task:
+        task.publish(_buffer())
+
+    task.dropped()  # arrives after the fact, from the completion drain
+
+    counters = mailbox.counters()
+    assert counters.published == 1
+    assert counters.dropped_before_start == 0
+    assert counters.task_accounting_error() == 0
+
+
+def test_discarded_and_cleared_buffers_take_a_terminal_outcome():
+    """A reset is where published buffers used to vanish from the accounting."""
+
+    mailbox = PreparedUploadMailbox()
     for index in range(3):
-        mailbox.publish(index, ("id", index), _buffer(), generation=index + 1)
+        task = mailbox.plan(index, ("id", index))
+        task.submitted()
+        with task:
+            task.publish(_buffer())
+
+    mailbox.discard(0)
+    assert mailbox.counters().reset_discarded == 1
+    mailbox.clear()
+
     counters = mailbox.counters()
-    assert counters.in_flight == 0
-    # The peak survives: it is the bound worth reporting, not the instant.
-    assert counters.peak_in_flight == 3
+    assert counters.reset_discarded == 3
+    assert counters.resident_entries == 0
+    assert counters.buffer_accounting_error() == 0
 
 
-def test_a_rejected_oversized_buffer_still_closes_its_in_flight_window():
+def test_an_oversized_buffer_settles_as_a_refused_publication():
     mailbox = PreparedUploadMailbox(budget_bytes=16)
-    mailbox.note_executed()
-    assert not mailbox.publish(1, ("id", 1), _buffer(1.0, size=64))
+    task = mailbox.plan(1, ("id", 1))
+    task.submitted()
+    with task:
+        assert not task.publish(_buffer(1.0, size=64))
 
     counters = mailbox.counters()
-    assert counters.rejected == 1
+    assert counters.oversized == 1
+    assert counters.publication_refused == 1
+    assert counters.published == 0
     assert counters.in_flight == 0
+    assert counters.task_accounting_error() == 0

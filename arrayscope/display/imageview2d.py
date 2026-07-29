@@ -2871,18 +2871,14 @@ class ImageView2D(ImageViewShell):
                 continue
             slot = int(getattr(payload, "tile_number", tile))
             variant = cpu_mapping_preparation_variant(payload, levels)
-            key = prepared_upload_key(payload, variant)
+            task = mailbox.plan(slot, prepared_upload_key(payload, variant))
             rows.append(
                 (
-                    slot,
-                    key,
+                    task,
                     _pyqtgraph_assembly_preparation(
-                        mailbox,
-                        slot,
-                        key,
+                        task,
                         payload,
                         (float(levels[0]), float(levels[1])),
-                        mailbox.next_generation(),
                     ),
                 )
             )
@@ -3157,12 +3153,12 @@ class ImageView2D(ImageViewShell):
             self._montage_tile_layer.set_lookup_table(lut)
 
 
-def _pyqtgraph_assembly_preparation(mailbox, slot, key, payload, levels, generation):
+def _pyqtgraph_assembly_preparation(task, payload, levels):
     """Build the worker callable that assembles one payload's pages.
 
-    Deliberately a module-level factory: the closure captures a mailbox, a
-    payload, two floats and an ordering token, and nothing that belongs to the
-    GUI thread.
+    Deliberately a module-level factory: the closure captures a task, a payload
+    and two floats, and nothing that belongs to the GUI thread. The ``with``
+    closes the task's in-flight window even when assembly raises.
     """
 
     def prepare() -> None:
@@ -3171,15 +3167,9 @@ def _pyqtgraph_assembly_preparation(mailbox, slot, key, payload, levels, generat
             resolve_page_backed_assembly,
         )
 
-        mailbox.note_executed()
-        assembly = resolve_page_backed_assembly(payload, levels=levels)
-        mailbox.publish(
-            slot,
-            key,
-            assembly,
-            nbytes=page_assembly_nbytes(assembly),
-            generation=generation,
-        )
+        with task:
+            assembly = resolve_page_backed_assembly(payload, levels=levels)
+            task.publish(assembly, nbytes=page_assembly_nbytes(assembly))
 
     return prepare
 

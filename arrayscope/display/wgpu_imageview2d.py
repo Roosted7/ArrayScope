@@ -2589,21 +2589,8 @@ class WgpuImageView2D(ImageViewShell):
                 mailbox.note_no_work()
                 continue
             slot = int(getattr(payload, "tile_number", tile))
-            key = prepared_upload_key(payload, representation)
-            rows.append(
-                (
-                    slot,
-                    key,
-                    _wgpu_pack_preparation(
-                        mailbox,
-                        slot,
-                        key,
-                        payload,
-                        representation,
-                        mailbox.next_generation(),
-                    ),
-                )
-            )
+            task = mailbox.plan(slot, prepared_upload_key(payload, representation))
+            rows.append((task, _wgpu_pack_preparation(task, payload, representation)))
         return tuple(rows)
 
     def _wgpu_reusable_native_texture(
@@ -4216,17 +4203,15 @@ def wgpu_pack_saves_work(payload, representation) -> bool:
     return False
 
 
-def _wgpu_pack_preparation(mailbox, slot, key, payload, representation, generation):
-    """Build the worker callable that packs one payload's upload plane."""
+def _wgpu_pack_preparation(task, payload, representation):
+    """Build the worker callable that packs one payload's upload plane.
+
+    The ``with`` closes the task's in-flight window even when packing raises.
+    """
 
     def prepare() -> None:
-        mailbox.note_executed()
-        mailbox.publish(
-            slot,
-            key,
-            wgpu_packed_payload_texture(payload, representation),
-            generation=generation,
-        )
+        with task:
+            task.publish(wgpu_packed_payload_texture(payload, representation))
 
     return prepare
 

@@ -1756,6 +1756,18 @@ def test_pipeline_effects_tile_states_exposes_ready_unacknowledged_fallback():
     assert state.ready_quality == "fallback"
 
 
+def _preparation_row(mailbox):
+    """One planned task plus the closure a worker would run for it."""
+
+    task = mailbox.plan(2, ("identity", "source", "variant"))
+
+    def prepare():
+        with task:
+            task.publish(np.ones((2, 2), np.float32))
+
+    return (task, prepare)
+
+
 def test_backend_upload_preparation_is_submitted_as_superseded_prefetch():
     """Admission schedules pure preparation; it never runs inline or gates display."""
 
@@ -1764,19 +1776,17 @@ def test_backend_upload_preparation_is_submitted_as_superseded_prefetch():
     mailbox = PreparedUploadMailbox()
     submitted = []
     payload = SimpleNamespace(tile_number=2, tile_identity="identity", source_id="source")
-    preparation_key = ("identity", "source", "variant")
     view = SimpleNamespace(
         preparedTiledUploads=mailbox,
         tiledPayloadResident=lambda _payload: False,
-        tiledUploadPreparations=lambda payloads, **_kwargs: (
-            (
-                2,
-                preparation_key,
-                lambda: mailbox.publish(2, preparation_key, np.ones((2, 2), np.float32)),
-            ),
-        ),
+        tiledUploadPreparations=lambda payloads, **_kwargs: (_preparation_row(mailbox),),
     )
-    kernel = SimpleNamespace(submit=submitted.append)
+
+    def _submit(spec, **kwargs):
+        submitted.append(spec)
+        return object()
+
+    kernel = SimpleNamespace(submit=_submit)
     session = SimpleNamespace(
         session_id=7,
         shader_display=True,
@@ -1803,11 +1813,19 @@ def test_backend_upload_preparation_is_submitted_as_superseded_prefetch():
     assert not spec.visible
     assert spec.priority is Priority.PREFETCH
     assert spec.supersession.family == ("prepared-upload", 7, 2)
-    assert spec.supersession.value == preparation_key
+    assert spec.supersession.value == ("identity", "source", "variant")
     assert spec.session_id == 7
     assert spec.tile_number == 2
+    # The task is pending, not yet counted as executed or dropped.
+    counters = mailbox.counters()
+    assert (counters.submitted, counters.pending) == (1, 1)
+    assert counters.task_accounting_error() == 0
     spec.fn()
-    assert mailbox.take(2, preparation_key) is not None
+    assert mailbox.take(2, ("identity", "source", "variant")) is not None
+    # And the task settled exactly once, with the publication as its outcome.
+    counters = mailbox.counters()
+    assert (counters.pending, counters.published, counters.in_flight) == (0, 1, 0)
+    assert counters.task_accounting_error() == 0
 
 
 def test_backend_upload_preparation_skips_physically_resident_payload():

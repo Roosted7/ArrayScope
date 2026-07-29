@@ -60,15 +60,30 @@ class PreparedUploadCounters:
     The point of counting this finely is that "the hand-off works" and "the
     hand-off is worth its cost" are different claims, and only the second one
     matters. A high ``hits`` proves the seam is wired up; it says nothing about
-    the preparations that were planned and never used. These counters close
-    over the whole population, so wasted work has nowhere to hide:
+    the preparations that were planned and never used.
 
-        planned = submitted + deduped + skipped_resident + skipped_no_work
-                  + skipped_stale_round
-        submitted = executed + superseded_before_execution
-        executed ≈ published + rejected
-        published = hits + stale + replaced + evicted + resident_entries
-        inline fallbacks at the commit = misses + stale
+    Two populations are tracked, and they are different things. A **task** is a
+    unit of planned work; a **buffer** is what a task may leave behind. Each has
+    exactly one terminal outcome, and both close while work is still in flight,
+    not only at a settled final snapshot:
+
+        planned  = submitted + deduped + skipped_resident + skipped_no_work
+                   + skipped_stale_round + submit_rejected
+        submitted = pending + in_flight + published + publication_refused
+                    + failed_after_start + dropped_before_start
+        published = hits + stale + replaced + evicted + reset_discarded
+                    + resident_entries
+
+    ``in_flight`` carries its weight twice over: it is the bound on concurrent
+    output allocation the byte budget cannot see, *and* it is the "entered a
+    worker but has not settled yet" state without which the task equation does
+    not close mid-flight.
+
+    An earlier version derived "superseded before execution" as
+    ``submitted - executed``, which silently counted every task still sitting in
+    the scheduler as though it had been dropped. ``pending`` is now a real state
+    and ``dropped_before_start`` a real outcome, so the equation holds at any
+    instant rather than only once the queue has drained.
 
     ``stale`` is the one to watch. It counts buffers that were prepared and
     then correctly refused because the slot moved on; a rising ``stale`` with a
@@ -82,17 +97,24 @@ class PreparedUploadCounters:
     skipped_resident: int = 0
     skipped_no_work: int = 0
     skipped_stale_round: int = 0
-    # Execution: what the workers did with what they were given.
-    executed: int = 0
+    submit_rejected: int = 0
+    # Task states and terminal outcomes. Every submitted task is in exactly one.
+    pending: int = 0
+    started: int = 0
     published: int = 0
-    rejected: int = 0
+    publication_refused: int = 0
+    failed_after_start: int = 0
+    dropped_before_start: int = 0
+    # Why a publication was refused, as a breakdown of publication_refused.
     superseded_publish: int = 0
-    # Displacement: buffers that were published and then lost their slot.
-    replaced: int = 0
-    evicted: int = 0
-    # Consumption: what the commit found when it came to submit.
+    oversized: int = 0
+    # Buffer outcomes: a published buffer leaves the mailbox exactly one way.
     hits: int = 0
     stale: int = 0
+    replaced: int = 0
+    evicted: int = 0
+    reset_discarded: int = 0
+    # Commit-side view.
     misses: int = 0
     # Live state.
     resident_entries: int = 0
@@ -101,21 +123,138 @@ class PreparedUploadCounters:
     peak_in_flight: int = 0
 
     @property
-    def superseded_before_execution(self) -> int:
-        """Submitted preparations the scheduler dropped before they ran.
-
-        Not a counter of its own: per-slot supersession drops the queued record
-        without running the closure, so the only honest way to see it is the
-        gap between what was submitted and what a worker actually entered.
-        """
-
-        return max(0, int(self.submitted) - int(self.executed))
-
-    @property
     def inline_fallbacks(self) -> int:
         """Commits that packed on the GUI thread after all."""
 
         return int(self.misses) + int(self.stale)
+
+    def task_accounting_error(self) -> int:
+        """Submitted tasks minus every state one can be in. Must be zero.
+
+        Holds at any instant, including with tasks queued and tasks inside a
+        worker closure — which is the whole point of checking it.
+        """
+
+        return int(self.submitted) - (
+            int(self.pending)
+            + int(self.in_flight)
+            + int(self.published)
+            + int(self.publication_refused)
+            + int(self.failed_after_start)
+            + int(self.dropped_before_start)
+        )
+
+    def buffer_accounting_error(self) -> int:
+        """Published buffers minus everything that could have become of them."""
+
+        return int(self.published) - (
+            int(self.hits)
+            + int(self.stale)
+            + int(self.replaced)
+            + int(self.evicted)
+            + int(self.reset_discarded)
+            + int(self.resident_entries)
+        )
+
+
+class PreparedUploadTask:
+    """One planned preparation, from planning to exactly one terminal outcome.
+
+    The worker side is a context manager, so the in-flight window is closed in
+    ``finally`` and cannot be leaked by an exception. Before this existed the
+    closure raised straight past the decrement and the gauge stayed high for the
+    life of the process, which is precisely the case an in-flight bound is for.
+
+    Nothing here touches Qt. ``dropped`` is called from the kernel's completion
+    drain, and it only takes the mailbox's own lock.
+    """
+
+    __slots__ = ("_key", "_lock", "_mailbox", "_settled", "_slot", "_started", "generation")
+
+    def __init__(self, mailbox: PreparedUploadMailbox, slot: int, key, generation: int) -> None:
+        self._mailbox = mailbox
+        self._slot = int(slot)
+        self._key = key
+        self.generation = int(generation)
+        self._started = False
+        self._settled = False
+        # `dropped` arrives on the GUI thread while `__enter__` may be running
+        # on a worker. The kernel's own ordering makes the race unlikely rather
+        # than impossible, and "exactly one terminal outcome" is the property
+        # this whole class exists to provide.
+        self._lock = threading.Lock()
+
+    def _claim(self) -> bool:
+        """Take the single terminal-outcome slot, or report it already taken."""
+
+        with self._lock:
+            if self._settled:
+                return False
+            self._settled = True
+            return True
+
+    @property
+    def slot(self) -> int:
+        return self._slot
+
+    @property
+    def key(self):
+        return self._key
+
+    def submitted(self) -> None:
+        """The scheduler accepted it; it is now pending."""
+
+        self._mailbox._task_submitted()
+
+    def submit_rejected(self) -> None:
+        """The scheduler refused it at the door; it never became pending."""
+
+        if self._claim():
+            self._mailbox._task_submit_rejected()
+
+    def dropped(self) -> None:
+        """Superseded or cancelled. Only terminal if it never entered a worker.
+
+        Idempotent, and deliberately a no-op once the closure has run: the
+        kernel reports staleness for tasks that completed and were then
+        superseded, and those already have a terminal outcome of their own.
+        """
+
+        with self._lock:
+            if self._settled or self._started:
+                return
+            self._settled = True
+        self._mailbox._task_dropped_before_start()
+
+    def __enter__(self) -> PreparedUploadTask:
+        with self._lock:
+            self._started = True
+        self._mailbox._task_started()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        if self._claim():
+            self._mailbox._task_finished("failed" if exc_type is not None else "refused")
+        return False
+
+    def publish(self, buffer, *, nbytes: int | None = None) -> bool:
+        """Publish this task's buffer and settle its outcome.
+
+        Settling here rather than in ``__exit__`` is what distinguishes a
+        refused publication from a closure that simply never called publish;
+        both leave the mailbox empty, and only one of them is a bug.
+        """
+
+        stored = self._mailbox.publish(
+            self._slot,
+            self._key,
+            buffer,
+            nbytes=nbytes,
+            generation=self.generation,
+        )
+        if self._claim():
+            self._mailbox._task_finished("published" if stored else "refused")
+        return stored
 
 
 def _buffer_nbytes(buffer) -> int:
@@ -145,12 +284,19 @@ class PreparedUploadMailbox:
         self._skipped_resident = 0
         self._skipped_no_work = 0
         self._skipped_stale_round = 0
-        self._executed = 0
-        self._published = 0
-        self._rejected = 0
+        self._submit_rejected = 0
+        self._pending = 0
+        self._started = 0
+        self._published_tasks = 0
+        self._publication_refused = 0
+        self._failed_after_start = 0
+        self._dropped_before_start = 0
         self._superseded_publish = 0
+        self._oversized = 0
+        self._published = 0
         self._replaced = 0
         self._evicted = 0
+        self._reset_discarded = 0
         self._hits = 0
         self._stale = 0
         self._misses = 0
@@ -206,20 +352,16 @@ class PreparedUploadMailbox:
         with self._lock:
             self._skipped_stale_round += max(0, int(count))
 
-    def note_executed(self, count: int = 1) -> None:
-        """A worker entered a preparation closure.
+    def plan(self, slot, key) -> PreparedUploadTask:
+        """Claim a task for ``slot``, in the ``PLANNED`` state.
 
-        Called by the closure itself rather than inferred from a completion, so
-        that ``submitted - executed`` is exactly the population the scheduler
-        dropped before it ran. Also raises the in-flight gauge: between here and
-        ``publish`` the worker holds an output allocation the mailbox's byte
-        budget cannot see.
+        Returned before the scheduler has seen anything, because submission can
+        itself fail: ``Kernel.submit`` returns None for a task refused at the
+        door, and counting that as submitted-then-vanished is one of the ways
+        the old equations did not close.
         """
 
-        with self._lock:
-            self._executed += max(0, int(count))
-            self._in_flight += max(0, int(count))
-            self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
+        return PreparedUploadTask(self, int(slot), key, self.next_generation())
 
     def publish(self, slot, key, buffer, *, nbytes: int | None = None, generation: int = 0) -> bool:
         """Store ``buffer`` for ``slot``, unless that slot already holds newer.
@@ -240,16 +382,18 @@ class PreparedUploadMailbox:
         Returns False when the buffer is not stored — refused as older, or too
         large for the whole budget to be worth evicting everything else for. The
         consumer's inline path covers both.
+
+        Task accounting belongs to :class:`PreparedUploadTask`; publishing
+        without one is supported for tests and for callers that never entered a
+        worker closure.
         """
 
         nbytes = _buffer_nbytes(buffer) if nbytes is None else max(0, int(nbytes))
         generation = int(generation)
         entry = PreparedUpload(key=key, buffer=buffer, nbytes=nbytes, generation=generation)
         with self._lock:
-            if self._in_flight > 0:
-                self._in_flight -= 1
             if self._budget_bytes and nbytes > self._budget_bytes:
-                self._rejected += 1
+                self._oversized += 1
                 return False
             previous = self._entries.get(slot)
             if previous is not None and generation and previous.generation > generation:
@@ -264,6 +408,39 @@ class PreparedUploadMailbox:
             self._published += 1
             self._evict_over_budget_locked(protect=slot)
         return True
+
+    # ------------------------------------------------- task state transitions
+
+    def _task_submitted(self) -> None:
+        with self._lock:
+            self._submitted += 1
+            self._pending += 1
+
+    def _task_submit_rejected(self) -> None:
+        with self._lock:
+            self._submit_rejected += 1
+
+    def _task_started(self) -> None:
+        with self._lock:
+            self._pending = max(0, self._pending - 1)
+            self._started += 1
+            self._in_flight += 1
+            self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
+
+    def _task_finished(self, outcome: str) -> None:
+        with self._lock:
+            self._in_flight = max(0, self._in_flight - 1)
+            if outcome == "published":
+                self._published_tasks += 1
+            elif outcome == "failed":
+                self._failed_after_start += 1
+            else:
+                self._publication_refused += 1
+
+    def _task_dropped_before_start(self) -> None:
+        with self._lock:
+            self._pending = max(0, self._pending - 1)
+            self._dropped_before_start += 1
 
     def take(self, slot, key):
         """Remove ``slot``'s entry and return its buffer only if ``key`` matches.
@@ -299,17 +476,25 @@ class PreparedUploadMailbox:
             return entry is not None and entry.key == key
 
     def discard(self, slot) -> None:
-        """Drop one slot's entry, if any."""
+        """Drop one slot's entry, if any, as a reset rather than a consumption."""
 
         with self._lock:
             entry = self._entries.pop(slot, None)
             if entry is not None:
                 self._resident_bytes -= entry.nbytes
+                self._reset_discarded += 1
 
     def clear(self) -> None:
-        """Drop every entry. Counters survive; they describe the run."""
+        """Drop every entry at a residency reset. Counters survive the run.
+
+        Each dropped buffer takes the ``reset_discarded`` outcome. Clearing used
+        to remove entries silently, which left `published` permanently ahead of
+        everything that could be said to have become of those buffers — the
+        buffer equation only closed on a run that never reset.
+        """
 
         with self._lock:
+            self._reset_discarded += len(self._entries)
             self._entries.clear()
             self._resident_bytes = 0
 
@@ -321,12 +506,18 @@ class PreparedUploadMailbox:
                 skipped_resident=self._skipped_resident,
                 skipped_no_work=self._skipped_no_work,
                 skipped_stale_round=self._skipped_stale_round,
-                executed=self._executed,
-                published=self._published,
-                rejected=self._rejected,
+                submit_rejected=self._submit_rejected,
+                pending=self._pending,
+                started=self._started,
+                published=self._published_tasks,
+                publication_refused=self._publication_refused,
+                failed_after_start=self._failed_after_start,
+                dropped_before_start=self._dropped_before_start,
                 superseded_publish=self._superseded_publish,
+                oversized=self._oversized,
                 replaced=self._replaced,
                 evicted=self._evicted,
+                reset_discarded=self._reset_discarded,
                 hits=self._hits,
                 stale=self._stale,
                 misses=self._misses,
@@ -392,6 +583,7 @@ __all__ = [
     "PreparedUpload",
     "PreparedUploadCounters",
     "PreparedUploadMailbox",
+    "PreparedUploadTask",
     "cpu_mapping_preparation_variant",
     "prepared_upload_key",
 ]
