@@ -207,7 +207,7 @@ class PreparedUploadTask:
         self._mailbox._task_submitted()
 
     def submit_rejected(self) -> None:
-        """The scheduler refused it at the door; it never became pending."""
+        """Roll back admission when the scheduler refused it at the door."""
 
         if self._claim():
             self._mailbox._task_submit_rejected()
@@ -418,6 +418,12 @@ class PreparedUploadMailbox:
 
     def _task_submit_rejected(self) -> None:
         with self._lock:
+            # Admission is recorded before Kernel.submit(), because submit may
+            # wake an inline backend (or a fast worker) before it returns. A
+            # refusal is the one path that rolls that provisional admission
+            # back out of the submitted population.
+            self._submitted = max(0, self._submitted - 1)
+            self._pending = max(0, self._pending - 1)
             self._submit_rejected += 1
 
     def _task_started(self) -> None:

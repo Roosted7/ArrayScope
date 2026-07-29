@@ -1287,6 +1287,11 @@ class FramePipelineEffects:
             if mailbox.holds(slot, key):
                 mailbox.note_deduped()
                 continue
+            # Record admission before submit: Kernel.submit() wakes its backend
+            # before returning, and an inline backend or a fast worker can run
+            # this closure synchronously. A None return rolls this provisional
+            # admission back into submit_rejected below.
+            task.submitted()
             handle = kernel.submit(
                 TaskSpec(
                     key=("prepared-upload", session_id, slot, key),
@@ -1318,12 +1323,9 @@ class FramePipelineEffects:
                 on_stale=task.dropped,
             )
             if handle is None:
-                # Refused at the door (shutting down). It never became pending,
-                # so counting it as submitted would leave the task equation
-                # permanently short by one.
+                # Refused at the door (shutting down): undo the provisional
+                # submitted/pending state and record the planned-task outcome.
                 task.submit_rejected()
-            else:
-                task.submitted()
 
     def request_presentation(self) -> None:
         """Coalesced presentation continuation: at most one per loop turn.

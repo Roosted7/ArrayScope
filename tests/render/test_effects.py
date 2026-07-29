@@ -1828,6 +1828,48 @@ def test_backend_upload_preparation_is_submitted_as_superseded_prefetch():
     assert counters.task_accounting_error() == 0
 
 
+def test_backend_upload_preparation_accounts_for_synchronous_kernel_execution():
+    """Submission is visible before a backend can execute from ``wake()``.
+
+    The real inline kernel backend runs the task inside ``Kernel.submit`` before
+    that call returns. A sufficiently fast threaded backend can do the same.
+    Recording submission afterwards resurrects a settled task as pending.
+    """
+
+    from arrayscope.window.frame_effects import FramePipelineEffects
+
+    mailbox = PreparedUploadMailbox()
+    payload = SimpleNamespace(tile_number=2, tile_identity="identity", source_id="source")
+    view = SimpleNamespace(
+        preparedTiledUploads=mailbox,
+        tiledPayloadResident=lambda _payload: False,
+        tiledUploadPreparations=lambda payloads, **_kwargs: (_preparation_row(mailbox),),
+    )
+
+    def _submit(spec, **_kwargs):
+        spec.fn()
+        return object()
+
+    session = SimpleNamespace(
+        session_id=7,
+        shader_display=True,
+        level_generation=SimpleNamespace(target_levels=(0.0, 1.0)),
+        lifecycle=SimpleNamespace(current_presentable_payload=lambda tile: payload),
+        display_tile_payloads={},
+    )
+    effects_bridge = FramePipelineEffects(
+        SimpleNamespace(win=SimpleNamespace(img_view=view, kernel=SimpleNamespace(submit=_submit))),
+        session,
+    )
+
+    effects_bridge._prepare_backend_uploads(((SimpleNamespace(tile_number=2), object()),))
+
+    counters = mailbox.counters()
+    assert (counters.submitted, counters.pending, counters.in_flight) == (1, 0, 0)
+    assert counters.published == 1
+    assert counters.task_accounting_error() == 0
+
+
 def test_backend_upload_preparation_skips_physically_resident_payload():
     """A resident rebind needs no producer and must not inflate visible work."""
 
