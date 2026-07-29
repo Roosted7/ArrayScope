@@ -29,6 +29,7 @@ from arrayscope.display.wgpu_imageview2d import (
 from arrayscope.gpu.keys import COMPLEX_RG32F, SCALAR_R32F
 from arrayscope.presentation.prepared_uploads import (
     PreparedUploadMailbox,
+    cpu_mapping_preparation_variant,
     prepared_upload_key,
 )
 
@@ -81,7 +82,7 @@ def test_pyqtgraph_takes_a_prepared_assembly_instead_of_assembling_inline():
     prepared = resolve_page_backed_assembly(payload, levels=levels)
     mailbox.publish(
         0,
-        prepared_upload_key(payload, levels),
+        prepared_upload_key(payload, cpu_mapping_preparation_variant(payload, levels)),
         prepared,
         nbytes=page_assembly_nbytes(prepared),
     )
@@ -122,7 +123,10 @@ def test_pyqtgraph_refuses_a_stale_assembly_and_assembles_inline(stale_source_id
     # the commit will ask for -- exactly the race the mailbox exists to lose.
     mailbox.publish(
         0,
-        prepared_upload_key(other, stale_levels),
+        prepared_upload_key(
+            other,
+            cpu_mapping_preparation_variant(other, stale_levels),
+        ),
         stale,
         nbytes=page_assembly_nbytes(stale),
     )

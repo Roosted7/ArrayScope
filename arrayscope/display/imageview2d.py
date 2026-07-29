@@ -75,6 +75,7 @@ from arrayscope.display.viewport import (
 )
 from arrayscope.presentation.prepared_uploads import (
     PreparedUploadMailbox,
+    cpu_mapping_preparation_variant,
     prepared_upload_key,
 )
 
@@ -2862,19 +2863,25 @@ class ImageView2D(ImageViewShell):
         """
 
         del rgb_already_windowed
-        bounds = (float(levels[0]), float(levels[1]))
         mailbox = self.preparedTiledUploads
         rows = []
         for tile, payload in dict(payloads or {}).items():
             if getattr(payload, "page_backing", None) is None:
                 continue
             slot = int(getattr(payload, "tile_number", tile))
-            key = prepared_upload_key(payload, bounds)
+            variant = cpu_mapping_preparation_variant(payload, levels)
+            key = prepared_upload_key(payload, variant)
             rows.append(
                 (
                     slot,
                     key,
-                    _pyqtgraph_assembly_preparation(mailbox, slot, key, payload, bounds),
+                    _pyqtgraph_assembly_preparation(
+                        mailbox,
+                        slot,
+                        key,
+                        payload,
+                        (float(levels[0]), float(levels[1])),
+                    ),
                 )
             )
         return tuple(rows)

@@ -14,8 +14,10 @@ import threading
 import numpy as np
 import pytest
 
+from arrayscope.display.shader_mapping import ShaderMapping, ShaderScale
 from arrayscope.presentation.prepared_uploads import (
     PreparedUploadMailbox,
+    cpu_mapping_preparation_variant,
     prepared_upload_key,
 )
 
@@ -184,6 +186,42 @@ def test_concurrent_publishers_and_one_taker_never_yield_a_mismatched_buffer():
     ],
 )
 def test_the_key_prefers_the_acknowledgement_identity(payload, expected_identity):
-    """One notion of sameness, shared with the acknowledgement protocol."""
+    """Semantic and physical payload identities both guard the buffer."""
 
-    assert prepared_upload_key(payload, "scalar") == (expected_identity, "scalar")
+    assert prepared_upload_key(payload, "scalar") == (
+        expected_identity if payload.tile_identity is not None else None,
+        payload.source_id,
+        "scalar",
+    )
+
+
+def test_same_acknowledgement_identity_with_new_actual_pages_is_stale():
+    """Fallback page improvements may share TileIdentity but not pixels."""
+
+    mailbox = PreparedUploadMailbox()
+    older = _Payload(tile_identity="same-target", source_id=("actual-pages", "coarse"))
+    newer = _Payload(tile_identity="same-target", source_id=("actual-pages", "fine"))
+    mailbox.publish(4, prepared_upload_key(older, "scalar"), _buffer(1.0))
+
+    assert mailbox.take(4, prepared_upload_key(newer, "scalar")) is None
+    assert mailbox.counters().stale == 1
+
+
+def test_cpu_mapping_variant_includes_symlog_and_lut_inputs():
+    """Equal levels do not imply equal CPU-mapped complex pixels."""
+
+    payload = _Payload(tile_identity="same-target", source_id="same-source")
+    payload.shader_mapping = ShaderMapping(
+        scale=ShaderScale.SYMLOG,
+        symlog_constant=1.0,
+        lut_identity=("lut", 1),
+    )
+    first = cpu_mapping_preparation_variant(payload, (0.0, 2.0))
+    payload.shader_mapping = ShaderMapping(
+        scale=ShaderScale.SYMLOG,
+        symlog_constant=2.0,
+        lut_identity=("lut", 2),
+    )
+    second = cpu_mapping_preparation_variant(payload, (0.0, 2.0))
+
+    assert first != second

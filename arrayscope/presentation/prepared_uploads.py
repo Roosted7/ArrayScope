@@ -34,6 +34,7 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 
 # One 512x512 RGBA32F page is 4 MiB, so this holds a few dozen prepared tiles.
 # The mailbox is a hand-off buffer, not a residency cache: entries live from
@@ -206,17 +207,37 @@ class PreparedUploadMailbox:
 def prepared_upload_key(payload, variant) -> tuple:
     """Identity a prepared buffer is valid under.
 
-    The acknowledgement identity already means "these exact pixels" everywhere
-    else in the presentation protocol; reusing it here keeps the mailbox from
-    inventing a second, weaker notion of sameness. ``variant`` carries whatever
-    else the preparation depended on — the round levels a PyQtGraph assembly
-    baked against, or the texture representation a WGPU pack targeted.
+    The acknowledgement identity names semantic/LOD truth, but deliberately
+    ignores physical plane provenance. That is too weak for a prepared buffer:
+    two fallback payloads can satisfy the same target while resolving different
+    actual page sets. ``source_id`` carries that physical payload distinction.
+    ``variant`` carries whatever else the preparation depended on — the CPU
+    mapping a PyQtGraph assembly baked against, or the texture representation a
+    WGPU pack targeted.
     """
 
     identity = getattr(payload, "tile_identity", None)
-    if identity is None:
-        identity = getattr(payload, "source_id", None)
-    return (identity, variant)
+    source_id = getattr(payload, "source_id", None)
+    return (identity, source_id, variant)
+
+
+def cpu_mapping_preparation_variant(payload, levels) -> tuple:
+    """Exact CPU display mapping a prepared page assembly was baked through.
+
+    PyQtGraph maps complex pages while assembling them, so levels alone are
+    insufficient: scale, symlog constant and LUT can all change output pixels
+    without changing ``TileIdentity``. ``ShaderMapping.identity_key`` is the
+    canonical hashable description of those inputs. The accepted transaction
+    levels override any older levels still carried by the payload wrapper.
+    """
+
+    bounds = (float(levels[0]), float(levels[1]))
+    mapping = getattr(payload, "shader_mapping", None)
+    if mapping is None:
+        mapping_key = None
+    else:
+        mapping_key = dataclass_replace(mapping, levels=bounds).identity_key
+    return ("cpu-page-assembly", bounds, mapping_key)
 
 
 __all__ = [
@@ -224,5 +245,6 @@ __all__ = [
     "PreparedUpload",
     "PreparedUploadCounters",
     "PreparedUploadMailbox",
+    "cpu_mapping_preparation_variant",
     "prepared_upload_key",
 ]

@@ -39,7 +39,10 @@ from arrayscope.display.shader_mapping import (
 from arrayscope.display.tile_layout import tile_layout_map
 from arrayscope.gpu.keys import REDUCER_PHASE_VECTOR, DataChunkKey
 from arrayscope.gpu.page_table import PageResolution
-from arrayscope.presentation.prepared_uploads import prepared_upload_key
+from arrayscope.presentation.prepared_uploads import (
+    cpu_mapping_preparation_variant,
+    prepared_upload_key,
+)
 
 RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 PYQTGRAPH_PREVIEW_ATLAS_MIN_TILES = 256
@@ -872,7 +875,10 @@ class MontageTileLayer:
         if mailbox is not None:
             prepared = mailbox.take(
                 int(payload.tile_number),
-                prepared_upload_key(payload, (float(levels[0]), float(levels[1]))),
+                prepared_upload_key(
+                    payload,
+                    cpu_mapping_preparation_variant(payload, levels),
+                ),
             )
             if prepared is not None:
                 self._prepared_assembly_hits += 1
