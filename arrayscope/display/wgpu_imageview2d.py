@@ -2591,7 +2591,14 @@ class WgpuImageView2D(ImageViewShell):
                 (
                     slot,
                     key,
-                    _wgpu_pack_preparation(mailbox, slot, key, payload, representation),
+                    _wgpu_pack_preparation(
+                        mailbox,
+                        slot,
+                        key,
+                        payload,
+                        representation,
+                        mailbox.next_generation(),
+                    ),
                 )
             )
         return tuple(rows)
@@ -4146,12 +4153,17 @@ def _wgpu_preparable_representation(payload, rgb_already_windowed: bool):
     return representation
 
 
-def _wgpu_pack_preparation(mailbox, slot, key, payload, representation):
+def _wgpu_pack_preparation(mailbox, slot, key, payload, representation, generation):
     """Build the worker callable that packs one payload's upload plane."""
 
     def prepare() -> None:
         mailbox.note_executed()
-        mailbox.publish(slot, key, wgpu_packed_payload_texture(payload, representation))
+        mailbox.publish(
+            slot,
+            key,
+            wgpu_packed_payload_texture(payload, representation),
+            generation=generation,
+        )
 
     return prepare
 

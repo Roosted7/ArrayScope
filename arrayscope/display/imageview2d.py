@@ -2882,6 +2882,7 @@ class ImageView2D(ImageViewShell):
                         key,
                         payload,
                         (float(levels[0]), float(levels[1])),
+                        mailbox.next_generation(),
                     ),
                 )
             )
@@ -3156,11 +3157,12 @@ class ImageView2D(ImageViewShell):
             self._montage_tile_layer.set_lookup_table(lut)
 
 
-def _pyqtgraph_assembly_preparation(mailbox, slot, key, payload, levels):
+def _pyqtgraph_assembly_preparation(mailbox, slot, key, payload, levels, generation):
     """Build the worker callable that assembles one payload's pages.
 
     Deliberately a module-level factory: the closure captures a mailbox, a
-    payload and two floats, and nothing that belongs to the GUI thread.
+    payload, two floats and an ordering token, and nothing that belongs to the
+    GUI thread.
     """
 
     def prepare() -> None:
@@ -3171,7 +3173,13 @@ def _pyqtgraph_assembly_preparation(mailbox, slot, key, payload, levels):
 
         mailbox.note_executed()
         assembly = resolve_page_backed_assembly(payload, levels=levels)
-        mailbox.publish(slot, key, assembly, nbytes=page_assembly_nbytes(assembly))
+        mailbox.publish(
+            slot,
+            key,
+            assembly,
+            nbytes=page_assembly_nbytes(assembly),
+            generation=generation,
+        )
 
     return prepare
 

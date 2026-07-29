@@ -50,6 +50,7 @@ class PreparedUpload:
     key: object
     buffer: object
     nbytes: int
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class PreparedUploadCounters:
     executed: int = 0
     published: int = 0
     rejected: int = 0
+    superseded_publish: int = 0
     # Displacement: buffers that were published and then lost their slot.
     replaced: int = 0
     evicted: int = 0
@@ -143,6 +145,7 @@ class PreparedUploadMailbox:
         self._executed = 0
         self._published = 0
         self._rejected = 0
+        self._superseded_publish = 0
         self._replaced = 0
         self._evicted = 0
         self._hits = 0
@@ -150,6 +153,20 @@ class PreparedUploadMailbox:
         self._misses = 0
         self._in_flight = 0
         self._peak_in_flight = 0
+        self._generation = 0
+
+    def next_generation(self) -> int:
+        """Claim the ordering token for one planned preparation.
+
+        Handed out on the GUI thread at planning time, which is the only place
+        that sees preparations for a slot in the order the round wants them.
+        Workers finish out of order; this is what lets ``publish`` tell a late
+        straggler from a genuinely newer buffer.
+        """
+
+        with self._lock:
+            self._generation += 1
+            return self._generation
 
     def note_submitted(self, count: int = 1) -> None:
         """One planned preparation reached the scheduler."""
@@ -190,28 +207,42 @@ class PreparedUploadMailbox:
             self._in_flight += max(0, int(count))
             self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
 
-    def publish(self, slot, key, buffer, *, nbytes: int | None = None) -> bool:
-        """Store ``buffer`` for ``slot``, replacing whatever that slot held.
+    def publish(self, slot, key, buffer, *, nbytes: int | None = None, generation: int = 0) -> bool:
+        """Store ``buffer`` for ``slot``, unless that slot already holds newer.
 
         ``nbytes`` is required when the buffer is not itself an array — the
         mailbox cannot bound what it cannot size, and silently treating a
         wrapper as free would let residency grow without limit.
 
-        Returns False when the buffer cannot be held at all — a buffer larger
-        than the whole budget is not worth evicting everything else for, and the
-        consumer's inline path covers it.
+        ``generation`` is the ordering token from ``next_generation``. A running
+        preparation cannot be recalled once it has started, so a superseded one
+        still finishes and still arrives here — after the replacement it lost
+        to, if that replacement was quicker. Overwriting on arrival order would
+        let the straggler evict the buffer the commit actually wants, turning a
+        hit into a stale take and an inline pack. Refusing the older generation
+        keeps the newest prepared buffer, which is what a keep-latest mailbox
+        promises.
+
+        Returns False when the buffer is not stored — refused as older, or too
+        large for the whole budget to be worth evicting everything else for. The
+        consumer's inline path covers both.
         """
 
         nbytes = _buffer_nbytes(buffer) if nbytes is None else max(0, int(nbytes))
-        entry = PreparedUpload(key=key, buffer=buffer, nbytes=nbytes)
+        generation = int(generation)
+        entry = PreparedUpload(key=key, buffer=buffer, nbytes=nbytes, generation=generation)
         with self._lock:
             if self._in_flight > 0:
                 self._in_flight -= 1
             if self._budget_bytes and nbytes > self._budget_bytes:
                 self._rejected += 1
                 return False
-            previous = self._entries.pop(slot, None)
+            previous = self._entries.get(slot)
+            if previous is not None and generation and previous.generation > generation:
+                self._superseded_publish += 1
+                return False
             if previous is not None:
+                self._entries.pop(slot, None)
                 self._resident_bytes -= previous.nbytes
                 self._replaced += 1
             self._entries[slot] = entry
@@ -278,6 +309,7 @@ class PreparedUploadMailbox:
                 executed=self._executed,
                 published=self._published,
                 rejected=self._rejected,
+                superseded_publish=self._superseded_publish,
                 replaced=self._replaced,
                 evicted=self._evicted,
                 hits=self._hits,

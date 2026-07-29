@@ -227,6 +227,47 @@ def test_cpu_mapping_variant_includes_symlog_and_lut_inputs():
     assert first != second
 
 
+def test_a_late_superseded_preparation_does_not_displace_the_newer_buffer():
+    """Priority cannot recall a task that has already started.
+
+    Per-slot supersession drops a *queued* preparation, but one already running
+    on a worker finishes and still arrives here — possibly after the newer
+    preparation it lost to, if the newer one was quicker. Arrival order must not
+    decide: overwriting would evict exactly the buffer the next commit wants and
+    turn a hit into a stale take plus an inline pack.
+    """
+
+    mailbox = PreparedUploadMailbox()
+    newer_buffer = _buffer(2.0)
+    assert mailbox.publish(3, ("id-new", "scalar"), newer_buffer, generation=2)
+
+    # The straggler was planned first (generation 1) and lands second.
+    assert not mailbox.publish(3, ("id-old", "scalar"), _buffer(1.0), generation=1)
+
+    assert mailbox.take(3, ("id-new", "scalar")) is newer_buffer
+    counters = mailbox.counters()
+    assert counters.superseded_publish == 1
+    assert counters.hits == 1
+    assert counters.stale == 0
+
+
+def test_generations_are_handed_out_in_planning_order():
+    mailbox = PreparedUploadMailbox()
+    assert [mailbox.next_generation() for _ in range(3)] == [1, 2, 3]
+
+
+def test_an_equal_or_newer_generation_still_replaces_its_slot():
+    """The keep-latest rule survives: only strictly older publishes are refused."""
+
+    mailbox = PreparedUploadMailbox()
+    mailbox.publish(5, ("id-a", "scalar"), _buffer(1.0), generation=4)
+    newer = _buffer(3.0)
+    assert mailbox.publish(5, ("id-b", "scalar"), newer, generation=5)
+
+    assert mailbox.take(5, ("id-b", "scalar")) is newer
+    assert mailbox.counters().replaced == 1
+
+
 def test_counters_account_for_every_planned_preparation():
     """The taxonomy closes: nothing planned disappears without a counter."""
 
@@ -238,7 +279,7 @@ def test_counters_account_for_every_planned_preparation():
     # Three of the four submitted reach a worker; one was dropped while queued.
     for index in range(3):
         mailbox.note_executed()
-        mailbox.publish(index, ("id", index), _buffer())
+        mailbox.publish(index, ("id", index), _buffer(), generation=index + 1)
     mailbox.take(0, ("id", 0))  # consumed
     mailbox.take(1, ("id", "other"))  # stale
     mailbox.take(99, ("id", 99))  # miss
@@ -274,7 +315,7 @@ def test_in_flight_gauge_bounds_output_allocation_the_byte_budget_cannot_see():
     assert mailbox.counters().peak_in_flight == 3
 
     for index in range(3):
-        mailbox.publish(index, ("id", index), _buffer())
+        mailbox.publish(index, ("id", index), _buffer(), generation=index + 1)
     counters = mailbox.counters()
     assert counters.in_flight == 0
     # The peak survives: it is the bound worth reporting, not the instant.
