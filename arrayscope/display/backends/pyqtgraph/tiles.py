@@ -881,7 +881,11 @@ class MontageTileLayer:
 
         tile = int(tile_number)
         state = self._states.get(tile)
-        if state is not None and bool(getattr(state, "visible", False)):
+        if (
+            state is not None
+            and int(getattr(state, "tile_number", -1)) == tile
+            and bool(getattr(state, "visible", False))
+        ):
             self._visible_intent_tiles.add(tile)
         else:
             self._visible_intent_tiles.discard(tile)
@@ -2775,10 +2779,19 @@ class _SlotStates(dict):
         super().clear()
         self._layer._visible_intent_tiles.clear()
 
+    def popitem(self):
+        tile, state = super().popitem()
+        self._layer._sync_presented(tile)
+        return tile, state
+
     def update(self, *args, **kwargs) -> None:
         super().update(*args, **kwargs)
         for tile in self:
             self._layer._sync_presented(tile)
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
 
     def setdefault(self, tile, default=None):
         result = super().setdefault(tile, default)

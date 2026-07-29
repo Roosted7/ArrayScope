@@ -343,6 +343,34 @@ def test_a_levels_update_does_not_disturb_the_agreement(view):
     assert _check(view) == set(range(6))
 
 
+def test_a_state_must_own_the_slot_that_indexes_it(view):
+    """Mapping membership is not ownership when the state's tile disagrees."""
+
+    _present(view, _payloads(3))
+    layer = view._montage_tile_layer
+    state = layer.states.pop(1)
+    layer.states[99] = state
+
+    assert _check(view) == {0, 2}
+    assert 99 not in layer._visible_intent_tiles
+
+
+def test_all_mapping_mutators_keep_the_candidate_set_in_step(view):
+    """Inherited ``dict`` mutators must not bypass the maintained index."""
+
+    _present(view, _payloads(3))
+    layer = view._montage_tile_layer
+    states = layer.states
+
+    removed_tile, state = states.popitem()
+    assert removed_tile not in layer._visible_intent_tiles
+
+    state.tile_number = 99
+    states |= {99: state}
+    assert 99 in layer._visible_intent_tiles
+    assert _check(view) == set(states)
+
+
 # --- the oracle itself --------------------------------------------------------
 
 
