@@ -845,14 +845,8 @@ class MontageTileLayer:
         self._record_upload_timing = record_upload_timing
         self._histogram_levels_for_display = histogram_levels_for_display
         self._is_rgb_image = is_rgb_image
-        self._states: dict[int, TileLayerItemState] = {}
-        # Tiles this layer *intends* to show: `state.visible` and still owning
-        # their slot. Maintained at the mutation sites, and deliberately not the
-        # presented set — Qt visibility is not the layer's to own, so it is
-        # confirmed per candidate rather than remembered. The win is that a
-        # bounded commit stops walking every resident tile, most of which are
-        # retained-but-hidden in the reuse pool.
         self._visible_intent_tiles: set[int] = set()
+        self._states: dict[int, TileLayerItemState] = _SlotStates(self)
         self._states_by_source_key: dict[object, TileLayerItemState] = {}
         self._direct_reuse_pool: list[TileLayerItemState] = []
         self._direct_reuse_pool_ids: set[int] = set()
@@ -1145,7 +1139,6 @@ class MontageTileLayer:
         for state in tuple(self._states.values()):
             self.layer_owner.remove_tile_item(state.tile_number)
         self._states.clear()
-        self._visible_intent_tiles.clear()
         self._states_by_source_key.clear()
         self._direct_reuse_pool.clear()
         self._direct_reuse_pool_ids.clear()
@@ -1600,7 +1593,6 @@ class MontageTileLayer:
                     old_tile = int(item_state.tile_number)
                     if self._states.get(old_tile) is item_state:
                         self._states.pop(old_tile, None)
-                        self._sync_presented(old_tile)
                     self._unregister_source_state(item_state)
                 self._displace_tile_slot_resident(int(tile_number), item_state)
                 item_state.tile_number = int(tile_number)
@@ -1610,7 +1602,6 @@ class MontageTileLayer:
                 else:
                     self.layer_owner.add_tile_item(tile_number, item_state.item)
                 self._states[int(tile_number)] = item_state
-                self._sync_presented(tile_number)
 
             # A state can remain assigned to its tile while hidden in the
             # direct-reuse pool. Once this transaction selects it for an
@@ -2085,7 +2076,6 @@ class MontageTileLayer:
                     old_tile = int(item_state.tile_number)
                     if self._states.get(old_tile) is item_state:
                         self._states.pop(old_tile, None)
-                        self._sync_presented(old_tile)
                     self._unregister_source_state(item_state)
                 self._displace_tile_slot_resident(int(tile_number), item_state)
                 item_state.tile_number = int(tile_number)
@@ -2290,7 +2280,6 @@ class MontageTileLayer:
             self._displace_tile_slot_resident(tile_number, state)
         if was_assigned:
             self._states.pop(old_tile, None)
-            self._sync_presented(old_tile)
         self._states[tile_number] = state
         move_item = getattr(self.layer_owner, "move_tile_item", None)
         if was_assigned and callable(move_item):
@@ -2298,6 +2287,8 @@ class MontageTileLayer:
         else:
             self.layer_owner.add_tile_item(tile_number, state.item)
         state.tile_number = tile_number
+        # `tile_number` is a field on the state, not a dict key, so this one is
+        # not covered by `_SlotStates`.
         self._sync_presented(tile_number)
         self._touch_resident_state(state)
         return state
@@ -2318,7 +2309,6 @@ class MontageTileLayer:
         if existing is None or existing is replacement:
             return
         self._states.pop(int(tile_number), None)
-        self._sync_presented(tile_number)
         self._set_item_visible(existing, False)
         self._set_state_visible(existing, False)
         unmap = getattr(self.layer_owner, "unmap_tile_item", None)
@@ -2329,7 +2319,6 @@ class MontageTileLayer:
 
     def _remove_tile(self, tile_number: int) -> None:
         state = self._states.pop(int(tile_number), None)
-        self._sync_presented(tile_number)
         if state is None:
             return
         self._unregister_source_state(state)
@@ -2609,7 +2598,6 @@ class MontageTileLayer:
             if state.visible:
                 return
             self._states.pop(tile_number, None)
-            self._sync_presented(tile_number)
         self._remove_from_direct_reuse_pool(state)
         with contextlib.suppress(Exception):
             self.layer_owner.remove_tile_item(tile_number)
@@ -2747,6 +2735,55 @@ def _direct_presented_identities(
             continue
         identities[tile_number] = state.acknowledged_identity or state.source_array_id
     return identities
+
+
+class _SlotStates(dict):
+    """``tile -> state`` that keeps the layer's visible-intent index in step.
+
+    The layer exposes this mapping as ``states``, and callers assign into it
+    directly — production code did, and so do tests that install a state
+    without going through a presentation. Intercepting the mutation here means
+    slot membership can never diverge from the index, whoever changes it, which
+    is a stronger guarantee than remembering to call a helper at each site.
+
+    Only membership is synced. ``state.visible`` is a field on the value, not a
+    dict operation, so the layer's setters still own that half.
+    """
+
+    __slots__ = ("_layer",)
+
+    def __init__(self, layer) -> None:
+        super().__init__()
+        self._layer = layer
+
+    def __setitem__(self, tile, state) -> None:
+        super().__setitem__(tile, state)
+        self._layer._sync_presented(tile)
+
+    def __delitem__(self, tile) -> None:
+        super().__delitem__(tile)
+        self._layer._sync_presented(tile)
+
+    def pop(self, tile, *default):
+        existed = tile in self
+        result = super().pop(tile, *default)
+        if existed:
+            self._layer._sync_presented(tile)
+        return result
+
+    def clear(self) -> None:
+        super().clear()
+        self._layer._visible_intent_tiles.clear()
+
+    def update(self, *args, **kwargs) -> None:
+        super().update(*args, **kwargs)
+        for tile in self:
+            self._layer._sync_presented(tile)
+
+    def setdefault(self, tile, default=None):
+        result = super().setdefault(tile, default)
+        self._layer._sync_presented(tile)
+        return result
 
 
 def _state_is_physically_visible(state: TileLayerItemState) -> bool:
