@@ -341,10 +341,14 @@ Three things follow, and they are not what the 107.1 ms number suggested:
 
 Only the array-packing row is pure over an immutable payload. It is prepared on
 a worker and handed over through `arrayscope.presentation.prepared_uploads`:
-keep-latest per tile, taken only under the exact acknowledgement identity and
-round levels the commit is submitting, dropped otherwise. Everything else in
-the table reads or mutates live presentation state and stays on the GUI thread
-until that state has an off-thread owner.
+keep-latest per tile, taken only under the semantic acknowledgement identity,
+the physical payload/source identity, and the mapping variant the commit is
+submitting, dropped otherwise. The physical identity is necessary because
+fallback payloads can share semantic/LOD truth while resolving different
+actual page sets; PyQtGraph's mapping variant includes levels, scale, symlog
+constant and LUT because its complex assembly bakes those into pixels.
+Everything else in the table reads or mutates live presentation state and
+stays on the GUI thread until that state has an off-thread owner.
 
 ## R6 — Falling behind degrades quality, never liveness
 
@@ -524,14 +528,19 @@ Open work, roughly in dependency order:
    below for why neither is a loop that can be tightened in place.
 2. **Presentation bookkeeping off the GUI thread.** *Seam built, one row moved.*
    `arrayscope.presentation.prepared_uploads` is the hand-off: a worker
-   publishes a prepared buffer under the payload's acknowledgement identity,
-   the GUI thread takes it only under the identity it is about to submit, and a
-   mismatch is dropped rather than presented. Admission triggers preparation on
-   `DISPLAY_PREPARATION` at `PREFETCH`, so it can never delay a rung that
-   produces pixels; a miss falls through to preparing inline. Measured on a
-   272-tile PyQtGraph fill: 272 preparations published, 146 consumed by the
-   commit that wanted them, per-commit page assembly 10.7 ms → 8.6 ms. WGPU is
-   neutral — scalar packing there was already a no-copy passthrough.
+   publishes a prepared buffer under the payload's semantic and physical
+   identities plus the mapping variant, the GUI thread takes it only under the
+   exact key it is about to submit, and a mismatch is dropped rather than
+   presented. Admission triggers best-effort preparation on
+   `DISPLAY_PREPARATION` at `PREFETCH`; it is not a presentation dependency,
+   and physically resident payloads schedule no producer. The governor closes
+   that lane during coverage and interaction, and higher-priority
+   pixel-producing work wins the ready queue. Those controls are not a
+   substitute for the ring-4 physical ACK-order gate. A miss falls through to
+   preparing inline. Measured on a 272-tile PyQtGraph fill: 272 preparations
+   published, 146 consumed by the commit that wanted them, per-commit page
+   assembly 10.7 ms → 8.6 ms. WGPU is neutral — scalar packing there was
+   already a no-copy passthrough.
    What is still on the GUI thread, and why: **the presentation delta build**
    (`FrameSession.build_tile_presentation`, 5.6–8.0 ms per callback) mutates
    session state throughout and has no off-thread owner, so moving it is a
