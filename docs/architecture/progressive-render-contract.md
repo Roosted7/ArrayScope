@@ -531,16 +531,44 @@ Open work, roughly in dependency order:
    publishes a prepared buffer under the payload's semantic and physical
    identities plus the mapping variant, the GUI thread takes it only under the
    exact key it is about to submit, and a mismatch is dropped rather than
-   presented. Admission triggers best-effort preparation on
-   `DISPLAY_PREPARATION` at `PREFETCH`; it is not a presentation dependency,
-   and physically resident payloads schedule no producer. The governor closes
-   that lane during coverage and interaction, and higher-priority
-   pixel-producing work wins the ready queue. Those controls are not a
-   substitute for the ring-4 physical ACK-order gate. A miss falls through to
-   preparing inline. Measured on a 272-tile PyQtGraph fill: 272 preparations
-   published, 146 consumed by the commit that wanted them, per-commit page
-   assembly 10.7 ms → 8.6 ms. WGPU is neutral — scalar packing there was
-   already a no-copy passthrough.
+   presented. A miss falls through to preparing inline; preparation is never a
+   presentation dependency.
+
+   **Preparation is speculative work and must be scheduled as such.** It runs
+   on `SPECULATIVE_RESIDENCY` at `PREFETCH` — a *non-visible* lane, which is
+   what subjects it to the kernel's speculative governor: parked while any
+   visible work is queued or running, capped at a fraction of the pool. This
+   was got wrong first, and the way it was wrong is worth keeping: on a visible
+   lane, `PREFETCH` orders selection from the ready set and nothing more, and a
+   worker already inside a preparation cannot be reclaimed by any priority. One
+   recorded cold scroll held 458 ms of worker time away from pixel-producing
+   tasks, delaying 39 of 157 producers by up to 21.5 ms each. Priority is not a
+   scheduling guarantee once a task has started; lane membership is.
+
+   **Prepare only what preparation can save, and only when it can be used.**
+   Two skips carry most of the value. A pack that would hand back the array it
+   was given (contiguous float32 scalar planes — the common WGPU montage tile)
+   is not prepared: there is nothing to move, and the task would still cost a
+   worker. And planning is skipped entirely while the round's level generation
+   has not caught up with the round, because every buffer baked against the
+   previous window is refused by the commit — a guaranteed miss, not a gamble.
+
+   Measured, with `render_pass_governor_probe` reporting the counters:
+
+   | Workload | Published | Consumed | Wasted |
+   |---|---:|---:|---|
+   | 272-tile settled fill, target pass | 254 | 139 | 53 evicted, 61 unclaimed |
+   | Cold scroll, before the level guard | 36 | **0** | 36 stale |
+   | Cold scroll, after the level guard | 0 | 0 | none submitted |
+
+   Per-commit page assembly on the 272-tile fill: 10.7 ms → 8.6 ms. WGPU is
+   neutral by construction now — its scalar packing was already a no-copy
+   passthrough, so it is no longer offered to a worker at all.
+
+   Read the counters, not the medians. A commit that packed inline because no
+   buffer arrived is indistinguishable in the timings from a commit on a build
+   with no hand-off; only `hits` separates them.
+
    What is still on the GUI thread, and why: **the presentation delta build**
    (`FrameSession.build_tile_presentation`, 5.6–8.0 ms per callback) mutates
    session state throughout and has no off-thread owner, so moving it is a
@@ -655,8 +683,13 @@ the more trustworthy half of that signal.
 - `arrayscope.tools.profile_montage_workflow` gates its exit on an in-process
   R1–R5/R7 verdict. Medians are report-only and must stay that way.
 - `arrayscope.tools.render_pass_governor_probe` reports wall time, throughput,
-  chunk distributions and cost attribution — use it rather than building
-  another harness.
+  chunk distributions, cost attribution and the prepared-upload counters — use
+  it rather than building another harness.
+- `arrayscope.tools.prepared_upload_schedule_probe TRACE.jsonl` replays a trace
+  and reports `blocked_ms`: worker time a speculative preparation held while a
+  higher-priority visible task sat ready. Any claim that background work does
+  not delay the fill should cite this rather than the priority it was submitted
+  at — priority orders selection and cannot reclaim a running task.
 - Run `tests/ui` and **diff the sorted failure list against the base commit**.
   A raw count cannot distinguish a stall from xdist noise, and this ring
   carries genuine flakes: re-run any delta serially before believing it.
