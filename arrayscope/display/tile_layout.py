@@ -106,16 +106,28 @@ _LAYOUT_CACHE: dict[object, _TileLayout] = {}
 def _resolve_tile_layout(geometry, frame_plan) -> _TileLayout:
     montage = getattr(geometry, "montage", None)
     fallback_shape = tuple(int(value) for value in getattr(geometry, "display_shape", (1, 1))[:2])
-    plan_regions = None if frame_plan is None else tuple(getattr(frame_plan, "regions", ()) or ())
     if frame_plan is not None:
+        # The plan's region signature is not merely a good key — it is the
+        # COMPLETE input, the same (region id, source index, bounds) triples
+        # the builder reads. Building from it rather than from the plan's
+        # regions makes "what the cache keys on" and "what the layout is
+        # derived from" the same value, so no input can change without
+        # changing the key. It also keeps a cached layout from retaining
+        # FrameRegion objects and the view states they reference.
         signature = getattr(frame_plan, "scene_region_signature", None)
-        key = None if signature is None else ("plan", signature, fallback_shape)
+        if signature is None:
+            return _TileLayout(montage, (), fallback_shape)
+        plan_regions = tuple(signature)
+        key = ("plan", plan_regions, fallback_shape)
     elif montage is not None:
+        # MontageGeometry hashes and compares by value over exactly the fields
+        # the builder reads: indices (the active set), tile shape, columns,
+        # rows and gap. Placement is world space and does not depend on the
+        # viewport, so a pan or zoom correctly does not invalidate it.
+        plan_regions = None
         key = ("montage", montage, fallback_shape)
     else:
         return _TileLayout(None, None, fallback_shape or (1, 1))
-    if key is None:
-        return _TileLayout(montage, plan_regions, fallback_shape)
     cached = _LAYOUT_CACHE.get(key)
     if cached is not None:
         return cached
@@ -129,20 +141,16 @@ def _resolve_tile_layout(geometry, frame_plan) -> _TileLayout:
 def _build_tile_layout_regions(montage, plan_regions) -> tuple[TileLayoutRegion, ...]:
     if plan_regions is not None:
         regions = []
-        for region in plan_regions:
-            x0, y0, x1, y1 = tuple(float(value) for value in getattr(region, "bounds", ()))
+        for region_id, source_index, bounds in plan_regions:
+            x0, y0, x1, y1 = (float(value) for value in bounds)
             width = max(0, round(x1 - x0 + 1.0))
             height = max(0, round(y1 - y0 + 1.0))
             if width < 1 or height < 1:
                 continue
             regions.append(
                 TileLayoutRegion(
-                    tile_number=int(region.region_id),
-                    source_index=(
-                        None
-                        if getattr(region, "source_index", None) is None
-                        else int(region.source_index)
-                    ),
+                    tile_number=int(region_id),
+                    source_index=None if source_index is None else int(source_index),
                     x=round(x0),
                     y=round(y0),
                     width=width,

@@ -340,6 +340,63 @@ def test_wgpu_instance_equality_checks_track_the_delta(qt_app, monkeypatch):
     )
 
 
+def test_layout_cache_invalidates_on_every_input_that_moves_a_tile():
+    """Semantic equality must never become stale physical geometry.
+
+    The layout cache is keyed by value, which is the only way it hits at all
+    (the app rebuilds geometry constantly). The risk of a value key is the
+    opposite of a stale identity key: an input that moves a tile but is not
+    part of the key would be served a placement from before it changed.
+
+    So this walks the inputs and asserts each one moves the result. It is a
+    completeness check on the key, not a behaviour check on placement.
+    """
+
+    from arrayscope.display.tile_layout import planned_tile_count, tile_layout_map
+
+    geometry, _payloads = _montage(FIELD_TILES)
+    base = tile_layout_map(geometry)
+    baseline = {
+        tile: (region.x, region.y, region.width, region.height) for tile, region in base.items()
+    }
+
+    def placement(changed):
+        layout = tile_layout_map(changed)
+        return {tile: (r.x, r.y, r.width, r.height) for tile, r in layout.items()}
+
+    montage = geometry.montage
+    cases = {
+        "tile size": replace(geometry, montage=replace(montage, tile_shape=(TILE * 2, TILE * 2))),
+        "columns": replace(geometry, montage=replace(montage, columns=COLUMNS // 2)),
+        "gutter": replace(geometry, montage=replace(montage, gap=3)),
+        "active set shrink": replace(
+            geometry, montage=replace(montage, indices=tuple(range(FIELD_TILES // 2)))
+        ),
+    }
+    for label, changed in cases.items():
+        assert placement(changed) != baseline, (
+            f"changing the {label} produced identical placement; that input is "
+            "not part of the layout cache key and a stale layout can be served"
+        )
+
+    # A source-index remap keeps placement but must not keep the mapping.
+    remapped = replace(
+        geometry, montage=replace(montage, indices=tuple(reversed(range(FIELD_TILES))))
+    )
+    assert {tile: region.source_index for tile, region in tile_layout_map(remapped).items()} != {
+        tile: region.source_index for tile, region in base.items()
+    }, "remapping source indices reused the previous tile-to-source mapping"
+
+    # An equal-but-new geometry must reuse, and an active-set growth must not.
+    rebuilt = replace(
+        geometry, montage=replace(montage), montage_tile_states=tuple(geometry.montage_tile_states)
+    )
+    assert placement(rebuilt) == baseline, "an equal geometry did not reuse its placement"
+    assert planned_tile_count(cases["active set shrink"]) == FIELD_TILES // 2, (
+        "the planned count did not follow the active set"
+    )
+
+
 def test_bounded_commit_inspects_only_the_delta_for_the_histogram(qt_app, monkeypatch):
     """The montage histogram source is maintained, not re-derived.
 
