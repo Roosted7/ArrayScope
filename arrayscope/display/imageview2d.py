@@ -2867,6 +2867,7 @@ class ImageView2D(ImageViewShell):
         rows = []
         for tile, payload in dict(payloads or {}).items():
             if getattr(payload, "page_backing", None) is None:
+                mailbox.note_no_work()
                 continue
             slot = int(getattr(payload, "tile_number", tile))
             variant = cpu_mapping_preparation_variant(payload, levels)
@@ -3168,6 +3169,7 @@ def _pyqtgraph_assembly_preparation(mailbox, slot, key, payload, levels):
             resolve_page_backed_assembly,
         )
 
+        mailbox.note_executed()
         assembly = resolve_page_backed_assembly(payload, levels=levels)
         mailbox.publish(slot, key, assembly, nbytes=page_assembly_nbytes(assembly))
 

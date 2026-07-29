@@ -2575,6 +2575,7 @@ class WgpuImageView2D(ImageViewShell):
         it, so a plane prepared here carries the key the commit will ask for. A
         payload whose kind is not packable is skipped rather than guessed at:
         the commit's own validation stays the single place that refuses.
+
         """
 
         del levels
@@ -2587,7 +2588,11 @@ class WgpuImageView2D(ImageViewShell):
             slot = int(getattr(payload, "tile_number", tile))
             key = prepared_upload_key(payload, representation)
             rows.append(
-                (slot, key, _wgpu_pack_preparation(mailbox, slot, key, payload, representation))
+                (
+                    slot,
+                    key,
+                    _wgpu_pack_preparation(mailbox, slot, key, payload, representation),
+                )
             )
         return tuple(rows)
 
@@ -4145,6 +4150,7 @@ def _wgpu_pack_preparation(mailbox, slot, key, payload, representation):
     """Build the worker callable that packs one payload's upload plane."""
 
     def prepare() -> None:
+        mailbox.note_executed()
         mailbox.publish(slot, key, wgpu_packed_payload_texture(payload, representation))
 
     return prepare

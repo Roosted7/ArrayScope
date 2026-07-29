@@ -225,3 +225,67 @@ def test_cpu_mapping_variant_includes_symlog_and_lut_inputs():
     second = cpu_mapping_preparation_variant(payload, (0.0, 2.0))
 
     assert first != second
+
+
+def test_counters_account_for_every_planned_preparation():
+    """The taxonomy closes: nothing planned disappears without a counter."""
+
+    mailbox = PreparedUploadMailbox()
+    mailbox.note_resident(3)
+    mailbox.note_no_work(2)
+    mailbox.note_deduped()
+    mailbox.note_submitted(4)
+    # Three of the four submitted reach a worker; one was dropped while queued.
+    for index in range(3):
+        mailbox.note_executed()
+        mailbox.publish(index, ("id", index), _buffer())
+    mailbox.take(0, ("id", 0))  # consumed
+    mailbox.take(1, ("id", "other"))  # stale
+    mailbox.take(99, ("id", 99))  # miss
+
+    counters = mailbox.counters()
+    assert counters.skipped_resident == 3
+    assert counters.skipped_no_work == 2
+    assert counters.deduped == 1
+    assert counters.submitted == 4
+    assert counters.executed == 3
+    assert counters.superseded_before_execution == 1
+    assert counters.published == 3
+    assert counters.hits == 1
+    assert counters.stale == 1
+    assert counters.misses == 1
+    assert counters.inline_fallbacks == 2
+    # One published buffer was never asked for and is still held.
+    assert counters.resident_entries == 1
+
+
+def test_in_flight_gauge_bounds_output_allocation_the_byte_budget_cannot_see():
+    """Between entering a closure and publishing, a worker holds an allocation.
+
+    The mailbox budget bounds *published* bytes only. The concurrent output of
+    running preparations is bounded instead by how many closures are inside
+    that window at once, so that count has to be observable.
+    """
+
+    mailbox = PreparedUploadMailbox()
+    for _ in range(3):
+        mailbox.note_executed()
+    assert mailbox.counters().in_flight == 3
+    assert mailbox.counters().peak_in_flight == 3
+
+    for index in range(3):
+        mailbox.publish(index, ("id", index), _buffer())
+    counters = mailbox.counters()
+    assert counters.in_flight == 0
+    # The peak survives: it is the bound worth reporting, not the instant.
+    assert counters.peak_in_flight == 3
+
+
+def test_a_rejected_oversized_buffer_still_closes_its_in_flight_window():
+    mailbox = PreparedUploadMailbox(budget_bytes=16)
+    mailbox.note_executed()
+    assert not mailbox.publish(1, ("id", 1), _buffer(1.0, size=64))
+
+    counters = mailbox.counters()
+    assert counters.rejected == 1
+    assert counters.in_flight == 0

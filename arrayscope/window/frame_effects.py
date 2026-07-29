@@ -1229,6 +1229,7 @@ class FramePipelineEffects:
         lifecycle = session.lifecycle
         payload_resident = getattr(view, "tiledPayloadResident", None)
         payloads = {}
+        resident_skips = 0
         for row in tuple(upserts or ()):
             if not isinstance(row, tuple) or len(row) != 2 or row[1] is None:
                 continue
@@ -1238,10 +1239,15 @@ class FramePipelineEffects:
             payload = lifecycle.current_presentable_payload(int(tile))
             if payload is None:
                 payload = session.display_tile_payloads.get(int(tile))
-            if payload is not None and not (
-                callable(payload_resident) and bool(payload_resident(payload))
-            ):
-                payloads[int(tile)] = payload
+            if payload is None:
+                continue
+            if callable(payload_resident) and bool(payload_resident(payload)):
+                resident_skips += 1
+                continue
+            payloads[int(tile)] = payload
+        mailbox = view.preparedTiledUploads
+        if resident_skips:
+            mailbox.note_resident(resident_skips)
         if not payloads:
             return
         levels = normalize_bounds(
@@ -1266,10 +1272,11 @@ class FramePipelineEffects:
         except Exception as exc:  # pragma: no cover - defensive, never fatal
             handle_ui_exception("montage upload preparation planning", exc)
             return
-        mailbox = view.preparedTiledUploads
         for slot, key, prepare in preparations:
             if mailbox.holds(slot, key):
+                mailbox.note_deduped()
                 continue
+            mailbox.note_submitted()
             kernel.submit(
                 TaskSpec(
                     key=("prepared-upload", session_id, slot, key),
@@ -4442,11 +4449,26 @@ def _prepared_upload_counters(renderer) -> dict[str, int]:
         return {}
     counters = mailbox.counters()
     return {
+        # Planning: what was decided about each payload, including the two
+        # ways a preparation is deliberately not made.
+        "prepared_upload_submitted": int(counters.submitted),
+        "prepared_upload_deduped": int(counters.deduped),
+        "prepared_upload_skipped_resident": int(counters.skipped_resident),
+        "prepared_upload_skipped_no_work": int(counters.skipped_no_work),
+        # Execution: what a worker did, and what the scheduler dropped first.
+        "prepared_upload_executed": int(counters.executed),
+        "prepared_upload_superseded_before_execution": int(counters.superseded_before_execution),
+        "prepared_upload_superseded_publish": int(counters.superseded_publish),
         "prepared_upload_published": int(counters.published),
+        # Displacement and consumption.
+        "prepared_upload_replaced": int(counters.replaced),
+        "prepared_upload_evicted": int(counters.evicted),
         "prepared_upload_hits": int(counters.hits),
         "prepared_upload_stale": int(counters.stale),
         "prepared_upload_misses": int(counters.misses),
+        "prepared_upload_inline_fallbacks": int(counters.inline_fallbacks),
         "prepared_upload_resident": int(counters.resident_entries),
+        "prepared_upload_peak_in_flight": int(counters.peak_in_flight),
     }
 
 

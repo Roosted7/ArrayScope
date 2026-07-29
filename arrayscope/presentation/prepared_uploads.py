@@ -54,22 +54,64 @@ class PreparedUpload:
 
 @dataclass(frozen=True)
 class PreparedUploadCounters:
-    """Why the mailbox helped or did not, without a debugger.
+    """Where every preparation went, without a debugger.
 
-    ``stale`` is the interesting one: it counts buffers that were prepared and
-    then correctly refused because the slot moved on. A rising ``stale`` with a
+    The point of counting this finely is that "the hand-off works" and "the
+    hand-off is worth its cost" are different claims, and only the second one
+    matters. A high ``hits`` proves the seam is wired up; it says nothing about
+    the preparations that were planned and never used. These counters close
+    over the whole population, so wasted work has nowhere to hide:
+
+        planned = submitted + deduped + skipped_resident + skipped_no_work
+        submitted = executed + superseded_before_execution
+        executed ≈ published + rejected
+        published = hits + stale + replaced + evicted + resident_entries
+        inline fallbacks at the commit = misses + stale
+
+    ``stale`` is the one to watch. It counts buffers that were prepared and
+    then correctly refused because the slot moved on; a rising ``stale`` with a
     flat ``hits`` means preparation is chasing a target it never catches, which
     is a scheduling problem, not a correctness one.
     """
 
+    # Planning: what the GUI thread decided to do about each payload.
+    submitted: int = 0
+    deduped: int = 0
+    skipped_resident: int = 0
+    skipped_no_work: int = 0
+    # Execution: what the workers did with what they were given.
+    executed: int = 0
     published: int = 0
+    rejected: int = 0
+    # Displacement: buffers that were published and then lost their slot.
     replaced: int = 0
+    evicted: int = 0
+    # Consumption: what the commit found when it came to submit.
     hits: int = 0
     stale: int = 0
     misses: int = 0
-    evicted: int = 0
+    # Live state.
     resident_entries: int = 0
     resident_bytes: int = 0
+    in_flight: int = 0
+    peak_in_flight: int = 0
+
+    @property
+    def superseded_before_execution(self) -> int:
+        """Submitted preparations the scheduler dropped before they ran.
+
+        Not a counter of its own: per-slot supersession drops the queued record
+        without running the closure, so the only honest way to see it is the
+        gap between what was submitted and what a worker actually entered.
+        """
+
+        return max(0, int(self.submitted) - int(self.executed))
+
+    @property
+    def inline_fallbacks(self) -> int:
+        """Commits that packed on the GUI thread after all."""
+
+        return int(self.misses) + int(self.stale)
 
 
 def _buffer_nbytes(buffer) -> int:
@@ -94,12 +136,59 @@ class PreparedUploadMailbox:
         self._lock = threading.Lock()
         self._entries: OrderedDict[object, PreparedUpload] = OrderedDict()
         self._resident_bytes = 0
+        self._submitted = 0
+        self._deduped = 0
+        self._skipped_resident = 0
+        self._skipped_no_work = 0
+        self._executed = 0
         self._published = 0
+        self._rejected = 0
         self._replaced = 0
+        self._evicted = 0
         self._hits = 0
         self._stale = 0
         self._misses = 0
-        self._evicted = 0
+        self._in_flight = 0
+        self._peak_in_flight = 0
+
+    def note_submitted(self, count: int = 1) -> None:
+        """One planned preparation reached the scheduler."""
+
+        with self._lock:
+            self._submitted += max(0, int(count))
+
+    def note_deduped(self, count: int = 1) -> None:
+        """A planned preparation was already waiting, so it was not resubmitted."""
+
+        with self._lock:
+            self._deduped += max(0, int(count))
+
+    def note_resident(self, count: int = 1) -> None:
+        """Planning skipped a payload the backend already has physically."""
+
+        with self._lock:
+            self._skipped_resident += max(0, int(count))
+
+    def note_no_work(self, count: int = 1) -> None:
+        """Planning skipped a payload whose preparation would allocate nothing."""
+
+        with self._lock:
+            self._skipped_no_work += max(0, int(count))
+
+    def note_executed(self, count: int = 1) -> None:
+        """A worker entered a preparation closure.
+
+        Called by the closure itself rather than inferred from a completion, so
+        that ``submitted - executed`` is exactly the population the scheduler
+        dropped before it ran. Also raises the in-flight gauge: between here and
+        ``publish`` the worker holds an output allocation the mailbox's byte
+        budget cannot see.
+        """
+
+        with self._lock:
+            self._executed += max(0, int(count))
+            self._in_flight += max(0, int(count))
+            self._peak_in_flight = max(self._peak_in_flight, self._in_flight)
 
     def publish(self, slot, key, buffer, *, nbytes: int | None = None) -> bool:
         """Store ``buffer`` for ``slot``, replacing whatever that slot held.
@@ -114,10 +203,13 @@ class PreparedUploadMailbox:
         """
 
         nbytes = _buffer_nbytes(buffer) if nbytes is None else max(0, int(nbytes))
-        if self._budget_bytes and nbytes > self._budget_bytes:
-            return False
         entry = PreparedUpload(key=key, buffer=buffer, nbytes=nbytes)
         with self._lock:
+            if self._in_flight > 0:
+                self._in_flight -= 1
+            if self._budget_bytes and nbytes > self._budget_bytes:
+                self._rejected += 1
+                return False
             previous = self._entries.pop(slot, None)
             if previous is not None:
                 self._resident_bytes -= previous.nbytes
@@ -179,14 +271,22 @@ class PreparedUploadMailbox:
     def counters(self) -> PreparedUploadCounters:
         with self._lock:
             return PreparedUploadCounters(
+                submitted=self._submitted,
+                deduped=self._deduped,
+                skipped_resident=self._skipped_resident,
+                skipped_no_work=self._skipped_no_work,
+                executed=self._executed,
                 published=self._published,
+                rejected=self._rejected,
                 replaced=self._replaced,
+                evicted=self._evicted,
                 hits=self._hits,
                 stale=self._stale,
                 misses=self._misses,
-                evicted=self._evicted,
                 resident_entries=len(self._entries),
                 resident_bytes=int(self._resident_bytes),
+                in_flight=int(self._in_flight),
+                peak_in_flight=int(self._peak_in_flight),
             )
 
     def _evict_over_budget_locked(self, *, protect=None) -> None:
