@@ -1589,6 +1589,22 @@ def floor_can_progress(session, tile_number: int, tile=None) -> bool:
     )
 
 
+def page_plan_source_origin(plans) -> tuple[int, int]:
+    """Native origin the stored pages were binned from — the reduction phase.
+
+    Pyramid pages live on the GLOBAL source grid, so a page set covering a
+    crop that does not begin on a bin boundary spans one extra partial bin.
+    Its stored extent is therefore wider than ``ceil(extent / factor)``, and a
+    consumer can only reproduce it if it is told where the bins were counted
+    from.
+    """
+
+    return (
+        int(min(plan.valid_source_rect_yx[0] for plan in plans)),
+        int(min(plan.valid_source_rect_yx[2] for plan in plans)),
+    )
+
+
 def ensure_floor_payloads(
     session,
     tile_numbers,
@@ -1744,6 +1760,7 @@ def ensure_floor_payloads(
                 - min(plan.stored_rect_yx[2] for plan in key.plans),
             ),
             gutter=0,
+            source_origin=page_plan_source_origin(key.plans),
         )
         # ADR 0056 G5 slice 1: an EXACT reduced plane covering the whole
         # display window carries the window-invariant source anchor (native
@@ -1888,12 +1905,19 @@ def resident_texture_for_rendered_tile(
     stored_y1 = max(plan.stored_rect_yx[1] for plan in key.plans)
     stored_x0 = min(plan.stored_rect_yx[2] for plan in key.plans)
     stored_x1 = max(plan.stored_rect_yx[3] for plan in key.plans)
+    # These pages live on the GLOBAL reduced grid, so the stored rectangle is
+    # the native rectangle's image under that grid — which is wider than
+    # ``ceil(extent / factor)`` whenever the crop does not start on a bin
+    # boundary. Carry the native origin the pages were binned from so a
+    # consumer can derive the same extent instead of guessing it from the
+    # local extent, which is how an odd-origin crop was rejected outright.
     lod = LodInfo(
         level=applied,
         factor=max(int(factor_xy[0]), int(factor_xy[1])),
         source_shape=source_shape,
         texture_shape=(stored_y1 - stored_y0, stored_x1 - stored_x0),
         gutter=0,
+        source_origin=page_plan_source_origin(key.plans),
     )
     page_backing = PageBackedPresentation(
         requested_plans=key.plans,

@@ -59,6 +59,7 @@ from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 from arrayscope.display.backends.pyqtgraph.histogram_adapter import PyQtGraphHistogramAdapter
 from arrayscope.display.glyph_atlas import GlyphAtlas
 from arrayscope.display.imageview2d import ArrayScopeGraphicsView, ImageViewShell
+from arrayscope.display.lod import reduced_extent
 from arrayscope.display.model.tile_identity import TileIdentity, tile_ack_identity
 from arrayscope.display.model.tile_stats import TileLayerUpdateStats
 from arrayscope.display.overlay_geometry import (
@@ -4399,6 +4400,7 @@ def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
             int(value) for value in (getattr(payload, "source_shape", None) or texture_shape)[:2]
         )
         declared_texture_shape = texture_shape
+        source_origin = (0, 0)
     else:
         rung_level = int(getattr(lod, "level", 0) or 0)
         try:
@@ -4413,6 +4415,11 @@ def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
         # canonical native geometry the executor's page ladder addresses.
         source_shape = tuple(int(value) for value in lod.source_shape)
         declared_texture_shape = tuple(int(value) for value in lod.texture_shape)
+        # The reduction's phase, not the crop's position: a source-anchored
+        # axis reduces on the global source grid, so an odd-origin crop
+        # legitimately carries one more reduced sample than its own extent
+        # implies. Phase 0 reproduces ceil(extent / factor) exactly.
+        source_origin = tuple(int(value) for value in getattr(lod, "source_origin", (0, 0)))
         if gutter:
             raise NotImplementedError(
                 f"wgpu backend does not yet support LOD gutters; got {gutter}"
@@ -4423,14 +4430,18 @@ def _wgpu_payload_lod_geometry(payload, texture) -> tuple[int, tuple[int, int]]:
             f"got factor {factor} for rung label {rung_level}"
         )
     level = factor.bit_length() - 1
-    expected_texture_shape = tuple(-(-extent // factor) for extent in source_shape)
+    expected_texture_shape = tuple(
+        reduced_extent(origin, extent, factor)
+        for origin, extent in zip(source_origin, source_shape, strict=True)
+    )
     requested_shape_mismatch = (
         getattr(payload, "page_backing", None) is None and declared_texture_shape != texture_shape
     )
     if requested_shape_mismatch or texture_shape != expected_texture_shape:
         raise ValueError(
             "wgpu payload texture geometry does not match its native LOD ladder: "
-            f"source={source_shape}, rung_label={rung_level}, factor={factor}, "
+            f"source={source_shape}, origin={source_origin}, rung_label={rung_level}, "
+            f"factor={factor}, "
             f"executor_level={level}, declared={declared_texture_shape}, "
             f"actual={texture_shape}, expected={expected_texture_shape}"
         )

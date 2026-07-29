@@ -653,6 +653,11 @@ def evaluate_shared_preview(
                 ),
                 texture_shape=tuple(int(value) for value in np.shape(value.data)[:2]),
                 gutter=0,
+                # The phase these samples were reduced on. Without it a
+                # consumer derives the reduced extent from the local extent
+                # alone and rejects an anchored odd-origin crop, whose span
+                # legitimately covers one extra partial bin.
+                source_origin=canonical_preview_reduction_origin(session, tile.view_state),
             ),
         )
         rendered = RenderedTile(
@@ -1369,13 +1374,9 @@ def _reduced_preview_read_spec(
     display_x_region = _display_axis_region_for_preview(
         view_state, image_axes[1], base_shape[image_axes[1]]
     )
-    display_source_starts = {
-        image_axes[0]: _axis_region_first_index(display_y_region) if aligned_y else None,
-        image_axes[1]: _axis_region_first_index(display_x_region) if aligned_x else None,
-    }
-    display_source_starts = {
-        axis: int(start) for axis, start in display_source_starts.items() if start is not None
-    }
+    display_source_starts = _preview_reduction_starts(
+        (display_y_region, display_x_region), image_axes, (aligned_y, aligned_x)
+    )
     if sample_display_axes:
         preview_y_region = _sample_preview_axis_region(
             display_y_region,
@@ -1467,6 +1468,50 @@ def _reduced_preview_read_spec(
         slice_remap=dict(slice_remap),
         display_source_starts=display_source_starts,
     )
+
+
+def _preview_reduction_starts(regions, image_axes, alignment) -> dict[int, int]:
+    """The reduction PHASE per display axis, keyed by document axis.
+
+    An axis that is source-anchored reduces on the global source grid, so its
+    phase is where its window starts in source coordinates. An axis that is
+    not anchored reduces from its own origin and has no phase entry, which
+    every consumer reads as 0.
+
+    One owner on purpose: the reduced extent a producer emits and the extent a
+    backend validates are the same function of this value, and they must not
+    be able to disagree about it.
+    """
+
+    return {
+        int(axis): int(_axis_region_first_index(region))
+        for region, axis, aligned in zip(regions, image_axes, alignment, strict=True)
+        if aligned
+    }
+
+
+def canonical_preview_reduction_origin(session, view_state) -> tuple[int, int]:
+    """``_preview_reduction_starts`` in the payload's canonical axis order.
+
+    Ordered to match :func:`render.lod.canonical_source_tile_shape`, so the
+    pair lines up element-wise with the ``source_shape`` it describes.
+    """
+
+    axes = tuple(int(axis) for axis in (getattr(view_state, "image_axes", None) or ()))
+    if len(axes) != 2:
+        return (0, 0)
+    base_shape = tuple(int(size) for size in np.shape(session.document.base_data))
+    aligned = _preview_axis_alignment(_preview_source_alignment(session))
+    regions = tuple(
+        _display_axis_region_for_preview(view_state, axis, base_shape[axis]) for axis in axes
+    )
+    starts = _preview_reduction_starts(regions, axes, aligned)
+    canonical = (
+        (axes[1], axes[0])
+        if bool(getattr(session, "canonical_orientation", False)) and axes[0] > axes[1]
+        else axes
+    )
+    return (int(starts.get(canonical[0], 0)), int(starts.get(canonical[1], 0)))
 
 
 def _preview_source_alignment(session) -> bool | tuple[bool, bool]:
@@ -2073,6 +2118,7 @@ def _evaluate_tile_reduced_input_preview(
             ),
             texture_shape=tuple(int(size) for size in np.shape(value.data)[:2]),
             gutter=0,
+            source_origin=canonical_preview_reduction_origin(session, tile.view_state),
         ),
     )
     rendered = RenderedTile(

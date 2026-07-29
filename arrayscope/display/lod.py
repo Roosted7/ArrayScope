@@ -21,11 +21,27 @@ LOD_REASON_INVALID_VIEW = (
 
 @dataclass(frozen=True)
 class LodInfo:
+    """Native geometry of one payload's reduction, in payload axis order.
+
+    ``source_origin`` is the native coordinate the reduction bins are aligned
+    to — the reduction's *phase*, not merely where the crop happens to start.
+    A source-anchored axis reduces on the global source grid, so a crop whose
+    native start is not a multiple of ``factor`` straddles one extra partial
+    bin and has MORE reduced samples than its own extent implies. An axis that
+    is not source-anchored reduces from its own origin and has phase ``0``.
+
+    ``(0, 0)`` therefore means "phase-aligned", and reproduces
+    ``ceil(extent / factor)`` exactly; carrying the phase is what lets a
+    consumer predict the reduced extent of an odd-origin crop instead of
+    deriving a wrong one from the local extent alone.
+    """
+
     level: int
     factor: int
     source_shape: tuple[int, int]
     texture_shape: tuple[int, int]
     gutter: int = 0
+    source_origin: tuple[int, int] = (0, 0)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "level", max(0, int(self.level)))
@@ -34,6 +50,44 @@ class LodInfo:
         object.__setattr__(self, "source_shape", _shape2(self.source_shape))
         object.__setattr__(self, "texture_shape", _shape2(self.texture_shape))
         object.__setattr__(self, "gutter", max(0, int(self.gutter)))
+        object.__setattr__(self, "source_origin", _origin2(self.source_origin))
+
+    def reduced_extents(self) -> tuple[int, int]:
+        """Reduced sample count per axis for this payload's native extent.
+
+        The one place the phase rule lives, so a producer and a validating
+        consumer cannot disagree about it.
+        """
+
+        return tuple(
+            reduced_extent(origin, extent, self.factor)
+            for origin, extent in zip(self.source_origin, self.source_shape, strict=True)
+        )
+
+
+def reduced_extent(origin: int, extent: int, factor: int) -> int:
+    """Bins a native span covers on a reduction grid aligned to ``origin``.
+
+    ``origin`` is the phase: the native coordinate bin boundaries are counted
+    from. With a phase of 0 this is ``ceil(extent / factor)``; with a phase
+    that is not a multiple of ``factor`` the span straddles one extra partial
+    leading bin, which is why an anchored crop of 100 native rows at factor 2
+    legitimately reduces to 51 rather than 50 samples.
+    """
+
+    factor = max(1, int(factor))
+    origin = max(0, int(origin))
+    extent = int(extent)
+    if extent <= 0:
+        return 0
+    return (origin + extent - 1) // factor - origin // factor + 1
+
+
+def _origin2(value) -> tuple[int, int]:
+    origin = tuple(max(0, int(item)) for item in tuple(value))
+    if len(origin) != 2:
+        raise ValueError(f"source origin must be a (y, x) pair, got {value!r}")
+    return origin
 
 
 @dataclass(frozen=True)
