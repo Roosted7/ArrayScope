@@ -12,6 +12,8 @@ tell a matched key from a mismatched one.
 
 from __future__ import annotations
 
+from dataclasses import replace as dataclass_replace
+
 import numpy as np
 import pytest
 
@@ -20,6 +22,7 @@ from arrayscope.display.backends.pyqtgraph.tiles import (
     resolve_page_backed_assembly,
 )
 from arrayscope.display.lod import LodInfo
+from arrayscope.display.shader_mapping import ShaderMapping, ShaderScale
 from arrayscope.display.model.frame import DisplayTilePayload, PageBackedPresentation
 from arrayscope.display.pyramid import materialize_source_grid_pages, plan_source_grid_pages
 from arrayscope.display.wgpu_imageview2d import (
@@ -244,3 +247,99 @@ def test_an_unpackable_payload_is_skipped_rather_than_guessed_at():
         image = None
 
     assert _wgpu_preparable_representation(_Opaque(), False) is None
+
+
+# --- Physical residency is not mapping residency ------------------------------
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param(
+            {"levels": (0.0, 2.0)},
+            {"levels": (0.0, 5.0)},
+            id="levels",
+        ),
+        pytest.param(
+            {"scale": ShaderScale.LINEAR},
+            {"scale": ShaderScale.LOG},
+            id="scale",
+        ),
+        pytest.param(
+            {"scale": ShaderScale.SYMLOG, "symlog_constant": 1.0},
+            {"scale": ShaderScale.SYMLOG, "symlog_constant": 4.0},
+            id="symlog-constant",
+        ),
+        pytest.param(
+            {"lut_identity": ("lut", "gray")},
+            {"lut_identity": ("lut", "viridis")},
+            id="lut",
+        ),
+        pytest.param(
+            {"component": "real"},
+            {"component": "abs"},
+            id="complex-component",
+        ),
+    ],
+)
+def test_a_mapping_change_alone_changes_the_preparation_key(first, second):
+    """`TileIdentity` is blind to the CPU mapping; the preparation key is not.
+
+    Each of these changes the pixels a PyQtGraph assembly bakes while leaving
+    semantic identity untouched. If any of them collided, a buffer baked under
+    the old mapping could be taken for the new one — the torn frame the mailbox
+    exists to prevent.
+    """
+
+    base = _page_backed_payload()
+    levels_first = first.pop("levels", (0.0, 2.0))
+    levels_second = second.pop("levels", (0.0, 2.0))
+    one = dataclass_replace(base, shader_mapping=ShaderMapping(**first))
+    other = dataclass_replace(base, shader_mapping=ShaderMapping(**second))
+
+    assert prepared_upload_key(
+        one, cpu_mapping_preparation_variant(one, levels_first)
+    ) != prepared_upload_key(other, cpu_mapping_preparation_variant(other, levels_second))
+
+
+def test_a_skipped_preparation_still_bakes_the_current_mapping_inline():
+    """The residency filter may only cost a preparation, never a remap.
+
+    Planning skips physically resident payloads, and physical residency says
+    nothing about the mapping. So the case that matters is a source the backend
+    already holds, presented through a mapping it was not baked under: the
+    commit must bake the *current* mapping, exactly as it would with no
+    preparation in the picture at all.
+    """
+
+    from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
+
+    payload = _page_backed_payload(fill=3.0)
+    mailbox = PreparedUploadMailbox()
+    layer = MontageTileLayer.__new__(MontageTileLayer)
+    layer._payload_prepare_ms = 0.0
+    layer._prepared_uploads = mailbox
+    layer._prepared_assembly_hits = 0
+
+    # Nothing was prepared for this round: planning skipped it as resident.
+    mailbox.note_resident()
+    resolved = layer._resolve_payload(payload, levels=(0.0, 9.0))
+
+    assert layer._prepared_assembly_hits == 0
+    assert mailbox.counters().misses == 1
+    assert layer.consume_payload_prepare_ms() > 0.0
+    assert float(np.asarray(resolved.payload.image).ravel()[0]) == pytest.approx(3.0)
+
+
+def test_a_fallback_payload_sharing_semantic_identity_keeps_its_own_key():
+    """Two payloads can satisfy one target from different physical pages."""
+
+    coarse = dataclass_replace(
+        _page_backed_payload(source_id=("tile", "fallback")), tile_identity="same-target"
+    )
+    fine = dataclass_replace(
+        _page_backed_payload(source_id=("tile", "exact")), tile_identity="same-target"
+    )
+
+    assert coarse.tile_identity == fine.tile_identity
+    assert prepared_upload_key(coarse, "scalar") != prepared_upload_key(fine, "scalar")
