@@ -551,6 +551,9 @@ class FrameRuntimeMixin:
 
     @Qt.QtCore.Slot()
     def _montage_watchdog_tick(self) -> None:
+        if getattr(self.win, "_closing", False):
+            self._montage_watchdog_stop()
+            return
         session = getattr(self, "_frame_session", None)
         if session is None or not self._frame_session_is_current(session):
             self._montage_watchdog_stop()
@@ -591,6 +594,15 @@ class FrameRuntimeMixin:
             and bool(required_first_pixels_presented())
             and (frame is None or not callable(frame_current) or not bool(frame_current(frame)))
         )
+        committed_frame_stale_reason = None
+        if committed_frame_stale:
+            currency_mismatch = getattr(self, "_committed_display_frame_currency_mismatch", None)
+            if frame is None:
+                committed_frame_stale_reason = "missing"
+            elif callable(currency_mismatch):
+                committed_frame_stale_reason = currency_mismatch(frame) or "unknown"
+            else:
+                committed_frame_stale_reason = "unknown"
         if not required_unsettled and not committed_frame_stale:
             self._montage_watchdog_stop()
             return
@@ -668,6 +680,7 @@ class FrameRuntimeMixin:
             "level_evidence": level_evidence,
             "level_stale": level_stale,
             "committed_frame_stale": committed_frame_stale,
+            "committed_frame_stale_reason": committed_frame_stale_reason,
             "flush_pending": bool(session.flush_pending),
             "final_commit_pending": bool(session.final_commit_pending),
             "stage_active": len(session.stage_fan_in.active_requests),
@@ -1358,33 +1371,36 @@ def _stall_tile_probe_row_actionable(row: dict[str, object]) -> bool:
     claims actionable.
     """
 
-    if not bool(row.get("visible_first_pixel_complete")):
-        return True
-    for key in ("loading", "active", "dirty", "pending_upsert"):
-        if bool(row.get(key)):
-            return True
-    if row.get("evaluation_claim_source_index") is not None and not bool(
+    live_work = any(bool(row.get(key)) for key in ("loading", "active", "dirty", "pending_upsert"))
+    evaluation_conflict = row.get("evaluation_claim_source_index") is not None and not bool(
         row.get("evaluation_claim_matches_current_source")
-    ):
-        return True
+    )
     desired_present = row.get("desired_payload_source_index") is not None
     state_present = row.get("state_payload_source_index") is not None
-    if desired_present and not bool(row.get("desired_matches_current_source")):
-        return True
-    if state_present and not bool(row.get("state_matches_current_source")):
-        return True
-    if (
+    desired_conflict = desired_present and not bool(row.get("desired_matches_current_source"))
+    state_conflict = state_present and not bool(row.get("state_matches_current_source"))
+    backend_desired_conflict = (
         desired_present
         and row.get("backend_source") not in (None, "")
         and not bool(row.get("backend_matches_desired"))
-    ):
-        return True
-    return bool(
+    )
+    backend_state_conflict = (
         not desired_present
         and state_present
         and row.get("backend_source") not in (None, "")
         and not bool(row.get("backend_matches_state"))
     )
+    if (
+        evaluation_conflict
+        or desired_conflict
+        or state_conflict
+        or backend_desired_conflict
+        or backend_state_conflict
+    ):
+        return True
+    if live_work:
+        return True
+    return bool(row.get("target_unsettled")) and not bool(row.get("visible_first_pixel_complete"))
 
 
 def _interactive_active(window) -> bool:

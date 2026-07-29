@@ -234,6 +234,23 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   completes 272/272, but performance remains red: the zoom/pan scalar phase
   takes 24.326 s with a 513 ms maximum event-loop interval and still fails
   R1/R2/R2b/R5. This closes a permanent wedge, not the governor tuning row.
+  **WGPU callback spikes re-attributed 2026-07-29, nothing optimized:** an
+  order-balanced managed-Weston A-B-C/C-B-A run compared `fbaf9074`, landed
+  `160ede2c`, and the viewport-currency/stall-reporting fix at 336×336×272.
+  Same-process warm fills completed 1/2, 2/2, and 2/2 respectively; callback
+  min/p50/p95/max was 9.8/42.5/63.3/195.0 ms, 10.2/43.8/62.0/99.5 ms, and
+  8.7/41.3/89.5/134.1 ms, with 11/46, 11/42, and 10/48 callbacks above
+  50 ms. Fresh-process cold fills remained censored at the five-second gate
+  in five of six runs. In every revision the target spikes are
+  backend-apply-owned (worst target callbacks: 228.9 ms with 209.2 ms apply;
+  212.8/193.4; 243.1/217.0). The fixed revision's worst apply splits between
+  130.4 ms texture preparation and 81.6 ms native submission. No new
+  post-`fbaf9074` whole-montage Python loop explains more than 25 ms:
+  warm `payload_build_ms` maxima were 25.8/24.1/27.1 ms, with the 27.1 ms
+  observation a metadata commit and the same inherited owner already present
+  at the comparison base. Keep the next optimization on WGPU backend
+  preparation/submission and cold native initialization, with deterministic
+  physical equivalence; do not retune the scheduler from these noisy tails.
   Preview-first is the explicit default; `--disable-coarse-rung` is the B arm
   ([ADR 0059](decisions/0059-coarse-rung-and-shared-reduced-stage.md)).
   **Non-reducible pipelines keep the pass (2026-07-27):** FLOOR no longer
@@ -245,6 +262,20 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   and PyQtGraph in 3178 ms, versus no preview ACKs on the parent. Target
   settlement remained beyond 5 s on both and the standing R1/R2 failures did
   not increase ([evidence](redesign/unconditional-native-output-preview-2026-07-27.md)).
+- **WGPU odd-origin resident-crop geometry is rejected — OPEN.** The
+  managed-Weston 336×336×272 `display_x_axis_slice`/`display_y_axis_slice`
+  matrix reproducibly reaches `tiledPayloadResident()` with a globally
+  phase-aligned level-1 crop whose native extent is 100 but whose reduced
+  extent is 51. `_wgpu_payload_lod_geometry()` derives 50 from the local
+  extent alone and raises
+  `wgpu payload texture geometry does not match its native LOD ladder`,
+  stranding 50 current targets with no work in flight. Exact landed
+  `160ede2c` and the viewport-currency fix fail identically. Preserve the
+  strict geometry check, but make the expected reduced extent include the
+  crop's native origin/phase (or prove that information at the page identity
+  owner); pin odd-origin crops in both orientations and require the existing
+  physical CPU-reference/continuity matrix to settle. Do not catch and
+  silently fall back after the binding error.
 - **PyQtGraph full complex montage presentation is broken — OPEN.** Short
   prefixes are sufficient; do not hide it behind a long watchdog. The
   target-only full FFT action failed to return before an 8 s process guard and

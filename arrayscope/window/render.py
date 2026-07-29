@@ -180,44 +180,56 @@ class RenderOrchestrator(
             return None
         return value_source.value_at(mapping)
 
-    def _committed_display_frame_identity_current(self, frame: CommittedDisplayFrame) -> bool:
-        """Every currency check EXCEPT the render-generation ordering stamp.
-
-        Splits the pixel-affecting identity (document, geometry, request key,
-        data/histogram shape) from ``render_generation``.  The generation is an
-        ordering token — it advances on every render request, including ones
-        that land on an already-settled presentation and commit nothing.  When
-        that happens the committed frame's stamp lags the live counter while
-        its pixels remain the current output; separating the two lets the
-        reuse path tell "this frame is current, only its stamp lagged" from
-        "this frame is genuinely superseded" and re-stamp the former.
-        """
+    def _committed_display_frame_identity_mismatch(
+        self, frame: CommittedDisplayFrame
+    ) -> str | None:
+        """Name the first pixel-affecting identity component that is stale."""
 
         if getattr(self.win, "_closing", False):
-            return False
+            return "window_closing"
         if frame.key.document_key != _document_key(self.win.document):
-            return False
+            return "document"
         display_geometry = getattr(self, "display_geometry", None)
         if frame.geometry != display_geometry and not (
             isinstance(frame.value_source, TiledValueSource)
             and display_geometry_coordinates_equal(frame.geometry, display_geometry)
         ):
-            return False
+            return "geometry"
         if frame.data is None:
             if not isinstance(frame.value_source, TiledValueSource):
-                return False
+                return "data_shape"
         elif tuple(np.shape(frame.data)[:2]) != tuple(frame.geometry.display_shape):
-            return False
+            return "data_shape"
         if frame.histogram_data is not None and tuple(np.shape(frame.histogram_data)[:2]) != tuple(
             frame.geometry.display_shape
         ):
-            return False
-        return frame.key.request_key == getattr(self, "_committed_display_request_key", None)
+            return "histogram_shape"
+        if frame.key.request_key != getattr(self, "_committed_display_request_key", None):
+            return "request_key"
+        return None
+
+    def _committed_display_frame_identity_current(self, frame: CommittedDisplayFrame) -> bool:
+        """Return whether every pixel-affecting frame identity is current.
+
+        ``render_generation`` is deliberately separate: it is an ordering
+        token that can advance when an already-settled presentation reuses its
+        pixels and therefore has a safe, identity-checked restamp path.
+        """
+
+        return self._committed_display_frame_identity_mismatch(frame) is None
+
+    def _committed_display_frame_currency_mismatch(
+        self, frame: CommittedDisplayFrame
+    ) -> str | None:
+        mismatch = self._committed_display_frame_identity_mismatch(frame)
+        if mismatch is not None:
+            return mismatch
+        if not self._is_current_render_generation(int(frame.key.render_generation)):
+            return "render_generation"
+        return None
 
     def _is_committed_display_frame_current(self, frame: CommittedDisplayFrame) -> bool:
-        return self._is_current_render_generation(
-            int(frame.key.render_generation)
-        ) and self._committed_display_frame_identity_current(frame)
+        return self._committed_display_frame_currency_mismatch(frame) is None
 
     def _refresh_committed_display_frame_generation(self, render_generation: int) -> None:
         """Realign the committed frame's ordering stamp with a superseding but

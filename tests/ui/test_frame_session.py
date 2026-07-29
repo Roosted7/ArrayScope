@@ -382,6 +382,66 @@ def test_stall_probe_row_keeps_stale_presented_identity_actionable():
     assert _stall_tile_probe_row_actionable(row)
 
 
+def test_stall_probe_row_ignores_released_resident_tile_without_live_obligation():
+    from arrayscope.window.frame_runtime import _stall_tile_probe_row_actionable
+
+    row = {
+        "tile": 258,
+        "target_unsettled": False,
+        "visible_first_pixel_complete": False,
+        "loading": False,
+        "active": False,
+        "dirty": False,
+        "pending_upsert": False,
+        "desired_payload_source_index": None,
+        "state_payload_source_index": None,
+        "backend_source": "",
+        "evaluation_claim_source_index": None,
+        "resident_levels_current_source": (2, 5),
+    }
+
+    assert not _stall_tile_probe_row_actionable(row)
+
+
+def test_stall_probe_row_keeps_unsettled_missing_active_target_actionable():
+    from arrayscope.window.frame_runtime import _stall_tile_probe_row_actionable
+
+    row = {
+        "target_unsettled": True,
+        "visible_first_pixel_complete": False,
+        "loading": False,
+        "active": True,
+        "dirty": False,
+        "pending_upsert": False,
+        "desired_payload_source_index": None,
+        "state_payload_source_index": None,
+        "backend_source": "",
+        "evaluation_claim_source_index": None,
+    }
+
+    assert _stall_tile_probe_row_actionable(row)
+
+
+def test_stall_probe_row_keeps_mismatched_evaluation_claim_actionable():
+    from arrayscope.window.frame_runtime import _stall_tile_probe_row_actionable
+
+    row = {
+        "target_unsettled": False,
+        "visible_first_pixel_complete": True,
+        "loading": False,
+        "active": False,
+        "dirty": False,
+        "pending_upsert": False,
+        "desired_payload_source_index": None,
+        "state_payload_source_index": None,
+        "backend_source": "",
+        "evaluation_claim_source_index": 257,
+        "evaluation_claim_matches_current_source": False,
+    }
+
+    assert _stall_tile_probe_row_actionable(row)
+
+
 def test_stale_committed_state_payload_is_not_complete_after_retarget():
     session = _session()
     tile = session.plan.tiles[0]
@@ -2754,6 +2814,10 @@ def test_settled_tiles_with_stale_committed_frame_emit_stall_probe(
         def _is_committed_display_frame_current(_frame):
             return False
 
+        @staticmethod
+        def _committed_display_frame_currency_mismatch(_frame):
+            return "render_generation"
+
     configure_trace(tmp_path / "stale-frame.trace.jsonl")
     renderer = Renderer()
     try:
@@ -2767,4 +2831,37 @@ def test_settled_tiles_with_stale_committed_frame_emit_stall_probe(
     rows = [json.loads(line) for line in dump_path.read_text().splitlines()]
     stall = next(row for row in rows if row.get("kind") == "stall")
     assert stall["owner_chain"]["committed_frame_stale"] is True
+    assert stall["owner_chain"]["committed_frame_stale_reason"] == "render_generation"
     dump_path.unlink(missing_ok=True)
+
+
+def test_watchdog_stops_without_reporting_frame_currency_while_window_closes(qtbot):
+    from pyqtgraph.Qt import QtWidgets
+
+    from arrayscope.window.frame_runtime import FrameRuntimeMixin
+
+    window = QtWidgets.QMainWindow()
+    window._closing = True
+    qtbot.addWidget(window)
+
+    class Timer:
+        def __init__(self):
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    class Renderer(FrameRuntimeMixin):
+        def __init__(self):
+            self.win = window
+            self._montage_watchdog_timer = Timer()
+            self._montage_watchdog_state = ("armed",)
+            self._montage_watchdog_state_since = 1.0
+            self._montage_stall_assertions = 0
+
+    renderer = Renderer()
+    renderer._montage_watchdog_tick()
+
+    assert renderer._montage_watchdog_timer.stopped
+    assert renderer._montage_watchdog_state is None
+    assert renderer._montage_stall_assertions == 0
