@@ -2585,6 +2585,9 @@ class WgpuImageView2D(ImageViewShell):
             representation = _wgpu_preparable_representation(payload, bool(rgb_already_windowed))
             if representation is None:
                 continue
+            if not wgpu_pack_saves_work(payload, representation):
+                mailbox.note_no_work()
+                continue
             slot = int(getattr(payload, "tile_number", tile))
             key = prepared_upload_key(payload, representation)
             rows.append(
@@ -4151,6 +4154,66 @@ def _wgpu_preparable_representation(payload, rgb_already_windowed: bool):
     if representation == RGB8 and not rgb_already_windowed:
         return RGB_WINDOWED_RGBA32F
     return representation
+
+
+def _wgpu_multi_page_assembly(payload) -> bool:
+    """Whether packing this payload has to assemble more than one page.
+
+    Mirrors the early returns in ``_wgpu_assembled_page_texture``: a single
+    plan, or a plan set the page store does not exactly cover, hands the
+    fallback texture straight back without touching it.
+    """
+
+    backing = getattr(payload, "page_backing", None)
+    plans = tuple(getattr(backing, "requested_plans", ()) or ())
+    pages = tuple(getattr(backing, "materialized_pages", ()) or ())
+    if len(plans) <= 1 or len(pages) != len(plans):
+        return False
+    return {page.key for page in pages} == {plan.key for plan in plans}
+
+
+def wgpu_pack_saves_work(payload, representation) -> bool:
+    """Whether packing ``payload`` would allocate anything the commit lacks.
+
+    ``pack_texture_data`` is a no-op for a plane that already has the texel
+    layout its representation wants: ``np.ascontiguousarray`` on a contiguous
+    array of the right dtype hands the same object back. Preparing one of those
+    ahead buys nothing and is not free — it takes a scheduler slot and holds a
+    worker thread for as long as it runs, which is worker time the round's
+    pixel-producing tasks could have had.
+
+    So the hand-off is offered only where there is real work to move: a
+    multi-page assembly, a dtype or component conversion, or a channel
+    repack. This is a *value* judgement about preparation, never a statement
+    about what the commit can upload — the commit packs whatever it is given.
+    """
+
+    if _wgpu_multi_page_assembly(payload):
+        return True
+    if representation == RGB_WINDOWED_RGBA32F:
+        # Always builds a fresh RGBA plane and derives or copies the scalar.
+        return True
+    texture = payload.texture_data if payload.texture_data is not None else payload.image
+    texture = np.asarray(texture)
+    if representation == SCALAR_R32F:
+        return texture.dtype != np.float32 or not texture.flags["C_CONTIGUOUS"]
+    if representation == COMPLEX_RG32F:
+        if np.iscomplexobj(texture):
+            return True
+        return (
+            texture.ndim < 3
+            or texture.shape[-1] != 2
+            or texture.dtype != np.float32
+            or not texture.flags["C_CONTIGUOUS"]
+        )
+    if representation == RGB8:
+        return (
+            texture.ndim != 3
+            or texture.shape[-1] != 3
+            or texture.dtype != np.uint8
+            or not texture.flags["C_CONTIGUOUS"]
+        )
+    return False
 
 
 def _wgpu_pack_preparation(mailbox, slot, key, payload, representation, generation):
