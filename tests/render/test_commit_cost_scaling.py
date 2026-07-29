@@ -604,6 +604,40 @@ def test_wgpu_equal_replacement_retains_the_instance_tuple(qt_app):
     )
 
 
+@pytest.mark.skipif("wgpu" not in _BACKENDS, reason="no wgpu adapter on this machine")
+def test_empty_delta_takes_the_production_fast_path(qt_app, monkeypatch):
+    """The fixture must reach the path production reaches.
+
+    WGPU's whole-binding reuse needs a real ``TileIdentity`` on every payload:
+    without one the identity comparison bails, the empty delta falls onto a
+    full montage rebuild, and every timing taken through that fixture
+    describes a path the app never runs. That is not hypothetical — an
+    earlier measurement of this same empty-delta case reported 13.4 ms and a
+    supposed inversion against a 32-tile delta, both artefacts of payloads
+    that carried no identity.
+
+    So this pins the fixture as much as the code: an empty delta must build
+    no tile instances at all, which is only true on the fast path.
+    """
+
+    from arrayscope.display import wgpu_imageview2d
+    from arrayscope.display.wgpu_imageview2d import _wgpu_physical_payload_identities
+
+    montage = _Montage("wgpu", FIELD_TILES)
+    assert _wgpu_physical_payload_identities(montage.payloads) is not None, (
+        "fixture payloads carry no TileIdentity, so WGPU cannot reuse a "
+        "binding; any commit cost measured through them is not the app's"
+    )
+
+    counter = _Counter(monkeypatch, wgpu_imageview2d, "TileInstance")
+    montage.commit(())
+
+    assert counter.count == 0, (
+        f"an empty delta built {counter.count} tile instances; it left the "
+        "whole-binding fast path and rebuilt the montage"
+    )
+
+
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_empty_delta_commit_is_cheaper_than_one_that_does_work(backend, qt_app):
     """An empty delta must not cost more than a delta that presents tiles.
