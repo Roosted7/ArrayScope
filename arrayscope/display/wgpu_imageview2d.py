@@ -1104,6 +1104,7 @@ class WgpuImageView2D(ImageViewShell):
         base_serial = committed.get("base_serial")
         changed = committed.get("changed_tiles")
         instances = None
+        patched_from_cache = False
         if (
             cached is not None
             and base_serial is not None
@@ -1113,22 +1114,27 @@ class WgpuImageView2D(ImageViewShell):
         ):
             positions = {tile: index for index, tile in enumerate(order)}
             patched = list(cached[1])
+            instance_changed = False
             for tile in changed:
                 index = positions.get(int(tile))
                 if index is None:
                     patched = None
                     break
-                patched[index] = instance_for(int(tile))
+                replacement = instance_for(int(tile))
+                if replacement != patched[index]:
+                    patched[index] = replacement
+                    instance_changed = True
             if patched is not None:
-                instances = tuple(patched)
+                patched_from_cache = True
+                instances = tuple(patched) if instance_changed else cached[1]
         if instances is None:
             instances = tuple(instance_for(tile) for tile in order)
-        if cached is not None and cached[1] == instances:
+        if not patched_from_cache and cached is not None and cached[1] == instances:
             # The executor's identity check deliberately avoids an O(n)
-            # equality scan. Do that scan here while the instances are
-            # already being assembled, then retain the exact tuple so a
-            # target-quality payload replacement with unchanged geometry
-            # performs no full instance-buffer rewrite.
+            # equality scan. A full rebuild must compare the full result, but
+            # the incremental path above compares only the changed positions.
+            # Retain the exact tuple so a target-quality payload replacement
+            # with unchanged geometry performs no instance-buffer rewrite.
             instances = cached[1]
         self._wgpu_tile_instances_cache = (serial, instances, order)
         return instances

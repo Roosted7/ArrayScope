@@ -290,6 +290,32 @@ def test_wgpu_instance_rebuild_tracks_the_delta_not_the_montage(qt_app, monkeypa
     )
 
 
+@pytest.mark.skipif("wgpu" not in _BACKENDS, reason="no wgpu adapter on this machine")
+def test_wgpu_instance_equality_checks_track_the_delta(qt_app, monkeypatch):
+    """Reusing an equal instance tuple must not hide a whole-montage scan."""
+
+    from arrayscope.gpu.command_protocol import TileInstance
+
+    montage = _Montage("wgpu", FIELD_TILES)
+    comparisons = 0
+    original_eq = TileInstance.__eq__
+
+    def counted_eq(self, other):
+        nonlocal comparisons
+        comparisons += 1
+        return original_eq(self, other)
+
+    monkeypatch.setattr(TileInstance, "__eq__", counted_eq)
+    # The last tile makes a tuple equality fallback inspect the full montage
+    # when the replacement's geometry is unchanged.
+    montage.commit((FIELD_TILES - 1,))
+
+    assert comparisons <= 4, (
+        f"a 1-tile commit compared {comparisons} tile instances; equality "
+        "reuse must inspect the delta, not scan the montage"
+    )
+
+
 @pytest.mark.parametrize("backend", _BACKENDS)
 def test_empty_delta_commit_is_cheaper_than_one_that_does_work(backend, qt_app):
     """An empty delta must not cost more than a delta that presents tiles.
