@@ -1085,9 +1085,18 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             or session.view_range != current_range
         )
         if session_key == session.key and viewport_changed:
+            # Viewport retargeting may create new work tokens and commit a
+            # presentation without rebuilding the session.  Carry the render
+            # request's ordering generation into that work before it starts.
+            # If the specialized retarget declines, restore the old stamp so
+            # the ordinary rejection/rebirth path still owns the transition.
+            previous_render_generation = int(session.render_generation)
+            session.render_generation = self._capture_render_generation()
             if self._try_update_montage_viewport_only():
                 self._frame_session_reuses = int(getattr(self, "_frame_session_reuses", 0) or 0) + 1
+                self._refresh_committed_display_frame_generation(session.render_generation)
                 return True
+            session.render_generation = previous_render_generation
             return _reject("viewport-retarget")
         if session_key == session.key:
             # Same identity: refresh the generation stamp, commit genuine

@@ -5140,13 +5140,22 @@ def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(q
             self.win = self
             self.document = document
             self.viewport_retargets = 0
+            self.refreshed_generations = []
 
         def _montage_quality_policy_mode(self):
             return self._frame_session.lod_policy_mode
 
+        @staticmethod
+        def _capture_render_generation():
+            return 7
+
         def _try_update_montage_viewport_only(self):
+            assert self._frame_session.render_generation == 7
             self.viewport_retargets += 1
             return True
+
+        def _refresh_committed_display_frame_generation(self, render_generation):
+            self.refreshed_generations.append(render_generation)
 
     document = ArrayDocument(np.zeros((2, 2, 6), dtype=np.float32))
     state = ViewState.from_shape(document.current_shape).with_montage_axis(
@@ -5211,7 +5220,102 @@ def test_same_key_view_range_change_uses_viewport_retarget_not_session_rebirth(q
 
     assert handled is True
     assert win.viewport_retargets == 1
+    assert session.render_generation == 7
+    assert win.refreshed_generations == [7]
     assert getattr(win, "_frame_session_retarget_last_reject", "") != "view-range"
+
+
+def test_declined_viewport_retarget_restores_session_generation(qt_app):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.operations.evaluator import _document_key
+    from arrayscope.operations.pipeline import ArrayDocument
+    from arrayscope.window.frame_controller import FrameControllerMixin
+    from arrayscope.window.frame_session import FrameSession
+
+    class Window(QtCore.QObject, FrameControllerMixin):
+        def __init__(self, document):
+            super().__init__()
+            self.win = self
+            self.document = document
+
+        def _montage_quality_policy_mode(self):
+            return self._frame_session.lod_policy_mode
+
+        @staticmethod
+        def _capture_render_generation():
+            return 7
+
+        def _try_update_montage_viewport_only(self):
+            assert self._frame_session.render_generation == 7
+            return False
+
+    document = ArrayDocument(np.zeros((2, 2, 6), dtype=np.float32))
+    state = ViewState.from_shape(document.current_shape).with_montage_axis(
+        2, columns=3, indices=tuple(range(6)), text=":"
+    )
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(6)), tile_shape=(2, 2), columns=3)
+    old_viewport = MontageViewportPlan(
+        2, tuple(range(6)), (4, 12), (2, 2), plan, ((0.0, 6.0), (0.0, 4.0)), True, True
+    )
+    new_viewport = MontageViewportPlan(
+        2, tuple(range(6)), (4, 12), (2, 2), plan, ((1.0, 3.0), (0.5, 2.5)), True, True
+    )
+    session = FrameSession(
+        session_id=1,
+        key=frame_session_key(_document_key(document), state, old_viewport, None),
+        render_generation=1,
+        level_key=("levels",),
+        level_expected_indices=tuple(range(6)),
+        plan=plan,
+        view_state=state,
+        document=document,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=old_viewport.viewport_shape,
+        view_range=old_viewport.view_range,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode="relative",
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+        display_committed=True,
+    )
+    session.shader_display = True
+    win = Window(document)
+    win._frame_session = session
+
+    handled = win._maybe_retarget_frame_session(
+        session,
+        document=document,
+        axis=2,
+        view_state=state,
+        viewport_plan=new_viewport,
+        plan=plan,
+        policy=None,
+        colormap_lut=None,
+        window_mode="relative",
+        force_auto=False,
+        user_levels=None,
+        output_dtype=np.dtype(np.float32),
+        shader_display=True,
+        cached_tiles=(),
+        missing_tiles=(),
+        skipped_tiles=(),
+        all_indices=tuple(range(6)),
+        display_tiles=plan.tiles,
+        current_range=new_viewport.view_range,
+        viewport_shape=new_viewport.viewport_shape,
+    )
+
+    assert handled is False
+    assert session.render_generation == 1
+    assert getattr(win, "_frame_session_retarget_last_reject", "") == "viewport-retarget"
 
 
 def test_resize_retarget_requests_presentation_through_gate(qt_app):

@@ -338,6 +338,57 @@ def test_pan_keeps_event_loop_responsive_and_content_correct(montage_window):
     h.assert_lifecycle_settled()
 
 
+def test_viewport_only_retarget_keeps_frame_current_and_required_rows_physical(
+    montage_window,
+):
+    """A reused WGPU session carries the render request that moved its camera."""
+
+    from arrayscope.window.frame_runtime import _stall_tile_probe_row_actionable
+
+    h = montage_window
+    h.fit_view()
+    assert h.wait_settled()
+    session_id = int(h.session.session_id)
+    view = h.win.img_view.getView()
+    (x0, x1), (y0, y1) = h.session.view_range
+    span_x = float(x1 - x0)
+    span_y = float(y1 - y0)
+    ranges = (
+        (
+            (float(x0 + span_x * 0.02), float(x1 + span_x * 0.02)),
+            (float(y0 + span_y * 0.02), float(y1 + span_y * 0.02)),
+        ),
+        (
+            (float(x0 + span_x * 0.02), float(x1 - span_x * 0.02)),
+            (float(y0 + span_y * 0.02), float(y1 - span_y * 0.02)),
+        ),
+    )
+
+    for x_range, y_range in ranges:
+        view.setRange(xRange=x_range, yRange=y_range, padding=0)
+        assert h.wait_settled(timeout=INTERACTION_SETTLE_HARD_LIMIT_S), (
+            f"never settled after viewport-only retarget {x_range}/{y_range}"
+        )
+        assert int(h.session.session_id) == session_id
+        frame = h.win._committed_display_frame
+        assert frame is not None
+        assert h.win.renderer._is_committed_display_frame_current(frame)
+        assert int(h.session.render_generation) == int(h.win.renderer._render_generation.current)
+
+        required = {int(tile) for tile in h.session.required_tile_numbers()}
+        physical = set(h.win.img_view.tileTruthPhysicalRows())
+        assert required <= physical, (
+            f"required tiles missing physical rows: {sorted(required - physical)}"
+        )
+        actionable = tuple(
+            row
+            for row in h.session.diagnostic_tile_identity_rows()
+            if _stall_tile_probe_row_actionable(row)
+        )
+        assert not actionable, f"settled viewport retarget reported stalled tiles: {actionable}"
+        assert int(getattr(h.win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+
+
 def test_zoom_across_lod_threshold_keeps_content_and_levels_in_sync(montage_window):
     h = montage_window
     h.fit_view()
