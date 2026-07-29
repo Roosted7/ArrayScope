@@ -14,11 +14,25 @@ nothing else. The kernel already emits ``kernel_submit`` / ``kernel_start`` /
 ``kernel_finish`` with lane, priority, tile and task sequence, so the evidence
 is a replay, not new instrumentation on the commit path.
 
-The number to read is **blocked_ms**: worker-time during which a preparation
-task was running while at least one higher-priority visible task had been
+The number to read is **blocking_worker_ms**: worker-time during which a
+preparation was running while at least one outranking visible task had been
 submitted and had not yet started. That is head-of-line blocking, and it is the
 only way preparation can affect paint order. Zero means preparation never held
 a worker a producer wanted, whatever else the trace shows.
+
+It is a *union* over the producers waiting at each instant, deliberately. One
+preparation with three producers queued behind it occupies one worker, not
+three. An earlier version of this probe added the overlap once per waiting
+producer and called the total worker time, so a single 10 ms task that two
+producers were waiting behind reported 20 ms. Worker-time is still summed
+*across* preparations, because two preparations running at once genuinely do
+hold two threads.
+
+**producer_wait_overlap_ms** is the other quantity, and it is the per-producer
+sum on purpose: it answers "how much collective waiting coincided with
+preparation", which is a fairness measure rather than a resource measure. The
+two questions are different and their answers coincide only when at most one
+producer is ever waiting at a time.
 
 ``--ack`` additionally reports the acknowledgement order against the tile
 priority order the round asked for, so a reordering can be attributed to (or
@@ -72,6 +86,32 @@ class _Task:
         return self.start_ns >= 0 and self.finish_ns >= 0
 
 
+def _union_ms(intervals) -> float:
+    """Wall time covered by a set of possibly overlapping ``(low, high)`` ns pairs."""
+
+    spans = sorted((low, high) for low, high in intervals if high > low)
+    if not spans:
+        return 0.0
+    total = 0
+    current_low, current_high = spans[0]
+    for low, high in spans[1:]:
+        if low > current_high:
+            total += current_high - current_low
+            current_low, current_high = low, high
+        else:
+            current_high = max(current_high, high)
+    total += current_high - current_low
+    return total / 1e6
+
+
+def _intersect(first, second):
+    """Clip ``second`` against ``first``; both are ``(low, high)`` ns pairs."""
+
+    low = max(first[0], second[0])
+    high = min(first[1], second[1])
+    return (low, high) if high > low else None
+
+
 @dataclass
 class ScheduleEvidence:
     """What the trace says about preparation's effect on producer start times."""
@@ -81,7 +121,13 @@ class ScheduleEvidence:
     preparations_dropped: int = 0
     preparation_outcomes: dict[str, int] = field(default_factory=dict)
     preparation_busy_ms: float = 0.0
-    blocked_ms: float = 0.0
+    # The resource number: worker time held away from producers. Unioned within
+    # each preparation, summed across them, because concurrent preparations
+    # really do occupy separate threads.
+    blocking_worker_ms: float = 0.0
+    # The fairness number: collective producer waiting that coincided with a
+    # running preparation. Summed per producer, so it may exceed the above.
+    producer_wait_overlap_ms: float = 0.0
     blocking_intervals: int = 0
     worst_producer_delay_ms: float = 0.0
     delayed_producers: int = 0
@@ -94,7 +140,8 @@ class ScheduleEvidence:
             "preparations_dropped": self.preparations_dropped,
             "preparation_outcomes": dict(sorted(self.preparation_outcomes.items())),
             "preparation_busy_ms": round(self.preparation_busy_ms, 3),
-            "blocked_ms": round(self.blocked_ms, 3),
+            "blocking_worker_ms": round(self.blocking_worker_ms, 3),
+            "producer_wait_overlap_ms": round(self.producer_wait_overlap_ms, 3),
             "blocking_intervals": self.blocking_intervals,
             "worst_producer_delay_ms": round(self.worst_producer_delay_ms, 3),
             "delayed_producers": self.delayed_producers,
@@ -172,28 +219,33 @@ def analyze_schedule(events) -> ScheduleEvidence:
         if task.start_ns > task.submit_ns >= 0
     ]
     for prep in running:
-        overlapped = False
-        for wait_start, wait_end, producer in waits:
-            if producer.priority >= prep.priority:
-                continue
-            low = max(wait_start, prep.start_ns)
-            high = min(wait_end, prep.finish_ns)
-            if high <= low:
-                continue
-            overlapped = True
-            evidence.blocked_ms += (high - low) / 1e6
-        if overlapped:
-            evidence.blocking_intervals += 1
+        window = (prep.start_ns, prep.finish_ns)
+        overlaps = [
+            clipped
+            for wait_start, wait_end, producer in waits
+            if producer.priority < prep.priority
+            and (clipped := _intersect(window, (wait_start, wait_end))) is not None
+        ]
+        if not overlaps:
+            continue
+        evidence.blocking_intervals += 1
+        # One worker, however many producers happened to be queued behind it.
+        evidence.blocking_worker_ms += _union_ms(overlaps)
+        evidence.producer_wait_overlap_ms += sum(high - low for low, high in overlaps) / 1e6
 
     per_producer: dict[int, float] = defaultdict(float)
     for wait_start, wait_end, producer in waits:
-        for prep in running:
-            if producer.priority >= prep.priority:
-                continue
-            low = max(wait_start, prep.start_ns)
-            high = min(wait_end, prep.finish_ns)
-            if high > low:
-                per_producer[producer.seq] += (high - low) / 1e6
+        # Unioned per producer as well: two preparations overlapping the same
+        # wait at the same instant did not delay that producer twice.
+        blocked = [
+            clipped
+            for prep in running
+            if producer.priority < prep.priority
+            and (clipped := _intersect((prep.start_ns, prep.finish_ns), (wait_start, wait_end)))
+            is not None
+        ]
+        if blocked:
+            per_producer[producer.seq] = _union_ms(blocked)
     if per_producer:
         evidence.delayed_producers = len(per_producer)
         evidence.worst_producer_delay_ms = max(per_producer.values())

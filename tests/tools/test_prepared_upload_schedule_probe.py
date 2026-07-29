@@ -83,7 +83,8 @@ def test_a_preparation_running_across_a_producers_wait_is_charged():
     evidence = analyze_schedule(events)
 
     assert evidence.preparations_started == 1
-    assert evidence.blocked_ms == 10.0
+    assert evidence.blocking_worker_ms == 10.0
+    assert evidence.producer_wait_overlap_ms == 10.0
     assert evidence.delayed_producers == 1
     assert evidence.worst_producer_delay_ms == 10.0
 
@@ -97,7 +98,7 @@ def test_a_preparation_that_finishes_before_the_producer_is_ready_is_not_charged
     evidence = analyze_schedule(events)
 
     assert evidence.preparations_started == 1
-    assert evidence.blocked_ms == 0.0
+    assert evidence.blocking_worker_ms == 0.0
     assert evidence.delayed_producers == 0
 
 
@@ -148,7 +149,7 @@ def test_a_preparation_dropped_before_running_costs_no_worker_time():
 
     assert evidence.preparations_submitted == 1
     assert evidence.preparations_dropped == 1
-    assert evidence.blocked_ms == 0.0
+    assert evidence.blocking_worker_ms == 0.0
 
 
 def test_a_producer_that_does_not_outrank_the_preparation_is_not_charged():
@@ -168,7 +169,7 @@ def test_a_producer_that_does_not_outrank_the_preparation_is_not_charged():
         _finish(2, ts=11 * MS),
     ]
 
-    assert analyze_schedule(events).blocked_ms == 0.0
+    assert analyze_schedule(events).blocking_worker_ms == 0.0
 
 
 def test_acknowledgement_order_keeps_each_tiles_first_accepted_ack():
@@ -180,3 +181,64 @@ def test_acknowledgement_order_keeps_each_tiles_first_accepted_ack():
     ]
 
     assert acknowledgement_report(events)["acknowledgement_order"] == (5, 3)
+
+
+def test_one_preparation_blocking_two_producers_is_one_worker_not_two():
+    """Worker time is a resource, so it is unioned, not summed per waiter.
+
+    A single 10 ms preparation with two producers queued behind it occupied one
+    thread for 10 ms. Adding the overlap once per waiting producer reported
+    20 ms of "worker time" that no machine ever spent — the arithmetic behind
+    the first 458 ms figure quoted for this seam.
+    """
+
+    events = [
+        *_preparation(1, submit=0, start=1 * MS, finish=11 * MS),
+        *_producer(2, submit=1 * MS, start=11 * MS, finish=12 * MS, tile=1),
+        *_producer(3, submit=1 * MS, start=11 * MS, finish=12 * MS, tile=2),
+    ]
+
+    evidence = analyze_schedule(events)
+
+    # One worker was held for 10 ms.
+    assert evidence.blocking_worker_ms == 10.0
+    # Two producers each waited 10 ms behind it: 20 ms of collective waiting.
+    assert evidence.producer_wait_overlap_ms == 20.0
+    assert evidence.delayed_producers == 2
+    assert evidence.worst_producer_delay_ms == 10.0
+    # And it is one blocking episode, not two.
+    assert evidence.blocking_intervals == 1
+
+
+def test_two_concurrent_preparations_hold_two_workers():
+    """The counter-case: across preparations, worker time really does add."""
+
+    events = [
+        *_preparation(1, submit=0, start=1 * MS, finish=11 * MS, tile=0),
+        *_preparation(2, submit=0, start=1 * MS, finish=11 * MS, tile=1),
+        *_producer(3, submit=1 * MS, start=11 * MS, finish=12 * MS, tile=2),
+    ]
+
+    evidence = analyze_schedule(events)
+
+    assert evidence.blocking_worker_ms == 20.0
+    # The producer still only waited 10 ms, however many threads were busy.
+    assert evidence.worst_producer_delay_ms == 10.0
+    assert evidence.delayed_producers == 1
+
+
+def test_partially_overlapping_preparations_do_not_double_charge_one_producer():
+    """Per-producer delay is unioned across preparations too."""
+
+    events = [
+        *_preparation(1, submit=0, start=1 * MS, finish=7 * MS, tile=0),
+        *_preparation(2, submit=0, start=4 * MS, finish=11 * MS, tile=1),
+        *_producer(3, submit=1 * MS, start=11 * MS, finish=12 * MS, tile=2),
+    ]
+
+    evidence = analyze_schedule(events)
+
+    # The union of [1,7) and [4,11) is 10 ms of wait, not 6 + 7 = 13 ms.
+    assert evidence.worst_producer_delay_ms == 10.0
+    # Worker time is the sum of the two tasks' blocking spans: 6 + 7.
+    assert evidence.blocking_worker_ms == 13.0

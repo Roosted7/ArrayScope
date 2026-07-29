@@ -540,10 +540,23 @@ Open work, roughly in dependency order:
    visible work is queued or running, capped at a fraction of the pool. This
    was got wrong first, and the way it was wrong is worth keeping: on a visible
    lane, `PREFETCH` orders selection from the ready set and nothing more, and a
-   worker already inside a preparation cannot be reclaimed by any priority. One
-   recorded cold scroll held 458 ms of worker time away from pixel-producing
-   tasks, delaying 39 of 157 producers by up to 21.5 ms each. Priority is not a
-   scheduling guarantee once a task has started; lane membership is.
+   worker already inside a preparation cannot be reclaimed by any priority.
+
+   | Cold-scroll run | Worker time held | Collective producer wait | Worst producer |
+   |---|---:|---:|---:|
+   | Visible lane, failing | **47.9 ms** (75% of 63.5 ms run) | 458.3 ms | 18.9 ms |
+   | Visible lane, failing | 6.2 ms (of 37.2 ms run) | 62.3 ms | 4.8 ms |
+   | Visible lane, passing | 0.0 ms | 0.0 ms | 0.0 ms |
+   | Speculative lane | 0.19 ms | 0.19 ms | 0.10 ms |
+
+   Read the first column, not the second. **The 458 ms figure first quoted for
+   this seam was the second column** — collective producer waiting, which
+   counts one blocked worker once per producer queued behind it. It is a real
+   quantity and a useful fairness measure, but it is not worker time and no
+   machine ever spent it. The probe now reports both under names that say which
+   is which, and a test pins one preparation blocking two producers at 10 ms of
+   worker time rather than 20. Priority is not a scheduling guarantee once a
+   task has started; lane membership is.
 
    **Prepare only what preparation can save, and only when it can be used.**
    Two skips carry most of the value. A pack that would hand back the array it
@@ -686,7 +699,7 @@ the more trustworthy half of that signal.
   chunk distributions, cost attribution and the prepared-upload counters — use
   it rather than building another harness.
 - `arrayscope.tools.prepared_upload_schedule_probe TRACE.jsonl` replays a trace
-  and reports `blocked_ms`: worker time a speculative preparation held while a
+  and reports `blocking_worker_ms`: worker time a preparation held while a
   higher-priority visible task sat ready. Any claim that background work does
   not delay the fill should cite this rather than the priority it was submitted
   at — priority orders selection and cannot reclaim a running task.

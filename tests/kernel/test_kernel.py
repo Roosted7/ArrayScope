@@ -1003,7 +1003,8 @@ def test_speculative_preparation_yields_the_pool_to_pending_visible_work():
     on a visible lane. `Priority.PREFETCH` orders *selection* from the ready
     set; it says nothing once a worker is already inside the closure, and no
     priority or quota can take that thread back. On a recorded cold scroll that
-    cost 458 ms of worker time held away from pixel-producing tasks.
+    cost 47.9 ms of worker time held away from pixel-producing tasks — 75% of
+    all the time preparation ran that round — delaying 39 of 157 producers.
 
     Being non-visible is what closes it: the speculative gate refuses to start
     the task at all while any visible work is queued or running.

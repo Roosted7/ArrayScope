@@ -1295,8 +1295,10 @@ class FramePipelineEffects:
                     # from the ready set; it cannot reclaim a worker already
                     # inside a task, so a preparation on a visible lane could
                     # and did hold a thread a pixel-producing task wanted —
-                    # 458 ms of it across one recorded cold scroll, delaying
-                    # 39 producers by up to 21 ms each. A non-visible lane is
+                    # 47.9 ms of worker time across one recorded cold scroll,
+                    # which is 75% of everything preparation ran that round,
+                    # delaying 39 producers by up to 18.9 ms each. A
+                    # non-visible lane is
                     # what makes the kernel's existing speculative governor
                     # apply: parked while any visible work is queued or
                     # running, capped at a fraction of the pool, and sorted
