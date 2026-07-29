@@ -515,18 +515,13 @@ whoever picks this up next; update it in place rather than appending.
 | R2b one floor pair per round | Enforced. Round identity is explicit and both floors latch to it. |
 | R3 levels never clip | Enforced. Round levels come from the preview cohort, with an analytic envelope that is exact for realistic k-space. |
 | R4 preview for every backend/dtype | Green on both backends, including PyQtGraph complex and pipelines that cannot reduce their input. |
-| R5 chunked and governed | Governed. The per-commit **bookkeeping** is now delta-proportional; the per-commit **aggregates** are not. See below. |
+| R5 chunked and governed | Governed. The known whole-montage bookkeeping and aggregates are now delta-proportional; one pure preparation row runs on a worker. Stateful delta construction and genuine per-item submission remain on the GUI thread. |
 | R6 shed quality, never liveness | **Not implemented.** WGPU fast scroll still freezes until idle. |
 | R7 speculative residency is post-settle | **Not implemented.** Level 0 was 82–84% of upload bytes and ran during the fill. |
 
 Open work, roughly in dependency order:
 
-1. **Presentation cost proportional to the delta.** Partly done — the
-   whole-montage *bookkeeping* is gone, the whole-montage *aggregates* are
-   not. What is left is an incrementally accumulated montage histogram owner
-   and maintained presentation truth; see "What a bounded commit still costs"
-   below for why neither is a loop that can be tightened in place.
-2. **Presentation bookkeeping off the GUI thread.** *Seam built, one row moved.*
+1. **Presentation bookkeeping off the GUI thread.** *Seam built, one row moved.*
    `arrayscope.presentation.prepared_uploads` is the hand-off: a worker
    publishes a prepared buffer under the payload's semantic and physical
    identities plus the mapping variant, the GUI thread takes it only under the
@@ -585,19 +580,18 @@ Open work, roughly in dependency order:
    What is still on the GUI thread, and why: **the presentation delta build**
    (`FrameSession.build_tile_presentation`, 5.6–8.0 ms per callback) mutates
    session state throughout and has no off-thread owner, so moving it is a
-   re-architecture rather than a hand-off; **the rest of WGPU's preparation**
-   (6–12 ms) is the O(montage) walk, which belongs to item 1; **pool growth**
-   is already pre-reserved per round and has a per-callback median of 0, but
-   still spikes to 46 ms in a single callback, and moving it means calling
+   re-architecture rather than a hand-off; **pool growth** is already
+   pre-reserved per round and has a per-callback median of 0, but still spikes
+   to 46 ms in a single callback, and moving it means calling
    `create_texture`/`copy_texture_to_texture` off the GUI thread beside a live
-   surface — unvalidated here. The seam is in place for all of these; nothing
-   about the mailbox is specific to array packing.
-3. **R6 load shedding** on WGPU fast scroll.
-4. **R7 post-settle prefetch**, with the warm ladder breadth-first at coarse
+   surface — unvalidated here. The seam is in place for future pure preparation
+   rows; nothing about the mailbox is specific to array packing.
+2. **R6 load shedding** on WGPU fast scroll.
+3. **R7 post-settle prefetch**, with the warm ladder breadth-first at coarse
    levels rather than native-first.
-5. **The R3 tolerance ladder** (±20% free-reuse, ±10% preview, ±2% target),
+4. **The R3 tolerance ladder** (±20% free-reuse, ±10% preview, ±2% target),
    which lets PyQtGraph reuse committed tiles the way WGPU reuses bound ones.
-6. **Tag uploads with their purpose**, which turns the oracle's suspected
+5. **Tag uploads with their purpose**, which turns the oracle's suspected
    over-production into a decidable rule and makes R7 checkable.
 
 ### What a bounded commit still costs
@@ -641,18 +635,16 @@ machine drifts by more than the effect over the minutes such a comparison
 takes. Alternate revisions within one sweep and balance the order, or the
 number measures the clock, not the change.
 
-What remains is the **presented-identity scan**, ~22% of a bounded PyQtGraph
-commit and now the largest whole-montage walk left. Its per-tile comparison is
-already O(1) — the item state remembers which payload produced its source id,
-so recognising that object replaces rebuilding a fourteen-element tuple — but
-the scan still visits every resident tile and asks Qt for its effective
-visibility. That last part is not a loop that can be made cheaper in place:
-`state.visible` and the item's own Qt flag are deliberately allowed to
-diverge, so the two-condition check is load-bearing. Maintaining that truth at
-the points where backend visibility changes is the right shape, and it moves a
-correctness invariant into bookkeeping — which is the defect class ADR 0051
-exists to prevent, so it wants its own change with its own equivalence
-coverage, not a rider on this one.
+The **presented-identity scan** is no longer in that list either. PyQtGraph
+maintains the layer-owned candidate truth — visible intent plus ownership of
+the tile slot — and still asks Qt for physical visibility per candidate,
+because the scene or another owner can hide an item behind the layer's back.
+It therefore visits intended tiles rather than every retained resident tile
+without caching a fact the layer does not own. The exposed state mapping
+synchronizes all membership mutations and requires the mapping key to match
+the state's authoritative tile number. A full-scan equivalence oracle covers
+direct and compact-preview presentation, reuse, eviction, reset, rollback,
+external Qt hiding, mismatched slots, and every exposed mapping mutation.
 
 The montage histogram source is no longer in that list. It is maintained
 across commits, keyed on the presentation revision it was built at, and only a
