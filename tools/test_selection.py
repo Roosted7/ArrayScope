@@ -167,17 +167,32 @@ def command_status(args) -> int:
     for name in sorted(unmapped):
         print(f"    {name}")
 
+    from tests import red_ledger
+
+    broken_here = red_ledger.read_new_reds(testmon_policy.map_path(REPO_ROOT), environment)
+    inherited = peek.forced_tests - broken_here
+
     print()
-    if peek.forced_tests:
+    if broken_here:
+        print(f"broken here ({len(broken_here)}) — passing in this checkout before, now not.")
+        print("These always run until they pass again:")
+        for name in sorted(broken_here):
+            print(f"    {name}")
+        print()
+        print("    python tools/test_selection.py accept-reds   if they are not yours")
+        print("    (a stale worktree that jumped, or a branch stacked on another's reds)")
+        print()
+    if inherited:
         rerun = "re-run" if testmon_policy.rerun_known_red_tests() else "NOT re-run"
         print(
-            f"known red ({len(peek.forced_tests)}, ~{peek.forced_seconds:.0f} s) — "
-            f"failing at their last recorded run, dependencies unchanged, {rerun}:"
+            f"inherited red ({len(inherited)}, ~{peek.forced_seconds:.0f} s) — already failing "
+            f"when this map arrived, dependencies unchanged, {rerun}:"
         )
-        for name in sorted(peek.forced_tests):
+        for name in sorted(inherited):
             print(f"    {name}")
         print()
         print("    ARRAYSCOPE_TESTMON_RERUN_FAILING=1 pytest   re-runs them")
+        print("    pytest --since                              adds what this branch changed")
         print("    pytest --no-testmon                         runs everything")
         print()
     print()
@@ -198,6 +213,38 @@ def command_status(args) -> int:
     return 0
 
 
+def command_accept_reds(args) -> int:
+    """Re-baseline: declare the current failures inherited rather than yours.
+
+    The ledger decides "this checkout broke it" from observed pass -> fail
+    transitions, which is right while you work and wrong after the ground moves
+    underneath it: a worktree that jumps fifty commits, a branch stacked on
+    another branch's reds, a feature branch split in two. In all three the
+    failures are real but not yours, and left alone they would re-run on every
+    iteration forever. This is the one place to say so.
+    """
+
+    from tests import red_ledger
+
+    environment = _environment(args.environment)
+    map_path = testmon_policy.map_path(REPO_ROOT)
+    current = red_ledger.read_new_reds(map_path, environment)
+    if not current:
+        print(f"Nothing recorded as broken here for environment {environment!r}.")
+        return 0
+
+    ledger = red_ledger.RedLedger.load(map_path, environment, {}, map_was_populated=True)
+    ledger.new_reds.clear()
+    ledger.save()
+    print(f"Accepted {len(current)} test(s) as inherited for environment {environment!r}:")
+    for nodeid in sorted(current):
+        print(f"    {nodeid}")
+    print()
+    print("They are now treated like any other incumbent red: skipped while their")
+    print("dependencies are unchanged. Anything that breaks from here is yours again.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--environment", help="read another regime's slice of the map")
@@ -210,6 +257,12 @@ def main(argv: list[str] | None = None) -> int:
 
     status = subparsers.add_parser("status", help="what the map does not cover")
     status.set_defaults(func=command_status)
+
+    accept = subparsers.add_parser(
+        "accept-reds",
+        help="treat the currently-broken tests as inherited, not as yours",
+    )
+    accept.set_defaults(func=command_accept_reds)
 
     arguments = sys.argv[1:] if argv is None else argv
     args = parser.parse_args(arguments)
