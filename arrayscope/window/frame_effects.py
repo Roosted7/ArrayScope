@@ -1227,6 +1227,7 @@ class FramePipelineEffects:
         # not the whole dirty set: a payload stays dirty across many governed
         # chunks, and re-offering it every drain repeats work already published.
         lifecycle = session.lifecycle
+        payload_resident = getattr(view, "tiledPayloadResident", None)
         payloads = {}
         for row in tuple(upserts or ()):
             if not isinstance(row, tuple) or len(row) != 2 or row[1] is None:
@@ -1237,7 +1238,9 @@ class FramePipelineEffects:
             payload = lifecycle.current_presentable_payload(int(tile))
             if payload is None:
                 payload = session.display_tile_payloads.get(int(tile))
-            if payload is not None:
+            if payload is not None and not (
+                callable(payload_resident) and bool(payload_resident(payload))
+            ):
                 payloads[int(tile)] = payload
         if not payloads:
             return

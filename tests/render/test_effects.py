@@ -20,6 +20,7 @@ from arrayscope.display.pyramid import (
 )
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping, TexturePlaneKind
 from arrayscope.display.source_anchoring import SourceAnchoring
+from arrayscope.kernel.task import Lane, Priority
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import (
     ArrayDocument,
@@ -35,6 +36,7 @@ from arrayscope.operations.pipeline import (
 from arrayscope.operations.regions import region_shape
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import ClaimOwner, TileLifecycle, TileTarget
+from arrayscope.presentation.prepared_uploads import PreparedUploadMailbox
 from arrayscope.render import effects
 from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung
@@ -1752,6 +1754,94 @@ def test_pipeline_effects_tile_states_exposes_ready_unacknowledged_fallback():
     assert state.presented_level is None
     assert state.ready_level == 2
     assert state.ready_quality == "fallback"
+
+
+def test_backend_upload_preparation_is_submitted_as_superseded_prefetch():
+    """Admission schedules pure preparation; it never runs inline or gates display."""
+
+    from arrayscope.window.frame_effects import FramePipelineEffects
+
+    mailbox = PreparedUploadMailbox()
+    submitted = []
+    payload = SimpleNamespace(tile_number=2, tile_identity="identity", source_id="source")
+    preparation_key = ("identity", "source", "variant")
+    view = SimpleNamespace(
+        preparedTiledUploads=mailbox,
+        tiledPayloadResident=lambda _payload: False,
+        tiledUploadPreparations=lambda payloads, **_kwargs: (
+            (
+                2,
+                preparation_key,
+                lambda: mailbox.publish(2, preparation_key, np.ones((2, 2), np.float32)),
+            ),
+        ),
+    )
+    kernel = SimpleNamespace(submit=submitted.append)
+    session = SimpleNamespace(
+        session_id=7,
+        shader_display=True,
+        level_generation=SimpleNamespace(target_levels=(0.0, 1.0)),
+        lifecycle=SimpleNamespace(current_presentable_payload=lambda tile: payload),
+        display_tile_payloads={},
+    )
+    effects_bridge = FramePipelineEffects(
+        SimpleNamespace(win=SimpleNamespace(img_view=view, kernel=kernel)),
+        session,
+    )
+
+    effects_bridge._prepare_backend_uploads(
+        ((SimpleNamespace(tile_number=2), object()),),
+    )
+
+    assert mailbox.counters().published == 0
+    assert len(submitted) == 1
+    spec = submitted[0]
+    assert spec.lane is Lane.DISPLAY_PREPARATION
+    assert spec.priority is Priority.PREFETCH
+    assert spec.supersession.family == ("prepared-upload", 7, 2)
+    assert spec.supersession.value == preparation_key
+    assert spec.session_id == 7
+    assert spec.tile_number == 2
+    spec.fn()
+    assert mailbox.take(2, preparation_key) is not None
+
+
+def test_backend_upload_preparation_skips_physically_resident_payload():
+    """A resident rebind needs no producer and must not inflate visible work."""
+
+    from arrayscope.window.frame_effects import FramePipelineEffects
+
+    submitted = []
+    payload = SimpleNamespace(tile_number=2, tile_identity="identity", source_id="source")
+    view = SimpleNamespace(
+        preparedTiledUploads=PreparedUploadMailbox(),
+        tiledPayloadResident=lambda candidate: candidate is payload,
+        tiledUploadPreparations=lambda *_args, **_kwargs: pytest.fail(
+            "resident payload must be filtered before preparation planning"
+        ),
+    )
+    session = SimpleNamespace(
+        session_id=7,
+        shader_display=True,
+        level_generation=SimpleNamespace(target_levels=(0.0, 1.0)),
+        lifecycle=SimpleNamespace(current_presentable_payload=lambda tile: payload),
+        display_tile_payloads={},
+    )
+    effects_bridge = FramePipelineEffects(
+        SimpleNamespace(
+            win=SimpleNamespace(
+                img_view=view,
+                kernel=SimpleNamespace(submit=submitted.append),
+            )
+        ),
+        session,
+    )
+
+    effects_bridge._prepare_backend_uploads(
+        ((SimpleNamespace(tile_number=2), object()),),
+    )
+
+    assert submitted == []
 
 
 def test_cpu_auto_first_commit_allows_progressive_preview_floor():
