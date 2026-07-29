@@ -475,3 +475,119 @@ def test_failed_exact_upload_keeps_preview_member(qt_app, monkeypatch):
         layer.tile_truth_physical_rows()[0]["physical_acknowledged_identity"]
         == previews[0].source_id
     )
+
+
+# --- presented-visibility equivalence, compact-preview path -------------------
+
+
+def _assert_presented_equivalence(layer):
+    """The maintained answer must equal a fresh full scan.
+
+    Same gate as `tests/display/test_presented_visibility_equivalence.py`, run
+    here because the compact-preview atlas needs 256 tiles to engage and that
+    module works at direct-presentation scale.
+    """
+
+    layer.assert_presented_index_matches_scan()
+
+
+def test_presented_index_agrees_while_the_compact_preview_atlas_owns_the_frame(qt_app):
+    count = 256
+    owner = _Owner()
+    layer = _layer(owner)
+    previews = {tile: _preview_payload(tile) for tile in range(count)}
+    layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=_geometry(count),
+        levels=(0.0, 1200.0),
+        rgb_already_windowed=False,
+        dirty_tiles=tuple(previews),
+        tile_payloads=previews,
+        tile_delta=_delta(previews, active=range(count)),
+    )
+
+    _assert_presented_equivalence(layer)
+    # The atlas owns every tile, so no direct item is presented — the two
+    # populations are disjoint here, which is the case most likely to be
+    # double-counted.
+    assert layer.presented_tiles == set()
+    assert layer.physically_visible_tile_count == count
+
+
+def test_presented_index_agrees_when_an_exact_item_leaves_the_atlas(qt_app):
+    count = 256
+    owner = _Owner()
+    layer = _layer(owner)
+    previews = {tile: _preview_payload(tile) for tile in range(count)}
+    geometry = _geometry(count)
+    layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 1200.0),
+        rgb_already_windowed=False,
+        dirty_tiles=tuple(previews),
+        tile_payloads=previews,
+        tile_delta=_delta(previews, active=range(count)),
+    )
+    exact = _exact_payload(0)
+    mixed = dict(previews)
+    mixed[0] = exact
+    layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 1200.0),
+        rgb_already_windowed=False,
+        dirty_tiles=(0,),
+        tile_payloads=mixed,
+        tile_delta=_delta({0: exact}, active=range(count)),
+    )
+
+    _assert_presented_equivalence(layer)
+    # Tile 0 is now a direct item; the rest remain atlas members.
+    assert layer.presented_tiles == {0}
+    assert layer.preview_atlas_active_tiles == frozenset(range(1, count))
+
+
+def test_presented_index_agrees_after_hiding_a_compact_preview_frame(qt_app):
+    count = 256
+    owner = _Owner()
+    layer = _layer(owner)
+    previews = {tile: _preview_payload(tile) for tile in range(count)}
+    layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=_geometry(count),
+        levels=(0.0, 1200.0),
+        rgb_already_windowed=False,
+        dirty_tiles=tuple(previews),
+        tile_payloads=previews,
+        tile_delta=_delta(previews, active=range(count)),
+    )
+    layer.hide_all()
+
+    _assert_presented_equivalence(layer)
+    assert layer.presented_tiles == set()
+
+
+def test_presented_index_agrees_after_a_residency_reset_of_a_compact_frame(qt_app):
+    count = 256
+    owner = _Owner()
+    layer = _layer(owner)
+    previews = {tile: _preview_payload(tile) for tile in range(count)}
+    layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=_geometry(count),
+        levels=(0.0, 1200.0),
+        rgb_already_windowed=False,
+        dirty_tiles=tuple(previews),
+        tile_payloads=previews,
+        tile_delta=_delta(previews, active=range(count)),
+    )
+    layer.clear()
+
+    _assert_presented_equivalence(layer)
+    assert layer.presented_tiles == set()

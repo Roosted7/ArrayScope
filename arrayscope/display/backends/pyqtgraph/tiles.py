@@ -846,6 +846,13 @@ class MontageTileLayer:
         self._histogram_levels_for_display = histogram_levels_for_display
         self._is_rgb_image = is_rgb_image
         self._states: dict[int, TileLayerItemState] = {}
+        # Tiles this layer *intends* to show: `state.visible` and still owning
+        # their slot. Maintained at the mutation sites, and deliberately not the
+        # presented set — Qt visibility is not the layer's to own, so it is
+        # confirmed per candidate rather than remembered. The win is that a
+        # bounded commit stops walking every resident tile, most of which are
+        # retained-but-hidden in the reuse pool.
+        self._visible_intent_tiles: set[int] = set()
         self._states_by_source_key: dict[object, TileLayerItemState] = {}
         self._direct_reuse_pool: list[TileLayerItemState] = []
         self._direct_reuse_pool_ids: set[int] = set()
@@ -860,6 +867,86 @@ class MontageTileLayer:
         self._payload_prepare_ms = 0.0
         self._prepared_uploads = prepared_uploads
         self._prepared_assembly_hits = 0
+
+    # ------------------------------------------- presented-visibility index
+
+    def _sync_presented(self, tile_number) -> None:
+        """Re-derive one tile's visible *intent* from the state that holds it.
+
+        Deliberately a recompute rather than an incremental add/remove: the
+        inputs are mutated from a dozen sites, and a set that is *told* what
+        changed drifts the moment one site forgets. Recomputing means a missed
+        call can only leave the set stale, never inconsistent with itself, and
+        the equivalence oracle catches exactly that.
+
+        Qt visibility is not consulted here. An item can be hidden by the scene,
+        by its owner, or by a test reaching in, none of which the layer sees —
+        so remembering it would be remembering something that can change behind
+        the layer's back. `presented_tiles` confirms it per candidate instead.
+        """
+
+        tile = int(tile_number)
+        state = self._states.get(tile)
+        if state is not None and bool(getattr(state, "visible", False)):
+            self._visible_intent_tiles.add(tile)
+        else:
+            self._visible_intent_tiles.discard(tile)
+
+    @property
+    def presented_tiles(self) -> set[int]:
+        """Tiles whose pixels are on screen right now.
+
+        Intent from the maintained index, Qt visibility confirmed per candidate.
+        Costs one `isVisible()` per *intended* tile rather than one per resident
+        tile, and stays exactly equal to the full scan.
+        """
+
+        states = self._states
+        presented = set()
+        for tile in self._visible_intent_tiles:
+            state = states.get(tile)
+            if state is not None and _state_is_physically_visible(state):
+                presented.add(tile)
+        return presented
+
+    def _set_state_visible(self, state: TileLayerItemState, visible: bool) -> None:
+        """Set the layer's intent for a state, keeping the index in step."""
+
+        state.visible = bool(visible)
+        self._sync_presented(state.tile_number)
+
+    def _set_item_visible(self, state: TileLayerItemState, visible: bool) -> None:
+        """Set Qt visibility for a state's item, keeping the index in step."""
+
+        state.item.setVisible(bool(visible))
+        self._sync_presented(state.tile_number)
+
+    def _presented_index_scan(self) -> set[int]:
+        """The full scan the index replaces. Kept for the equivalence oracle."""
+
+        return {
+            int(state.tile_number)
+            for tile, state in self._states.items()
+            if int(tile) == int(state.tile_number) and _state_is_physically_visible(state)
+        }
+
+    def assert_presented_index_matches_scan(self) -> None:
+        """Raise unless the maintained index equals a fresh full scan.
+
+        Test-only, and the gate on removing the scan from production: a
+        visibility mutation site that forgets to sync shows up here as a
+        concrete difference rather than as a tile that silently stops being
+        acknowledged.
+        """
+
+        scanned = self._presented_index_scan()
+        maintained = self.presented_tiles
+        if maintained != scanned:
+            raise AssertionError(
+                "presented index drifted from the full scan: "
+                f"index-only={sorted(maintained - scanned)} "
+                f"scan-only={sorted(scanned - maintained)}"
+            )
 
     def _resolve_payload(self, payload: DisplayTilePayload, *, levels):
         """Assemble one payload, taking a worker's result when one is waiting.
@@ -912,8 +999,9 @@ class MontageTileLayer:
 
         direct = sum(
             1
-            for state in self._states.values()
-            if _state_is_physically_visible(state)
+            for tile in self._visible_intent_tiles
+            if (state := self._states.get(int(tile))) is not None
+            and _state_is_physically_visible(state)
             and getattr(state.item, "image", None) is not None
             and int(np.size(state.item.image)) > 0
         )
@@ -1057,6 +1145,7 @@ class MontageTileLayer:
         for state in tuple(self._states.values()):
             self.layer_owner.remove_tile_item(state.tile_number)
         self._states.clear()
+        self._visible_intent_tiles.clear()
         self._states_by_source_key.clear()
         self._direct_reuse_pool.clear()
         self._direct_reuse_pool_ids.clear()
@@ -1110,8 +1199,8 @@ class MontageTileLayer:
                 for tile_number in self.preview_atlas_active_tiles:
                     state = self._states.get(int(tile_number))
                     if state is not None:
-                        state.item.setVisible(False)
-                        state.visible = False
+                        self._set_item_visible(state, False)
+                        self._set_state_visible(state, False)
                 raise
         raise ValueError("PyQtGraph tiled presentation requires typed tile payloads")
 
@@ -1511,6 +1600,7 @@ class MontageTileLayer:
                     old_tile = int(item_state.tile_number)
                     if self._states.get(old_tile) is item_state:
                         self._states.pop(old_tile, None)
+                        self._sync_presented(old_tile)
                     self._unregister_source_state(item_state)
                 self._displace_tile_slot_resident(int(tile_number), item_state)
                 item_state.tile_number = int(tile_number)
@@ -1520,6 +1610,7 @@ class MontageTileLayer:
                 else:
                     self.layer_owner.add_tile_item(tile_number, item_state.item)
                 self._states[int(tile_number)] = item_state
+                self._sync_presented(tile_number)
 
             # A state can remain assigned to its tile while hidden in the
             # direct-reuse pool. Once this transaction selects it for an
@@ -1600,7 +1691,7 @@ class MontageTileLayer:
                 items_skipped += 1
                 if not levels_changed:
                     item_state.levels = levels
-                item_state.visible = True
+                self._set_state_visible(item_state, True)
                 item_state.source_index = int(source_index)
                 item_state.world_rect = world_rect
                 self._touch_resident_state(item_state)
@@ -1613,8 +1704,8 @@ class MontageTileLayer:
                 item_state.acknowledged_identity,
                 target_identities.get(int(tile_number)),
             ):
-                item_state.item.setVisible(True)
-                item_state.visible = True
+                self._set_item_visible(item_state, True)
+                self._set_state_visible(item_state, True)
                 active.add(int(tile_number))
             else:
                 self._hide_tile(int(tile_number))
@@ -1808,16 +1899,13 @@ class MontageTileLayer:
                     for tile in atlas.active_tiles
                 }
             )
-        identities.update(_direct_presented_identities(self._states, payloads))
+        identities.update(
+            _direct_presented_identities(self._states, payloads, self.presented_tiles)
+        )
         return identities
 
     def _physically_presented_tiles(self) -> tuple[int, ...]:
-        direct = {
-            int(state.tile_number)
-            for state in self._states.values()
-            if _state_is_physically_visible(state)
-        }
-        return tuple(sorted(direct.union(self.preview_atlas_active_tiles)))
+        return tuple(sorted(self.presented_tiles.union(self.preview_atlas_active_tiles)))
 
     def _preview_atlas_nbytes(self) -> int:
         item = self._preview_atlas_item
@@ -1900,9 +1988,7 @@ class MontageTileLayer:
 
         if not payloads:
             resident_items = self._resident_count()
-            visible_items = sum(
-                1 for state in self._states.values() if _state_is_physically_visible(state)
-            )
+            visible_items = len(self.presented_tiles)
             return TileLayerUpdateStats(
                 resident_items=int(resident_items),
                 storage_capacity=int(resident_items),
@@ -1999,6 +2085,7 @@ class MontageTileLayer:
                     old_tile = int(item_state.tile_number)
                     if self._states.get(old_tile) is item_state:
                         self._states.pop(old_tile, None)
+                        self._sync_presented(old_tile)
                     self._unregister_source_state(item_state)
                 self._displace_tile_slot_resident(int(tile_number), item_state)
                 item_state.tile_number = int(tile_number)
@@ -2050,8 +2137,8 @@ class MontageTileLayer:
                 item_state.page_fallback_reason = assembly.fallback_reason
             else:
                 items_skipped += 1
-            item_state.item.setVisible(False)
-            item_state.visible = False
+            self._set_item_visible(item_state, False)
+            self._set_state_visible(item_state, False)
             _apply_item_lod_scale(item_state, scale_x, scale_y)
             item_state.world_rect = (
                 int(region.x),
@@ -2203,6 +2290,7 @@ class MontageTileLayer:
             self._displace_tile_slot_resident(tile_number, state)
         if was_assigned:
             self._states.pop(old_tile, None)
+            self._sync_presented(old_tile)
         self._states[tile_number] = state
         move_item = getattr(self.layer_owner, "move_tile_item", None)
         if was_assigned and callable(move_item):
@@ -2210,6 +2298,7 @@ class MontageTileLayer:
         else:
             self.layer_owner.add_tile_item(tile_number, state.item)
         state.tile_number = tile_number
+        self._sync_presented(tile_number)
         self._touch_resident_state(state)
         return state
 
@@ -2217,8 +2306,8 @@ class MontageTileLayer:
         state = self._states.get(int(tile_number))
         if state is None:
             return
-        state.item.setVisible(False)
-        state.visible = False
+        self._set_item_visible(state, False)
+        self._set_state_visible(state, False)
         self._add_to_direct_reuse_pool(state)
         self._touch_resident_state(state)
 
@@ -2229,8 +2318,9 @@ class MontageTileLayer:
         if existing is None or existing is replacement:
             return
         self._states.pop(int(tile_number), None)
-        existing.item.setVisible(False)
-        existing.visible = False
+        self._sync_presented(tile_number)
+        self._set_item_visible(existing, False)
+        self._set_state_visible(existing, False)
         unmap = getattr(self.layer_owner, "unmap_tile_item", None)
         if callable(unmap):
             unmap(int(tile_number), existing.item)
@@ -2239,6 +2329,7 @@ class MontageTileLayer:
 
     def _remove_tile(self, tile_number: int) -> None:
         state = self._states.pop(int(tile_number), None)
+        self._sync_presented(tile_number)
         if state is None:
             return
         self._unregister_source_state(state)
@@ -2316,7 +2407,7 @@ class MontageTileLayer:
         state.local_rect = tuple(int(value) for value in local_rect)
         state.levels = levels
         state.rgb_already_windowed = bool(rgb_already_windowed)
-        state.visible = True
+        self._set_state_visible(state, True)
         self._touch_resident_state(state)
         self._register_source_state(state)
         self._refresh_resident_nbytes(state)
@@ -2476,7 +2567,7 @@ class MontageTileLayer:
     def _discard_direct_reuse_pool(self) -> None:
         for state in tuple(self._direct_reuse_pool):
             self._unregister_source_state(state)
-            state.visible = False
+            self._set_state_visible(state, False)
             state.rgb_base = None
             state.hist_source = None
             state.display_cache = None
@@ -2518,6 +2609,7 @@ class MontageTileLayer:
             if state.visible:
                 return
             self._states.pop(tile_number, None)
+            self._sync_presented(tile_number)
         self._remove_from_direct_reuse_pool(state)
         with contextlib.suppress(Exception):
             self.layer_owner.remove_tile_item(tile_number)
@@ -2525,7 +2617,7 @@ class MontageTileLayer:
         self._rgb_source_cache_bytes -= int(getattr(state, "source_cache_nbytes", 0) or 0)
         state.resident_nbytes = 0
         state.source_cache_nbytes = 0
-        state.visible = False
+        self._set_state_visible(state, False)
         state.rgb_base = None
         state.hist_source = None
         state.display_cache = None
@@ -2618,11 +2710,32 @@ def _state_drew_payload(state: TileLayerItemState, payload) -> bool:
 def _direct_presented_identities(
     states: Mapping[int, TileLayerItemState],
     payloads: Mapping[int, DisplayTilePayload] | None = None,
+    presented: set[int] | None = None,
 ) -> dict[int, object]:
+    """Acknowledged identity per presented tile.
+
+    ``presented`` is the layer's maintained index. Given one, this visits only
+    the tiles actually on screen instead of every resident state, and asks Qt
+    nothing — a bounded commit used to pay a full walk plus an ``isVisible()``
+    call per resident tile to learn something the layer already knew. Omitting
+    it falls back to the full scan, which is what the equivalence oracle
+    compares against.
+    """
+
     payloads = payloads or {}
     identities: dict[int, object] = {}
-    for state in tuple(states.values()):
-        if not _state_is_physically_visible(state) or state.source_array_id == 0:
+    if presented is None:
+        candidates = tuple(states.values())
+    else:
+        candidates = tuple(
+            state
+            for state in (states.get(int(tile)) for tile in sorted(presented))
+            if state is not None
+        )
+    for state in candidates:
+        if presented is None and not _state_is_physically_visible(state):
+            continue
+        if state.source_array_id == 0:
             continue
         tile_number = int(state.tile_number)
         payload = payloads.get(tile_number)
@@ -2637,6 +2750,21 @@ def _direct_presented_identities(
 
 
 def _state_is_physically_visible(state: TileLayerItemState) -> bool:
+    """The one definition of "this tile's pixels are on screen".
+
+    Three separate truths meet here and must stay separate: ``state.visible``
+    is the layer's intent, the item's Qt visibility is what the scene will
+    actually draw, and holding a state at all is residency. A tile can be
+    resident and not visible (retained in the reuse pool), and ``state.visible``
+    can be set without the item having been shown yet. Only the conjunction is
+    *presented*.
+
+    ``MontageTileLayer`` maintains a memoized set of the tiles satisfying this,
+    updated wherever any of the three inputs changes. This function stays the
+    only definition, so the maintained set is a projection of it rather than a
+    second opinion — `_assert_presented_index_matches_scan` compares them.
+    """
+
     return bool(
         getattr(state, "visible", False)
         and getattr(state, "item", None) is not None
