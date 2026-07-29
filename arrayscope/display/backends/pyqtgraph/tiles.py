@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from math import ceil
@@ -792,6 +793,13 @@ class TileLayerItemState:
     # phase 3): (1.0, 1.0) means native and an identity item transform.
     lod_scale: tuple[float, float] = (1.0, 1.0)
     acknowledged_identity: object = None
+    # Weak reference to the payload whose ``_direct_payload_source_id`` produced
+    # ``source_array_id``.  Recomputing that 14-element tuple for every resident
+    # tile, only to confirm it still equals the value already stored, was the
+    # largest single term in the per-commit presented-identity scan.  A weak
+    # reference keeps the shortcut from retaining payload pixels, and a dead
+    # referent simply falls back to recomputing.
+    source_payload_ref: object = None
     page_resolutions: tuple[PageResolution, ...] = ()
     page_candidate_missing: tuple[DataChunkKey, ...] = ()
     physical_lod: LodInfo | None = None
@@ -1474,6 +1482,7 @@ class MontageTileLayer:
                     histogram_array_id=hist_id,
                     local_rect=local_rect,
                     rgb_already_windowed=payload_rgb_already_windowed,
+                    source_payload=payload,
                 )
                 item_state.world_rect = world_rect
                 item_state.acknowledged_identity = (
@@ -1957,6 +1966,7 @@ class MontageTileLayer:
                     histogram_array_id=hist_id,
                     local_rect=local_rect,
                     rgb_already_windowed=payload_rgb_already_windowed,
+                    source_payload=payload,
                 )
                 items_updated += int(updated)
                 rgb_window_tiles += int(windowed)
@@ -2191,6 +2201,7 @@ class MontageTileLayer:
         histogram_array_id: object | None,
         local_rect: tuple[int, int, int, int],
         rgb_already_windowed: bool,
+        source_payload: object = None,
     ) -> tuple[bool, bool]:
         self._unregister_source_state(state)
         is_rgb = self._is_rgb_image(tile_data)
@@ -2239,6 +2250,7 @@ class MontageTileLayer:
             )
         state.source_index = int(source_index)
         state.source_array_id = source_array_id
+        state.source_payload_ref = _payload_weakref(source_payload)
         state.histogram_array_id = histogram_array_id
         state.local_rect = tuple(int(value) for value in local_rect)
         state.levels = levels
@@ -2457,6 +2469,7 @@ class MontageTileLayer:
         state.hist_source = None
         state.display_cache = None
         state.source_array_id = 0
+        state.source_payload_ref = None
         state.acknowledged_identity = None
         state.histogram_array_id = None
         state.page_resolutions = ()
@@ -2518,22 +2531,46 @@ def _source_key_for_state(state: TileLayerItemState) -> object | None:
     )
 
 
+def _payload_weakref(payload):
+    if payload is None:
+        return None
+    try:
+        return weakref.ref(payload)
+    except TypeError:  # pragma: no cover - payloads are weakref-able today
+        return None
+
+
+def _state_drew_payload(state: TileLayerItemState, payload) -> bool:
+    """Whether ``state``'s stored source id was derived from ``payload``.
+
+    ``source_array_id`` was assigned from ``_direct_payload_source_id`` for a
+    specific payload object, and payloads are immutable, so recognising that
+    object is a proof the recomputation would return the stored value — at
+    O(1) instead of rebuilding the tuple.  A dead or absent reference is not
+    evidence of anything, so the caller recomputes.
+    """
+
+    reference = getattr(state, "source_payload_ref", None)
+    return bool(callable(reference) and reference() is payload)
+
+
 def _direct_presented_identities(
     states: Mapping[int, TileLayerItemState],
     payloads: Mapping[int, DisplayTilePayload] | None = None,
 ) -> dict[int, object]:
-    payloads = dict(payloads or {})
+    payloads = payloads or {}
     identities: dict[int, object] = {}
-    for state in tuple(dict(states).values()):
+    for state in tuple(states.values()):
         if not _state_is_physically_visible(state) or state.source_array_id == 0:
             continue
         tile_number = int(state.tile_number)
         payload = payloads.get(tile_number)
-        if payload is not None:
-            expected = _direct_payload_source_id(payload.source_id, payload)
-            if state.source_array_id == expected:
-                identities[tile_number] = state.acknowledged_identity or payload.source_id
-                continue
+        if payload is not None and (
+            _state_drew_payload(state, payload)
+            or state.source_array_id == _direct_payload_source_id(payload.source_id, payload)
+        ):
+            identities[tile_number] = state.acknowledged_identity or payload.source_id
+            continue
         identities[tile_number] = state.acknowledged_identity or state.source_array_id
     return identities
 
