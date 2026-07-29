@@ -189,8 +189,15 @@ def patched_histogram_plot_source(previous, previous_layout, payloads, *, upsert
     if previous is None or previous_layout is None:
         return None, None
     previous_population, previous_slices = previous_layout
-    payload_map = dict(payloads or {})
-    if removals or tuple(int(tile) for tile in payload_map) != previous_population:
+    # Read the caller's mapping; copying it would be an O(montage) allocation
+    # on the way to a refusal this path takes on every commit of a fill.
+    payload_map = payloads or {}
+    if removals or len(payload_map) != len(previous_population):
+        # Population size is the cheapest thing that separates a fill (which
+        # adds a tile per commit and can never reuse) from a refinement. Check
+        # it before building a key tuple that a fill always throws away.
+        return None, None
+    if tuple(int(tile) for tile in payload_map) != previous_population:
         return None, None
     patched = None
     slices = previous_slices
