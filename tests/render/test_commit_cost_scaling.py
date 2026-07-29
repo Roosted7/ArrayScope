@@ -137,17 +137,31 @@ def _montage(tiles: int):
 class _Montage:
     """A committed montage that can be driven with further bounded deltas."""
 
-    def __init__(self, backend: str, tiles: int):
+    def __init__(self, backend: str, tiles: int, *, present: int | None = None):
         self.view = _view_class(backend)()
         self.geometry, self.payloads = _montage(tiles)
         self.tiles = tiles
         self.revision = 1
-        self._commit(range(tiles))
+        if present is None:
+            self._commit(range(tiles))
+        else:
+            # Start partial, the way a fill does: the montage is planned at
+            # full size but only some tiles have arrived.
+            self.payloads = {tile: self.payloads[tile] for tile in range(present)}
+            self.tiles = present
+            self._commit(range(present))
 
-    def _commit(self, upsert_tiles):
+    def _commit(self, upsert_tiles, *, removals=(), active=None, refresh_payloads=True):
         upsert_tiles = tuple(int(tile) for tile in upsert_tiles)
-        for tile in upsert_tiles:
-            self.payloads[tile] = _payload(tile, self.revision)
+        removals = tuple(int(tile) for tile in removals)
+        if refresh_payloads:
+            for tile in upsert_tiles:
+                self.payloads[tile] = _payload(tile, self.revision)
+        for tile in removals:
+            self.payloads.pop(tile, None)
+        active_tiles = (
+            tuple(range(self.tiles)) if active is None else tuple(sorted(int(t) for t in active))
+        )
         delta = TilePresentationDelta(
             structure_revision=self.revision,
             payload_revision=self.revision,
@@ -158,7 +172,8 @@ class _Montage:
             base_revision=self.revision - 1,
             target_revision=self.revision,
             upserts={tile: self.payloads[tile] for tile in upsert_tiles},
-            active_tiles=tuple(range(self.tiles)),
+            removals=removals,
+            active_tiles=active_tiles,
             planned_tiles=tuple(range(self.tiles)),
         )
         self.view.setTiledPresentation(
@@ -172,8 +187,8 @@ class _Montage:
         )
         self.revision += 1
 
-    def commit(self, upsert_tiles):
-        self._commit(upsert_tiles)
+    def commit(self, upsert_tiles, **kwargs):
+        self._commit(upsert_tiles, **kwargs)
 
     def commit_ms(self, upsert_tiles, *, samples: int = 9) -> float:
         timings = []
@@ -313,6 +328,129 @@ def test_wgpu_instance_equality_checks_track_the_delta(qt_app, monkeypatch):
     assert comparisons <= 4, (
         f"a 1-tile commit compared {comparisons} tile instances; equality "
         "reuse must inspect the delta, not scan the montage"
+    )
+
+
+def _instances_rebuilt_from_scratch(view):
+    """Independent oracle: the instance tuple a full rebuild would produce.
+
+    Deliberately re-derived from the committed record rather than from the
+    incremental builder, so a position/identity mismatch in the patch path
+    cannot agree with itself.
+    """
+
+    from arrayscope.gpu.command_protocol import TileInstance
+
+    committed = view._wgpu_committed or {}
+    tiles = committed.get("tiles", {}) or {}
+    transposed = bool(committed.get("transposed", False))
+    return tuple(
+        TileInstance(
+            tuple(float(value) for value in tiles[tile]["world_rect"]),
+            tuple(float(value) for value in tiles[tile].get("src_origin", (0.0, 0.0))),
+            tuple(float(value) for value in tiles[tile]["src_size"]),
+            0,
+            plane_index=int(tiles[tile]["plane_index"]),
+            transposed=transposed,
+        )
+        for tile in sorted(tiles)
+    )
+
+
+@pytest.mark.skipif("wgpu" not in _BACKENDS, reason="no wgpu adapter on this machine")
+def test_wgpu_patched_instances_match_a_full_rebuild(qt_app):
+    """Every bounded path must agree with an independent full rebuild.
+
+    Patching by position is only sound while position means tile identity.
+    This sweeps the shapes where that could stop being true — the last
+    position, a removal, an active-set change, an empty delta, and geometry
+    rebuilt as a new but equal object — and checks the result against an
+    oracle that re-derives the tuple from the committed record.
+    """
+
+    montage = _Montage("wgpu", FIELD_TILES)
+
+    def check(label):
+        instances = montage.view._wgpu_tile_instances()
+        assert instances == _instances_rebuilt_from_scratch(montage.view), (
+            f"[{label}] the incremental instance tuple disagrees with a full "
+            "rebuild; a patched position no longer names the tile it belongs to"
+        )
+
+    check("initial")
+    montage.commit((0,))
+    check("first tile")
+    montage.commit((FIELD_TILES - 1,))
+    check("last tile")
+    montage.commit(range(8))
+    check("eight tiles")
+    montage.commit(())
+    check("empty delta")
+    montage.geometry = replace(
+        montage.geometry,
+        montage=replace(montage.geometry.montage),
+        montage_tile_states=tuple(montage.geometry.montage_tile_states),
+    )
+    montage.commit((5,))
+    check("geometry rebuilt by value")
+    montage.commit((), removals=(FIELD_TILES - 1,), active=range(FIELD_TILES - 1))
+    check("removal")
+    montage.tiles = FIELD_TILES - 1
+    montage.commit((3,), active=range(FIELD_TILES - 1))
+    check("after removal")
+
+
+@pytest.mark.skipif("wgpu" not in _BACKENDS, reason="no wgpu adapter on this machine")
+def test_wgpu_growing_population_places_every_new_tile(qt_app):
+    """Tiles arriving must reach the instance buffer, at the right position.
+
+    Growth is the shape a fill is in for its whole duration, and it is the
+    one that can defeat an order reused from the predecessor: the new tile has
+    no position in that order.  A patch path that trusts a stale order drops
+    it silently — the montage simply never draws that tile.
+    """
+
+    montage = _Montage("wgpu", FIELD_TILES, present=FIELD_TILES // 2)
+
+    for arrived in range(FIELD_TILES // 2, FIELD_TILES, 32):
+        cohort = range(arrived, min(arrived + 32, FIELD_TILES))
+        for tile in cohort:
+            montage.payloads[tile] = _payload(tile, montage.revision)
+        montage.tiles = min(arrived + 32, FIELD_TILES)
+        montage.commit(cohort, refresh_payloads=False, active=range(montage.tiles))
+        instances = montage.view._wgpu_tile_instances()
+        assert instances == _instances_rebuilt_from_scratch(montage.view), (
+            f"after growing to {montage.tiles} tiles the incremental instance "
+            "tuple disagrees with a full rebuild"
+        )
+        assert len(instances) == montage.tiles, (
+            f"the montage holds {montage.tiles} tiles but the instance buffer "
+            f"carries {len(instances)}; an arriving tile was dropped"
+        )
+
+
+@pytest.mark.skipif("wgpu" not in _BACKENDS, reason="no wgpu adapter on this machine")
+def test_wgpu_equal_replacement_retains_the_instance_tuple(qt_app):
+    """An unchanged descriptor must reuse the tuple OBJECT, not an equal copy.
+
+    The executor skips the instance-buffer upload on tuple identity, so an
+    equal-but-new tuple is a montage-sized rewrite that changes no pixels.
+    Identity — not equality — is what proves nothing was copied.
+    """
+
+    montage = _Montage("wgpu", FIELD_TILES)
+    montage.commit((FIELD_TILES - 1,))
+    before = montage.view._wgpu_tile_instances()
+
+    # Re-present the same payloads: identities are unchanged, so every
+    # descriptor this commit rewrites is equal to the one it replaces.
+    montage.commit((FIELD_TILES - 1,), refresh_payloads=False)
+    after = montage.view._wgpu_tile_instances()
+
+    assert after is before, (
+        "re-presenting an unchanged descriptor produced a new instance tuple; "
+        "the executor will now rewrite the whole instance buffer for a frame "
+        "whose geometry did not move"
     )
 
 

@@ -35,6 +35,7 @@ pages is actually resident in the executor page table after the submit.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, replace
 from time import perf_counter, perf_counter_ns
 from typing import ClassVar
@@ -1088,7 +1089,19 @@ class WgpuImageView2D(ImageViewShell):
             return cached[1]
         transposed = bool(committed.get("transposed", False))
         tiles = committed["tiles"]
-        order = tuple(sorted(tiles))
+        base_serial = committed.get("base_serial")
+        # Reuse the predecessor's order outright when this commit provably did
+        # not change the tile population.  Re-sorting the montage and then
+        # comparing the result to prove it equals the cached order are both
+        # O(montage) — cheap per element, but they are exactly the kind of
+        # whole-montage step this path exists to remove.
+        reuse_order = bool(
+            cached is not None
+            and base_serial is not None
+            and cached[0] == base_serial
+            and committed.get("population_stable")
+        )
+        order = cached[2] if reuse_order else tuple(sorted(tiles))
 
         def instance_for(tile):
             info = tiles[tile]
@@ -1101,7 +1114,6 @@ class WgpuImageView2D(ImageViewShell):
                 transposed=transposed,
             )
 
-        base_serial = committed.get("base_serial")
         changed = committed.get("changed_tiles")
         instances = None
         patched_from_cache = False
@@ -1110,24 +1122,37 @@ class WgpuImageView2D(ImageViewShell):
             and base_serial is not None
             and changed is not None
             and cached[0] == base_serial
-            and cached[2] == order
+            and (reuse_order or cached[2] == order)
         ):
-            positions = {tile: index for index, tile in enumerate(order)}
-            patched = list(cached[1])
-            instance_changed = False
+            # ``order`` is sorted, so a changed tile's position is a binary
+            # search rather than a montage-sized position index.  The list copy
+            # is deferred until a descriptor actually differs: a refinement
+            # that re-presents the same geometry then allocates nothing.
+            previous = cached[1]
+            patched = None
+            unplaceable = False
             for tile in changed:
-                index = positions.get(int(tile))
-                if index is None:
-                    patched = None
+                index = bisect_left(order, int(tile))
+                if index >= len(order) or order[index] != int(tile):
+                    unplaceable = True
                     break
                 replacement = instance_for(int(tile))
-                if replacement != patched[index]:
+                # ``changed`` is a set, so each position is visited once and
+                # ``previous[index]`` is always the pre-existing descriptor.
+                if replacement != previous[index]:
+                    if patched is None:
+                        patched = list(previous)
                     patched[index] = replacement
-                    instance_changed = True
-            if patched is not None:
+            if not unplaceable:
                 patched_from_cache = True
-                instances = tuple(patched) if instance_changed else cached[1]
+                instances = previous if patched is None else tuple(patched)
         if instances is None:
+            # The reused order is only trustworthy for the patch path that
+            # proved it. Anything falling through to a full rebuild re-derives
+            # it, so a wrong ``population_stable`` can cost work but can never
+            # drop or misplace a tile.
+            if reuse_order:
+                order = tuple(sorted(tiles))
             instances = tuple(instance_for(tile) for tile in order)
         if not patched_from_cache and cached is not None and cached[1] == instances:
             # The executor's identity check deliberately avoids an O(n)
@@ -1753,8 +1778,9 @@ class WgpuImageView2D(ImageViewShell):
             # tiles continue to request L0 so the shader resolves resident
             # ancestors while refinement is incomplete.
             planes = list(previous_commit.get("planes", ()) or ()) if incremental_delta else []
+            previous_tile_map = previous_commit.get("tiles", {}) or {}
             committed_tiles: dict[int, dict[str, object]] = (
-                dict(previous_commit.get("tiles", {}) or {}) if incremental_delta else {}
+                dict(previous_tile_map) if incremental_delta else {}
             )
             commands = []
             planned_resident = set(executor.page_table.resident_keys())
@@ -2051,6 +2077,17 @@ class WgpuImageView2D(ImageViewShell):
                     frozenset(int(tile) for tile in (*work_payloads, *atlas_tiles))
                     if incremental_delta
                     else None
+                ),
+                # Whether this commit rewrote descriptors WITHOUT changing the
+                # tile population.  An incremental commit already refuses
+                # removals, so it can only add; deciding that from the delta
+                # costs O(delta), and it lets the successor reuse the
+                # predecessor's tile ORDER instead of re-sorting the montage
+                # and comparing the result to prove it is the same order.
+                "population_stable": (
+                    incremental_delta
+                    and not atlas_tiles
+                    and all(int(tile) in previous_tile_map for tile in work_payloads)
                 ),
                 # Payloads are canonical (sorted image axes); an X/Y swap is a
                 # display transform the vertex shader applies via a UV axis swap
