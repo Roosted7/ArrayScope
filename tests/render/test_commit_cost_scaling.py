@@ -403,6 +403,30 @@ def test_layout_cache_invalidates_on_every_input_that_moves_a_tile():
     )
 
 
+def test_layout_map_cannot_be_mutated_by_a_caller():
+    """The shared placement mapping is read-only by construction.
+
+    Every caller resolving an equal geometry receives the same mapping, so one
+    accidental write would misplace tiles for all of them until the entry is
+    evicted — and it would surface far from the code that did it. Documenting
+    it as read-only is not the same as it being read-only.
+    """
+
+    from arrayscope.display.tile_layout import tile_layout_map
+
+    geometry, _payloads = _montage(8)
+    layout = tile_layout_map(geometry)
+    victim = next(iter(layout))
+
+    with pytest.raises(TypeError):
+        layout[victim] = None
+    with pytest.raises((TypeError, AttributeError)):
+        layout.pop(victim)
+
+    assert dict(layout), "a caller must still be able to take its own copy"
+    assert tile_layout_map(geometry)[victim] is layout[victim]
+
+
 def test_bounded_commit_inspects_only_the_delta_for_the_histogram(qt_app, monkeypatch):
     """The montage histogram source is maintained, not re-derived.
 

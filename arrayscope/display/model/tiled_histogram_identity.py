@@ -10,6 +10,8 @@ unchanged across display-LOD level swaps, so a level swap leaves this identity
 
 from __future__ import annotations
 
+import weakref
+
 import numpy as np
 
 
@@ -48,6 +50,38 @@ def payload_histogram_display_source(payload):
     return source
 
 
+def _source_proof(source):
+    """A weak, checkable claim that a later array IS this one.
+
+    ``id()`` alone is not a proof of anything once the array it named can
+    die: CPython reuses addresses, so a historical id can compare equal to a
+    DIFFERENT array and a real content change would be skipped.  A weak
+    reference is falsifiable — it either still yields this exact object or it
+    yields ``None`` — and it holds no pixels alive, so proving the
+    optimization never keeps a payload from being freed.
+
+    ``None`` means no proof is obtainable; the caller must then treat the
+    source as changed.
+    """
+
+    try:
+        return weakref.ref(source)
+    except TypeError:  # pragma: no cover - ndarrays are weakref-able
+        return None
+
+
+def _proves_same_source(proof, source) -> bool:
+    """Whether ``proof`` establishes that ``source`` is the very same array.
+
+    Anything that is not a live reference yielding this exact object is not a
+    proof — including a bare ``id()`` value, which is what this replaced.
+    Refusing to interpret it keeps a stale layout from silently degrading back
+    into address comparison.
+    """
+
+    return callable(proof) and proof() is source
+
+
 def _histogram_parts(payloads):
     """Per-tile histogram sources in build order, with their flat placement."""
 
@@ -61,7 +95,7 @@ def _histogram_parts(payloads):
             continue
         source = np.asarray(source)
         parts.append(source)
-        slices[int(tile)] = (id(source), offset, offset + source.size)
+        slices[int(tile)] = (_source_proof(source), offset, offset + source.size)
         offset += source.size
     population = tuple(int(tile) for tile in payload_map)
     return parts, slices, population
@@ -89,7 +123,7 @@ def histogram_plot_source_and_layout(payloads):
 
     Returns ``(source, layout)``.  ``layout`` is ``(population, slices)``,
     where ``population`` is the payload key order this buffer was built from
-    and ``slices`` maps a contributing tile to its ``(source_id, start,
+    and ``slices`` maps a contributing tile to its ``(source_proof, start,
     stop)`` flat placement — or ``None`` when the result is not a
     concatenation this module laid out (no contributing tile, or the
     single-part passthrough below), and therefore cannot be patched later.
@@ -172,18 +206,23 @@ def patched_histogram_plot_source(previous, previous_layout, payloads, *, upsert
         if source is None:
             return None, None
         source = np.asarray(source)
-        source_id, start, stop = placement
+        proof, start, stop = placement
         if source.dtype != previous.dtype or source.size != stop - start:
             return None, None
-        if id(source) == source_id:
+        if _proves_same_source(proof, source):
+            # Provably the same array, so this slice already holds its values.
             continue
+        # Either a different array, or an unprovable one (the previous source
+        # has been freed, so nothing can establish sameness). Both are handled
+        # by rewriting the slice from what the payload holds now, which is
+        # correct whatever the old contents were.
         if patched is None:
             patched = previous.copy()
             slices = dict(previous_slices)
         # Offsets are flat positions in the concatenation; the padded buffer
         # is C-contiguous, so this reshape is a view onto the same memory.
         patched.reshape(-1)[start:stop] = np.ravel(source)
-        slices[tile] = (id(source), start, stop)
+        slices[tile] = (_source_proof(source), start, stop)
     if patched is None:
         return previous, previous_layout
     return patched, (previous_population, slices)

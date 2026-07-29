@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
@@ -61,9 +62,16 @@ class _TileLayout:
         return self._regions
 
     @property
-    def region_map(self) -> dict[int, TileLayoutRegion]:
+    def region_map(self) -> Mapping[int, TileLayoutRegion]:
         if self._region_map is None:
-            self._region_map = {int(region.tile_number): region for region in self.regions}
+            # Read-only by construction, not by documentation. This mapping is
+            # shared by every caller that resolves an equal geometry, so a
+            # single stray write would corrupt placement for all of them until
+            # the entry is evicted — a failure that would surface as misplaced
+            # tiles far from the code that caused it.
+            self._region_map = MappingProxyType(
+                {int(region.tile_number): region for region in self.regions}
+            )
         return self._region_map
 
     @property
@@ -188,11 +196,11 @@ def tile_layout_regions(geometry, *, frame_plan=None) -> tuple[TileLayoutRegion,
     return _resolve_tile_layout(geometry, frame_plan).regions
 
 
-def tile_layout_map(geometry, *, frame_plan=None) -> dict[int, TileLayoutRegion]:
+def tile_layout_map(geometry, *, frame_plan=None) -> Mapping[int, TileLayoutRegion]:
     """Tile-keyed placement.
 
-    The returned mapping is shared with the layout cache and must be treated
-    as read-only; callers that need to mutate placement take their own copy.
+    The returned mapping is shared with the layout cache and is read-only;
+    callers that need to mutate placement take their own copy (``dict(...)``).
     """
 
     return _resolve_tile_layout(geometry, frame_plan).region_map
