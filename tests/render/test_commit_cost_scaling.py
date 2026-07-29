@@ -20,14 +20,20 @@ One wall-clock assertion survives, and it needs no threshold: a commit with
 nothing to present must not cost more than one presenting 32 tiles.
 
 Field scale is the point.  A 3-tile fixture cannot see any of this: the
-whole-montage term and the per-delta term are the same size there.
+whole-montage term and the per-delta term are the same size there.  Neither
+can a fixture whose tiles are a constant fill (a misplaced patch is then
+byte-identical) or whose payloads carry no ``TileIdentity`` (WGPU then never
+reaches the binding-reuse path the app runs).  Both are pinned below, because
+both silently turned a green test into no test at all.
 
-**Still montage-proportional, and not covered here** (measured shares of a
-bounded PyQtGraph commit at 272 tiles, after this change): the montage-wide
-histogram source rebuild (~28%) and the presented-identity scan (~24%).  Both
-need a design change rather than a cheaper loop — an incrementally accumulated
-histogram owner, and presentation truth maintained instead of re-read from Qt
-per tile — so they are reported rather than pinned by a passing assertion.
+**Still montage-proportional, and not covered here**: the presented-identity
+scan, now the largest remaining whole-montage walk in a bounded PyQtGraph
+commit at ~22%.  It asks Qt for each item's effective visibility, and
+``state.visible`` and the item's own flag are deliberately allowed to
+diverge, so the two-condition check is load-bearing.  Replacing it needs
+maintained visibility ownership at the points where backend visibility
+changes — not a cheaper loop — and is left for the GUI-handoff work rather
+than pinned here by an assertion that would quietly succeed.
 """
 
 from __future__ import annotations

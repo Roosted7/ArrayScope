@@ -501,42 +501,61 @@ Open work, roughly in dependency order:
 
 Measured at 272 tiles, the field scale, against the parent revision.
 
-The **bookkeeping** that made a commit O(montage) is gone. Four walks were
-keyed to the montage and are now keyed to the delta, all pinned by counting
-tests in `tests/render/test_commit_cost_scaling.py`. For a one-tile commit,
-against the parent revision those counters read: 272 and 816 rebuilt tile
-layout regions (PyQtGraph and WGPU — WGPU asked three times per commit), 272
-rebuilt GPU tile instances, and 818 re-derived pin ownerships over a 272-page
-resident set. All four are now bounded by the delta.
+The **bookkeeping** that made a commit O(montage) is gone, and so is the
+montage-wide **histogram aggregate**. Every walk below is now bounded by the
+delta and pinned by a counting test in
+`tests/render/test_commit_cost_scaling.py`. For a ONE-tile commit, against
+main those counters read:
 
-End to end, the total GUI-thread commit cost of a full 272-tile fill in 32-tile
-cohorts fell from 79.1 ms to 70.9 ms on WGPU (−10%) and from 66.8 ms to 64.3 ms
-on PyQtGraph (−4%). Those are means of six order-balanced interleaved rounds
-per revision; on WGPU every after-round beat every before-round, on PyQtGraph
-one round overlapped.
+| Whole-montage walk | Against main | Now |
+|---|---:|---:|
+| Tile layout regions rebuilt (PyQtGraph / WGPU) | 272 / 816 | 0 |
+| GPU tile instances constructed | 272 | 1 |
+| GPU tile instances compared for equality | 272 | 1 |
+| Pin ownerships re-derived over a 272-page set | 818 | ≤32 |
+| Payload histogram sources inspected | 272 | 1 |
+
+Bounded-commit cost at 272 tiles, medians of six order-balanced interleaved
+rounds against main, every after-sample separated from every before-sample
+except where noted:
+
+| Delta | PyQtGraph | WGPU |
+|---|---|---|
+| empty | 2.56 → 2.04 ms | 0.98 → 1.13 ms (unchanged path, overlapping) |
+| 1 tile | 4.93 → 1.34 ms (−73%) | 4.87 → 2.65 ms (−46%) |
+| 8 tiles | 4.50 → 1.87 ms (−58%) | 6.15 → 3.55 ms (−42%) |
+| 32 tiles | 5.53 → 3.34 ms (−40%) | 9.56 → 7.33 ms (−23%) |
+
+The end-to-end fill number moves much less — a 32-tile cohort carries 32
+tiles of genuine per-item work, which is what now dominates it. That is the
+intended shape of the result, not a disappointment: the fixed term is what
+fell, and the fixed term is what R5 said no cohort size could chunk away.
+Read the small-delta column, not the fill total.
 
 Interleaving is not optional here. Run sequentially — all of one revision, then
-all of the other — the same benchmark reported −19% and −18%, because this
+all of the other — the fill benchmark reported −19% and −18%, because this
 machine drifts by more than the effect over the minutes such a comparison
 takes. Alternate revisions within one sweep and balance the order, or the
 number measures the clock, not the change.
 
-What remains is **whole-montage aggregates**, not bookkeeping, and it is the
-larger half on PyQtGraph. After this change, a bounded PyQtGraph commit at 272
-tiles still spends ~28% rebuilding the montage-wide histogram source and ~24%
-re-reading presented-tile identity from Qt, one `isVisible()` call per tile.
-Neither is a loop that can be made cheaper in place:
+What remains is the **presented-identity scan**, ~22% of a bounded PyQtGraph
+commit and now the largest whole-montage walk left. Its per-tile comparison is
+already O(1) — the item state remembers which payload produced its source id,
+so recognising that object replaces rebuilding a fourteen-element tuple — but
+the scan still visits every resident tile and asks Qt for its effective
+visibility. That last part is not a loop that can be made cheaper in place:
+`state.visible` and the item's own Qt flag are deliberately allowed to
+diverge, so the two-condition check is load-bearing. Maintaining that truth at
+the points where backend visibility changes is the right shape, and it moves a
+correctness invariant into bookkeeping — which is the defect class ADR 0051
+exists to prevent, so it wants its own change with its own equivalence
+coverage, not a rider on this one.
 
-- The histogram source is a montage-wide aggregate with no owner outside the
-  commit. It is rebuilt because any tile's pixels changing genuinely changes
-  it. Making it delta-proportional means an incrementally accumulated owner —
-  or accepting a coarser repaint cadence during a fill, which changes what the
-  histogram widget shows and is a product decision, not a performance one.
-- Presented-tile identity is read from Qt because `state.visible` and the
-  item's own flag are deliberately allowed to diverge. Maintaining that truth
-  instead of re-reading it is sound, but it moves a correctness invariant into
-  bookkeeping, and this module exists because optimistic bookkeeping is the
-  defect class that strands tiles.
+The montage histogram source is no longer in that list. It is maintained
+across commits, keyed on the presentation revision it was built at, and only a
+delta whose base is that revision may patch it. A coarser histogram repaint
+*cadence* would still be a product decision; this is not that — the values are
+identical to a full rebuild, pinned by an oracle.
 
 The governor's fitted `fixed_ms` — the term the scheduler actually steers on —
 moved on the target pass and not on the preview pass. Medians of four repeats,
