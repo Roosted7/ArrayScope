@@ -58,15 +58,30 @@ class SourceAnchoring:
 
 
 def contiguous_range_start(indices) -> int | None:
-    """Start of a contiguous ascending index range, else ``None``."""
+    """Start of a contiguous ascending index range, else ``None``.
 
-    values = tuple(int(value) for value in tuple(indices))
+    Walked rather than compared against a materialized ``range``: this is
+    asked once per payload anchor, so a crop of a few hundred indices used to
+    allocate two throwaway tuples per call and compare them element-wise. The
+    span pre-check rejects a non-contiguous window in constant time, and the
+    walk stops at the first gap.
+    """
+
+    values = indices if isinstance(indices, tuple) else tuple(indices)
     if not values:
         return None
-    start = values[0]
-    if values == tuple(range(start, start + len(values))):
-        return start
-    return None
+    start = int(values[0])
+    # Necessary condition, O(1): a contiguous ascending run spans exactly its
+    # own length. Cheap enough to pay before touching the interior at all.
+    if int(values[-1]) - start != len(values) - 1:
+        return None
+    previous = start
+    for value in values[1:]:
+        value = int(value)
+        if value != previous + 1:
+            return None
+        previous = value
+    return start
 
 
 def source_anchoring_for_view(

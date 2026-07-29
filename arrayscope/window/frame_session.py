@@ -657,6 +657,10 @@ class LifecycleStageFanIn(StageFanInState):
         return waiting
 
 
+# A round's tiles share one crop, so a handful of snapshots covers it.
+_SOURCE_ANCHOR_SNAPSHOT_CACHE_LIMIT = 32
+
+
 @dataclass
 class FrameSession:
     session_id: int
@@ -832,6 +836,7 @@ class FrameSession:
     # geometry for every floor query.
     _lod_page_set_key_cache: dict[object, object] = field(default_factory=dict)
     _source_anchor_content_key_cache: dict[int, object] = field(default_factory=dict)
+    _source_anchor_snapshot_starts_cache: dict[object, object] = field(default_factory=dict)
     # List-like view over lifecycle-owned rung materialization claims.  Filled
     # only under the "resident" policy after a singleflight claim on the
     # pyramid cache; the lifecycle record, not this attribute, owns truth.
@@ -1584,6 +1589,7 @@ class FrameSession:
         self.source_anchoring = source_anchoring
         if previous_anchor_key != next_anchor_key:
             self._source_anchor_content_key_cache.clear()
+            self._source_anchor_snapshot_starts_cache.clear()
         self.view_state = view_state
         new_image_axes = tuple(getattr(view_state, "image_axes", None) or ())
         if self.canonical_orientation and old_image_axes != new_image_axes:
@@ -2905,25 +2911,41 @@ class FrameSession:
             source_axes = tuple(sorted(image_axes)) if self.canonical_orientation else image_axes
             range_indices = tuple(getattr(state, "axis_range_indices", ()) or ())
             anchored_mask = tuple(value is not None for value in tuple(starts))
-            snapshot_starts: list[int | None] = []
             if len(source_axes) == len(anchored_mask):
-                from arrayscope.display.source_anchoring import contiguous_range_start
+                # Every tile of a round carries its own immutable snapshot, but
+                # they all crop the same axes, so the per-axis window start is
+                # one answer the whole round shares. Deriving it per call made
+                # this O(tiles x calls-per-tile x crop extent): measured 35 666
+                # calls for 272 tiles, walking 200-index windows each time.
+                cache = self._source_anchor_snapshot_starts_cache
+                key = (id(state), anchored_mask)
+                cached = cache.get(key)
+                if cached is not None and cached[0] is state:
+                    starts = cached[1]
+                else:
+                    from arrayscope.display.source_anchoring import contiguous_range_start
 
-                for source_axis, is_anchored in zip(
-                    source_axes,
-                    anchored_mask,
-                    strict=True,
-                ):
-                    if not is_anchored:
-                        snapshot_starts.append(None)
-                        continue
-                    indices = (
-                        range_indices[source_axis] if source_axis < len(range_indices) else None
-                    )
-                    snapshot_starts.append(
-                        0 if indices is None else contiguous_range_start(indices)
-                    )
-                starts = tuple(snapshot_starts)
+                    snapshot_starts: list[int | None] = []
+                    for source_axis, is_anchored in zip(
+                        source_axes,
+                        anchored_mask,
+                        strict=True,
+                    ):
+                        if not is_anchored:
+                            snapshot_starts.append(None)
+                            continue
+                        indices = (
+                            range_indices[source_axis] if source_axis < len(range_indices) else None
+                        )
+                        snapshot_starts.append(
+                            0 if indices is None else contiguous_range_start(indices)
+                        )
+                    starts = tuple(snapshot_starts)
+                    if len(cache) >= _SOURCE_ANCHOR_SNAPSHOT_CACHE_LIMIT:
+                        cache.clear()
+                    # Retaining the snapshot is what makes the id key sound:
+                    # a live referent's address cannot be reused.
+                    cache[key] = (state, starts)
         y_start = int(starts[0] or 0)
         x_start = int(starts[1] or 0)
         height, width = (int(native_shape[0]), int(native_shape[1]))

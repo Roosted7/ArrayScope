@@ -285,13 +285,15 @@ def _axis_contains(container: AxisRegion, contained: AxisRegion, size: int) -> b
             int(index) for index in np.asarray(contained_indices, dtype=np.int64).ravel()
         )
         return len(contained_values) == 1 and int(container_indices) == contained_values[0]
-    container_set = {int(index) for index in np.asarray(container_indices, dtype=np.int64).ravel()}
+    # Vectorized on purpose: this is asked once per payload per axis while a
+    # crop settles, and building a Python set of the container then testing
+    # each contained index through the interpreter made one call cost the sum
+    # of both axis extents. Same membership question, answered in C.
+    container_values = np.asarray(container_indices, dtype=np.int64).ravel()
     if isinstance(contained_indices, int):
-        return int(contained_indices) in container_set
-    return all(
-        int(index) in container_set
-        for index in np.asarray(contained_indices, dtype=np.int64).ravel()
-    )
+        return bool((container_values == int(contained_indices)).any())
+    contained_values = np.asarray(contained_indices, dtype=np.int64).ravel()
+    return bool(np.isin(contained_values, container_values).all())
 
 
 def _local_axis_region(source_axis: AxisRegion, target_axis: AxisRegion, size: int) -> AxisRegion:
