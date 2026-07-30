@@ -8,8 +8,7 @@ It does not treat “the child process exited successfully” as visual evidence
 The baseline was decoded with:
 
 ```bash
-PATH=~/miniconda3/bin:$PATH direnv exec . \
-  python tools/demo_inspector.py --strict
+tools/env python tools/demo_inspector.py --strict
 ```
 
 The resulting `tests/artifacts/demo-inspection/` bundle contains a
@@ -155,7 +154,7 @@ The current coverage is:
 Each item below is independently reviewable and must land with focused tests,
 updated documentation, and an explanatory commit body:
 
-1. Agent-readable final-format inspection (landed as `bf5d69b4`).
+1. Agent-readable final-format inspection (landed as `afc10b81`).
 2. Event manifests and action-centered inspection sheets.
 3. Recorder-owned popup/menu composition with coordinate-correct targeting.
 4. Non-overlapping, wrapped, scale-stable captions.
@@ -192,18 +191,18 @@ cursor-target, or companion-file finding.
 
 The bounded implementation history is:
 
-1. `bf5d69b4` — final-format storyboard, report, and HTML inspection.
-2. `f8eeffec` — this baseline audit and explicit acceptance gates.
-3. `a2e322c8` — action timelines and before/act/after event sheets.
-4. `f0822cb2` — faithful FFT popup/combo composition and targets.
-5. `00387f6b` — honest click ownership and animated ROI gestures.
-6. `06027661` — dedicated, wrapped caption band.
-7. `ade2da63` — native-width inline media and readable source layouts.
-8. `52170845` — showcase crop and real 1:1 behavior.
-9. `1456bbd5` — unambiguous logarithmic-magnitude FFT sequence.
-10. `aba21ba4` — parameterized-operation and export-menu workflow.
-11. `bd67f356` — semantic montage trigger and readable hold.
-12. `8dbbf437` — direct coverage of the production export-menu seam.
+1. `afc10b81` — final-format storyboard, report, and HTML inspection.
+2. `c5834ade` — this baseline audit and explicit acceptance gates.
+3. `ef73fa3f` — action timelines and before/act/after event sheets.
+4. `61c46fd6` — faithful FFT popup/combo composition and targets.
+5. `b2b98eba` — honest click ownership and animated ROI gestures.
+6. `0a070ce5` — dedicated, wrapped caption band.
+7. `b8d1ac31` — native-width inline media and readable source layouts.
+8. `b15b571f` — showcase crop and real 1:1 behavior.
+9. `836f855a` — unambiguous logarithmic-magnitude FFT sequence.
+10. `d36c1fe1` — parameterized-operation and export-menu workflow.
+11. `47ee9a22` — semantic montage trigger and readable hold.
+12. `df4623b4` — direct coverage of the production export-menu seam.
 
 Some README claims deliberately remain prose: flip/FFT-shift variants, every
 ROI shape, resource diagnostics/WGPU behavior, and asynchronous file loading.
@@ -211,3 +210,35 @@ Adding those to these tours would either duplicate an existing narrative or
 misrepresent offscreen PyQtGraph capture as hardware/file-stream evidence.
 The new workflow previews export discoverability but intentionally does not
 open a modal dialog or write a user file.
+
+## Still open after the closure
+
+Reviewing the decoded storyboards frame by frame — rather than the structural
+report — leaves five findings that the acceptance criteria above do not yet
+hold the media to. They are recorded here so the next pass starts from
+evidence rather than from a fresh reading of the same files.
+
+| # | Finding | Why the current gate misses it |
+|---|---|---|
+| 1 | `fft` still spends roughly 4.5 s–11.5 s on a near-black frame: the Real channel of a linear-scaled complex FFT. The ambiguous-failure beat was moved, not removed. | Nothing measures decoded luminance, so "does this read as broken?" is still a human question. |
+| 2 | The `showcase` crop beat is invisible. Cropping a centred Gaussian to `16:112` removes near-zero margins and the view refits, so the pixels before and after are indistinguishable. | The timeline proves the action ran and hit its target; no check asks whether the frame changed. |
+| 3 | The composited channel/scale choice lists render the combo's own abbreviations (`R`, `|x|`, `∠`) at ~40 px wide. The menu is visible but unreadable, so "show the real choice" is only half met. | Target geometry is validated; legibility is not. |
+| 4 | `showcase`, `montage`, and `workflow` all use `_volume3d`, a sum of Gaussians with no structure. Zoom, pan, 1:1, montage tiles, and the crop all act on a featureless blob; `_phantom2d` (used by `fft`/`roi`) reads far better. | Dataset choice is not part of any acceptance criterion. |
+| 5 | The `true 1:1` beat shows a 128 px image in an ~830 px viewport — a speck in black. Correct, but it reads as the same kind of failure the FFT black beat did. | Same gap as #1. |
+
+Three process findings sit alongside them:
+
+- **One coverage row was neither shown nor declared prose.** "Adjust
+  window/level → add a visible histogram/window adjustment if it stays
+  concise" appears in the coverage table above, is absent from the landed
+  outcome, and is missing from the deliberately-prose paragraph. Either
+  demonstrate it or say why it stays prose.
+
+- **Framing was never implemented.** "Control-heavy beats receive enough hold
+  time *and framing* to read the relevant label" was met only by widening the
+  window and holding longer. No beat crops or magnifies its subject, so a
+  popup row is still ~1.5 % of the frame.
+- **Media weight.** The thirteen commits write 38.0 MB of blobs to reach a
+  12.1 MB final `docs/media/`; each re-record commits another full set. Squash
+  the media so history carries one copy of each final file. `showcase.gif`
+  alone is 3.73 MB and is the largest file in the repository's documentation.

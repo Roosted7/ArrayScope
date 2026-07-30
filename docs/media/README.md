@@ -57,8 +57,7 @@ automatically after encoding. To re-inspect existing MP4, AVIF, and GIF files
 without recording them again:
 
 ```bash
-PATH=~/miniconda3/bin:$PATH direnv exec . \
-  python tools/demo_inspector.py --strict
+tools/env python tools/demo_inspector.py --strict
 ```
 
 The report is written under `tests/artifacts/demo-inspection/` (gitignored):
@@ -76,12 +75,15 @@ The report is written under `tests/artifacts/demo-inspection/` (gitignored):
 
 Use `--only <substring>` for one scenario and increase `--samples` when an
 interaction needs closer inspection. `--strict` fails when a companion format
-is missing, encoded durations/aspect ratios disagree, or a manifested click
-misses (or lacks) its visible target. It also refuses an inline GIF narrower
-than the README's 880 px slot, because browser enlargement damages small text
-and palette edges. A newly recorded scenario writes
-`<scenario>.timeline.json` beside the final media; older media without a
-timeline remains inspectable through uniform samples and is reported as such.
+is missing, encoded durations/aspect ratios disagree, an action's cursor
+misses (or a click lacks) its recorded target, or an action starts before its
+caption can be read. It also refuses any inline format narrower than the
+README's 880 px slot, because browser enlargement damages small text and
+palette edges. Every recorded scenario writes `<scenario>.timeline.json`
+beside its final media, and `--strict` requires it: without a timeline nothing
+can adjudicate cursor targets or caption timing, so accepting one would be a
+gate that cannot fail. Media without a timeline stays inspectable through
+uniform samples in a non-strict run.
 These structural checks complement, but do not replace, reviewing cursor
 alignment, click/menu visibility, captions, readable scale, and whether each
 promised feature is actually visible. The dated
@@ -110,7 +112,7 @@ lead-in before the described action begins. The timeline distinguishes the
 application `window_size` from the final `capture_size`, so target checks
 remain in the application's coordinate system.
 
-All four walkthrough windows are 1100 px wide and both inline encodes are
+All five walkthrough windows are 1100 px wide and both inline encodes are
 880 px. This gives every scenario the same 0.8× application-to-README scale;
 control-heavy FFT and ROI scenes no longer shrink from 1280 px, and the GIF
 fallback is never enlarged.
@@ -118,10 +120,13 @@ fallback is never enlarged.
 ## Staying maintainable
 
 `tests/app/test_demo_recorder_smoke.py` records every scenario in `--smoke`
-mode in CI. If a widget or window entry point a scenario scripts against is
+mode as part of the suite. If a widget or window entry point a scenario scripts against is
 renamed or removed, the suite fails at once — the demos break loudly in the
 PR that changed the UI, not silently in the README.
 
 `tests/app/test_demo_inspector.py` creates a small encoded video and proves the
 inspection path decodes the final artifact, writes a usable storyboard/JSON/
-HTML bundle, and fails closed when an expected companion format is absent.
+HTML bundle, and fails closed when an expected companion format is absent. It
+also loads the inspector in-process to exercise its findings directly — a
+subprocess is invisible to test selection, so without that the gate's own
+tests would never re-run when the gate changes.
