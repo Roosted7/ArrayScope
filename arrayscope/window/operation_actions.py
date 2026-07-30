@@ -296,6 +296,7 @@ class OperationActionsMixin:
             )
             for entry in operation_entries
         ]
+        commands.extend(self._colormap_palette_commands())
         commands.extend(
             [
                 PaletteCommand("fit", "Fit image to viewport", icon="fit_screen"),
@@ -313,7 +314,7 @@ class OperationActionsMixin:
                 PaletteCommand("load_recipe", "Load operation recipe", icon="folder_open"),
                 PaletteCommand("save_view_recipe", "Save view recipe", icon="view_quilt"),
                 PaletteCommand("load_view_recipe", "Load view recipe", icon="folder_open"),
-                PaletteCommand("edit_colormaps", "Edit colormaps", icon="palette"),
+                PaletteCommand("manage_colormaps", "Manage colormaps", icon="palette"),
                 PaletteCommand("manage_operations", "Manage operations", icon="tune"),
             ]
         )
@@ -328,11 +329,51 @@ class OperationActionsMixin:
             return None
         if command.kind == "operation":
             return self.request_operation(command.id, axis)
+        if command.kind == "colormap":
+            return self._apply_palette_colormap(command.id)
         return self._run_palette_command(command.id)
+
+    def _colormap_palette_commands(self):
+        """Every colormap, as a palette command.
+
+        Every operation has been searchable from the palette since it shipped
+        and no colormap ever was -- the palette's single colormap entry was the
+        manager itself. The listing is the manager's arrangement, grouped
+        exactly as the toolbar menu groups it, so what the palette offers and
+        what the picker offers cannot drift (ADR 0063).
+        """
+
+        from arrayscope.display import colormap_library
+        from arrayscope.display.colormap_policy import colormap_family
+
+        family = None
+        try:
+            family = colormap_family(self.view_state.channel)
+        except Exception:
+            family = None
+        commands = []
+        for group, infos in colormap_library.grouped_colormaps(family):
+            section = group or colormap_library.FAVORITES_LABEL
+            commands.extend(
+                PaletteCommand(
+                    info.name,
+                    f"Colormap: {info.name} ({section})",
+                    kind="colormap",
+                    icon="palette",
+                )
+                for info in infos
+            )
+        return commands
+
+    def _apply_palette_colormap(self, name):
+        setter = getattr(self, "_set_display_colormap", None)
+        if callable(setter):
+            return setter(str(name), user_selected=True, request_render=True)
+        return None
 
     def _run_palette_command(self, command_id):
         actions = {
-            "edit_colormaps": self.open_colormap_designer,
+            "manage_colormaps": self.open_colormap_manager,
             "manage_operations": self.open_operation_manager,
             "fit": self.fit_image_to_view,
             "one_to_one": self.one_to_one_image,

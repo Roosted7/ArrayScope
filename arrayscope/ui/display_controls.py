@@ -723,7 +723,7 @@ class DisplayControlBuildMixin:
         self.display_toolbar.colormapChanged.connect(
             lambda name: self._set_display_colormap(name, user_selected=True, request_render=True)
         )
-        self.display_toolbar.colormapCustomizeRequested.connect(self.open_colormap_designer)
+        self.display_toolbar.colormapManagerRequested.connect(self.open_colormap_manager)
         from arrayscope.display import colormap_library
 
         colormap_library.add_library_listener(self._refresh_colormap_options)

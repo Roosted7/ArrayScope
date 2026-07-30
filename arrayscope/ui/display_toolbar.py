@@ -69,7 +69,7 @@ class DisplayToolbar(QtWidgets.QToolBar):
     channelChanged = Qt.QtCore.Signal(str)
     scaleChanged = Qt.QtCore.Signal(str)
     colormapChanged = Qt.QtCore.Signal(str)
-    colormapCustomizeRequested = Qt.QtCore.Signal()
+    colormapManagerRequested = Qt.QtCore.Signal()
     fitRequested = Qt.QtCore.Signal(bool)
     oneToOneRequested = Qt.QtCore.Signal()
     windowModeChanged = Qt.QtCore.Signal(str)
@@ -243,9 +243,13 @@ class DisplayToolbar(QtWidgets.QToolBar):
             for info in infos:
                 add_map_action(submenu, info)
         menu.addSeparator()
-        customize = menu.addAction(material_icon("edit"), "Customize…")
-        customize.setToolTip("Edit, create and import colormaps")
-        customize.triggered.connect(self.colormapCustomizeRequested)
+        # One verb for the surface, everywhere: the menu bar, this toolbar and
+        # the command palette all say "Manage colormaps" (ADR 0063). This entry
+        # used to say "Customize…" while the menu said "Colormap manager…" and
+        # the palette said "Edit colormaps" -- three names for one dialog.
+        manage = menu.addAction(material_icon("palette"), "Manage colormaps…")
+        manage.setToolTip("Browse, edit, create and import colormaps")
+        manage.triggered.connect(self.colormapManagerRequested)
         self._sync_colormap_button()
 
     def _pick_colormap(self, name: str) -> None:

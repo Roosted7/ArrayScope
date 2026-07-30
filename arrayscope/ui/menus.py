@@ -132,13 +132,13 @@ class WindowMenuMixin:
             )
             view_menu.addAction(inspection_action)
         view_menu.addSeparator()
-        colormap_manager_action = QtGui.QAction("Colormap manager…", self)
+        colormap_manager_action = QtGui.QAction("Manage colormaps…", self)
         set_action_icon(colormap_manager_action, "palette")
         colormap_manager_action.triggered.connect(
-            lambda _checked=False: self.open_colormap_designer()
+            lambda _checked=False: self.open_colormap_manager()
         )
         view_menu.addAction(colormap_manager_action)
-        operation_manager_action = QtGui.QAction("Operation manager…", self)
+        operation_manager_action = QtGui.QAction("Manage operations…", self)
         set_action_icon(operation_manager_action, "tune")
         operation_manager_action.triggered.connect(
             lambda _checked=False: self.open_operation_manager()

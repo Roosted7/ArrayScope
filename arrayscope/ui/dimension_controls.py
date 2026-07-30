@@ -577,17 +577,18 @@ class DimensionControlMixin:
         self._set_display_colormap("Adjusted", user_selected=True, request_render=True)
         show_status_message(
             self,
-            "Histogram gradient saved as “Adjusted” — rename it in Color ▸ Customize… to keep it.",
+            "Histogram gradient saved as “Adjusted” — rename it in Color ▸ Manage colormaps… "
+            "to keep it.",
             timeout=3500,
         )
 
-    def open_colormap_designer(self):
-        from arrayscope.ui.colormap_designer import ColormapDesignerDialog
+    def open_colormap_manager(self):
+        from arrayscope.ui.colormap_manager import ColormapManagerDialog
 
-        dialog = getattr(self, "_colormap_designer_dialog", None)
+        dialog = getattr(self, "_colormap_manager_dialog", None)
         if dialog is None or not dialog.isVisible():
-            dialog = ColormapDesignerDialog(self)
-            self._colormap_designer_dialog = dialog
+            dialog = ColormapManagerDialog(self)
+            self._colormap_manager_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
