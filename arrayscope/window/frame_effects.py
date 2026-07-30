@@ -29,7 +29,7 @@ from arrayscope.display.model.tile_identity import (
     tile_ack_identity,
 )
 from arrayscope.display.model.tile_priority import prioritize_tile_numbers
-from arrayscope.display.montage import montage_rect_for_viewport
+from arrayscope.display.montage import VISIBLE_MARGIN_TILES, montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
 from arrayscope.display.pyramid import materialize_lod_page
 from arrayscope.display.slice_engine import DisplayImage
@@ -3412,7 +3412,7 @@ class FramePipelineEffects:
             renderer.refresh_montage_priority_targets(session)
         overlay_start = perf_counter()
         rect = montage_rect_for_viewport(
-            session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape
+            session.plan, view_range=session.view_range, margin_tiles=VISIBLE_MARGIN_TILES
         )
         renderer._update_montage_tile_overlays_for_plan(
             session.plan, tuple(session.tile_states), rect

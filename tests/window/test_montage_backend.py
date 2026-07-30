@@ -6051,7 +6051,11 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
 
 
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
-    from arrayscope.display.montage import RETENTION_HALO_TILES
+    from arrayscope.display.montage import (
+        COVERAGE_MARGIN_TILES,
+        RETENTION_HALO_TILES,
+        VISIBLE_MARGIN_TILES,
+    )
     from arrayscope.window.frame_effects import (
         persistent_gpu_tile_residency_backend,
         persistent_tile_residency_backend,
@@ -6077,7 +6081,8 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
         shader_windowing=False,
     )
     assert (
-        montage_viewport_retarget_policy(capabilities, "wgpu_tile_layer").coverage_margin_tiles == 1
+        montage_viewport_retarget_policy(capabilities, "wgpu_tile_layer").coverage_margin_tiles
+        == COVERAGE_MARGIN_TILES
     )
     assert (
         persistent_tile_residency_backend(
@@ -6102,13 +6107,15 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
     )
     assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").enabled is True
     # Coverage is a production request, so a backend that cannot hold a tile
-    # past the viewport is not asked to pay for one. Retention is bookkeeping
+    # past the viewport is not asked to pay for one -- it is asked for exactly
+    # the drawn set, which is a named margin rather than a bare zero: zero now
+    # means the camera with no ring at all. Retention is bookkeeping
     # and is unconditional -- and this branch is also what a FAILED capability
     # probe returns, so leaving the halo out of it made the halo vanish during
     # teardown rather than on some deliberately halo-less backend.
     assert (
         montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").coverage_margin_tiles
-        == 0
+        == VISIBLE_MARGIN_TILES
     )
     assert (
         montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").near_margin_tiles
@@ -6202,7 +6209,6 @@ def test_convergence_latch_key_names_the_set_the_session_would_plan():
         for t in viewport_tiles(
             plan,
             view_range=view_range,
-            viewport_shape=viewport_shape,
             margin_tiles=VISIBLE_MARGIN_TILES,
         )
     }

@@ -1228,7 +1228,6 @@ def _halo_montage_window(qtbot, *, indices=64, tile=16, columns=8):
         for t in viewport_tiles(
             session.plan,
             view_range=session.view_range,
-            viewport_shape=session.viewport_shape,
             margin_tiles=RETENTION_HALO_TILES,
         )
     }

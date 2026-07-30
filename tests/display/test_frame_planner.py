@@ -114,45 +114,36 @@ def test_one_tile_montage_matches_single_region_geometry():
 
 
 def test_multi_tile_montage_marks_active_and_near_regions_from_viewport():
+    """A 9x9 grid, not the 2x3 this used to use.
+
+    ``near`` is three rings once the viewport rect's undeclared ring is counted
+    in the constant, and on a 2x3 montage that is the whole montage -- the near
+    half of this assertion became "all of them", which no planner could fail.
+    The grid is sized so that a camera on one interior tile leaves active that
+    tile, near a 7x7 neighbourhood, and the montage larger than both.
+    """
+
     state = (
-        ViewState.from_shape((10, 10, 6))
+        ViewState.from_shape((10, 10, 81))
         .with_image_axes(0, 1)
-        .with_montage_axis(2, columns=3, indices=tuple(range(6)))
+        .with_montage_axis(2, columns=9, indices=tuple(range(81)))
     )
 
     plan = FramePlanner().plan(
         target=_target(),
         view_state=state,
-        display_shape=(21, 32),
+        display_shape=(98, 98),
         backend_capabilities=PYQTGRAPH_CAPABILITIES,
         viewport_shape=(10, 10),
-        view_range=((11.0, 20.0), (0.0, 9.0)),
+        view_range=((44.0, 53.0), (44.0, 53.0)),
     )
 
     assert plan.layout is DisplayLayout.MONTAGE
-    assert plan.planned_region_ids == tuple(range(6))
-    assert plan.active_region_ids == (1,)
-    assert set(plan.near_region_ids).issuperset({0, 1, 2, 4})
-    assert plan.regions[1].source_index == 1
-
-
-def test_montage_requires_tiles_that_touch_the_viewport_boundary():
-    state = (
-        ViewState.from_shape((10, 10, 6))
-        .with_image_axes(0, 1)
-        .with_montage_axis(2, columns=3, indices=tuple(range(6)))
-    )
-
-    plan = FramePlanner().plan(
-        target=_target(),
-        view_state=state,
-        display_shape=(21, 32),
-        backend_capabilities=PYQTGRAPH_CAPABILITIES,
-        viewport_shape=(10, 10),
-        view_range=((0.0, 10.0), (0.0, 11.0)),
-    )
-
-    assert plan.active_region_ids == (0, 3)
+    assert plan.planned_region_ids == tuple(range(81))
+    assert set(plan.active_region_ids) == {40}
+    assert set(plan.near_region_ids) > set(plan.active_region_ids)
+    assert len(plan.near_region_ids) == 49
+    assert plan.regions[40].source_index == 40
 
 
 def test_camera_only_retarget_changes_active_regions_not_materialization_key():
@@ -227,21 +218,28 @@ def test_sub_tile_nudge_reuses_the_whole_region_tuple():
     assert planner.montage_region_set_misses == 1
 
 
-def test_a_camera_edge_on_a_tile_boundary_widens_the_halo_by_a_whole_ring():
-    """Pins an open defect in the rect convention, so it cannot go quiet.
+def test_a_camera_edge_on_a_tile_boundary_answers_the_same_as_half_a_pixel_past_it():
+    """The boundary is closed: touching a tile and overlapping it agree.
 
-    ``montage_rect_for_viewport`` snaps the camera rect outward to whole-tile
-    bounds. An edge sitting exactly on a boundary snaps to that boundary; half
-    a pixel past it snaps to the next one. On the field montage that is a rect
-    of 84 against 101 -- a full extra stride on each side -- for a camera move
-    of half a pixel, which widens the retention halo from 49 tiles to 64 and
-    misses every cache keyed on the tile sets.
+    The replaced version of this test asserted the opposite, on purpose. The
+    rect snap solved a STRICT overlap test where ``tiles_intersecting`` solves
+    an inclusive one, and the two disagree on exactly one input -- an edge
+    landing on an integer multiple of the stride -- where the strict form
+    dropped a whole ring. On this montage that was a rect of 84 against 101
+    and a halo of 49 against 64, for a camera move of half a pixel.
 
-    A drag passes through such a position on every tile it crosses, so this is
-    not a corner case. It is asserted rather than fixed because the repair is
-    a rect-convention change shared with ``FrameSession.visible_tiles``, which
-    is a separate adjudication (see ``docs/redesign/retention-halo-2026-07-30.md``
-    §4). When that lands, this test is the one that should start failing.
+    It is fixed rather than accepted because it is what made "the raw camera
+    rect" and "the snapped camera rect" two different questions. With the
+    boundary closed the snap is idempotent (asserted directly in
+    ``test_montage``), so there is one question again and
+    ``FrameRegion.active`` could join the one derivation.
+
+    Note what this does *not* claim. Both cameras answer 64, not 49: the wide
+    answer is the correct one, and the fix moved one transition rather than
+    removing a jitter. A camera 2.5 tiles wide covers 3 or 4 tile columns
+    depending on its sub-tile phase under any convention, so the halo still
+    changes once per boundary crossed -- measured, and measured to be the same
+    cost either way, in the convention document.
     """
 
     state = _field_state()
@@ -251,7 +249,60 @@ def test_a_camera_edge_on_a_tile_boundary_widens_the_halo_by_a_whole_ring():
     just_past = _field_plan(FramePlanner(), state, ((0.5, span + 0.5), (0.5, span + 0.5)))
 
     assert on_boundary.active_region_ids == just_past.active_region_ids
-    assert len(on_boundary.near_region_ids) < len(just_past.near_region_ids)
+    assert on_boundary.near_region_ids == just_past.near_region_ids
+    # Regime: at 272 tiles the halo is a genuine subset, so this can fail.
+    assert 0 < len(on_boundary.near_region_ids) < FIELD_TILES
+
+
+def test_the_planner_and_the_session_derive_their_camera_sets_the_same_way():
+    """One derivation, two named margins -- not two derivations.
+
+    ``FrameRegion.active`` and ``FrameSession.visible_tiles`` were 6 tiles and
+    15 for one camera on this montage. That read as a missing snap, and was
+    really the ring the viewport rect added without any constant naming it.
+    With the ring named, both come out of ``viewport_tiles`` and the whole
+    difference between them is the margin each asks for.
+
+    They are still different sets, deliberately. ``active`` gates completion,
+    and giving it the drawn set's ring left off-screen tiles unsettled and the
+    montage never converged; see ``ACTIVE_MARGIN_TILES``. So the assertion is
+    the derivation, not equality: active is exactly the margin-0 answer, and a
+    proper subset of the drawn set.
+    """
+
+    from arrayscope.display.montage import (
+        ACTIVE_MARGIN_TILES,
+        VISIBLE_MARGIN_TILES,
+        make_montage_plan,
+        viewport_tiles,
+    )
+
+    state = _field_state()
+    span = 2.5 * FIELD_STRIDE
+    view_range = ((3.5 * FIELD_STRIDE, 3.5 * FIELD_STRIDE + span),) * 2
+    plan = _field_plan(FramePlanner(), state, view_range)
+
+    montage_plan = make_montage_plan(
+        state,
+        axis=2,
+        indices=tuple(range(FIELD_TILES)),
+        tile_shape=(FIELD_TILE, FIELD_TILE),
+        columns=FIELD_COLUMNS,
+    )
+
+    def ids(margin):
+        return {
+            int(tile.montage_index)
+            for tile in viewport_tiles(montage_plan, view_range=view_range, margin_tiles=margin)
+        }
+
+    on_screen = ids(ACTIVE_MARGIN_TILES)
+    drawn = ids(VISIBLE_MARGIN_TILES)
+
+    assert set(plan.active_region_ids) == on_screen
+    assert on_screen < drawn
+    # Regime: a camera covering the montage would make this unfalsifiable.
+    assert 0 < len(drawn) < FIELD_TILES
 
 
 def test_pan_rebuilds_only_the_regions_whose_flags_changed():
@@ -395,7 +446,6 @@ def test_montage_near_regions_are_the_one_retention_halo():
         for t in viewport_tiles(
             montage_plan,
             view_range=view_range,
-            viewport_shape=viewport_shape,
             margin_tiles=RETENTION_HALO_TILES,
         )
     }

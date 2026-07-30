@@ -14,30 +14,72 @@ from arrayscope.display.geometry import MontageGeometry
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 
-# The three tile sets a camera defines, and the one halo between them.
+# The four tile sets a camera defines, and the one derivation behind them.
 #
-# ``tiles_intersecting`` is handed a rect that ``montage_rect_for_viewport``
-# has already snapped outward to whole-tile bounds, so ``margin_tiles=0``
-# already means "every tile with any overlap".  The margins below are rings
-# *beyond* that drawn set, counted in whole tiles.
+# ``viewport_tiles(plan, view_range=, margin_tiles=N)`` is the derivation: the
+# tiles the camera rect touches, plus N whole-tile rings.  **The margin is the
+# whole policy.**  Everything else is convention, and the convention is now
+# fixed so that it cannot contribute a ring of its own:
 #
-# These were six copies of the literal ``2`` and four of the literal ``1``,
-# spread over five modules, and two unrelated sets were both called ``near``
-# (margin 2 in the session, margin 1 in the planner) while they filled the
-# same downstream fields.  A radius is a policy, and a policy that is spelled
-# as a bare integer at its point of use cannot be reasoned about or changed.
-# Where a consumer genuinely wants a different ring it now says which one and
-# why; silence is no longer a way to pick a number.
+#   * the rect is a function of the camera and the margin alone.  The viewport's
+#     pixel size never entered it (``montage_rect_for_viewport``);
+#   * snapping the rect outward to whole-tile bounds cannot change which tiles
+#     it touches.  ``_expand_rect_to_tile_bounds`` and ``tiles_intersecting``
+#     read one span computation, so the snap is idempotent and "raw rect" and
+#     "snapped rect" stop being two questions.
+#
+# Both were false, and each was worth a ring.  The rect added one tile stride
+# per side that no constant named, so every margin below was one larger than it
+# read -- and ``FrameRegion.active``, which bypassed the rect, was 6 tiles where
+# ``FrameSession.visible_tiles`` was 15 for the same camera.  The snap solved a
+# strict overlap test against ``tiles_intersecting``'s inclusive one, so a rect
+# edge landing on a multiple of the stride dropped the ring the same rect kept
+# one pixel later.  The numbers below are one larger than the ones they replace
+# and denote exactly the same sets.
+#
+# What the boundary repair is *not*: a performance fix.  Measured over 400
+# camera spans x 300 drag steps at three tile sizes, it changes the number of
+# times the halo set changes across a drag by under 1% -- the old convention
+# moved one transition by a pixel rather than adding one.  A camera 2.5 tiles
+# wide covers 3 or 4 tile columns depending on its sub-tile phase, and no rect
+# convention removes that.  See
+# docs/redesign/viewport-rect-convention-2026-07-30.md.
 
-#: What the frame owes the screen.  Not a halo: every tile here must be
-#: presented, so widening it widens first-pixel latency directly.
-VISIBLE_MARGIN_TILES = 0
+#: What is *on screen*: the tiles the camera rect touches, rounded outward to
+#: whole pixels and nothing more.  This is the set completion is declared on
+#: (``FrameSession.required_tile_numbers`` reads it through
+#: ``FramePlan.active_region_ids``), so a tile in here is a tile the montage is
+#: not finished without.
+#:
+#: Zero rings, and the zero is measured rather than assumed.  Giving it the one
+#: ring ``VISIBLE_MARGIN_TILES`` carries -- which looks like the obvious
+#: unification, since both sets answer "what does this camera show" -- left
+#: two off-screen tiles unsettled and the montage never converged
+#: (``test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto``
+#: timed out at five seconds on both backends, and the framebuffer oracle then
+#: reported half the required tiles as off-target because they were not on
+#: screen to sample).  Slack belongs in the *drawn* set, not in the set that
+#: decides whether the frame is done.
+ACTIVE_MARGIN_TILES = 0
+
+#: What the frame *draws*: the on-screen set plus one ring of slack.
+#:
+#: The slack is inherited rather than argued -- it has been folded into the
+#: viewport rect since ``f58cf98f`` with no recorded reason, so every
+#: measurement this display has ever taken was taken with it, and the only
+#: thing this constant changed was that it is now spelled out instead of
+#: hiding inside ``montage_rect_for_viewport``.  What it plausibly buys is a
+#: camera that has moved since the plan it is being drawn from was built: the
+#: backends hide every tile outside the drawn set, so a drawn set with no slack
+#: turns any lag into a hole.  Removing it is a separate adjudication with its
+#: own evidence, not a side effect of naming it.
+VISIBLE_MARGIN_TILES = 1
 
 #: What we ask to be *produced*.  One ring past the drawn set, so a pan of a
 #: single tile step does not have to start production from cold.  Every tile
 #: added here costs an evaluation, a reduction and an upload, which is why it
 #: is the narrowest ring that covers one pan step and no wider.
-COVERAGE_MARGIN_TILES = 1
+COVERAGE_MARGIN_TILES = 2
 
 #: What we *keep and warm* -- the retention halo.  This is the ring that
 #: decides scheduling order (``TilePriorityBand.NEAR``), which in-flight work
@@ -45,14 +87,14 @@ COVERAGE_MARGIN_TILES = 1
 #: should give up last.  It costs no production, only bookkeeping, which is
 #: why it can afford to be wider than coverage.
 #:
-#: Two rings, not one, because the halo has to survive the very move it exists
-#: to absorb: a pan that crosses one tile boundary consumes a one-ring halo
-#: exactly, leaving the next pan step as cold as if there had been no halo at
-#: all.  At two rings the newly drawn tiles come from ring 1 and ring 2 is
-#: still ahead of them.  Widening further is not free of *warm-up* work even
-#: though it is free of production, and the ring grows as the perimeter of the
-#: viewport, so each extra ring costs more than the last.
-RETENTION_HALO_TILES = 2
+#: Two rings past the drawn set, not one, because the halo has to survive the
+#: very move it exists to absorb: a pan that crosses one tile boundary consumes
+#: a one-ring halo exactly, leaving the next pan step as cold as if there had
+#: been no halo at all.  At two rings the newly drawn tiles come from ring 1 and
+#: ring 2 is still ahead of them.  Widening further is not free of *warm-up*
+#: work even though it is free of production, and the ring grows as the
+#: perimeter of the viewport, so each extra ring costs more than the last.
+RETENTION_HALO_TILES = 3
 
 
 @dataclass(frozen=True)
@@ -445,8 +487,23 @@ class RenderedTile:
 
 
 def montage_rect_for_viewport(
-    plan: MontagePlan, *, view_range=None, viewport_shape=None
+    plan: MontagePlan, *, view_range=None, margin_tiles: int
 ) -> tuple[int, int, int, int]:
+    """The camera rect plus ``margin_tiles`` whole-tile rings, snapped and clipped.
+
+    ``margin_tiles`` is required rather than defaulted because the ring this
+    rect carries used to be a constant inside it that nothing named, which made
+    every consumer's margin one larger than it read.  A caller that has not
+    decided how many rings it wants has not decided what it is asking for.
+
+    There is no ``viewport_shape`` parameter.  There was one, from ``f58cf98f``
+    until this convention was settled, and it could not affect the result: the
+    only expression that read it was ``max(stride, min(viewport_px, stride))``,
+    which is ``stride``.  A parameter inside the one derivation that provably
+    cannot change its answer is worse than no parameter, because the next
+    caller assumes the rect is viewport-aware and sizes something to it.
+    """
+
     full_height, full_width = plan.display_shape
     if full_height <= 0 or full_width <= 0:
         return (0, 0, 1, 1)
@@ -461,35 +518,46 @@ def montage_rect_for_viewport(
         # world).  Cover the full montage instead; a real view_range refines it.
         rect = (0, 0, max(1, int(full_width)), max(1, int(full_height)))
         return _expand_rect_to_tile_bounds(plan, rect)
-    rect = _rect_for_view_range(view_range, plan, viewport_shape)
-    rect = _intersect_rect(rect, (0, 0, full_width, full_height)) or (
-        0,
-        0,
-        min(1, full_width),
-        min(1, full_height),
-    )
+    rect = _rect_for_view_range(view_range, plan, margin_tiles=margin_tiles)
+    # A camera parked entirely off the montage keeps its own rect.  This used
+    # to fall back to a 1x1 rect at the origin, which is not a smaller answer
+    # but a *different* one: it teleports the answer to the opposite corner and
+    # makes ``viewport_tiles`` report tile 0 as visible for a camera nowhere
+    # near it.  Nothing depended on that while ``FrameRegion.active`` bypassed
+    # this function; routing ``active`` through it made the fallback the answer
+    # to "what does an off-montage camera owe the screen", where the truthful
+    # answer is nothing.
+    rect = _intersect_rect(rect, (0, 0, full_width, full_height)) or rect
     return _expand_rect_to_tile_bounds(plan, rect)
 
 
-def viewport_tiles(
-    plan: MontagePlan, *, view_range, viewport_shape, margin_tiles: int
-) -> tuple[MontageTile, ...]:
+def viewport_tiles(plan: MontagePlan, *, view_range, margin_tiles: int) -> tuple[MontageTile, ...]:
     """The one derivation of "which tiles does this camera cover, plus N rings".
 
-    Every consumer of a viewport tile set goes through here.  The margin alone
-    was never the whole policy: this snaps the camera rect outward to whole-tile
-    bounds and clips it to the montage first, and a caller that skipped that
-    step got a different set for the same camera and the same margin -- on a
-    272-tile montage zoomed to a few tiles, 6 tiles instead of 15 at margin 0.
-    Two definitions of one set is how a retention halo ends up protecting tiles
-    nobody is about to look at, so there is only one derivation.
+    Every consumer of a viewport tile set goes through here, and the margin it
+    is handed is the only thing that separates one consumer's answer from
+    another's.  That is the convention, and it took two repairs to become true:
+    the rect used to add one tile stride that no margin named, and the snap to
+    whole-tile bounds used to change which tiles the rect covered.  With both
+    gone, "the raw camera rect" and "the snapped camera rect" stop being two
+    questions -- which is the only reason ``FrameRegion.active`` was ever
+    entitled to a second convention.
+
+    This takes the margin rect *before* the clip and snap that
+    ``montage_rect_for_viewport`` applies for its rect consumers, because
+    neither can change the answer and skipping them keeps two edge cases from
+    mattering: a camera parked off the montage stays empty rather than
+    resolving to whichever tile the clip fell back to, and the snap's
+    round-trip stays exact on a gapless plan, where the inclusive bounds
+    ``_axis_span`` uses make each tile's box touch its neighbour's.
     """
 
-    rect = montage_rect_for_viewport(plan, view_range=view_range, viewport_shape=viewport_shape)
-    return plan.tiles_intersecting(
-        ((rect[0], rect[2]), (rect[1], rect[3])),
-        margin_tiles=max(0, int(margin_tiles)),
-    )
+    if view_range is None:
+        # Same answer ``montage_rect_for_viewport`` gives for an unmeasured
+        # camera: a montage defaults to fit-to-window, so all of it is visible.
+        return plan.tiles
+    rect = _rect_for_view_range(view_range, plan, margin_tiles=max(0, int(margin_tiles)))
+    return plan.tiles_intersecting(((rect[0], rect[2]), (rect[1], rect[3])), margin_tiles=0)
 
 
 def _expand_rect_to_tile_bounds(plan: MontagePlan, rect) -> tuple[int, int, int, int]:
@@ -504,14 +572,22 @@ def _expand_rect_to_tile_bounds(plan: MontagePlan, rect) -> tuple[int, int, int,
     rx0, ry0, rx1, ry1 = (int(value) for value in rect)
     if rx1 <= rx0 or ry1 <= ry0:
         return rect
-    # ``_intersect_rect`` demands POSITIVE overlap area (``x1 <= x0`` is a
-    # miss), unlike ``tiles_intersecting``'s inclusive pixel-center bounds.
-    # Solving ``tile_x1 > rx0 and tile_x0 < rx1`` for the integer grid index
-    # gives the strict form below — do not unify these two conventions.
-    col0 = max(0, math.floor((rx0 - tile_width) / stride_x) + 1)
-    col1 = min(columns - 1, math.ceil(rx1 / stride_x) - 1)
-    row0 = max(0, math.floor((ry0 - tile_height) / stride_y) + 1)
-    row1 = min(plan.rows - 1, math.ceil(ry1 / stride_y) - 1)
+    # One span computation, shared with ``tiles_intersecting``.  This used to
+    # solve the STRICT overlap test ``tile_x1 > rx0 and tile_x0 < rx1`` while
+    # ``_axis_span`` solves the inclusive one, and a comment here said not to
+    # unify them.  They differ on exactly one input -- a rect edge landing on
+    # an integer multiple of the stride -- and there the strict form drops the
+    # tile the inclusive form keeps: on the 272-tile field montage, a rect of
+    # 84 against 101 and a halo of 49 against 64.
+    #
+    # Sharing the span makes the snap idempotent: the snapped rect touches the
+    # same tiles as the rect it came from.  That is the point.  It is not a
+    # churn fix -- the strict form was monotone too, it just stepped a pixel
+    # later -- it is what lets "raw rect" and "snapped rect" stop being two
+    # different questions, which is what let ``FrameRegion.active`` give up its
+    # second convention.
+    col0, col1 = plan._axis_span(rx0, rx1, axis=1)
+    row0, row1 = plan._axis_span(ry0, ry1, axis=0)
     if col0 > col1 or row0 > row1:
         return rect
     x0 = y0 = x1 = y1 = None
@@ -554,18 +630,16 @@ def tile_status_at_global_point(
 
 
 def _rect_for_view_range(
-    view_range, plan: MontagePlan, viewport_shape
+    view_range, plan: MontagePlan, *, margin_tiles: int
 ) -> tuple[int, int, int, int]:
     x_range, y_range = view_range
     x0, x1 = sorted((float(x_range[0]), float(x_range[1])))
     y0, y1 = sorted((float(y_range[0]), float(y_range[1])))
     stride_x = int(plan.tile_shape[1]) + int(plan.gap)
     stride_y = int(plan.tile_shape[0]) + int(plan.gap)
-    margin_x = max(0, stride_x)
-    margin_y = max(0, stride_y)
-    if viewport_shape is not None:
-        margin_y = max(margin_y, min(int(viewport_shape[0]), stride_y))
-        margin_x = max(margin_x, min(int(viewport_shape[1]), stride_x))
+    rings = max(0, int(margin_tiles))
+    margin_x = max(0, stride_x) * rings
+    margin_y = max(0, stride_y) * rings
     return (
         int(np.floor(x0)) - margin_x,
         int(np.floor(y0)) - margin_y,

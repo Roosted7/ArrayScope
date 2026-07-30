@@ -121,7 +121,6 @@ class MontageViewportPlan:
         tiles = viewport_tiles(
             self.plan,
             view_range=self.view_range,
-            viewport_shape=self.viewport_shape,
             margin_tiles=margin_tiles,
         )
         if not prioritize:
@@ -131,7 +130,7 @@ class MontageViewportPlan:
         rect = montage_rect_for_viewport(
             self.plan,
             view_range=self.view_range,
-            viewport_shape=self.viewport_shape,
+            margin_tiles=VISIBLE_MARGIN_TILES,
         )
         return prioritize_tiles(
             tiles,
@@ -145,7 +144,7 @@ class MontageViewportPlan:
         rect = montage_rect_for_viewport(
             self.plan,
             view_range=self.view_range,
-            viewport_shape=self.viewport_shape,
+            margin_tiles=VISIBLE_MARGIN_TILES,
         )
         return prioritize_tiles(
             tiles,
@@ -752,6 +751,7 @@ def montage_viewport_retarget_policy(
         )
     return MontageViewportRetargetPolicy(
         enabled=True,
+        coverage_margin_tiles=VISIBLE_MARGIN_TILES,
         near_margin_tiles=RETENTION_HALO_TILES,
     )
 
@@ -899,13 +899,15 @@ def _nearest_visible_tile(plan, view_range, focus):
     tile = _nearest_tile_by_grid(plan, focus)
     if tile is not None:
         return tile
-    tiles_intersecting = getattr(plan, "tiles_intersecting", None)
-    if callable(tiles_intersecting):
-        try:
-            candidates = tuple(tiles_intersecting(view_range, margin_tiles=0))
-        except Exception:
-            candidates = ()
-    else:
+    # Through ``viewport_tiles`` like every other camera tile set.  This used
+    # to be exempt from that on the grounds that it has no ``viewport_shape``
+    # to snap with; the rect never read ``viewport_shape``, so the exemption
+    # was never buying anything.
+    try:
+        candidates = tuple(
+            viewport_tiles(plan, view_range=view_range, margin_tiles=VISIBLE_MARGIN_TILES)
+        )
+    except Exception:
         candidates = ()
     if not candidates:
         candidates = tuple(getattr(plan, "tiles", ()) or ())

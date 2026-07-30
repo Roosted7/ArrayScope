@@ -222,14 +222,12 @@ def _viewport_tiles(
     plan: MontagePlan,
     *,
     view_range,
-    viewport_shape: tuple[int, int],
     margin_tiles: int,
 ) -> tuple[MontageTile, ...]:
     # One derivation, shared with the frame planner -- see ``viewport_tiles``.
     return viewport_tiles(
         plan,
         view_range=view_range,
-        viewport_shape=viewport_shape,
         margin_tiles=margin_tiles,
     )
 
@@ -1662,7 +1660,6 @@ class FrameSession:
             for tile in viewport_tiles(
                 plan,
                 view_range=view_range,
-                viewport_shape=viewport_shape,
                 margin_tiles=VISIBLE_MARGIN_TILES,
             )
         )
@@ -1703,19 +1700,16 @@ class FrameSession:
         active = _viewport_tiles(
             self.plan,
             view_range=view_range,
-            viewport_shape=self.viewport_shape,
             margin_tiles=VISIBLE_MARGIN_TILES,
         )
         coverage = _viewport_tiles(
             self.plan,
             view_range=view_range,
-            viewport_shape=self.viewport_shape,
             margin_tiles=max(0, int(coverage_margin_tiles)),
         )
         near = _viewport_tiles(
             self.plan,
             view_range=view_range,
-            viewport_shape=self.viewport_shape,
             margin_tiles=max(0, int(near_margin_tiles)),
         )
         known = {int(index) for index in self.rendered_tiles}
@@ -5562,7 +5556,6 @@ class FrameSession:
                 for tile in _viewport_tiles(
                     self.plan,
                     view_range=range_for_priority,
-                    viewport_shape=self.viewport_shape,
                     margin_tiles=RETENTION_HALO_TILES,
                 )
             )
@@ -5661,7 +5654,6 @@ class FrameSession:
             for tile in _viewport_tiles(
                 self.plan,
                 view_range=self.view_range,
-                viewport_shape=self.viewport_shape,
                 margin_tiles=int(margin_tiles),
             )
         )

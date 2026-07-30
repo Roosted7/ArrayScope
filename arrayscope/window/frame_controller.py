@@ -1688,7 +1688,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             for tile in viewport_tiles(
                 session.plan,
                 view_range=session.view_range,
-                viewport_shape=session.viewport_shape,
                 margin_tiles=RETENTION_HALO_TILES,
             )
         }

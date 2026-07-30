@@ -9,8 +9,8 @@ from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.montage import (
+    ACTIVE_MARGIN_TILES,
     RETENTION_HALO_TILES,
-    VISIBLE_MARGIN_TILES,
     MontageTileState,
     make_montage_plan,
     viewport_tiles,
@@ -423,10 +423,22 @@ class FramePlanner:
             display_shape=display_shape,
             montage=montage_plan.geometry,
         )
+        # Through ``viewport_tiles`` like every other camera tile set, at the
+        # margin that says what this one is: ``ACTIVE_MARGIN_TILES``, the tiles
+        # on screen and no ring.  This used to bypass the derivation entirely,
+        # which is how it came to be 6 tiles where ``FrameSession.visible_tiles``
+        # was 15 for one camera on the field montage -- a gap that read as a
+        # missing snap and was really the undeclared ring inside the viewport
+        # rect.  The two sets still differ by that ring, and now say so: this
+        # one gates completion (``FrameSession.required_tile_numbers``) and the
+        # other is what the backend keeps shown, so slack helps one and stalls
+        # the other.  See ``ACTIVE_MARGIN_TILES`` for the measurement.
         active = {
             int(tile.montage_index)
-            for tile in montage_plan.tiles_intersecting(
-                view_range, margin_tiles=VISIBLE_MARGIN_TILES
+            for tile in viewport_tiles(
+                montage_plan,
+                view_range=view_range,
+                margin_tiles=ACTIVE_MARGIN_TILES,
             )
         }
         if view_range is None:
@@ -450,7 +462,6 @@ class FramePlanner:
             for tile in viewport_tiles(
                 montage_plan,
                 view_range=view_range,
-                viewport_shape=viewport_shape,
                 margin_tiles=RETENTION_HALO_TILES,
             )
         }

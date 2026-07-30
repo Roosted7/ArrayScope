@@ -32,6 +32,13 @@ must clear.
 > [retention-halo-2026-07-30.md](retention-halo-2026-07-30.md) for the unified
 > halo, two corrections to what is written below, and the measured **rejection**
 > of warming the halo from prefetch. §2, §3, §4, §6 and §7 stand as written.
+>
+> **The margin column in §1's table is one too small in every row**, and the
+> quoted-block correction below misdiagnoses why: the rect adds a tile stride
+> that no constant named, and that stride — not the snap — is the whole
+> 6-against-15 gap. The convention is settled in
+> [viewport-rect-convention-2026-07-30.md](viewport-rect-convention-2026-07-30.md),
+> where the constants are rebased to denote the same sets honestly.
 
 ## 1. The three tile sets, and their three inconsistent halos
 

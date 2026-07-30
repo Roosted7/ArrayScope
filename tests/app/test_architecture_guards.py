@@ -1807,15 +1807,12 @@ def test_backend_labelled_evidence_rejects_factory_fallbacks():
 # the narrower one silently under-protects or under-plans against a session
 # holding the wider one.
 _RAW_RECT_TILE_SET_EXEMPTIONS = {
-    # The one derivation. This is the call every other consumer routes through.
+    # The one derivation. This is the call every other consumer routes through,
+    # and it is now the only exemption: the rect convention was settled so that
+    # snapping is a no-op on the tile set, which removed the last reason a
+    # consumer had to hold its own -- see
+    # docs/redesign/viewport-rect-convention-2026-07-30.md.
     ("arrayscope/display/montage.py", "viewport_tiles"),
-    # FrameRegion.active, deliberately still on the raw rect pending the rect
-    # convention adjudication (docs/redesign/retention-halo-2026-07-30.md §4).
-    # The comment at the site is the record; this entry is its ceiling.
-    ("arrayscope/display/frame_planner.py", "_plan_montage"),
-    # Not a viewport set: a focus fallback that ends at "every tile in the
-    # plan" anyway, and has no viewport_shape to snap with.
-    ("arrayscope/window/montage_viewport.py", "_nearest_visible_tile"),
 }
 
 

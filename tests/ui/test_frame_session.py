@@ -1405,22 +1405,27 @@ def test_retarget_viewport_separates_draw_set_from_loaded_residency():
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
         session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
 
+    # Tile 4 -- far enough from the rendered pair that the drawn set and its
+    # ``VISIBLE_MARGIN_TILES`` ring both clear them. The camera this used to
+    # use sat one tile closer, which the rect convention brought inside the
+    # ring: the separation the test is about would then have been asserted
+    # against a set that contained tile 1's payload after all.
     additions, changed = session.retarget_viewport(
-        view_range=((8.0, 9.0), (0.0, 1.0)),
+        view_range=((12.0, 13.0), (0.0, 1.0)),
         viewport_shape=(1, 1),
         coverage_margin_tiles=1,
         near_margin_tiles=2,
     )
 
     assert changed
-    assert tuple(tile.montage_index for tile in session.visible_tiles) == (2, 3)
+    assert tuple(tile.montage_index for tile in session.visible_tiles) == (3, 4, 5)
     assert set(session.rendered_tiles) == {0, 1}
-    assert tuple(tile.montage_index for tile in additions) == (2, 3, 4)
+    assert tuple(tile.montage_index for tile in additions) == (3, 4, 5)
 
     state, delta = session.build_tile_presentation(
         {index: ("tile-source", index) for index in range(8)}
     )
-    assert delta.active_tiles == (2, 3)
+    assert delta.active_tiles == (3, 4, 5)
     assert state.active_payloads(delta) == {}
 
 

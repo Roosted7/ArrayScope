@@ -197,6 +197,16 @@ Until one of those lands, warming the halo from prefetch makes panning worse.
   the session passes the snapped one. Only `near` was unified here; `active`
   drives presentation scope on the retarget-only path and widening it is a
   separate, riskier change. Recorded, not fixed.
+
+  > **Settled the same day, and the diagnosis above is wrong.** The snap
+  > contributes nothing on that camera: the whole 6-against-15 gap is a tile
+  > stride the viewport rect added that no constant named, so the session got
+  > a ring the planner did not. `active` now goes through `viewport_tiles`
+  > like everything else, at its own named margin of zero rings, because
+  > giving it the drawn set's ring makes completion wait on off-screen tiles
+  > and the montage stops converging. The margin constants are all one larger
+  > and denote the same sets. See
+  > [viewport-rect-convention-2026-07-30.md](viewport-rect-convention-2026-07-30.md).
 - **`LodAdmissionScope.near_tile_numbers` is written and never read.** It is
   constructed in `frame_runtime.py` and normalized in `stages.py`; no
   production code consults it. Material for queue row 12.

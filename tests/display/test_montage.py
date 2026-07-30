@@ -135,24 +135,97 @@ def _field_montage_plan():
     cx = float(tile.x0) + float(tile.width) * 0.5
     cy = float(tile.y0) + float(tile.height) * 0.5
     view_range = ((cx - 64.0, cx + 64.0), (cy - 64.0, cy + 64.0))
-    return plan, view_range, (800, 800)
+    return plan, view_range
 
 
-def _ring(plan, view_range, viewport_shape, margin):
+def _ring(plan, view_range, margin):
     return {
         int(tile.montage_index)
-        for tile in montage.viewport_tiles(
-            plan, view_range=view_range, viewport_shape=viewport_shape, margin_tiles=margin
+        for tile in montage.viewport_tiles(plan, view_range=view_range, margin_tiles=margin)
+    }
+
+
+def test_a_camera_edge_that_only_touches_a_tile_still_requires_it():
+    """The closed boundary, at margin 0 where nothing else can supply the tile.
+
+    This used to be asserted through ``FramePlanner`` on a 2x3 montage, where
+    the tile in question is inside every ring the plan carries, so nothing but
+    a coincidence was keeping it honest. Here it is asserted at margin 0, where
+    there is no ring to supply the answer. The camera below ends exactly on the
+    first pixel row of the second montage row -- one pixel of it is on screen,
+    so it is a render obligation, not speculation.
+    """
+
+    from arrayscope.core.view_state import ViewState
+
+    state = (
+        ViewState.from_shape((10, 10, 6))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=3, indices=tuple(range(6)))
+    )
+    plan = montage.make_montage_plan(
+        state, axis=2, indices=tuple(range(6)), tile_shape=(10, 10), columns=3
+    )
+    stride = plan.tile_shape[0] + plan.gap
+
+    touching = _ring(plan, ((0.0, 10.0), (0.0, float(stride))), 0)
+    short_of_it = _ring(plan, ((0.0, 10.0), (0.0, stride - 1.0)), 0)
+
+    assert touching == {0, 3}
+    assert short_of_it == {0}
+
+
+def test_snapping_a_rect_to_tile_bounds_cannot_change_which_tiles_it_touches():
+    """The rect convention, stated as the one property it has to have.
+
+    ``montage_rect_for_viewport`` snaps outward to whole-tile bounds, and for a
+    long time that snap solved a strict overlap test while ``tiles_intersecting``
+    solved an inclusive one. Composing them was therefore not a fixed point,
+    and the error term was a whole ring: a rect edge landing on a multiple of
+    the stride lost the tile it was touching. That is what made "raw rect" and
+    "snapped rect" two different answers to one question, which is the only
+    reason ``FrameRegion.active`` was entitled to a second convention.
+
+    Both now read one span computation, so the property below holds by
+    construction rather than by two formulas agreeing. The sweep steps by one
+    pixel through several strides, which is the resolution the defect lived at:
+    it was invisible at any coarser step.
+    """
+
+    plan, _view_range = _field_montage_plan()
+    stride = plan.tile_shape[1] + plan.gap
+    checked = boundary_cases = 0
+
+    for x0 in range(4 * stride):
+        for width in (1, stride - 1, stride, stride + 1, 2 * stride):
+            rect = (x0, x0 // 2, x0 + width, x0 // 2 + width)
+            raw = _tiles_for_rect(plan, rect)
+            snapped = _tiles_for_rect(plan, montage._expand_rect_to_tile_bounds(plan, rect))
+            assert raw == snapped, f"snap changed the tile set for {rect}"
+            checked += 1
+            if rect[2] % stride == 0:
+                boundary_cases += 1
+
+    # Regime: a sweep that never lands an edge on a boundary tests nothing.
+    assert boundary_cases > 0
+    assert checked > 100
+
+
+def _tiles_for_rect(plan, rect):
+    return {
+        int(tile.montage_index)
+        for tile in plan.tiles_intersecting(
+            ((rect[0], rect[2]), (rect[1], rect[3])), margin_tiles=0
         )
     }
 
 
 def test_viewport_rings_are_strictly_nested_and_a_genuine_subset():
-    plan, view_range, viewport_shape = _field_montage_plan()
+    plan, view_range = _field_montage_plan()
 
-    visible = _ring(plan, view_range, viewport_shape, montage.VISIBLE_MARGIN_TILES)
-    coverage = _ring(plan, view_range, viewport_shape, montage.COVERAGE_MARGIN_TILES)
-    retention = _ring(plan, view_range, viewport_shape, montage.RETENTION_HALO_TILES)
+    visible = _ring(plan, view_range, montage.VISIBLE_MARGIN_TILES)
+    coverage = _ring(plan, view_range, montage.COVERAGE_MARGIN_TILES)
+    retention = _ring(plan, view_range, montage.RETENTION_HALO_TILES)
     everything = {int(tile.montage_index) for tile in plan.tiles}
 
     # Regime first: if the retention halo covered the montage this test could
@@ -170,15 +243,15 @@ def test_retention_halo_survives_the_pan_step_that_coverage_only_absorbs():
     halo. At two rings the old ring 2 is still ahead of the new viewport.
     """
 
-    plan, view_range, viewport_shape = _field_montage_plan()
+    plan, view_range = _field_montage_plan()
     (x0, x1), y = view_range
     stride = plan.tile_shape[1] + plan.gap
     panned = ((x0 + stride, x1 + stride), y)
 
-    before_coverage = _ring(plan, view_range, viewport_shape, montage.COVERAGE_MARGIN_TILES)
-    before_retention = _ring(plan, view_range, viewport_shape, montage.RETENTION_HALO_TILES)
-    after_visible = _ring(plan, panned, viewport_shape, montage.VISIBLE_MARGIN_TILES)
-    after_coverage = _ring(plan, panned, viewport_shape, montage.COVERAGE_MARGIN_TILES)
+    before_coverage = _ring(plan, view_range, montage.COVERAGE_MARGIN_TILES)
+    before_retention = _ring(plan, view_range, montage.RETENTION_HALO_TILES)
+    after_visible = _ring(plan, panned, montage.VISIBLE_MARGIN_TILES)
+    after_coverage = _ring(plan, panned, montage.COVERAGE_MARGIN_TILES)
 
     assert after_visible, "the pan must land on tiles, or this proves nothing"
     # One ring covers what the pan draws...

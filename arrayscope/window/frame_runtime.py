@@ -18,6 +18,7 @@ from arrayscope.core.trace import TRACE, emit_trace
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.montage import (
     RETENTION_HALO_TILES,
+    VISIBLE_MARGIN_TILES,
     MontageTileState,
     montage_rect_for_viewport,
 )
@@ -163,7 +164,7 @@ class FrameRuntimeMixin:
         self.win.img_view.setImageStale(True)
         self.win.img_view.setEvaluationOverlay(True, "Updating image frame...")
         rect = montage_rect_for_viewport(
-            session.plan, view_range=session.view_range, viewport_shape=session.viewport_shape
+            session.plan, view_range=session.view_range, margin_tiles=VISIBLE_MARGIN_TILES
         )
         overlay_start = perf_counter()
         self._update_montage_tile_overlays_for_plan(session.plan, tuple(session.tile_states), rect)
