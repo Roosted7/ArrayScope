@@ -705,6 +705,119 @@ def test_testmon_still_exposes_what_the_policy_reaches_into():
     assert "stable_files" in data_source, (
         "apply_known_red_policy reads it to decide which files may be skipped wholesale"
     )
+    from testmon import pytest_testmon
+
+    assert hasattr(pytest_testmon, "init_testmon_data"), (
+        "testmon_policy.reuse_map_read replaces this module global so testmon adopts "
+        "the map reading peek() already took instead of building a second one"
+    )
+    configure_source = inspect.getsource(pytest_testmon.pytest_configure)
+    assert "init_testmon_data(config)" in configure_source, (
+        "testmon no longer reaches its data through the module global, so replacing "
+        "that name no longer intercepts it — the map would be read twice again"
+    )
+    # Through the marker, because this very run has already replaced the name:
+    # ``arrayscope_reuse`` holds whatever it displaced.
+    upstream = getattr(
+        pytest_testmon.init_testmon_data, "arrayscope_reuse", pytest_testmon.init_testmon_data
+    )
+    assert "for_worker" in inspect.getsource(upstream), (
+        "an xdist worker's data used to come from a different constructor with the "
+        "controller's exec_id; reuse_map_read refuses on workers because of it"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Reading the map once per run instead of twice
+# --------------------------------------------------------------------------- #
+
+
+class _FakeMapData:
+    """Just enough of ``TestmonData`` to be identified."""
+
+    def __init__(self, environment="offscreen"):
+        self.environment = environment
+
+
+def _reuse_config(tmp_path, environment="offscreen", **extra):
+    return SimpleNamespace(
+        rootdir=tmp_path,
+        getini={
+            "environment_expression": f"'{environment}'",
+            "testmon_ignore_dependencies": [],
+        }.get,
+        getoption=lambda name, default=None: None,
+        **extra,
+    )
+
+
+def test_a_reading_of_the_same_map_is_offered_to_testmon(tmp_path):
+    """The whole point: testmon gets the object peek already stability-checked."""
+
+    data = _FakeMapData()
+    config = _reuse_config(tmp_path)
+    config.arrayscope_map_read = (
+        testmon_policy.map_read_identity(tmp_path, "offscreen", []),
+        data,
+    )
+    assert testmon_policy.adopted_map_read(config) is data
+
+
+def test_a_reading_of_a_different_environment_is_refused(tmp_path):
+    """Environment is part of the map's identity, and testmon *replaces* an
+    environment row whose inputs moved — so adopting across one would not merely
+    mis-measure, it would discard the map."""
+
+    config = _reuse_config(tmp_path, environment="offscreen")
+    config.arrayscope_map_read = (
+        testmon_policy.map_read_identity(tmp_path, "wayland+gpu", []),
+        _FakeMapData("wayland+gpu"),
+    )
+    assert testmon_policy.adopted_map_read(config) is None
+
+
+def test_a_reading_from_another_checkout_is_refused(tmp_path):
+    config = _reuse_config(tmp_path)
+    config.arrayscope_map_read = (
+        testmon_policy.map_read_identity(tmp_path / "elsewhere", "offscreen", []),
+        _FakeMapData(),
+    )
+    assert testmon_policy.adopted_map_read(config) is None
+
+
+def test_an_xdist_worker_never_adopts_the_controllers_reading(tmp_path):
+    """A worker's data is built by ``TestmonData.for_worker`` from the
+    controller's ``exec_id``. Handing it a local-run reading would have it record
+    against the wrong execution — the one failure here that is not merely slow."""
+
+    config = _reuse_config(tmp_path, workerinput={"testmon_exec_id": 7})
+    config.arrayscope_map_read = (
+        testmon_policy.map_read_identity(tmp_path, "offscreen", []),
+        _FakeMapData(),
+    )
+    assert testmon_policy.adopted_map_read(config) is None
+
+
+def test_a_run_that_offered_nothing_gets_testmons_own_behaviour(tmp_path):
+    """The interception is a module global and outlives any one run, so a config
+    that made no offer must fall straight through rather than inherit one."""
+
+    assert testmon_policy.adopted_map_read(_reuse_config(tmp_path)) is None
+
+
+def test_the_system_package_walk_is_paid_once_per_process():
+    """``importlib.metadata`` over the whole environment, 0.045 s, asked for by
+    both readers. Installed distributions cannot change inside one process."""
+
+    assert testmon_policy.memoise_system_packages()
+    from testmon import common, pytest_testmon, testmon_core
+
+    assert getattr(common.get_system_packages, "arrayscope_memoised", False)
+    # Both importers bound the name at import time, so patching only the owner
+    # would leave testmon's own reader on the original.
+    assert pytest_testmon.get_system_packages is common.get_system_packages
+    assert testmon_core.get_system_packages is common.get_system_packages
+    assert common.get_system_packages(ignore=[]) == common.get_system_packages(ignore=[])
 
 
 def test_the_option_keys_testmon_subscripts_all_still_exist():

@@ -216,15 +216,12 @@ def _selection_workload(config):
         # --since widens the run by an amount only collection can know, so the
         # map's answer would under-provision the pool.
         return None
-    try:
-        environment = testmon_policy.resolve_environment(config.getini("environment_expression"))
-        peek = testmon_policy.peek(
-            config.rootdir,
-            environment,
-            tuple(config.getini("testmon_ignore_dependencies")),
-        )
-    except Exception:  # a broken or half-written map must never fail a run
-        return None
+    # Through the shared cache, not a peek of its own. This hook runs in
+    # ``pytest_cmdline_main``, ahead of every pricing gate, so it is the run's
+    # *first* reader — and a private read here meant a bare `pytest` opened and
+    # stability-checked the map three times over (here, in the gates, and again
+    # in testmon's own configure) rather than twice.
+    peek = _map_peek(config)
     if peek is None or peek.empty:
         return None
 
@@ -704,6 +701,12 @@ def _map_peek(config, *, with_changed_files: bool = False):
             testmon_policy.resolve_environment(config.getini("environment_expression")),
             tuple(config.getini("testmon_ignore_dependencies")),
             with_changed_files=with_changed_files,
+            # Keep the live object so testmon can adopt it instead of building a
+            # second one — see ``testmon_policy.reuse_map_read``. Only from the
+            # plain slot: the ``--testmon-noselect`` reading is a second, extra
+            # read taken for one gate, and two candidates would make "which one
+            # does testmon get" a question rather than an answer.
+            keep_data=not with_changed_files,
         )
     except Exception:  # a broken map must never be the reason a run cannot start
         peek = None
@@ -991,6 +994,10 @@ def pytest_configure(config):
         # Before testmon's own configure, which is where it resolves the
         # affected set through the module global this patches.
         testmon_policy.install_forgiveness(config.rootdir)
+        # Also before it: this hands testmon the map reading the gates above
+        # already took, instead of letting it build and stability-check a second
+        # copy of the same thing.
+        testmon_policy.reuse_map_read(config, _map_peek(config))
     if decision.active and not decision.explicit:
         config.option.testmon = True
     if decision.active and not _XDIST_WORKER:

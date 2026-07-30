@@ -250,6 +250,12 @@ class MapPeek:
     #: the map", not "different from git HEAD" — an old map makes an untouched
     #: file changed, which is exactly the truth selection acts on.
     changed_files: frozenset[str] = frozenset()
+    #: The live ``TestmonData`` this reading was taken from, when the caller
+    #: asked to keep it (``keep_data``). It is the object testmon's own
+    #: ``init_testmon_data`` would otherwise build a second copy of — see
+    #: :func:`reuse_map_read`. Excluded from equality and repr: it is a database
+    #: handle, not part of what this value *says*.
+    data: object | None = field(default=None, compare=False, repr=False)
 
     @property
     def empty(self) -> bool:
@@ -836,6 +842,7 @@ def peek(
     environment: str,
     ignore_dependencies: tuple[str, ...] = (),
     with_changed_files: bool = False,
+    keep_data: bool = False,
 ) -> MapPeek | None:
     """Read the map and diff it against the working tree. ``None`` if unusable.
 
@@ -844,21 +851,30 @@ def peek(
     key, same ignored dependencies. A mismatch would not merely mis-measure:
     testmon replaces an environment row whose package set changed, so peeking
     with different inputs would *discard* the map it is reading.
+
+    ``keep_data`` hands the live ``TestmonData`` back on the result instead of
+    dropping it. Reproducing testmon's inputs exactly is the condition this
+    function already had to meet, so the object it built *is* the one testmon is
+    about to build again; :func:`reuse_map_read` turns that from a coincidence
+    into the thing that happens.
     """
 
     if not testmon_installed() or not map_path(rootdir).exists():
         return None
 
     install_forgiveness(rootdir)
+    # Before the import below, which binds whatever the name points at now.
+    memoise_system_packages()
 
     from testmon.common import get_system_packages
     from testmon.testmon_core import TestmonData
 
     try:
+        packages = get_system_packages(ignore=list(ignore_dependencies))
         data = TestmonData.for_local_run(
             rootdir=str(rootdir),
             environment=environment,
-            system_packages=get_system_packages(ignore=list(ignore_dependencies)),
+            system_packages=packages,
         )
         data.determine_stable()
         all_tests = data.all_tests
@@ -901,7 +917,173 @@ def peek(
         forced_files=frozenset(name.split("::", 1)[0] for name in forced),
         forced_seconds=forced_seconds,
         changed_files=changed,
+        data=data if keep_data else None,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Reading the map once instead of twice
+# --------------------------------------------------------------------------- #
+
+
+def map_read_identity(rootdir, environment: str, ignore_dependencies) -> tuple[str, str, str]:
+    """The three inputs that decide *which* map a reading is a reading of.
+
+    Everything else ``TestmonData.for_local_run`` takes is derived (the Python
+    version) or unused here (``database``, which is the tmnet RPC proxy and is
+    ``None`` for every local run). If these three agree, the two objects are
+    reading the same rows of the same file with the same environment row — which
+    is the condition :func:`peek` has always had to meet anyway, stated as a
+    value that can be compared instead of as a comment that can rot.
+    """
+
+    from testmon.common import get_system_packages
+
+    return (
+        str(rootdir),
+        str(environment),
+        get_system_packages(ignore=list(ignore_dependencies or ())),
+    )
+
+
+def memoise_system_packages() -> bool:
+    """Cache ``get_system_packages`` for the life of the process. Idempotent.
+
+    It walks ``importlib.metadata.distributions()`` over the whole environment —
+    0.045 s measured, and it was paid twice per run because :func:`peek` and
+    testmon's own ``init_testmon_data`` each ask for it. The installed
+    distributions cannot change inside one pytest process, so a second walk can
+    only produce the answer the first one did.
+
+    Patched in all three modules that hold a binding: ``testmon.common`` owns it,
+    and ``testmon.pytest_testmon`` and ``testmon.testmon_core`` each imported the
+    name at module import time, so patching only the owner would leave both
+    callers on the original.
+    """
+
+    try:
+        import testmon.common as common
+        import testmon.pytest_testmon as plugin
+        import testmon.testmon_core as core
+    except ImportError:
+        return False
+
+    original = common.get_system_packages
+    if getattr(original, "arrayscope_memoised", False):
+        return True
+
+    cache: dict[tuple, str] = {}
+
+    def get_system_packages(ignore=None):
+        key = tuple(ignore) if ignore else ()
+        if key not in cache:
+            cache[key] = original(ignore=ignore)
+        return cache[key]
+
+    get_system_packages.arrayscope_memoised = True
+    for module in (common, plugin, core):
+        if getattr(module, "get_system_packages", None) is original:
+            module.get_system_packages = get_system_packages
+    return True
+
+
+def reuse_map_read(config, peeked: MapPeek | None) -> bool:
+    """Make testmon adopt the ``TestmonData`` :func:`peek` already built.
+
+    testmon's ``init_testmon_data`` constructs a second ``TestmonData`` and runs
+    ``determine_stable()`` over it, having no way to know one was built minutes
+    of CPU earlier — ``peek`` exists precisely because xdist fixes the worker
+    pool in ``pytest_cmdline_main``, before testmon's ``pytest_configure`` has
+    anything to ask. Measured, the pair cost 0.33 s of a 1.15 s no-op run.
+
+    Interception rather than pre-setting ``config.testmon_data``: testmon calls
+    ``init_testmon_data`` unconditionally, so anything set beforehand is
+    overwritten. The call goes through the module global, so replacing that name
+    reaches it.
+
+    Refused, falling back to today's double build, when:
+
+    * there is no peeked reading, or it was taken without ``keep_data``;
+    * this is an xdist **worker** — a worker's data comes from
+      ``TestmonData.for_worker`` with the controller's ``exec_id``, which is a
+      different object built from different inputs, and handing it a local-run
+      reading would have it record against the wrong execution;
+    * ``(rootdir, environment, system packages)`` differ from what testmon is
+      about to ask for.
+
+    Returns whether the interception is in place. Idempotent.
+
+    The offer is carried on ``config``, never captured in the patch. The patch is
+    a module global and outlives any one run, so a closure over one run's data
+    would hand a *stale* reading to the next ``pytest.main()`` in the same
+    process. Keyed on the config, a run that made no offer simply gets testmon's
+    own behaviour.
+    """
+
+    try:
+        import testmon.pytest_testmon as plugin
+    except ImportError:
+        return False
+
+    data = getattr(peeked, "data", None)
+    if data is None or hasattr(config, "workerinput"):
+        return False
+    try:
+        identity = map_read_identity(
+            config.rootdir,
+            getattr(data, "environment", None),
+            config.getini("testmon_ignore_dependencies"),
+        )
+    except Exception:  # a peek we cannot identify is one we must not reuse
+        return False
+    config.arrayscope_map_read = (identity, data)
+
+    original = plugin.init_testmon_data
+    if getattr(original, "arrayscope_reuse", None) is not None:
+        return True
+
+    def init_testmon_data(target):
+        offered = adopted_map_read(target)
+        if offered is None:
+            return original(target)
+        target.testmon_data = offered
+        return None
+
+    init_testmon_data.arrayscope_reuse = original
+    plugin.init_testmon_data = init_testmon_data
+    return True
+
+
+def adopted_map_read(config):
+    """The ``TestmonData`` this config offered, if it is the one testmon wants.
+
+    Separate from the patch so the identity rule is testable without a pytest
+    run, and pure in the sense that matters: it never builds anything, and any
+    doubt at all resolves to ``None``, which is today's double build.
+    """
+
+    offer = getattr(config, "arrayscope_map_read", None)
+    if not offer or hasattr(config, "workerinput"):
+        return None
+    identity, data = offer
+    # tmnet routes every read through an RPC proxy instead of the local file.
+    testmon_config = getattr(config, "testmon_config", None)
+    if getattr(testmon_config, "tmnet", False) or getattr(config, "tmnet", None):
+        return None
+    try:
+        from testmon.testmon_core import eval_environment
+
+        environment = config.getoption("environment_expression") or eval_environment(
+            config.getini("environment_expression")
+        )
+        wanted = map_read_identity(
+            config.rootdir, environment, config.getini("testmon_ignore_dependencies")
+        )
+    except Exception:  # cannot prove they match, so they do not
+        return None
+    if wanted != identity or getattr(data, "environment", None) != identity[1]:
+        return None
+    return data
 
 
 def _whole_file_lines(rootdir: os.PathLike[str] | str, relative: str) -> frozenset[int]:
