@@ -222,7 +222,18 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   272-tile WGPU zoom/pan return changes from a permanent 1/272 presentation
   (271 target-ready, kernel and commit queues idle) to 272/272; final zoom-out
   takes 1.208 s and settles in 0.912 s with zero coarse-target producer starts
-  ([R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md)). **Orphan
+  ([R5 dossier](redesign/r5-bulk-render-governor-2026-07-27.md)). **Second
+  displayed-axis crop liveness fixed 2026-07-30:** when the narrower
+  crop sharpens demand beyond the one resident crop-local rung, WGPU now
+  rebinds that rung as a display-only fallback and refines through
+  governor-owned continuations instead of evaluating 272 tiles before a
+  useful frame. Eight order-balanced, interleaved managed-Weston processes
+  across both orientations moved median first-current-pixel latency
+  2586→1320 ms and median maximum governed callback 244→32 ms (worst 35 ms);
+  every changed run rebound 272/272 tiles with zero stalls. Full target
+  convergence is slower background work and R6 remains generally
+  unimplemented; the exact scope and evidence are recorded in the
+  [dossier](redesign/second-axis-crop-retained-lod-2026-07-30.md). **Orphan
   ready-payload strand fixed 2026-07-28:** lifecycle-ready is no longer
   assumed to mean commit-pending. A ready, current payload with no dirty/upsert
   owner gets the same presentation-only handoff; a stale or unrecoverable
