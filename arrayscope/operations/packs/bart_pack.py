@@ -95,13 +95,6 @@ def bart_timeout(default: float = _DEFAULT_TIMEOUT_S) -> float | None:
     return value if value > 0 else None
 
 
-def bart_admission_notes() -> tuple[str, ...]:
-    return (
-        "BART op: out-of-process subprocess + cfl temp-file round-trip (expensive).",
-        "OPAQUE whole-array: never run per-region (a per-tile subprocess is never the right plan).",
-    )
-
-
 def bart_env(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
     environment = dict(os.environ)
     if overrides:

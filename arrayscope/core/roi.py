@@ -393,16 +393,6 @@ def roi_statistics(values):
     )
 
 
-def geometry_with_simplified_freehand(
-    geometry: RoiGeometry, tolerance=DEFAULT_FREEHAND_SIMPLIFY_TOLERANCE
-):
-    if geometry.kind != RoiKind.FREEHAND_POLYGON:
-        return geometry
-    return replace(
-        geometry, points=close_polygon(simplify_polyline(geometry.points, tolerance)), closed=True
-    )
-
-
 def _segment_samples(image, p0, p1, width=DEFAULT_LINE_WIDTH):
     x0, y0 = p0
     x1, y1 = p1

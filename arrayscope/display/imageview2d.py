@@ -3174,15 +3174,6 @@ def _pyqtgraph_assembly_preparation(task, payload, levels):
     return prepare
 
 
-def _image_origin(geometry) -> tuple[float, float]:
-    if getattr(geometry, "montage", None) is None:
-        return (0.0, 0.0)
-    return (
-        float(getattr(geometry, "montage_origin_x", 0)),
-        float(getattr(geometry, "montage_origin_y", 0)),
-    )
-
-
 def _previous_viewport_size_from_resize_event(current_viewport_size, event, *, fallback=None):
     try:
         old_size = event.oldSize()

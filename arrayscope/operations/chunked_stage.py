@@ -34,13 +34,6 @@ class StageChunkPlan:
     estimated_chunk_bytes: int
 
 
-@dataclass(frozen=True)
-class ChunkedStageProgress:
-    completed_chunks: int
-    total_chunks: int
-    bytes_written: int
-
-
 def plan_chunked_stage_materialization(
     region_plan,
     candidate,

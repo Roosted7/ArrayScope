@@ -469,29 +469,6 @@ def _page_route_format(
     return REDUCER_NATIVE, dtype.name, SCALAR_R32F
 
 
-def source_origin_yx_for_session(
-    session, source: np.ndarray, *, source_index=None
-) -> tuple[int, int]:
-    """Locate a rendered source plane on the canonical native source grid.
-
-    Every live producer must pair its precomputed page plans and numeric
-    materialization with this same origin.  Falling back to ``(0, 0)`` is
-    correct only when the session has no source anchor (ordinary montage
-    tiles); applying it to a shifted source window labels window-local values
-    with the wrong canonical bins.
-    """
-
-    anchor_fn = getattr(session, "_payload_source_anchor", None)
-    anchor = (
-        anchor_fn(tuple(np.shape(source)[:2]), source_index=source_index)
-        if callable(anchor_fn)
-        else None
-    )
-    if anchor is None:
-        return (0, 0)
-    return (int(anchor.source_rect[0]), int(anchor.source_rect[2]))
-
-
 def source_anchor_for_rendered(session, rendered, source: np.ndarray):
     """Return the anchor owned by an immutable rendered-tile snapshot."""
 

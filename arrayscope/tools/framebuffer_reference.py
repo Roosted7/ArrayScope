@@ -540,13 +540,6 @@ def _add_rect(mask: np.ndarray, x0: float, y0: float, x1: float, y1: float, marg
     mask[lo_y : hi_y + 1, lo_x : hi_x + 1] = True
 
 
-def _polyline_coverage(shape, points, radius: float) -> np.ndarray:
-    mask = np.zeros((int(shape[0]), int(shape[1])), dtype=bool)
-    for start, end in itertools.pairwise(points):
-        _add_segment(mask, start, end, radius)
-    return mask
-
-
 def _polyline_bounds(shape, points, radius: float) -> tuple[int, int, int, int] | None:
     """Clipped ``(lo_x, lo_y, hi_x, hi_y)`` covering a dilated polyline."""
 
@@ -1266,35 +1259,6 @@ def wgpu_frame_matches_cpu_reference(
             overlay_mask=overlay_mask,
         ),
     )
-
-
-def roi_placement_matches_geometry(win, *, backend: str) -> RoiPlacementReport:
-    """Check every drawn ROI outline sits where its semantic geometry says.
-
-    The complement of the image comparison: that oracle proves no overlay
-    stroke tinted a pixel it had no business tinting, this one proves each
-    ROI's colour really is on the frame, inside its own band, after whatever
-    the stage just did to the displayed axis.  Together they keep a cropped
-    montage's ROI coverage without letting overlay pixels masquerade as image
-    divergence -- and without letting an overlay that stopped being drawn at
-    all pass unnoticed.
-
-    Standalone form.  Callers that also want the image verdict should read
-    ``FrameReferenceReport.roi_placement`` instead: both verdicts then come
-    from one capture, which is both cheaper and the only way to be sure they
-    describe the same frame.
-    """
-
-    backend = str(backend)
-    if backend == "wgpu":
-        report = wgpu_frame_matches_cpu_reference(win)
-    elif backend == "pyqtgraph":
-        report = qt_raster_matches_cpu_reference(win)
-    else:
-        raise AssertionError(f"ROI placement oracle does not cover backend {backend!r}")
-    if report.roi_placement is None:
-        raise AssertionError("frame reference report carried no ROI placement verdict")
-    return report.roi_placement
 
 
 def _assert_report(report: FrameReferenceReport, *, label: str) -> FrameReferenceReport:

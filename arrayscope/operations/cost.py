@@ -166,14 +166,6 @@ def estimate_pipeline_cost(
     )
 
 
-def format_operation_cost(cost: OperationCost) -> str:
-    dtype = "unknown" if cost.output_dtype is None else str(cost.output_dtype)
-    peak = (
-        "unknown" if cost.estimated_peak_bytes is None else _format_bytes(cost.estimated_peak_bytes)
-    )
-    return f"{cost.kind} -> shape {cost.output_shape}, dtype {dtype}, peak {peak}"
-
-
 def _cost(
     kind,
     input_shape,

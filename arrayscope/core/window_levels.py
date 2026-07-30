@@ -84,10 +84,6 @@ class WindowLevelState:
         )
 
 
-def normalize_levels(levels) -> Levels | None:
-    return normalize_bounds(levels)
-
-
 def normalize_bounds(bounds) -> Levels | None:
     if bounds is None:
         return None
@@ -196,10 +192,6 @@ def state_from_source(
         mode=coerced_mode,
         evidence_quality=max(0, int(getattr(source, "evidence_quality", 0) or 0)),
     )
-
-
-def source_from_state(state: WindowLevelState | None) -> LevelSource | None:
-    return None if state is None else state.as_level_source()
 
 
 class WindowLevelController:

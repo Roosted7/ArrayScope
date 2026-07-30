@@ -101,23 +101,6 @@ def _histogram_parts(payloads):
     return parts, slices, population
 
 
-def histogram_data_from_tile_payloads(payloads):
-    """Concatenate the semantic histogram source arrays of a tiled commit.
-
-    Backend-agnostic source of truth for the montage histogram: the histogram
-    is built from the committed tile PAYLOADS, never from a single bound
-    ImageItem (a tiled montage has none). Both maintained views
-    feed their histogram from this.
-    """
-
-    parts, _slices, _population = _histogram_parts(payloads)
-    if not parts:
-        return None
-    if len(parts) == 1:
-        return parts[0]
-    return np.concatenate([np.ravel(part) for part in parts])
-
-
 def histogram_plot_source_and_layout(payloads):
     """The montage histogram source, laid out as the image the plot draws.
 
@@ -273,7 +256,6 @@ def tiled_histogram_key(histogram_range, *, histogram_plot_data, tile_delta, sem
 
 
 __all__ = [
-    "histogram_data_from_tile_payloads",
     "histogram_plot_source_and_layout",
     "patched_histogram_plot_source",
     "payload_histogram_display_source",

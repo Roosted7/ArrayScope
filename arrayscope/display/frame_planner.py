@@ -402,10 +402,6 @@ def _shape2(shape) -> tuple[int, int]:
     return values
 
 
-def _pixel_count(shape: tuple[int, int]) -> int:
-    return int(shape[0]) * int(shape[1])
-
-
 def _display_axis_size(view_state, axis: int) -> int:
     indices = view_state.axis_range_indices[int(axis)]
     if indices is not None:

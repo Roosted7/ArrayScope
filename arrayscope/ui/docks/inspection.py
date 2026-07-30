@@ -11,7 +11,6 @@ import pyqtgraph as pg
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
-from arrayscope.core.roi import RoiKind
 from arrayscope.ui.docks.common import StandardDockWidget, add_size_grip, configure_standard_dock
 from arrayscope.ui.icons import set_button_icon
 from arrayscope.ui.roi_model import RoiTableModel
@@ -274,15 +273,6 @@ class InspectionDock(StandardDockWidget):
         roi_id = self.current_roi_id()
         if roi_id is not None:
             self._on_select_roi(roi_id)
-
-
-def _roi_item_text(selection):
-    geometry = selection.geometry
-    if geometry.kind == RoiKind.RECTANGLE and geometry.rect is not None:
-        detail = "rect"
-    else:
-        detail = f"{len(geometry.points)} pts"
-    return f"{selection.label}  {geometry.kind.value.replace('_', ' ')}  {detail}"
 
 
 def _fmt(value):

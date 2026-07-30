@@ -1590,10 +1590,6 @@ def _size_text(size: tuple[int, int] | None) -> str:
     return f"{int(size[0])}x{int(size[1])}"
 
 
-def _bytes_or_na(value: int | None) -> str:
-    return "n/a" if value is None else format_bytes(int(value))
-
-
 def _short_debug_text(value: object, *, limit: int = 220) -> str:
     text = str(value)
     if "b'" in text or 'b"' in text:

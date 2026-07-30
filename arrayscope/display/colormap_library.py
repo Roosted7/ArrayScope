@@ -346,17 +346,6 @@ def find_colormap(name: str) -> ColormapInfo | None:
     return None
 
 
-def builtin_stops_colormap(name: str):
-    """ColorMap for a built-in that carries its own stops (embedded or
-    cmcrameri-backed); None when the name resolves elsewhere."""
-    for spec_name, _kind, _group, spec_stops in _BUILTIN_SPECS:
-        if spec_name == str(name) and spec_stops is not None:
-            stops = _resolve_builtin_stops(spec_stops)
-            if stops is not None:
-                return _colormap_from_stops(stops)
-    return None
-
-
 def gray_colormap():
     """Grayscale colormap matching pyqtgraph's built-in default."""
     import pyqtgraph as pg

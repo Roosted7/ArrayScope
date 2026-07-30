@@ -15,13 +15,6 @@ DEFAULT_REPRESENTATIVE_SAMPLE_LIMIT = 512
 HISTOGRAM_NORMALIZED_L1_TOLERANCE = 0.05
 
 
-def chunk_summary_storage_nbytes(bins: int = DEFAULT_HISTOGRAM_BINS) -> int:
-    """Accounted array storage for one summary (counts + bin edges)."""
-
-    bins = max(1, int(bins))
-    return int(bins * np.dtype(np.float64).itemsize + (bins + 1) * np.dtype(np.float32).itemsize)
-
-
 @dataclass(frozen=True)
 class ChunkHistogramSummary:
     """Small immutable distribution summary for one canonical data chunk."""
@@ -472,7 +465,6 @@ __all__ = [
     "aggregate_chunk_summaries",
     "chunk_key_frontier",
     "chunk_summary_frontier",
-    "chunk_summary_storage_nbytes",
     "representative_sample_from_histogram",
     "summarize_chunk",
 ]

@@ -450,7 +450,3 @@ class StateSyncMixin:
 
     def _current_is_complex(self):
         return np.issubdtype(np.dtype(self.data.dtype), np.complexfloating)
-
-
-def _indices_from_slice_text(text, axis_size):
-    return parse_slice_selection(text, axis_size).indices

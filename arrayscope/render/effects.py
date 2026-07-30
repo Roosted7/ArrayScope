@@ -1097,6 +1097,30 @@ def _floor_available(session, tile, demand, *, preview_cache) -> bool:
     )
 
 
+def presented_first_pixel_payload(session, tile_number: int):
+    """Current physically acknowledged payload, regardless of old quality.
+
+    A payload labelled ``exact`` under an earlier coarse demand remains valid
+    first-pixel coverage after zooming in, but it is not the new target.  The
+    lifecycle owns that target-settlement decision; historical payload quality
+    must not suppress the shared target's only producer.
+    """
+
+    tile_number = int(tile_number)
+    lifecycle = getattr(session, "lifecycle", None)
+    if tile_number not in set(getattr(lifecycle, "presented_tiles", ()) or ()):
+        return None
+    payload = dict(
+        getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {}
+    ).get(tile_number)
+    if payload is None:
+        return None
+    backend_identities = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
+    if backend_identities and backend_identities.get(tile_number) != tile_ack_identity(payload):
+        return None
+    return payload
+
+
 def can_evaluate_preview(session, tile) -> bool:
     document = getattr(session, "document", None)
     view_state = getattr(tile, "view_state", None)
@@ -1104,21 +1128,6 @@ def can_evaluate_preview(session, tile) -> bool:
         return False
     base_shape = tuple(int(size) for size in np.shape(getattr(document, "base_data", ())))
     return len(base_shape) == int(getattr(view_state, "ndim", len(base_shape)))
-
-
-def display_output_is_composited_rgb(session) -> bool:
-    """Whether this session's display payload is a CPU-composited RGB plane.
-
-    Final PyQtGraph complex tiles still have this shape.  Reduced previews no
-    longer do: they retain a complex source atlas and let the backend bake its
-    derived RGB pages through the round levels.  This predicate remains useful
-    to describe the final-output contract, but it is not a preview-admission
-    rejection.
-    """
-
-    return bool(getattr(session, "rgb", False)) and not bool(
-        getattr(session, "shader_display", False)
-    )
 
 
 def preview_retains_complex_source(session, values) -> bool:
@@ -1152,65 +1161,6 @@ def can_evaluate_reduced_preview(session, tile) -> bool:
         base_shape,
         dtype,
     )
-
-
-def payload_identity_dead(session, tile_number: int, payload) -> bool:
-    """Whether the backend can never acknowledge this payload for its target.
-
-    The commit path only presents payloads whose typed identity satisfies the
-    tile's lifecycle target; anything else is rejected without state change.
-    A payload that fails that check while nothing is presented can therefore
-    never open the tile's first-pixel obligation — schedulers must treat it
-    as missing, not as coverage.
-    """
-
-    tile_number = int(tile_number)
-    lifecycle = getattr(session, "lifecycle", None)
-    if lifecycle is None:
-        return False
-    if tile_number in (getattr(lifecycle, "presented_tiles", None) or frozenset()):
-        return False
-    record = lifecycle.peek(tile_number)
-    target = None if record is None or record.target is None else record.target.identity
-    if target is None:
-        return False
-    identity = getattr(payload, "tile_identity", None)
-    if identity is None:
-        identity = getattr(payload, "source_id", None)
-    return not acknowledged_identity_satisfies_target(identity, target)
-
-
-def presented_preview_payload(session, tile_number: int):
-    """Acknowledged preview payload for scheduling higher shared quality."""
-
-    payload = presented_first_pixel_payload(session, tile_number)
-    if payload is None or str(getattr(payload, "quality", "exact")) != "preview":
-        return None
-    return payload
-
-
-def presented_first_pixel_payload(session, tile_number: int):
-    """Current physically acknowledged payload, regardless of old quality.
-
-    A payload labelled ``exact`` under an earlier coarse demand remains valid
-    first-pixel coverage after zooming in, but it is not the new target.  The
-    lifecycle owns that target-settlement decision; historical payload quality
-    must not suppress the shared target's only producer.
-    """
-
-    tile_number = int(tile_number)
-    lifecycle = getattr(session, "lifecycle", None)
-    if tile_number not in set(getattr(lifecycle, "presented_tiles", ()) or ()):
-        return None
-    payload = dict(
-        getattr(getattr(session, "tile_presentation_state", None), "payloads", {}) or {}
-    ).get(tile_number)
-    if payload is None:
-        return None
-    backend_identities = dict(getattr(lifecycle, "backend_presented_identities", {}) or {})
-    if backend_identities and backend_identities.get(tile_number) != tile_ack_identity(payload):
-        return None
-    return payload
 
 
 def preview_pipeline_commutes_for_display_lod(session, tile) -> bool:
@@ -2451,23 +2401,11 @@ def _check_preview_cancelled(cancellation_token) -> None:
         raise EvaluationCancelled()
 
 
-def _preview_claim_component(session, *, shader_display: bool) -> str:
-    if bool(shader_display):
-        return str(TexturePlaneKind.COMPLEX_RG32F.value)
-    if not bool(shader_display) and bool(getattr(session, "rgb", False)):
-        # The final PyQtGraph tile is CPU-composited RGB, but the preview
-        # claim names the retained reduced source format consumed by the
-        # compact atlas, not that later derived display plane.
-        return str(TexturePlaneKind.COMPLEX_RG32F.value)
-    return "scalar"
-
-
 __all__ = [
     "attach_montage_tile_level_stats",
     "axis_region_for_preview_indices",
     "can_evaluate_preview",
     "can_evaluate_reduced_preview",
-    "display_output_is_composited_rgb",
     "evaluate_preview_tile",
     "evaluate_shared_preview",
     "evaluate_target_tile",

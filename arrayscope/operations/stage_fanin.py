@@ -103,24 +103,6 @@ class StageFanInState:
         return bool(self.tile_stage_keys)
 
 
-def _take_batch(waiting, *, max_items: int | None) -> tuple[tuple[object, ...], bool]:
-    limit = len(waiting) if max_items is None else max(0, int(max_items))
-    if isinstance(waiting, list):
-        batch = tuple(waiting[:limit])
-        del waiting[:limit]
-        return batch, not waiting
-    # Priority-ordered queues (e.g. MontageTilePriorityQueue) release the
-    # highest-priority tiles first, so budget-capped activation batches follow
-    # the viewport/focus order instead of the plan's row-major order.
-    batch = []
-    while waiting and len(batch) < limit:
-        tile = waiting.pop()
-        if tile is None:
-            break
-        batch.append(tile)
-    return tuple(batch), not waiting
-
-
 def _tile_index(tile_or_index) -> int:
     try:
         return int(tile_or_index.montage_index)

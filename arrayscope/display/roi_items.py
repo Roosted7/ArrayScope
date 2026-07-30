@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 
-import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
@@ -15,10 +14,6 @@ def default_roi_label(kind, index) -> str:
     # The kind is displayed alongside the name everywhere (table, overlay,
     # HUD), so default names are just numbers.
     return str(int(index))
-
-
-def point_distance(a, b) -> float:
-    return float(np.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1])))
 
 
 def item_for_roi(selection):

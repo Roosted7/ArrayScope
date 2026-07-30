@@ -1101,24 +1101,6 @@ def benchmark_large_progressive_montage(
     return tuple(results)
 
 
-def run_optional_stress_benchmark() -> tuple[RenderingBenchmarkResult, ...]:
-    if os.environ.get("ARRAYSCOPE_RUN_STRESS") != "1":
-        return ()
-    tile_shape = (
-        _positive_env_int("ARRAYSCOPE_STRESS_TILE_HEIGHT", 336),
-        _positive_env_int("ARRAYSCOPE_STRESS_TILE_WIDTH", 336),
-    )
-    count = _positive_env_int("ARRAYSCOPE_STRESS_TILE_COUNT", 272)
-    columns = min(count, _positive_env_int("ARRAYSCOPE_STRESS_COLUMNS", 17))
-    batch_size = _positive_env_int("ARRAYSCOPE_STRESS_BATCH_SIZE", 8)
-    return benchmark_large_progressive_montage(
-        tile_shape=tile_shape,
-        count=count,
-        columns=columns,
-        batch_size=batch_size,
-    )
-
-
 def collect_benchmark_samples(
     *,
     runs: int = 1,
@@ -1206,19 +1188,6 @@ def _sample_record(sample: RenderingBenchmarkSample) -> dict:
     timing = record["result"]["timing"]
     record["result"]["timing"] = timing
     return record
-
-
-def _positive_env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return max(1, int(default))
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
-    if value < 1:
-        raise ValueError(f"{name} must be positive, got {value}")
-    return value
 
 
 def _format_optional_ms(value: float | None) -> str:

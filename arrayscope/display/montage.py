@@ -16,15 +16,6 @@ from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 
 
 @dataclass(frozen=True)
-class MontageLayout:
-    tile_shape: tuple[int, int]
-    count: int
-    columns: int
-    rows: int
-    gap: int = 1
-
-
-@dataclass(frozen=True)
 class MontageTile:
     montage_index: int
     source_index: int

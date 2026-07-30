@@ -18,7 +18,6 @@ from arrayscope.display.histogram_plot import (
     HistogramPlotResult,
     compute_histogram_plot,
     finite_increasing_pair,
-    sample_histogram_data,
 )
 from arrayscope.display.histogram_view_range import HistogramViewRangePolicy
 from arrayscope.ui.icons import material_icon, set_button_icon
@@ -996,10 +995,6 @@ def adaptive_histogram_for_view(
     if not result.has_data:
         return None
     return result.x, result.y
-
-
-def _sample_histogram_data(data: np.ndarray, *, target_image_size: int = 200) -> np.ndarray:
-    return sample_histogram_data(data, target_image_size=target_image_size)
 
 
 def histogram_plot_request_for_view(

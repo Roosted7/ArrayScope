@@ -5484,17 +5484,6 @@ def tile_layer_first_pixels_wait_for_level_source(
     return not complete_round_source
 
 
-def preview_payload_parts(preview):
-    if preview is None:
-        return (None, None, None, None, None, None, None)
-    if len(preview) == 3:
-        key, plane, histogram = preview
-        return key, plane, histogram, None, None, None, None
-    if len(preview) == 7:
-        return preview
-    raise ValueError(f"unexpected preview payload shape: {len(preview)}")
-
-
 def preview_row_parts(row):
     if len(row) == 4:
         tile_number, key, plane, histogram = row
@@ -5953,7 +5942,6 @@ __all__ = [
     "persistent_gpu_tile_residency_backend",
     "persistent_tile_layer_fast_drain_enabled",
     "persistent_tile_residency_backend",
-    "preview_payload_parts",
     "preview_row_parts",
     "rendered_tile_nbytes",
     "safe_tiled_payload_geometry_retarget",

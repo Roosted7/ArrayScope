@@ -728,19 +728,6 @@ def _gpu_available(snapshot) -> bool:
     )
 
 
-def _gpu_overview(snapshot) -> str:
-    timing = snapshot.montage_timing
-    gpu_bytes = int(getattr(timing, "tile_layer_estimated_gpu_bytes", 0) or 0)
-    budget_bytes = int(getattr(timing, "tile_layer_budget_bytes", 0) or 0)
-    resident = int(getattr(timing, "tile_layer_resident_items", 0) or 0)
-    capacity = int(getattr(timing, "tile_layer_storage_capacity", 0) or 0)
-    if budget_bytes > 0:
-        return f"{_short_bytes(gpu_bytes)}/{_short_bytes(budget_bytes)} {_percent(gpu_bytes, budget_bytes)}"
-    if capacity > 0:
-        return f"slots {resident}/{capacity} {_percent(resident, capacity)}"
-    return "n/a"
-
-
 def _worker_segments(schedulers) -> tuple[tuple[str, int, str], ...]:
     segments = []
     colors = ("#2563eb", "#9333ea", "#0f766e", "#ca8a04", "#0891b2", "#64748b", "#dc2626")
@@ -766,21 +753,6 @@ def _active_work_summary(schedulers) -> str:
         if active:
             parts.append(f"{scheduler.name} {active}")
     return ", ".join(parts) if parts else "idle"
-
-
-def _montage_overview(snapshot) -> str:
-    if not snapshot.montage.active:
-        return "inactive"
-    return (
-        f"{snapshot.montage.loaded_tiles}/{snapshot.montage.visible_tiles} loaded, "
-        f"target unsettled {snapshot.montage.target_unsettled_tiles}, "
-        f"resident {snapshot.montage_timing.tile_layer_resident_items}/"
-        f"{snapshot.montage_timing.tile_layer_storage_capacity}, "
-        f"updated {snapshot.montage_timing.tile_layer_items_updated}, "
-        f"rgb tiles {snapshot.montage_timing.tile_layer_rgb_window_tiles}, "
-        f"stage-backed {snapshot.montage.tile_compute_stage_backed}, "
-        f"direct {snapshot.montage.tile_compute_direct}"
-    )
 
 
 def _ms_text(value) -> str:

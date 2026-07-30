@@ -2,22 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from time import perf_counter
 
 import numpy as np
 
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.operations.cancellation import EvaluationCancelled
-
-
-@dataclass(frozen=True)
-class ChunkedImageResult:
-    display_image: DisplayImage
-    eval_ms: float
-    chunk_count: int
-    slab_nbytes: int | None
-    mode: str = "chunked"
 
 
 def evaluate_image_snapshot_chunked(

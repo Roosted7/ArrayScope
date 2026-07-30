@@ -28,7 +28,6 @@ __all__ = [
     "ASTC_BLOCK_BYTES",
     "AstcResult",
     "astc_available",
-    "astc_block_bytes",
     "astc_decode",
     "encode_scalar",
     "encode_two_channel",
@@ -44,12 +43,6 @@ def astc_available() -> bool:
     except Exception:
         return False
     return True
-
-
-def astc_block_bytes(block: tuple[int, int], width: int, height: int) -> int:
-    bx, by = block
-    nblocks = ((width + bx - 1) // bx) * ((height + by - 1) // by)
-    return nblocks * ASTC_BLOCK_BYTES
 
 
 def wgpu_format_for_block(block: tuple[int, int]) -> str:

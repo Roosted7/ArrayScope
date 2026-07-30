@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -190,12 +190,6 @@ def _build_tile_layout_regions(montage, plan_regions) -> tuple[TileLayoutRegion,
     return tuple(regions)
 
 
-def tile_layout_regions(geometry, *, frame_plan=None) -> tuple[TileLayoutRegion, ...]:
-    """Return drawable tile placement for either a frame plan or montage geometry."""
-
-    return _resolve_tile_layout(geometry, frame_plan).regions
-
-
 def tile_layout_map(geometry, *, frame_plan=None) -> Mapping[int, TileLayoutRegion]:
     """Tile-keyed placement.
 
@@ -214,16 +208,9 @@ def planned_tile_count(geometry, *, frame_plan=None, minimum: int = 1) -> int:
     return max(int(minimum), _resolve_tile_layout(geometry, frame_plan).planned_count)
 
 
-def filter_layout_ids(layout: Iterable[TileLayoutRegion], ids: Iterable[int]) -> tuple[int, ...]:
-    valid = {int(region.tile_number) for region in layout}
-    return tuple(int(tile) for tile in tuple(ids or ()) if int(tile) in valid)
-
-
 __all__ = [
     "TileLayoutRegion",
-    "filter_layout_ids",
     "planned_tile_count",
     "tile_layout_map",
-    "tile_layout_regions",
     "tile_layout_shape",
 ]

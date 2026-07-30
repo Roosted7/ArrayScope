@@ -7,7 +7,6 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
-from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.model.tile_priority import TilePriorityContext, prioritize_tiles
 from arrayscope.display.montage import montage_rect_for_viewport, optimal_montage_columns
 from arrayscope.display.viewport import view_ranges_near
@@ -928,17 +927,3 @@ def _nearest_grid_index(value: float, tile_size: int, stride: int, count: int) -
     if local >= float(tile_size) + max(0.0, float(stride - tile_size)) * 0.5:
         raw += 1
     return max(0, min(int(count) - 1, int(raw)))
-
-
-def montage_viewport_update_delay_ms(window) -> int:
-    """Delay expensive tile discovery while camera motion stays immediate."""
-
-    try:
-        capabilities = image_view_backend_capabilities(window.img_view)
-    except Exception:
-        capabilities = None
-    try:
-        mode = str(window.img_view.montageDisplayMode())
-    except Exception:
-        mode = ""
-    return montage_viewport_retarget_policy(capabilities, mode).update_delay_ms

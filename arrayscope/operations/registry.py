@@ -93,12 +93,6 @@ COMMON_OPERATION_IDS: tuple[str, ...] = (
 )
 
 
-def is_common(operation_id: str) -> bool:
-    """Whether ``operation_id`` is one a UI surface pins to the top."""
-
-    return operation_id in COMMON_OPERATION_IDS
-
-
 @dataclass(frozen=True)
 class OperationEntry:
     id: str
@@ -736,12 +730,6 @@ def _ensure_user_operations_for(operation_id: str) -> None:
     from arrayscope.operations import library
 
     library._ensure_user_operations()
-
-
-def unregister_user_operation(operation_id: str) -> None:
-    """Drop a single user-op registration (used when a wrapper is removed)."""
-
-    _USER_SPECS.pop(operation_id, None)
 
 
 def _reset_user_operations() -> None:

@@ -106,20 +106,8 @@ def index_spec_from_region(region: RegionSpec) -> tuple:
     return tuple(spec)
 
 
-def region_ndim(region: RegionSpec) -> int:
-    return len(region.axes)
-
-
 def region_axis_kinds(region: RegionSpec) -> tuple[str, ...]:
     return tuple(axis_region_kind(axis.kind).value for axis in region.axes)
-
-
-def region_to_numpy_index(region: RegionSpec) -> tuple:
-    return index_spec_from_region(region)
-
-
-def normalize_region(shape, region: RegionSpec) -> RegionSpec:
-    return region_from_index_spec(shape, index_spec_from_region(region))
 
 
 def region_text(region: RegionSpec) -> str:
@@ -148,10 +136,6 @@ def region_text(region: RegionSpec) -> str:
     return "[" + ", ".join(parts) + "]"
 
 
-def region_axes_equal(left: RegionSpec, right: RegionSpec) -> bool:
-    return tuple(left.axes) == tuple(right.axes)
-
-
 def replace_region_axis(region: RegionSpec, axis: int, value: AxisRegion) -> RegionSpec:
     axes = list(region.axes)
     axes[int(axis)] = value
@@ -161,12 +145,6 @@ def replace_region_axis(region: RegionSpec, axis: int, value: AxisRegion) -> Reg
 def insert_region_axis(region: RegionSpec, axis: int, value: AxisRegion) -> RegionSpec:
     axes = list(region.axes)
     axes.insert(int(axis), value)
-    return RegionSpec(tuple(axes))
-
-
-def remove_region_axis(region: RegionSpec, axis: int) -> RegionSpec:
-    axes = list(region.axes)
-    axes.pop(int(axis))
     return RegionSpec(tuple(axes))
 
 

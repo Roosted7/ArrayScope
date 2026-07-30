@@ -601,13 +601,6 @@ class LifecycleRungMaterializations:
         tuple(effects or ())
 
 
-def _stage_tile_index(tile_or_index) -> int:
-    try:
-        return int(tile_or_index.montage_index)
-    except AttributeError:
-        return int(tile_or_index)
-
-
 def _stage_bindings_by_key(tile_stage_keys) -> dict[object, tuple[int, ...]]:
     bindings: dict[object, list[int]] = {}
     for tile_number, key in dict(tile_stage_keys or {}).items():

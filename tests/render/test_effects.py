@@ -996,7 +996,6 @@ def test_pyqtgraph_per_tile_fft_preview_also_retains_the_complex_source_format()
     session.lod_preview_level = 2
     tile = session.plan.tiles[0]
 
-    assert effects.display_output_is_composited_rgb(session) is True
     assert effects.can_evaluate_reduced_preview(session, tile) is True
 
     result = effects.evaluate_preview_tile(
@@ -2145,16 +2144,13 @@ def test_cpu_composited_rgb_display_retains_complex_reduced_coarse_rung():
     # legal and this is the configuration ADR 0059 measured.
     session.rgb = True
     session.shader_display = True
-    assert effects.display_output_is_composited_rgb(session) is False
     assert effects.can_evaluate_reduced_preview(session, tile) is True
 
     # CPU-mapped complex (PyQtGraph): final output is composited RGB, while the
     # preview payload remains a reduced complex plane.
     session.shader_display = False
-    assert effects.display_output_is_composited_rgb(session) is True
     assert effects.can_evaluate_reduced_preview(session, tile) is True
 
     # Scalar data on the same CPU-mapping backend is unaffected.
     session.rgb = False
-    assert effects.display_output_is_composited_rgb(session) is False
     assert effects.can_evaluate_reduced_preview(session, tile) is True

@@ -22,7 +22,7 @@ from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.backends.base import surface_for_view, tiled_presentation_visible
 from arrayscope.display.frame_planner import FramePlanner
-from arrayscope.display.lod import LOD_POLICY_RESIDENT, factor_xy_for_level, select_lod_demand
+from arrayscope.display.lod import LOD_POLICY_RESIDENT, select_lod_demand
 from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
 )
@@ -37,7 +37,6 @@ from arrayscope.kernel import Lane as WorkLane
 from arrayscope.kernel import WorkItem
 from arrayscope.kernel import complete_inline_work as _complete_inline_work
 from arrayscope.operations.evaluator import _document_key
-from arrayscope.render import effects as render_effects
 from arrayscope.render import lod as render_lod
 from arrayscope.render.level_stats import LevelStatsService
 from arrayscope.render.stages import RenderIntent
@@ -2014,15 +2013,6 @@ def _initial_montage_planning_view_range(plan, viewport_shape, viewport_controll
     return square_montage_fit_view_range(plan, viewport_shape)
 
 
-def _montage_tile_layer_placeholder(session) -> np.ndarray:
-    height, width = (max(1, int(value)) for value in session.plan.display_shape)
-    if bool(getattr(session, "rgb", False)):
-        base = np.zeros((1, 1, 3), dtype=np.uint8)
-        return np.broadcast_to(base, (height, width, 3))
-    base = np.zeros((1, 1), dtype=np.float32)
-    return np.broadcast_to(base, (height, width))
-
-
 def _rendered_tile_from_previous_payload(tile, payload) -> RenderedTile:
     semantic = None if payload.semantic_data is None else np.asarray(payload.semantic_data)
     image = semantic if semantic is not None else np.asarray(payload.image)
@@ -2084,93 +2074,6 @@ def _rendered_tile_from_cached_display(tile, cached) -> RenderedTile:
         level_stats=getattr(cached, "level_stats", None),
         quality=str(getattr(cached, "quality", "exact") or "exact"),
     )
-
-
-def _rendered_tile_from_evaluation_result(tile, result) -> RenderedTile:
-    value = result.value
-    return RenderedTile(
-        tile=tile,
-        image=value.data,
-        histogram_data=value.histogram_data,
-        eval_ms=float(getattr(result, "eval_ms", 0.0) or 0.0),
-        slab_shape=tuple(getattr(result, "slab_shape", np.shape(value.data))),
-        slab_nbytes=getattr(result, "slab_nbytes", None),
-        shader_mapping=getattr(value, "shader_mapping", None),
-        texture_kind=getattr(value, "texture_kind", None),
-        semantic_data=getattr(value, "semantic_data", None),
-        semantic_histogram_data=getattr(value, "semantic_histogram_data", None),
-        lod_source_data=getattr(value, "lod_source_data", None),
-        lod=getattr(value, "lod", None),
-        level_data=getattr(value, "level_data", None),
-        level_stats=getattr(value, "level_stats", None),
-        quality=str(getattr(value, "quality", "exact") or "exact"),
-    )
-
-
-def _shared_preview_batch_key(session, tile, demand) -> tuple:
-    preview_level = render_effects.preview_evaluation_level(session, demand)
-    view_state = tile.view_state
-    image_axes = tuple(int(axis) for axis in view_state.image_axes)
-    display_ranges = tuple(
-        (
-            axis,
-            None
-            if view_state.axis_range_indices[axis] is None
-            else tuple(int(index) for index in view_state.axis_range_indices[axis]),
-        )
-        for axis in image_axes
-    )
-    montage_axis = getattr(session, "montage_axis", None)
-    non_display_slices = tuple(
-        (axis, int(index))
-        for axis, index in enumerate(tuple(view_state.slice_indices))
-        if axis not in image_axes and (montage_axis is None or axis != int(montage_axis))
-    )
-    return (
-        int(preview_level),
-        tuple(int(value) for value in factor_xy_for_level(demand, int(preview_level))),
-        image_axes,
-        display_ranges,
-        non_display_slices,
-    )
-
-
-def _shared_preview_candidate_tiles(session):
-    for candidate in tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ()):
-        tile_number = int(candidate.montage_index)
-        if tile_number in getattr(session, "rendered_tiles", {}):
-            continue
-        existing = getattr(session, "display_tile_payloads", {}).get(tile_number)
-        if existing is not None:
-            continue
-        yield candidate
-
-
-def _preview_tile_shape(session, demand) -> tuple[int, int]:
-    factor_x, factor_y = factor_xy_for_level(
-        demand, render_effects.preview_evaluation_level(session, demand)
-    )
-    tile_h, tile_w = (max(1, int(value)) for value in tuple(session.plan.tile_shape)[:2])
-    return (
-        max(1, int(np.ceil(tile_h / max(1, factor_y)))),
-        max(1, int(np.ceil(tile_w / max(1, factor_x)))),
-    )
-
-
-def _visible_cpu_tile_layer_backlog_pending(window, session) -> bool:
-    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    if bool(capabilities.shader_windowing):
-        return False
-    return bool(
-        getattr(session, "dirty_payloads", None)
-        or getattr(session, "pending_payload_upserts", None)
-        or getattr(session, "pending_removals", None)
-        or (session.has_pending_level_update() and session.has_stale_level_presentations())
-    )
-
-
-def _latency_feedback(window):
-    return getattr(window.win, "latency_feedback", None)
 
 
 def _interactive_active(window) -> bool:

@@ -641,68 +641,6 @@ class OperationStackDock(StandardDockWidget):
         return True
 
 
-def _cache_status_style(status):
-    if status == "Error":
-        return "QLabel { background: rgba(180, 40, 40, 55); padding: 2px 4px; border-radius: 3px; }"
-    if status in {"Cached", "Ready"}:
-        return "QLabel { background: rgba(40, 140, 80, 45); padding: 2px 4px; border-radius: 3px; }"
-    if status == "Computing":
-        return (
-            "QLabel { background: rgba(180, 140, 40, 50); padding: 2px 4px; border-radius: 3px; }"
-        )
-    return "QLabel { background: rgba(128, 128, 128, 35); padding: 2px 4px; border-radius: 3px; }"
-
-
-def _cache_status_summary(cache_status):
-    text = cache_status.status.value
-    last_eval_ms = getattr(cache_status, "last_eval_ms", None)
-    if last_eval_ms is not None:
-        text += f", {last_eval_ms:.0f} ms"
-    bytes_used = getattr(cache_status, "bytes_used", None)
-    max_bytes = getattr(cache_status, "max_bytes", None)
-    if bytes_used is not None and max_bytes:
-        text += f", {_format_nbytes(bytes_used)}/{_format_nbytes(max_bytes)}"
-    return text
-
-
-def _cache_status_tooltip(cache_status):
-    parts = [getattr(cache_status, "message", "")]
-    for label, attr in (
-        ("Entries", "entries"),
-        ("Hits", "hits"),
-        ("Misses", "misses"),
-        ("Hit rate", "hit_rate"),
-        ("Evictions", "evictions"),
-        ("Chunked renders", "chunked_evaluations"),
-        ("Degraded previews", "degraded_evaluations"),
-        ("Refused renders", "refused_evaluations"),
-        ("Cancelled renders", "cancelled_evaluations"),
-        ("Scheduler pending", "scheduler_pending"),
-        ("Scheduler running", "scheduler_running"),
-        ("Scheduler cancelled", "scheduler_cancelled"),
-        ("Scheduler stale", "scheduler_stale"),
-        ("Compressed tier", "tier_codec"),
-        ("Tier entries", "tier_entries"),
-        ("Tier recoveries", "tier_recoveries"),
-        ("Tier stores", "tier_stores"),
-        ("Tier evictions", "tier_evictions"),
-    ):
-        if hasattr(cache_status, attr) and (
-            not attr.startswith("tier_") or getattr(cache_status, "tier_engaged", False)
-        ):
-            value = getattr(cache_status, attr)
-            if attr == "hit_rate" and value is not None:
-                value = f"{100.0 * float(value):.1f}%"
-            parts.append(f"{label}: {value}")
-    if getattr(cache_status, "last_eval_ms", None) is not None:
-        parts.append(f"Last evaluation: {cache_status.last_eval_ms:.1f} ms")
-    if hasattr(cache_status, "bytes_used"):
-        parts.append(
-            f"Memory: {_format_nbytes(cache_status.bytes_used)} / {_format_nbytes(cache_status.max_bytes)}"
-        )
-    return "\n".join(part for part in parts if part)
-
-
 def _estimate_nbytes(shape, dtype):
     try:
         import numpy as np

@@ -5,8 +5,13 @@ into another stage's internals. This is the "modular chunks with well-defined
 task and state" contract:
 
     RenderIntent -> plan -> TileWork* -> materialize/reduce (kernel tasks)
-                 -> CommitBatch -> apply (GUI/GPU gateway) -> AckExpectation
+                 -> CommitBatch -> apply (GUI/GPU gateway)
                  -> TileLifecycle events
+
+ADR 0053 draws one more arrow here, ``apply -> AckExpectation``. No type ever
+sat behind it: acknowledgement identity is carried by the presentation
+generation tracker instead, and the placeholder dataclass was deleted once it
+was found to have no caller in either direction.
 
 Data only: no Qt, no numpy payload manipulation, no scheduling decisions.
 """
@@ -139,20 +144,6 @@ class CommitBatch:
         return not self.upserts and not self.releases
 
 
-@dataclass(frozen=True)
-class AckExpectation:
-    """What the backend must acknowledge before lifecycle may advance.
-
-    Identity-aware: slots are compared by emitted payload identity, so a
-    late/foreign report can never satisfy a newer commit (ADR 0051 X5b).
-    """
-
-    semantic_key: object
-    presentation_key: object
-    slot_identities: tuple = ()
-    committed_at_ns: int = 0
-
-
 @dataclass
 class PipelineCounters:
     """Deterministic counters; the only mutable state in this module."""
@@ -258,7 +249,6 @@ _RUNG_VALUES = frozenset(int(rung) for rung in Rung)
 
 
 __all__ = [
-    "AckExpectation",
     "CommitBatch",
     "LodAdmissionScope",
     "PipelineCounters",
