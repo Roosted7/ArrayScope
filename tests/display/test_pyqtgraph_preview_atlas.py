@@ -431,6 +431,88 @@ def test_compact_preview_paints_through_the_real_pyqtgraph_scene(qtbot):
     )
 
 
+def test_hide_tiles_masks_superseded_atlas_members_and_keeps_the_survivors(qtbot):
+    """The atlas is masked per tile, not dropped, and it stays one item.
+
+    Read as pixels rather than as membership: the superseded tile's own patch
+    of the scene must go back to the view background while a survivor keeps
+    painting its value, out of the SAME item.  Dropping the atlas instead
+    would satisfy the first half and fail the second, which is the whole
+    reason masking exists here.
+    """
+
+    count = 256
+    geometry = _geometry(count)
+    payloads = {tile: _preview_payload(tile) for tile in range(count)}
+    view = ImageView2D()
+    qtbot.addWidget(view)
+    view.resize(640, 520)
+    view.show()
+    qtbot.waitExposed(view)
+
+    layer = view._montage_tile_layer
+    layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 257.0),
+        rgb_already_windowed=False,
+        dirty_tiles=tuple(payloads),
+        tile_payloads=payloads,
+        tile_delta=_delta(payloads, active=range(count)),
+    )
+    view.getView().setRange(
+        xRange=(0.0, float(geometry.display_shape[1])),
+        yRange=(0.0, float(geometry.display_shape[0])),
+        padding=0.0,
+    )
+    view.graphicsView.viewport().repaint()
+
+    def sample(tile_number):
+        row, column = divmod(tile_number, 17)
+        world = QtCore.QPointF(column * 9 + 4, row * 9 + 4)
+        point = view.graphicsView.mapFromScene(view.getView().mapViewToScene(world))
+        colour = view.graphicsView.viewport().grab().toImage().pixelColor(point)
+        return (colour.red(), colour.green(), colour.blue())
+
+    def expected(tile_number):
+        value = round((tile_number + 1) * 255.0 / 257.0)
+        return (value, value, value)
+
+    def close(left, right):
+        return max(abs(a - b) for a, b in zip(left, right, strict=True)) <= 2
+
+    masked, survivor = 128, 129
+    assert close(sample(masked), expected(masked))
+    assert close(sample(survivor), expected(survivor))
+
+    item = layer._preview_atlas_item
+    hidden = layer.hide_tiles({masked})
+    view.graphicsView.viewport().repaint()
+
+    background_colour = view.graphicsView.backgroundBrush().color()
+    background = (
+        background_colour.red(),
+        background_colour.green(),
+        background_colour.blue(),
+    )
+    assert close(sample(masked), background), f"the superseded member still paints {sample(masked)}"
+    assert close(sample(survivor), expected(survivor)), (
+        f"masking took the survivor with it: {sample(survivor)}"
+    )
+    # One item, still installed, minus exactly the named member.
+    assert hidden == 1
+    assert layer._preview_atlas_item is item
+    assert item.isVisible()
+    assert (
+        sum(
+            1 for scene_item in view.getView().scene().items() if isinstance(scene_item, type(item))
+        )
+        == 1
+    )
+    assert layer.preview_atlas_active_tiles == frozenset(range(count)) - {masked}
+
+
 def test_failed_exact_upload_keeps_preview_member(qt_app, monkeypatch):
     count = 256
     owner = _Owner()

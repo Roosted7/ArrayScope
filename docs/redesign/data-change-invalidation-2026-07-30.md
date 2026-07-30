@@ -19,6 +19,9 @@ The requirement, in the user's words:
 Three parts. Two are done and measured. The third is measured and **blocked**,
 with the blocker identified precisely; it is not shipped and §5 says why.
 
+§8 is a follow-up of the same date: the one path §4 left open — PyQtGraph's
+compact preview atlas — measured, and closed by masking it per tile.
+
 ---
 
 ## 1. The seam nobody was watching: `retarget_index_window`
@@ -188,14 +191,14 @@ to 1 whole-montage republication per pan leg. The contract now takes the
 superseded tile *set*, which for the retarget is exactly the tiles that retarget
 just deferred: a camera move that supersedes nothing hides nothing.
 
-### The one place a superseded tile can still reach the screen
+### The one place a superseded tile could still reach the screen — closed
 
-PyQtGraph's compact preview atlas is a single item covering many tiles, so it
-cannot be hidden per tile. `hide_tiles` drops it only when no surviving tile
-still depends on it; when it is load-bearing it stays, and
-`_superseded_atlas_retentions` counts it. Hiding a load-bearing atlas would blank
-the bridge this seam exists to preserve, which is a worse failure than the one it
-would fix.
+PyQtGraph's compact preview atlas is a single item covering many tiles. The
+first version of `hide_tiles` dropped it only when no surviving tile still
+depended on it, and otherwise kept it drawing and counted
+`_superseded_atlas_retentions`. That was named as the one path on `cpu_item`
+where a superseded tile could still reach the screen. It is now masked per
+tile instead, and §8 records what that cost and how often it bit.
 
 ---
 
@@ -305,3 +308,122 @@ around `build_tile_presentation` that classifies each delta's removals against
 Every number here was taken on a machine whose runner banner reported 4–10 of 16
 cores in use by another checkout's test run; the counters are unaffected by that,
 the milliseconds are why §3 claims nothing.
+
+---
+
+## 8. The preview atlas, closed (2026-07-30, follow-up)
+
+§4 left one path open and named it honestly. This closes it, and the first
+result is that the hole is smaller than it reads.
+
+### How often it actually bit: never, in any settled sequence
+
+`_superseded_atlas_retentions` was never non-zero in a realistic sequence, and
+the reason is structural rather than lucky:
+
+- out-of-view payload retention is `gpu_atlas`-only
+  (`FrameController._retains_out_of_view_payloads`), so on `cpu_item`
+  `delta.active_tiles` **is** the viewport;
+- every commit already narrows the atlas to `active_tiles ∩ requested_active`
+  (`_update_direct_payload_presentation`), so an atlas member outside the
+  viewport does not survive a commit.
+
+Sampled continuously — 1 195 samples over a zoom ladder (full → half → quarter
+→ corner → full, each leg settled), four settled slice steps, and six mid-fill
+scrub rounds on a 272-source montage — the set `preview_atlas_active_tiles −
+visible_tile_numbers` was **empty at every single sample**, six `hide_tiles`
+calls landed with **no** atlas up, and the counter finished at **0**.
+
+The one state that does produce it is a camera move with **no commit** between
+it and the data change, while the atlas is still up:
+
+```
+atlas up after 5 pumps: active=23 visible=272
+after camera-only pan:  atlas_active=23
+  hide_tiles(n=244) atlas_up=True active=23 stale=10 -> retention+=1
+after data change: visible=28 atlas_oov=10 drawn_oov=10 retentions=1
+```
+
+That is a user panning or zooming a large montage while its first fill is still
+arriving and then stepping the slice — narrow, but a real interaction and not a
+contrivance, and 10 superseded tiles kept drawing.
+
+### What was built, and why that shape
+
+**Per-tile masking inside the atlas item.** Not because it was the most
+promising of the three shapes but because it turned out not to be new code:
+`_CompactPreviewAtlasItem.paint` already iterates `active_tiles` and draws each
+member's own parts, and `set_active_tiles` is the narrowing every ordinary
+commit already performs. Withdrawing the superseded members is that same
+operation, so the branch collapses from *drop-or-retain* to one line.
+
+The two alternatives were both worse for stated reasons. **Splitting the atlas**
+buys nothing the paint loop does not already give. **Dropping it whenever any
+member is superseded** was the simplest and is the wrong trade: the atlas exists
+to avoid 256+ individual items, and a data change on a large montage is exactly
+when that cannot be paid back on the path that owes the screen new pixels —
+while the retained-and-counted alternative it replaced was the one that put
+stale pixels on screen. Masking is the only shape that refuses both.
+
+An atlas masked down to nothing is hidden rather than removed, which keeps its
+pages for the way back and matches the seam's contract: hide, never remove.
+
+`_superseded_atlas_retentions` is deleted with the branch it counted.
+
+### The visible-path cost: nothing measurable, and one commit either way
+
+Interleaved in-process A/B, one process, arms alternated per pass with the order
+mirrored between passes. The control arm is main's `hide_tiles` verbatim. The
+regime is the only one where the two arms differ at all — atlas up, superseded
+out-of-view members present at the data change. Metric is first-pixel latency
+for the visible set (data change → `visible_plan_complete()`), the commits that
+ran before it, and the time inside `hide_tiles` itself.
+
+| median | run 1 (n=6/arm) | run 2 (n=8/arm) |
+|---|---:|---:|
+| first pixel, main | 192.6 ms | 179.9 ms |
+| first pixel, masked | 182.7 ms | 182.0 ms |
+| commits before first pixel, both arms | **1** | **1** |
+| `hide_tiles` ms, main | 2.098 | 2.030 |
+| `hide_tiles` ms, masked | 2.067 | 1.924 |
+
+The direction flips between runs and the ranges overlap completely, so the
+honest statement is again that **first-pixel latency is unchanged within
+noise**. The commit count is identical and exact. `hide_tiles` itself is
+dominated by the ~200 per-tile `_hide_tile` calls either way; the atlas branch
+is a set difference in both arms, and the extra `update()` only marks an already
+installed item dirty — the repaint that follows draws *fewer* `drawImage` calls
+than the one before it, so masking cannot make the paint more expensive.
+
+Both runs' banners reported 4–5 of 16 cores in use by another checkout.
+
+### Coverage
+
+- `tests/ui/test_montage_data_change_invalidation.py::test_cpu_item_preview_atlas_stops_drawing_what_a_data_change_superseded`
+  — the live path, and a pixel oracle: after the data change the camera moves
+  back onto the superseded block with no renderer call and the viewport raster
+  must be scene background. Against the unfixed code it fails with **90.1 % of
+  the viewport not background**. Its regime is load-bearing twice over — the
+  atlas needs ≥ 256 planned tiles *and* sources large enough that fitting the
+  montage demands a reduced LOD, so the file's existing 32 px grids cannot
+  reproduce it at either count. It carries its own mutant (the same block, once
+  settled on the new data, must be lit and must not match the old capture) and
+  asserts the montage completes.
+- `tests/display/test_pyqtgraph_preview_atlas.py::test_hide_tiles_masks_superseded_atlas_members_and_keeps_the_survivors`
+  — the layer contract at 256 tiles, also as pixels: the masked member's patch
+  of the real PyQtGraph scene goes to background while a survivor keeps painting
+  its value out of the same item, which is what separates masking from dropping.
+
+Both fail on their pixel assertion against main, not on bookkeeping — the
+assertion order was changed once for exactly that reason, because the first
+draft's membership check fired first and would have let a green result rest on
+something other than the screen. Five serial repetitions of the whole
+`test_montage_data_change_invalidation.py` file are clean, and `--since main`
+reaches 86 tests with none left to run.
+
+One oracle trap cleared: `_lit_fraction`, the WGPU render target's "brighter
+than black", does not carry over. PyQtGraph's scene background is a light grey
+(236, 238, 240), so it reads 1.0 for an empty viewport — the first version of
+the test failed identically with and without the fix. The PyQtGraph oracle asks
+the view for its own `backgroundBrush()` colour, which is what the Qt-raster CPU
+reference already does.

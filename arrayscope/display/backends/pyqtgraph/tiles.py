@@ -858,7 +858,6 @@ class MontageTileLayer:
         self._lookup_table = default_gray_lut()
         self._preview_atlas_item: _CompactPreviewAtlasItem | None = None
         self._preview_atlas_decline_reason = ""
-        self._superseded_atlas_retentions = 0
         self._payload_prepare_ms = 0.0
         self._prepared_uploads = prepared_uploads
         self._prepared_assembly_hits = 0
@@ -1169,12 +1168,16 @@ class MontageTileLayer:
         ``_reshow_retained_active_tiles`` — its acknowledged identity names the
         superseded data, which is exactly what that guard refuses.
 
-        The compact preview atlas is one item covering many tiles, so it
-        cannot be hidden per tile.  It is dropped only when no tile still on
-        screen depends on it; hiding a load-bearing atlas would blank the
-        bridge this seam exists to preserve.  When it is load-bearing it stays
-        and the retention is counted, because that is the one case where a
-        superseded tile can still reach the screen on this backend.
+        The compact preview atlas is one item covering many tiles, and it is
+        masked per tile rather than dropped.  ``paint`` already draws only
+        ``active_tiles`` and every commit already narrows that set
+        (``_update_direct_payload_presentation``), so withdrawing the
+        superseded members is the same operation the ordinary path performs,
+        costs one repaint of an item that is already installed, and keeps the
+        single-item batching the atlas exists for.  Dropping the whole atlas
+        instead would blank the bridge this seam exists to preserve, and pay
+        back 256+ individual items on the path that owes the screen its new
+        pixels — the one moment a large montage cannot afford it.
         """
 
         superseded = {int(tile) for tile in tiles}
@@ -1192,18 +1195,14 @@ class MontageTileLayer:
             atlas_tiles = {int(tile) for tile in atlas.active_tiles}
             stale_members = atlas_tiles & superseded
             if stale_members:
-                survivors = atlas_tiles - superseded
-                covered_directly = {
-                    index
-                    for index in survivors
-                    if (state := self._states.get(int(index))) is not None
-                    and _state_is_physically_visible(state)
-                }
-                if survivors <= covered_directly:
+                atlas.set_active_tiles(atlas_tiles - superseded)
+                hidden += len(stale_members)
+                if not atlas.active_tiles:
+                    # Hidden, not removed: an empty atlas draws nothing, and
+                    # keeping the item keeps its pages for the way back --
+                    # which is the whole difference between this seam and
+                    # invalidation.
                     atlas.setVisible(False)
-                    hidden += len(stale_members)
-                else:
-                    self._superseded_atlas_retentions += 1
         return hidden
 
     def update_presentation(
