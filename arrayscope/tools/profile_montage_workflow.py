@@ -5842,11 +5842,18 @@ def _presented_payload_value_bounds(
         if bounds is not None:
             return bounds, name
     page_backed = getattr(payload, "page_backing", None) is not None
+    predecessor_planes_stale = bool(window_stale and page_backed)
     values, plane_source = display_value_plane(
-        semantic_histogram_data=getattr(payload, "semantic_histogram_data", None),
-        histogram_data=getattr(payload, "histogram_data", None),
-        semantic_data=getattr(payload, "semantic_data", None),
-        image=None if window_stale and page_backed else getattr(payload, "image", None),
+        semantic_histogram_data=(
+            None if predecessor_planes_stale else getattr(payload, "semantic_histogram_data", None)
+        ),
+        histogram_data=(
+            None if predecessor_planes_stale else getattr(payload, "histogram_data", None)
+        ),
+        semantic_data=(
+            None if predecessor_planes_stale else getattr(payload, "semantic_data", None)
+        ),
+        image=None if predecessor_planes_stale else getattr(payload, "image", None),
         shader_mapping=getattr(payload, "shader_mapping", None),
     )
     bounds = finite_value_bounds(values)
@@ -5854,6 +5861,13 @@ def _presented_payload_value_bounds(
         source = f"stale-stats-rejected-{plane_source}-used" if window_stale else plane_source
         return bounds, source
     if window_stale and page_backed:
+        full_plane, _full_plane_source = display_value_plane(
+            image=getattr(payload, "native_residency_data", None),
+            shader_mapping=getattr(payload, "shader_mapping", None),
+        )
+        bounds = finite_value_bounds(full_plane)
+        if bounds is not None:
+            return bounds, "page-backed-rebind-full-plane-superset"
         return None, "page-backed-rebind-no-current-plane"
     if window_stale:
         return None, "stale-stats-rejected-no-current-plane"
@@ -6972,13 +6986,29 @@ def _wait_for_montage_complete(
         physical_drawn = bool(
             (not wgpu_tiled or final_drawn) and (not pyqtgraph_tiled or pyqtgraph_final_drawn)
         )
-        if (
-            fully_visible
-            and requested_grid_visible
-            and physical_drawn
-            and presentation_ready
-            and target_settled
-        ):
+        semantic_gates_ready = bool(
+            fully_visible and requested_grid_visible and presentation_ready and target_settled
+        )
+        if semantic_gates_ready and wgpu_tiled and not final_drawn:
+            # The action deadline and the backend presentation cadence are
+            # different obligations. A final commit can legitimately land
+            # within rendercanvas's last 33 ms on-demand interval; ending the
+            # phase immediately then reports a one-draw debt even though the
+            # frame is already scheduled. Drain that existing request under
+            # the profiler's established physical-draw target. The action's
+            # full elapsed time is still recorded (and remains an R5/perf red
+            # when slow); this does not retry, request, or synthesize a draw.
+            _wait_for_tile_presentation_draw(
+                win,
+                app,
+                QtCore,
+                timeout_s=min(0.5, INTERACTION_SETTLE_HARD_LIMIT_S),
+                target_s=min(0.5, INTERACTION_SETTLE_HARD_LIMIT_S),
+            )
+            current_request_count = _tile_presentation_request_count(win)
+            final_drawn = _tile_presentation_draw_count(win) >= int(current_request_count)
+            physical_drawn = bool(final_drawn and (not pyqtgraph_tiled or pyqtgraph_final_drawn))
+        if semantic_gates_ready and physical_drawn:
             if (
                 first_visible_levels_state is None
                 and predecessor_semantic_key is not None
@@ -7234,6 +7264,15 @@ def _wait_for_montage_complete(
         f"gpu_pages={presentation_diagnostics.get('tile_atlas_pages', ())!r} "
         f"overlays={_montage_overlay_count(win)} draws={_backend_draw_count(win)} "
         f"tile_draw={_tile_presentation_draw_count(win)}/{_tile_presentation_request_count(win)} "
+        "last_tile_draw_request="
+        f"{presentation_diagnostics.get('last_presentation_request', {})!r} "
+        f"last_tile_draw_request_age_ms={presentation_diagnostics.get('last_presentation_request_age_ms', 0.0):.3f} "
+        "draw_request_span="
+        f"{presentation_diagnostics.get('last_draw_start_request_count', 0)}/"
+        f"{presentation_diagnostics.get('last_draw_end_request_count', 0)} "
+        "canvas_scheduler="
+        f"{presentation_diagnostics.get('canvas_scheduler_draw_requested', False)}/"
+        f"{presentation_diagnostics.get('canvas_scheduler_waiting_for_present', False)} "
         f"level_pending={final_level_state.get('pending', False)} "
         f"level_stale={final_level_state.get('stale_tiles', 0)} "
         f"level_values={final_level_state.get('active_level_value_count', 0)} "

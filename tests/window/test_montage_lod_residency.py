@@ -7011,6 +7011,15 @@ def test_deferred_stage_plan_applies_after_unrelated_render_generation_advance(m
         _is_current_render_generation=lambda generation: False,
         retarget_frame_pipeline=lambda current: setattr(current, "_test_retargeted", True),
     )
+    renderer._frame_pipeline_for_session = lambda current: SimpleNamespace(
+        effects=SimpleNamespace(
+            _needs_governed_crop_local_subset_rebind=lambda scope: False,
+            _seed_resident_crop_rebinds_governed=lambda scope: False,
+        ),
+        close=lambda: None,
+    )
+    renderer._montage_render_intent = lambda current: object()
+    renderer._lod_admission_scope = lambda current, intent: object()
 
     assert montage_commit.submit_deferred_stage_fan_in_plan(
         renderer, session, tuple(session.plan.tiles)

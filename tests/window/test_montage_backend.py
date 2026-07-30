@@ -2138,6 +2138,73 @@ def test_crop_rebind_arms_only_the_required_same_transaction_clamp(
     assert [row[0] for row in published] == ([expected_levels] if expected_armed else [])
 
 
+def test_page_backed_crop_rebind_arms_from_complete_native_plane():
+    """An unsampled current-window extremum is covered before the rebound draws."""
+
+    from arrayscope.core.window_levels import LevelSource, LevelSourceRank
+    from arrayscope.display.model.montage_levels import LevelEvidenceQuality
+    from arrayscope.window import frame_effects
+    from arrayscope.window.frame_session import (
+        FrameSession,
+        _rebind_current_plane_value_bounds,
+    )
+
+    previous = SimpleNamespace(
+        shader_mapping=None,
+        page_backing=object(),
+        native_residency_data=np.asarray(
+            [[2.0, 8.0], [-5.0, 20.0]],
+            dtype=np.float32,
+        ),
+    )
+    bounds = _rebind_current_plane_value_bounds(previous, {})
+    assert bounds == (-5.0, 20.0)
+    assert (
+        FrameSession._rebind_reslice_planes(
+            None,
+            SimpleNamespace(semantic_data=None, native_residency_data=None),
+            None,
+            None,
+        )
+        is None
+    ), "a page-backed binding without exhaustive evidence must be withheld"
+
+    payload = SimpleNamespace(
+        source_index=7,
+        quality="preview",
+        lod=SimpleNamespace(level=3),
+        level_evidence_window_stale=True,
+        rebind_current_value_bounds=bounds,
+    )
+    source = LevelSource(
+        levels=(2.0, 8.0),
+        histogram_range=(2.0, 8.0),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        source_count=1,
+        expected_count=1,
+        semantic_key=("levels", "page-backed-crop"),
+        evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+    )
+    published = []
+    session = SimpleNamespace(
+        shader_display=True,
+        session_id=5,
+        applied_level_source=source,
+        lifecycle=SimpleNamespace(
+            presented_tiles=set(),
+            current_presentable_payload=lambda tile: payload if tile == 4 else None,
+        ),
+        display_tile_payloads={4: payload},
+        begin_level_presentation_update=lambda levels, *, source: published.append(
+            (levels, source)
+        ),
+    )
+
+    assert frame_effects._arm_resident_crop_rebind_level_clamp(session, (4,))
+    assert session.applied_level_source.levels == (-5.0, 20.0)
+    assert published[0][0] == (-5.0, 20.0)
+
+
 def test_shader_commit_holds_the_presented_clamp_then_releases_it():
     """The release edge is what bounds the clamp; without it the window stays wide.
 

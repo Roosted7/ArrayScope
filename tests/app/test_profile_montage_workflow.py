@@ -1873,9 +1873,9 @@ def test_r3_rejects_only_stale_rebind_evidence_and_uses_current_plane():
         level_evidence_window_stale=True,
         level_stats=payload.level_stats,
         level_data=payload.level_data,
-        semantic_data=None,
-        semantic_histogram_data=None,
-        histogram_data=None,
+        semantic_data=np.asarray([[3.0, 4.0]], dtype=np.float32),
+        semantic_histogram_data=np.asarray([3.0, 4.0], dtype=np.float32),
+        histogram_data=np.asarray([3.0, 4.0], dtype=np.float32),
         image=np.asarray([[3.0, 4.0]], dtype=np.float32),
         page_backing=object(),
         native_residency_data=None,
@@ -1884,6 +1884,15 @@ def test_r3_rejects_only_stale_rebind_evidence_and_uses_current_plane():
     assert _presented_payload_value_bounds(page_backed) == (
         None,
         "page-backed-rebind-no-current-plane",
+    )
+
+    page_backed.native_residency_data = np.asarray(
+        [[-5.0, 4.0], [7.0, 20.0]],
+        dtype=np.float32,
+    )
+    assert _presented_payload_value_bounds(page_backed) == (
+        (-5.0, 20.0),
+        "page-backed-rebind-full-plane-superset",
     )
 
 
@@ -4105,10 +4114,10 @@ def test_profile_timing_detects_immediate_level_work():
     assert _timing_has_level_work(None) is False
 
 
-def test_profile_montage_completion_waits_for_fully_visible_wgpu_draw():
+def test_profile_montage_completion_drains_final_scheduled_wgpu_draw(monkeypatch):
+    import arrayscope.tools.profile_montage_workflow as workflow
     from arrayscope.display.model.presentation_generation import PresentationGenerationTracker
     from arrayscope.operations.stage_fanin import StageFanInState
-    from arrayscope.tools.profile_montage_workflow import _wait_for_montage_complete
 
     class FakeQtCore:
         class QEventLoop:
@@ -4149,7 +4158,7 @@ def test_profile_montage_completion_waits_for_fully_visible_wgpu_draw():
         def presentation_diagnostics(self):
             return dict(self.diagnostics)
 
-    target_state = {"settled": False}
+    target_state = {"settled": True}
 
     class FakeApp:
         def __init__(self, image_view):
@@ -4159,11 +4168,6 @@ def test_profile_montage_completion_waits_for_fully_visible_wgpu_draw():
         def processEvents(self, *_args):
             self.calls += 1
             self.image_view.diagnostics["draw_count"] = self.calls
-            if self.calls >= 2:
-                self.image_view.diagnostics["tile_presentation_draw_count"] = 4
-                self.image_view.diagnostics["tile_presentation_draw_pending"] = False
-            if self.calls >= 3:
-                target_state["settled"] = True
 
     image_view = FakeImageView()
     session = SimpleNamespace(
@@ -4187,8 +4191,16 @@ def test_profile_montage_completion_waits_for_fully_visible_wgpu_draw():
     session.has_pending_level_update = lambda: False
     win = SimpleNamespace(img_view=image_view, _frame_session=session)
     app = FakeApp(image_view)
+    drain_calls = []
 
-    result = _wait_for_montage_complete(
+    def drain_final_draw(*_args, **kwargs):
+        drain_calls.append(kwargs)
+        image_view.diagnostics["tile_presentation_draw_count"] = 4
+        image_view.diagnostics["tile_presentation_draw_pending"] = False
+
+    monkeypatch.setattr(workflow, "_wait_for_tile_presentation_draw", drain_final_draw)
+
+    result = workflow._wait_for_montage_complete(
         app,
         FakeQtCore,
         win,
@@ -4197,7 +4209,7 @@ def test_profile_montage_completion_waits_for_fully_visible_wgpu_draw():
         draw_start=0,
     )
 
-    assert app.calls >= 3
+    assert drain_calls == [{"timeout_s": 0.5, "target_s": 0.5}]
     assert result["active_presented_tile_count"] == 2
     assert result["active_planned_tile_count"] == 2
     assert result["fully_visible_ms"] is not None

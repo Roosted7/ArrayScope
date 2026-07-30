@@ -1366,6 +1366,13 @@ class FrameSession:
         """
 
         if getattr(previous, "semantic_data", None) is None:
+            # A page-backed wrapper can shift its binding without a current
+            # crop-local CPU plane only when it also carries the complete
+            # native plane that established source-anchored residency. Its
+            # mapped full-plane bounds are a proven R3 superset. Without that
+            # proof, decline and let ordinary evaluation produce the window.
+            if getattr(previous, "native_residency_data", None) is None:
+                return None
             return {}
         if canonical is None:
             return None
@@ -5334,6 +5341,11 @@ def _rebind_current_plane_value_bounds(
         image=planes.get("image"),
         shader_mapping=getattr(previous, "shader_mapping", None),
     )
+    if not np.asarray(values).size and getattr(previous, "page_backing", None) is not None:
+        values, _source = display_value_plane(
+            image=getattr(previous, "native_residency_data", None),
+            shader_mapping=getattr(previous, "shader_mapping", None),
+        )
     if work is not None:
         work["bytes"] = int(np.asarray(values).nbytes)
     return finite_value_bounds(values)

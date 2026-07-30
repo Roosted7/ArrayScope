@@ -324,7 +324,8 @@ class DisplayTilePayload:
     level_evidence_window_stale: bool = False
     # Exact CPU-plane rebinds can prove the values of the newly sliced window
     # even though their carried level_stats/level_data are predecessor-owned.
-    # Computed once at the rebind seam; page-backed rebinds leave it absent.
+    # A page-backed rebind may instead carry the mapped complete-native-plane
+    # range as a proven superset. Computed once at the rebind seam.
     rebind_current_value_bounds: tuple[float, float] | None = None
 
     def __post_init__(self) -> None:

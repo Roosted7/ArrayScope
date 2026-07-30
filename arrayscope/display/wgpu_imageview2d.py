@@ -834,11 +834,25 @@ class WgpuImageView2D(ImageViewShell):
 
     # ---- draw-ack discipline -------------------------------------------------
 
-    def _request_wgpu_canvas_draw(self, *, count_presentation: bool = False) -> None:
+    def _request_wgpu_canvas_draw(
+        self,
+        *,
+        count_presentation: bool = False,
+        presentation_reason: str = "",
+    ) -> None:
         if count_presentation:
             self._wgpu_tile_presentation_request_count = (
                 int(getattr(self, "_wgpu_tile_presentation_request_count", 0) or 0) + 1
             )
+            self._wgpu_last_presentation_request = {
+                "count": int(self._wgpu_tile_presentation_request_count),
+                "reason": str(presentation_reason or "unspecified"),
+                "draw_count_at_request": int(
+                    getattr(self, "_wgpu_tile_presentation_draw_count", 0) or 0
+                ),
+                "draw_callback_active": bool(getattr(self, "_wgpu_draw_callback_active", False)),
+                "at_ns": int(perf_counter_ns()),
+            }
         canvas = getattr(self, "_wgpu_canvas", None)
         if canvas is None:
             return
@@ -865,12 +879,19 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_tile_presentation_draw_count = int(
             getattr(self, "_wgpu_tile_presentation_request_count", 0) or 0
         )
+        self._wgpu_draw_callback_active = True
+        self._wgpu_last_draw_start_request_count = int(self._wgpu_tile_presentation_draw_count)
         try:
             self._present_wgpu_frame_to_canvas()
             self._wgpu_last_draw_error = ""
             self._record_wgpu_physical_tile_draw()
         except Exception as exc:  # keep the Qt paint loop alive; surface in diagnostics
             self._wgpu_last_draw_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            self._wgpu_draw_callback_active = False
+            self._wgpu_last_draw_end_request_count = int(
+                getattr(self, "_wgpu_tile_presentation_request_count", 0) or 0
+            )
         # Timer category: anti-hang fallback. A presentationDrawn listener may
         # immediately commit the next
         # band; emitting from inside the draw callback can drop its canvas
@@ -2464,7 +2485,10 @@ class WgpuImageView2D(ImageViewShell):
         )
         self._record_tile_layer_stats(stats)
         self._record_upload_timing("tile_layer_upload_ms", upload_ms)
-        self._request_wgpu_canvas_draw(count_presentation=True)
+        self._request_wgpu_canvas_draw(
+            count_presentation=True,
+            presentation_reason="tile-commit",
+        )
         return stats
 
     def _wgpu_commit_plan(self, payloads, source_mapping, rgb_already_windowed):
@@ -3165,7 +3189,10 @@ class WgpuImageView2D(ImageViewShell):
             upload_ms=upload_ms,
         )
         self._record_tile_layer_stats(stats)
-        self._request_wgpu_canvas_draw(count_presentation=True)
+        self._request_wgpu_canvas_draw(
+            count_presentation=True,
+            presentation_reason="levels",
+        )
         handler = getattr(self, "_level_presentation_change_handler", None)
         if callable(handler):
             handler((level_lo, level_hi), final=bool(final))
@@ -3187,7 +3214,10 @@ class WgpuImageView2D(ImageViewShell):
         )
         if self._montage_display_mode == "wgpu_tile_layer":
             self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
-            self._request_wgpu_canvas_draw(count_presentation=True)
+            self._request_wgpu_canvas_draw(
+                count_presentation=True,
+                presentation_reason="lut",
+            )
 
     # ---- shader display aids (Stage A + C1) -----------------------------------
 
@@ -3238,7 +3268,10 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_mapping_state = replace(self._wgpu_mapping_state, **{name: enabled})
         if self._wgpu_executor is not None and self._montage_display_mode == "wgpu_tile_layer":
             self._submit_wgpu((SetDisplayMapping(self._wgpu_mapping_state),))
-            self._request_wgpu_canvas_draw(count_presentation=True)
+            self._request_wgpu_canvas_draw(
+                count_presentation=True,
+                presentation_reason=f"display-aid:{name}",
+            )
 
     # ---- camera / geometry ----------------------------------------------------
 
@@ -3341,6 +3374,8 @@ class WgpuImageView2D(ImageViewShell):
 
     def wgpuPresentationDiagnostics(self) -> dict[str, object]:
         executor = self._wgpu_executor
+        canvas = getattr(self, "_wgpu_canvas", None)
+        scheduler = getattr(canvas, "_BaseRenderCanvas__scheduler", None)
         adapter = getattr(getattr(executor, "device", None), "adapter", None)
         adapter_info = dict(getattr(adapter, "info", {}) or {})
         drawn_tiles = tuple(self.tileTruthPhysicalRows())
@@ -3364,6 +3399,31 @@ class WgpuImageView2D(ImageViewShell):
                 getattr(self, "_wgpu_canvas_update_request_count", 0) or 0
             ),
             "canvas_update_pending": bool(getattr(self, "_wgpu_canvas_update_pending", False)),
+            "last_presentation_request": dict(
+                getattr(self, "_wgpu_last_presentation_request", {}) or {}
+            ),
+            "last_presentation_request_age_ms": (
+                0.0
+                if not getattr(self, "_wgpu_last_presentation_request", None)
+                else max(
+                    0.0,
+                    (
+                        perf_counter_ns()
+                        - int(self._wgpu_last_presentation_request.get("at_ns", 0) or 0)
+                    )
+                    / 1_000_000.0,
+                )
+            ),
+            "last_draw_start_request_count": int(
+                getattr(self, "_wgpu_last_draw_start_request_count", 0) or 0
+            ),
+            "last_draw_end_request_count": int(
+                getattr(self, "_wgpu_last_draw_end_request_count", 0) or 0
+            ),
+            "canvas_scheduler_draw_requested": bool(getattr(scheduler, "_draw_requested", False)),
+            "canvas_scheduler_waiting_for_present": bool(
+                getattr(scheduler, "_ready_for_present", None) is not None
+            ),
             "physically_visible_tile_count": len(drawn_tiles),
             "presented_tile_count": len(committed_tiles),
             "presented_tiles": committed_tiles,
