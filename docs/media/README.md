@@ -69,7 +69,9 @@ interaction needs closer inspection. `--strict` fails when a companion format
 is missing or when encoded durations/aspect ratios disagree. Those structural
 checks complement, but do not replace, reviewing cursor alignment, click/menu
 visibility, captions, readable scale, and whether each promised feature is
-actually visible.
+actually visible. The dated
+[walkthrough audit](../reviews/2026-07-30-readme-walkthrough-audit.md) records
+the baseline findings, README feature coverage, and bounded acceptance order.
 
 ## Staying maintainable
 
