@@ -963,6 +963,235 @@ def _cap_explicit_workers(config) -> None:
     )
 
 
+# --------------------------------------------------------------------------- #
+# The run with nothing to do
+# --------------------------------------------------------------------------- #
+
+#: Options that asked to *see* collection. The fast path answers a question
+#: about what would run, not about what exists, so none of them may take it.
+_INSPECTION_OPTIONS = (
+    "collectonly",
+    "showfixtures",
+    "show_fixtures_per_test",
+    "markers",
+    "help",
+    "version",
+)
+
+
+def noop_fast_path_refusal(
+    *,
+    inspecting: bool,
+    active: bool,
+    selects: bool,
+    since: bool,
+    whole_suite: bool,
+    readable_map: bool,
+    workload_files: int | None,
+    live_reading: bool,
+) -> str:
+    """Why this run has to build a session, or ``""`` when it provably need not.
+
+    Every clause is a way a run can still have work in it, and one of them —
+    ``workload_files`` — is the one that could hurt. It is
+    ``_selection_workload``'s own count, deliberately *not* re-derived here,
+    because it already unions the four things that mean "something must run":
+    affected tests, the reds this checkout broke, the inherited reds when
+    ``--rerun-reds`` asked for them, and **test files the map has never seen**.
+
+    That last one is the trap. A brand-new ``tests/**/test_*.py`` has no map
+    entry, so nothing marks it affected and nothing marks it changed; a fast
+    path that only asked "is anything affected?" would report the file as fully
+    tested having never run it. That is the scope-erosion failure class, the
+    worst this repository has (``docs/testing/test-selection.md``), and it is why
+    the count rather than the affected set is the discriminator.
+
+    Written as a *reason* rather than a boolean so each clause can be seen
+    firing, and so the one that is hard to reason about is not a silent ``and``
+    in the middle of an expression.
+    """
+
+    if inspecting:
+        return "the run asked to see collection"
+    if not active:
+        return "selection is not active, so the map has nothing to say"
+    if not selects:
+        return "a selector (-k, -m, --lf, a node id) decides this run, not the map"
+    if since:
+        return "--since widens the run by an amount only collection can know"
+    if not whole_suite:
+        return "a scoped run still cleans up the map inside its own scope"
+    if not readable_map:
+        return "the map is missing, unreadable, or holds nothing for this environment"
+    if workload_files is None:
+        return "the workload could not be priced"
+    if workload_files:
+        return f"{workload_files} test file(s) have work in them"
+    if not live_reading:
+        return "the map reading was not kept, so there is nothing to report from"
+    return ""
+
+
+def pytest_cmdline_main(config):
+    """Skip building a session for a run that provably has nothing to run.
+
+    A no-op ``pytest`` is 100% fixed cost — measured, there is no test work in it
+    at all — and two thirds of that cost is pytest constructing a session,
+    importing 266 test files' worth of conftests and letting testmon's
+    ``pytest_ignore_collect`` discard every one of them. Answering from the map
+    instead measured **1.25 s → 0.55 s** on this worktree. For scale,
+    ``tools/test_selection.py`` — a separate process answering the same question
+    without pytest at all — costs 0.35 s, so this lands close to the floor.
+
+    Placed in ``pytest_cmdline_main`` and deliberately *not* ``tryfirst``: xdist
+    sizes its worker pool in a ``tryfirst`` implementation of this same hook, and
+    that is the one map read this decision is made from. Running after it means
+    the read is already paid for.
+
+    What a normal run does here that this one does not, and why each is safe:
+
+    * **testmon's ``sync_db_fs_tests``** garbage-collects the map. Its retain set
+      on a zero-affected whole-suite run is every recorded test, so it deletes
+      nothing. (A *deleted* test file cannot hide behind this either: its
+      fingerprint stops matching, it is reported affected, and the fast path does
+      not fire.)
+    * **``db.finish_execution``** updates statistics and vacuums orphaned
+      fingerprint rows. Nothing was written, so nothing was orphaned.
+    * **The red ledger** is asked to forget tests that were not collected; with
+      nothing collected it drops nothing, and ``save()`` no-ops on an unchanged
+      set.
+    * **``protect_map_outside_the_scope``** returns 0 for a whole-suite run.
+
+    What it does **not** skip is the coverage measure and the erosion canary.
+    Both cost ~0.07 s and both are load-bearing on exactly this run: an edit that
+    affects no test can still delete or rename a covered function, and the
+    coverage line is the only thing that says so.
+
+    The two plugin-disable refusals run here too. They normally live in
+    ``pytest_configure``, which this path never reaches, and one of them
+    (``-p no:cacheprovider``) is the difference between a sentence and an
+    ``INTERNALERROR`` — a bare ``pytest`` carrying it must not quietly exit 0.
+    The other two refusals are unreachable rather than skipped: the bypass gate
+    fires on ``--testmon-noselect`` or on selection being off, and this path
+    requires both to be false; and the serial gate prices what an explicit
+    ``-n 0`` would *execute*, which here is zero seconds of a priceable map, so
+    it permits.
+    """
+
+    if _XDIST_WORKER:
+        return None
+    _refuse_harmful_plugin_disables(config)
+    _refuse_pointless_flags(config)
+
+    options = vars(config.option)
+    inspecting = any(options.get(name) for name in _INSPECTION_OPTIONS)
+    active = testmon_policy.decide(config).active
+    peek = _map_peek(config) if active and not inspecting else None
+    workload = _selection_workload(config) if peek is not None else None
+    reason = noop_fast_path_refusal(
+        inspecting=inspecting,
+        active=active,
+        selects=active and testmon_policy.selects(config),
+        since=config.getoption("since", None) is not None,
+        whole_suite=testmon_policy.collected_the_whole_suite(config),
+        readable_map=peek is not None and not peek.empty,
+        workload_files=None if workload is None else workload[0],
+        live_reading=getattr(peek, "data", None) is not None,
+    )
+    if reason:
+        return None
+    return _report_nothing_to_run(config, peek)
+
+
+class _FastPathReporter:
+    """The slice of ``TerminalReporter`` the two summary writers actually use.
+
+    ``stats`` is empty and stays empty, which is not a stub: it is the truth this
+    run is reporting, and ``tests_executed`` reading zero from it is what keeps
+    the coverage *drift* line — a statement about damage a run did — off a run
+    that did nothing.
+    """
+
+    def __init__(self, writer):
+        self._writer = writer
+        self.stats: dict = {}
+
+    def write_line(self, line, **markup):
+        self._writer.line(line, **markup)
+
+
+def _report_nothing_to_run(config, peek) -> int:
+    """Print what the full path prints for this run, and return its exit code.
+
+    The exit code is the measured one: a no-op selected run exits 0 today, and
+    a fast path that exited 5 (``NO_TESTS_COLLECTED``) would break every script
+    that treats a clean loop as success.
+    """
+
+    from _pytest.config import create_terminal_writer
+
+    config.arrayscope_load_start = load_report.LoadWindow.sample()
+    config.arrayscope_started = monotonic()
+    config.arrayscope_selection = testmon_policy.decide(config)
+    # The reading the gates already took, so the coverage and erosion reports
+    # below read the same object testmon's own configure would have handed them.
+    config.testmon_data = peek.data
+
+    writer = create_terminal_writer(config)
+    reporter = _FastPathReporter(writer)
+    writer.sep("=", "test session starts", bold=True)
+    for line in _fast_path_header(config, peek):
+        writer.line(line)
+    writer.line("")
+    writer.line("collected 0 items")
+    writer.line("")
+
+    # Same order as ``pytest_terminal_summary``, so the two paths read alike.
+    # ``_report_gate_run_cost`` is the one omission and it is unreachable here:
+    # this path requires selection to be active *and* selecting, which is the
+    # negation of what makes a run a bypass.
+    busy = load_report.closing_line(config.arrayscope_load_start, load_report.LoadWindow.sample())
+    if busy:
+        writer.line(busy, bold=True, yellow=True)
+    _report_map_erosion(reporter, config)
+    _report_function_coverage(reporter, config)
+    for line in unaffected_summary(0, peek.mapped_tests, peek.mapped_tests, 0.0, since=None):
+        writer.line(line, bold=True)
+    inherited = peek.forced_tests
+    if inherited and not testmon_policy.rerun_known_red_tests(config):
+        writer.line(
+            f"test selection: {len(inherited)} inherited reds not re-run; "
+            "`--rerun-reds` runs them.",
+            bold=True,
+            yellow=True,
+        )
+    elapsed = monotonic() - config.arrayscope_started
+    writer.sep("=", f"no tests ran in {elapsed:.2f}s", bold=True)
+    return 0
+
+
+def _fast_path_header(config, peek) -> list[str]:
+    """The header lines a run with nothing to do can still honestly print.
+
+    Everything conditioned on collection is gone, and everything that describes
+    *this tree against the map* stays — which is the whole content of the run.
+    """
+
+    lines = []
+    busy = load_report.opening_line(config.arrayscope_load_start)
+    if busy:
+        lines.append(busy)
+    donor = getattr(config, "arrayscope_selection_seed", None)
+    if donor:
+        lines.append(f"test selection: seeded this checkout's map from {donor}")
+    lines.append(selection_header_line(config.arrayscope_selection.reason, 0, peek.mapped_tests))
+    notice = harness_self_edit_notice(_harness_files_changed(config))
+    if notice:
+        lines.append(notice)
+    lines.append(f"rootdir: {config.rootdir}")
+    return lines
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config):
     """Turn change-selection on by default, before testmon reads its options.
@@ -1238,18 +1467,31 @@ def pytest_report_header(config):
     if donor:
         lines.append(f"test selection: seeded this checkout's map from {donor}")
     data = getattr(config, "testmon_data", None)
-    mapped = len(getattr(data, "all_tests", ()) or ())
-    if not mapped:
-        lines.append("test selection: on, but nothing is mapped yet — this run records the map")
-    else:
-        affected = len(getattr(data, "unstable_test_names", ()) or ())
-        lines.append(
-            f"test selection: on ({decision.reason}) — {affected} of {mapped} mapped tests affected"
+    lines.append(
+        selection_header_line(
+            decision.reason,
+            len(getattr(data, "unstable_test_names", ()) or ()),
+            len(getattr(data, "all_tests", ()) or ()),
         )
+    )
     notice = harness_self_edit_notice(_harness_files_changed(config))
     if notice:
         lines.append(notice)
     return lines
+
+
+def selection_header_line(reason: str, affected: int, mapped: int) -> str:
+    """The one line every run opens with about the size of its selection.
+
+    Shared with the no-op fast path (:func:`pytest_cmdline_main`), which prints
+    its own header because it never builds a session. Two spellings of this
+    sentence would drift, and it is the line an agent reads to decide whether
+    the run it is about to get is the run it asked for.
+    """
+
+    if not mapped:
+        return "test selection: on, but nothing is mapped yet — this run records the map"
+    return f"test selection: on ({reason}) — {affected} of {mapped} mapped tests affected"
 
 
 #: Editing either of these makes selection's own answer suspect, which is a
