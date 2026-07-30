@@ -84,6 +84,16 @@ from arrayscope.render.lod import (
     viewport_identity as _viewport_identity,
 )
 from arrayscope.render.progressive_scheduling import ProgressiveSchedulingPolicy
+from arrayscope.window.montage_payload_cache import payload_compatible_with_tile
+
+#: Share of ``tile_residency_budget_bytes`` an out-of-view display-payload
+#: retention set may hold.  Retention keeps CPU-side payload wrappers (and the
+#: numpy planes they reference) alive past the viewport, so it needs its own
+#: stated ceiling; the GPU pages those payloads name are budgeted separately by
+#: the executor.  Half leaves the visible round the larger share of the same
+#: memory policy while still covering several screens of pan on a montage whose
+#: whole visible set fits the budget.
+RETAINED_OUT_OF_VIEW_BUDGET_SHARE = 0.5
 
 
 @dataclass(frozen=True)
@@ -770,6 +780,28 @@ class FrameSession:
     dirty_payloads: OrderedDict[int, None] = field(default_factory=OrderedDict)
     pending_payload_upserts: OrderedDict[int, None] = field(default_factory=OrderedDict)
     pending_removals: set[int] = field(default_factory=set)
+    # Whether a display payload whose tile left the viewport keeps its
+    # presentation slot instead of being dropped and physically removed.  Only
+    # a persistent GPU-atlas backend sets this: there the pages the payload
+    # names stay resident anyway (``_ensure_free_pool_layer`` is the only
+    # eviction route), so dropping the payload threw away nothing but the
+    # binding that referenced them — and cost a whole-montage republication to
+    # rebuild on the way back.  A CPU-item backend keeps real per-tile widgets
+    # and has its own residency policy, so it stays false.
+    retain_out_of_view_payloads: bool = False
+    # ``tile -> (departure_stamp, payload_nbytes)`` for tiles retained past the
+    # viewport.  Insertion order is departure order, and eviction is
+    # oldest-departure-first: the tile that left longest ago is the one least
+    # likely to be panned back onto.  ``retained_out_of_view_bytes`` is the
+    # running sum of the second element; it is maintained incrementally because
+    # ``DisplayTilePayload.nbytes`` walks five arrays and re-deriving the total
+    # every commit would put an O(retention) cost back on the commit path.
+    retained_out_of_view: OrderedDict[int, tuple[int, int]] = field(default_factory=OrderedDict)
+    retained_out_of_view_bytes: int = 0
+    retained_out_of_view_admitted: int = 0
+    retained_out_of_view_evictions: int = 0
+    retained_out_of_view_returns: int = 0
+    _retention_departure_stamp: int = 0
     visible_tile_numbers: frozenset[int] = field(default_factory=frozenset)
     level_generation: PresentationGenerationTracker = field(
         default_factory=PresentationGenerationTracker
@@ -3688,6 +3720,217 @@ class FrameSession:
         )
         return previous_state.apply_delta(delta), delta
 
+    # -- out-of-view display-payload retention (gpu_atlas only) -------------
+
+    @property
+    def retained_out_of_view_budget_bytes(self) -> int:
+        """Ceiling on retained out-of-view payload bytes.
+
+        Zero disables retention.  A session with no memory policy applied has
+        no residency budget yet, and inventing one here would let a headless or
+        half-built session retain without a stated bound.
+        """
+
+        budget = int(getattr(self, "tile_residency_budget_bytes", 0) or 0)
+        if budget <= 0:
+            return 0
+        return int(budget * RETAINED_OUT_OF_VIEW_BUDGET_SHARE)
+
+    def _drop_display_payload(self, tile_number: int) -> None:
+        """Remove one tile's presentation slot and queue its physical removal."""
+
+        index = int(tile_number)
+        self._forget_out_of_view_retention(index)
+        self.display_tile_payloads.pop(index, None)
+        self.pending_removals.add(index)
+        self.dirty_payloads.pop(index, None)
+        self.pending_payload_upserts.pop(index, None)
+        self.level_generation.forget_tile(index)
+
+    def _forget_out_of_view_retention(self, tile_number: int) -> bool:
+        """Drop retention bookkeeping for one tile; return whether it was held."""
+
+        entry = self.retained_out_of_view.pop(int(tile_number), None)
+        if entry is None:
+            return False
+        self.retained_out_of_view_bytes = max(
+            0, int(self.retained_out_of_view_bytes) - int(entry[1])
+        )
+        return True
+
+    def _may_retain_out_of_view(
+        self,
+        tile_number: int,
+        payload,
+        *,
+        plan_tiles_by_number,
+        backend_identities,
+    ) -> bool:
+        """Whether an out-of-view payload keeps its presentation slot.
+
+        The predicate is deliberately narrow, because a retained tile is a tile
+        this commit does no work for.  It holds only when the backend is drawing
+        EXACTLY the payload the session still holds:
+
+        * ``backend_identities[tile] == tile_ack_identity(payload)`` is the
+          physical half.  It is also what keeps retention out of the identity
+          repair pass in ``build_tile_presentation`` (a matching identity takes
+          that pass's early continue), so retention cannot turn into a removal
+          that reads as a flat measurement, and cannot enqueue a replacement
+          upsert that would compete with visible work.
+        * the semantic half is the existing answer to "a quick pan must never
+          reveal stale pixels", reused rather than reinvented: the plan and the
+          lifecycle target both name the payload's source index, the lifecycle
+          still holds it in ``presentable_payloads`` (``retarget`` prunes that
+          map when a slot is reused for another source, which is the same
+          evidence ``may_remove_visible`` reads), and
+          ``payload_compatible_with_tile`` still accepts its
+          ``semantic_generation`` (ADR 0050 / montage_payload_cache).
+
+        Note what is deliberately NOT required: target quality.  A retained
+        coarse tile is legal to keep showing (R2's free-reuse rung); demanding
+        ``payload_is_current`` here would refuse every preview tile, which on a
+        large montage is most of the out-of-view set.
+        """
+
+        if not self.retain_out_of_view_payloads or payload is None:
+            return False
+        index = int(tile_number)
+        if index in self.skipped_tiles:
+            return False
+        tile = dict(plan_tiles_by_number or {}).get(index)
+        if tile is None:
+            return False
+        source_index = int(getattr(tile, "source_index", -2))
+        if int(getattr(payload, "source_index", -1)) != source_index:
+            return False
+        if backend_identities.get(index) != tile_ack_identity(payload):
+            return False
+        record = self.lifecycle.peek(index)
+        if record is None or record.target is None:
+            return False
+        if int(record.target.source_index) != source_index:
+            return False
+        if getattr(payload, "source_id", None) not in record.presentable_payloads:
+            return False
+        return bool(
+            payload_compatible_with_tile(
+                payload,
+                getattr(tile, "view_state", None),
+                shader_display=bool(getattr(self, "shader_display", False)),
+            )
+        )
+
+    def _payload_retention_bytes(self, payload) -> int:
+        nbytes = getattr(payload, "nbytes", 0)
+        nbytes = nbytes() if callable(nbytes) else nbytes
+        try:
+            return max(0, int(nbytes))
+        except (TypeError, ValueError):
+            return 0
+
+    def retain_out_of_view_presentation_scope(
+        self,
+        active: tuple[int, ...],
+        *,
+        plan_tiles_by_number,
+        backend_identities,
+        removals=(),
+    ) -> tuple[int, ...]:
+        """Widen the presentation scope with retainable out-of-view tiles.
+
+        This is the whole change, and it is deliberately the LAST thing a build
+        does.  ``active_tiles`` is what a persistent backend keeps drawn
+        (``TilePresentationState.active_payloads``); on WGPU a tile missing from
+        it disappears from ``_wgpu_committed["tiles"]`` whether or not a removal
+        was emitted, and its absence also breaks
+        ``previous_commit["tiles"] <= payloads``, which is the precondition the
+        executor tests before applying a delta instead of republishing the whole
+        montage.  So a camera move that changed no data still paid a full
+        republication just to put the same pixels back.
+
+        Nothing else widens: not ``planned``, not the lifecycle work scope, not
+        the rearm/upsert/priority passes, not the level-staleness scan.  A
+        retained tile is a tile this commit does no work for.
+
+        The predicate is re-evaluated for every held tile, not only for new
+        candidates: a montage index scroll repoints a slot at another source
+        without the retention entry knowing, and a decision taken once at
+        departure would keep the predecessor's pixels bound to it.  That costs
+        O(retained) dict lookups plus one ``semantic_generation`` tuple per
+        commit — sub-millisecond at 272 tiles, against a commit whose backend
+        apply alone is tens of milliseconds — and it buys a predicate that
+        cannot go stale.
+        """
+
+        active_scope = {int(tile) for tile in active}
+        removal_scope = {int(tile) for tile in removals}
+        for returned in tuple(self.retained_out_of_view):
+            # Back in view: it is not retention's business any more.  Doing this
+            # first keeps departure order honest, so a tile that leaves, returns
+            # and leaves again is stamped by its LATEST departure.
+            if int(returned) in active_scope and self._forget_out_of_view_retention(int(returned)):
+                self.retained_out_of_view_returns += 1
+        retained: list[int] = []
+        for tile_number, payload in self.display_tile_payloads.items():
+            index = int(tile_number)
+            if index in active_scope or index in removal_scope:
+                continue
+            if not self.retain_out_of_view_payloads or not self._may_retain_out_of_view(
+                index,
+                payload,
+                plan_tiles_by_number=plan_tiles_by_number,
+                backend_identities=backend_identities,
+            ):
+                continue
+            retained.append(index)
+            if index in self.retained_out_of_view:
+                continue
+            self._retention_departure_stamp += 1
+            self.retained_out_of_view[index] = (
+                int(self._retention_departure_stamp),
+                self._payload_retention_bytes(payload),
+            )
+            self.retained_out_of_view_bytes += int(self.retained_out_of_view[index][1])
+            self.retained_out_of_view_admitted += 1
+        # Whatever no longer qualifies leaves the scope, which puts it exactly
+        # where it would have been without retention.
+        for held in set(self.retained_out_of_view).difference(retained):
+            self._forget_out_of_view_retention(int(held))
+        self._enforce_out_of_view_retention_budget()
+        if not self.retained_out_of_view:
+            return active
+        return tuple(dict.fromkeys((*active, *sorted(self.retained_out_of_view))))
+
+    def _enforce_out_of_view_retention_budget(self) -> tuple[int, ...]:
+        """Trim the retention set to its ceiling, oldest departure first.
+
+        Eviction takes the ordinary drop path, so an evicted tile ends up
+        exactly where it would have been without retention: out of the
+        presentation scope and queued for physical removal.  Oldest departure
+        first is the opposite of the PyQtGraph victim policy this program
+        already found wrong (render-eagerness §2.3) — the tile that left longest
+        ago is the one least likely to be panned back onto.
+        """
+
+        ceiling = self.retained_out_of_view_budget_bytes
+        evicted: list[int] = []
+        while self.retained_out_of_view and int(self.retained_out_of_view_bytes) > ceiling:
+            oldest = next(iter(self.retained_out_of_view))
+            self._drop_display_payload(int(oldest))
+            evicted.append(int(oldest))
+        if evicted:
+            self.retained_out_of_view_evictions += len(evicted)
+            emit_trace(
+                "out_of_view_retention_evicted",
+                session_id=int(self.session_id),
+                tiles=tuple(evicted),
+                retained=len(self.retained_out_of_view),
+                bytes_used=int(self.retained_out_of_view_bytes),
+                ceiling_bytes=int(ceiling),
+            )
+        return tuple(evicted)
+
     def build_tile_presentation(
         self,
         source_ids: dict[int, object] | None,
@@ -3751,6 +3994,10 @@ class FrameSession:
                 continue
             self.display_tile_payloads[int(tile_number)] = payload
             materialized.add(int(tile_number))
+        # Read the backend's drawn-slot mirror once: the retention predicate
+        # below and the identity repair pass further down must agree about what
+        # is physically on screen, and nothing between them writes it.
+        backend_identities = dict(self.lifecycle.backend_presented_identities)
         for stale in tuple(self.display_tile_payloads):
             if int(stale) not in materialized:
                 payload = self.display_tile_payloads.get(int(stale))
@@ -3765,11 +4012,20 @@ class FrameSession:
                     # "remove the visible slot".
                     self.lifecycle.remember_presentable(int(stale), payload)
                     continue
-                self.display_tile_payloads.pop(int(stale), None)
-                self.pending_removals.add(int(stale))
-                self.dirty_payloads.pop(int(stale), None)
-                self.pending_payload_upserts.pop(int(stale), None)
-                self.level_generation.forget_tile(int(stale))
+                if self._may_retain_out_of_view(
+                    int(stale),
+                    payload,
+                    plan_tiles_by_number=plan_tiles_by_number,
+                    backend_identities=backend_identities,
+                ):
+                    # The viewport moved off this tile; its pixels did not
+                    # change and its GPU pages are still resident and still
+                    # pinned by the current commit.  Keep the payload so the
+                    # way back is a re-show rather than a re-plan/re-admit/
+                    # re-instance/re-bind of the whole montage.
+                    self.lifecycle.remember_presentable(int(stale), payload)
+                    continue
+                self._drop_display_payload(int(stale))
         for tile_number, payload in tuple(self.display_tile_payloads.items()):
             index = int(tile_number)
             if index not in materialized:
@@ -3827,7 +4083,6 @@ class FrameSession:
         # retrying and remain visible in diagnostics.
         stale_drawn: list[int] = []
         stale_identity_removals: set[int] = set()
-        backend_identities = dict(self.lifecycle.backend_presented_identities)
         if backend_identities:
             # Backend truth can be ahead of the session's acknowledged
             # TilePresentationState when a geometry/visibility commit reports
@@ -4467,6 +4722,13 @@ class FrameSession:
             if conflicting:
                 removals = tuple(tile for tile in removals if int(tile) not in conflicting)
                 self.pending_removals.difference_update(conflicting)
+
+        active = self.retain_out_of_view_presentation_scope(
+            active,
+            plan_tiles_by_number=plan_tiles_by_number,
+            backend_identities=backend_identities,
+            removals=removals,
+        )
 
         force_refresh = bool(self.backend_refresh_pending)
         clear_reason = ""

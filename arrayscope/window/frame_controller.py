@@ -163,6 +163,23 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             self._montage_retained_tiled_payloads = store
         return store
 
+    def _retains_out_of_view_payloads(self) -> bool:
+        """Whether this backend keeps display payloads for out-of-view tiles.
+
+        Only ``gpu_atlas``: its eviction is reachable solely from
+        ``_ensure_free_pool_layer`` under pool-layer pressure, so a tile leaving
+        the viewport keeps its pages either way and dropping the payload buys
+        nothing but a whole-montage republication on the way back.  A
+        ``cpu_item`` backend owns real per-tile scene items with their own
+        residency policy, and ``none`` has no persistent residency to build on.
+        """
+
+        capabilities = image_view_backend_capabilities(getattr(self.win, "img_view", None))
+        return bool(
+            capabilities.persistent_tile_residency
+            and str(getattr(capabilities, "tile_residency_kind", "none") or "none") == "gpu_atlas"
+        )
+
     def _session_source_anchoring(self, document, view_state, axis):
         """ADR 0055 G3: window-invariant payload anchoring for the session.
 
@@ -810,6 +827,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             lod_preview_level=lod_preview_level,
             lod_preview_min_level=lod_preview_level,
             tile_residency_budget_bytes=tile_residency_budget_bytes(policy),
+            retain_out_of_view_payloads=self._retains_out_of_view_payloads(),
             lod_page_cache=(
                 self._lod_page_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
             ),

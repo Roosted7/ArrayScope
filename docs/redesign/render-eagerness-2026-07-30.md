@@ -234,7 +234,19 @@ visibility. So off-screen montage pages stay pinned as long as they are in the
 current commit — which is the right instinct, and is precisely what §3.2
 undoes one level up.
 
-### 3.2 The defect is one level up: the session drops out-of-view payloads
+### 3.2 The defect is one level up: the session narrows the presentation scope
+
+**Closed 2026-07-30 —
+[out-of-view-retention](out-of-view-retention-2026-07-30.md).** That dossier
+also corrects the mechanism below: the payload drop is real and fires at 272
+tiles, but on a mid-sized montage nothing is dropped at all and the whole effect
+comes from `TilePresentationDelta.active_tiles` shrinking to the viewport. A
+tile absent from `active_tiles` disappears from `_wgpu_committed["tiles"]`
+without any removal being emitted, and breaks the executor's
+`previous_commit["tiles"] <= payloads` precondition for applying a delta.
+Measured: full republications per pan cycle 4 → 0 (64 tiles) and 6 → 2 (272
+tiles), GPU uploads unchanged at zero in both arms.
+
 
 ```python
 # frame_session.py:3689
@@ -264,7 +276,7 @@ whole-montage by construction (63–69% of it is
 empty-delta commit still costs ~90 ms). That is the lag spike, and the pages
 being resident is exactly why it looks unexplained.
 
-### 3.3 The guard that will bite any fix here
+### 3.3 The guard that will bite any fix here — checked, not widened
 
 `frame_session.py:3808-3860` compares each drawn slot's identity against the
 current payload and, on mismatch, calls `presentation_discarded` and adds to
@@ -273,6 +285,13 @@ may_remove_visible(tile)`**. Retaining an out-of-view tile keeps it outside
 `planned_numbers`, which makes that branch unconditionally take the *remove*
 path. A retention change that does not also widen this predicate will retain
 tiles that the very next commit removes again, and will measure as flat.
+
+The landed change does **not** widen it. Retention is refused unless the backend
+is drawing exactly the payload the session still holds, which puts every
+retained tile on that branch's `current_identity == shown_identity` early
+continue, so it cannot fire for one. The price is that retention erodes when
+background work supersedes an out-of-view wrapper, and each shrink costs one
+republication; see §5 of the retention dossier.
 
 ---
 

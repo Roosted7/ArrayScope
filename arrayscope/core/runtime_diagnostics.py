@@ -93,6 +93,13 @@ class MontageRuntimeDiagnostics:
     target_unsettled_tiles: int = 0
     pending_payload_upserts: int = 0
     pending_removals: int = 0
+    # Out-of-view display payloads still holding a presentation slot, and the
+    # bytes they hold against their ceiling.  Retention is a silent mechanism —
+    # it succeeds by NOT doing work — so it has to say so here or a field report
+    # cannot tell "retained cheaply" from "never retained".
+    retained_out_of_view_tiles: int = 0
+    retained_out_of_view_bytes: int = 0
+    retained_out_of_view_evictions: int = 0
     pending_level_tiles: int = 0
     level_scan_remaining_tiles: int = 0
     histogram_aggregate_inflight: bool = False
@@ -980,6 +987,9 @@ _MONTAGE_COVERED = frozenset(
         "wgpu_last_pool_exhaustion",
         "pending_payload_upserts",
         "pending_removals",
+        "retained_out_of_view_tiles",
+        "retained_out_of_view_bytes",
+        "retained_out_of_view_evictions",
         "level_scan_remaining_tiles",
         "semantic_evidence_target_population",
         "semantic_evidence_covered_sources",

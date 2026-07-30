@@ -115,6 +115,15 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         if session is None
         else len(getattr(session, "pending_payload_upserts", ())),
         pending_removals=0 if session is None else len(getattr(session, "pending_removals", ())),
+        retained_out_of_view_tiles=0
+        if session is None
+        else len(getattr(session, "retained_out_of_view", ()) or ()),
+        retained_out_of_view_bytes=0
+        if session is None
+        else int(getattr(session, "retained_out_of_view_bytes", 0) or 0),
+        retained_out_of_view_evictions=0
+        if session is None
+        else int(getattr(session, "retained_out_of_view_evictions", 0) or 0),
         pending_level_tiles=0
         if session is None
         else len(getattr(session, "pending_level_tiles", ())),
