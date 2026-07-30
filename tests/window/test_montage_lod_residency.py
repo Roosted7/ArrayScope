@@ -4393,6 +4393,114 @@ def test_index_window_retarget_rearms_resident_crop_transition_latch():
     assert session.resident_crop_fallback_source_ids == {}
 
 
+def test_governed_crop_seed_chunks_by_cap_and_clamps_before_publishing(monkeypatch):
+    """The governed handoff's three seams, on a path a default run executes.
+
+    ``_seed_resident_crop_rebinds_governed``, its ``run_chunk`` continuation and
+    ``_publish_resident_crop_rebinds`` had no test outside the onscreen-GPU gate,
+    which skips unless ``ARRAYSCOPE_GPU_TESTS=1``. That left the R3 clamp arming
+    on the publish seam — the one that hands a COMPLETE retained cohort to the
+    backend before any exact ACK — provable only on a machine nobody runs by
+    default. Three things are pinned here: the chunk count follows the
+    governor's named cap rather than a literal, exactly one presentation gate is
+    armed for the whole cohort, and the clamp is armed BEFORE that gate is
+    posted (arming it after would present the cohort through the predecessor
+    window for one frame).
+    """
+
+    from arrayscope.core.resource_governor import (
+        _RETAINED_FALLBACK_REBIND_BATCH_LIMIT as REBIND_CAP,
+    )
+    from arrayscope.core.resource_governor import ResourceGovernor
+    from arrayscope.window import frame_effects
+
+    # Deliberately not a multiple of the cap: the last chunk must be partial,
+    # and the count must fall out of the cap instead of being written down.
+    tiles = tuple(range(REBIND_CAP * 2 + 3))
+    expected_chunks = -(-len(tiles) // REBIND_CAP)
+
+    events: list[str] = []
+    session = SimpleNamespace(
+        session_id=7,
+        resident_crop_rebind_seeded=False,
+        resident_crop_rebind_stats={},
+        resident_crop_governor_stats={},
+        resident_crop_fallback_source_ids={},
+    )
+
+    def rebind(*, physical_resident_fn, tile_numbers, previous_by_tile, canonical_by_tile, **_kw):
+        chunk = tuple(int(tile) for tile in tile_numbers)
+        session.resident_crop_rebind_stats = {"rebound": len(chunk), "considered": len(chunk)}
+        session.resident_crop_fallback_source_ids.update({tile: ("src", tile) for tile in chunk})
+        return chunk
+
+    session.rebind_resident_crop_tiles = rebind
+    # The real decision function, called unbound: it reads only the named
+    # policy constant, so this proves the cap comes from the governor without
+    # standing up a full compute policy.
+    governor = SimpleNamespace(
+        decide_resident_crop_rebind=lambda **kwargs: ResourceGovernor.decide_resident_crop_rebind(
+            None, **kwargs
+        )
+    )
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(
+            img_view=SimpleNamespace(tiledPayloadResident=lambda payload: True),
+            resource_governor=governor,
+            _committed_display_frame=None,
+        ),
+        _frame_session_is_current=lambda current: True,
+        _montage_presentation_gate_armed=False,
+        _montage_presentation_gate_owner=None,
+        rearm_crop_rebind_level_evidence=lambda current: events.append("rearm-evidence"),
+    )
+    effects = frame_effects.FramePipelineEffects(renderer, session)
+    effects._resident_crop_rebind_enabled = lambda: True
+    effects._expire_canonical_plane_payloads_for_document = lambda: None
+    effects._canonical_plane_memo = dict
+    effects._remember_canonical_plane_payload = lambda tile, payload: None
+    effects._record_resident_crop_rebind = lambda **kwargs: events.append(
+        f"record:{kwargs.get('rebound')}"
+    )
+    effects._on_presentation_gate = lambda owner: events.append("gate-fired")
+
+    monkeypatch.setattr(frame_effects, "_observe_ui", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        frame_effects,
+        "image_view_backend_capabilities",
+        lambda view: SimpleNamespace(name="wgpu"),
+    )
+    monkeypatch.setattr(frame_effects, "previous_tiled_payloads", lambda frame: {})
+    monkeypatch.setattr(
+        frame_effects,
+        "_arm_resident_crop_rebind_level_clamp",
+        lambda current, scope: events.append(f"clamp:{len(tuple(scope))}"),
+    )
+    # Run the continuations inline so the whole cohort completes in-process;
+    # the real seam posts each chunk as a separate visible-path callback.
+    monkeypatch.setattr(
+        frame_effects,
+        "_post_visible_path_callback",
+        lambda _renderer, callback: (events.append("post"), callback())[1],
+    )
+
+    assert effects._seed_resident_crop_rebinds_governed(SimpleNamespace(visible_tile_numbers=tiles))
+
+    governed = dict(session.resident_crop_governor_stats)
+    assert governed["seed_admitted_items"] == len(tiles)
+    assert governed["seed_batch_cap"] == REBIND_CAP
+    assert governed["seed_callbacks"] == expected_chunks
+    assert governed["seed_batch_max"] == REBIND_CAP
+    assert governed["presentation_gate_posts"] == 1
+
+    # One gate for the complete cohort, and the clamp covers every rebound tile
+    # before that gate reaches the renderer.
+    assert events.count(f"clamp:{len(tiles)}") == 1
+    assert events.index(f"clamp:{len(tiles)}") < events.index("gate-fired")
+    assert events.count("gate-fired") == 1
+    assert renderer._montage_presentation_gate_owner == (7, id(session))
+
+
 def test_paced_followup_rejects_same_slots_with_new_source_mapping():
     """A scroll keeps slot numbers but changes the slices they represent."""
 
