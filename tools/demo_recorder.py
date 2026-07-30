@@ -105,17 +105,34 @@ def _phantom2d(n=384):
     return img
 
 
-def _volume3d(nx=96, ny=96, nz=40):
+def _structured_volume(nx=192, ny=160, nz=32):
+    """Deterministic volume whose spatial and through-plane changes read on video.
+
+    Smooth blobs alone made crop, pan, montage completion, and 1:1 technically
+    correct but visually ambiguous. This fixture keeps a compressible smooth
+    background while adding moving anatomy-like ellipses, an edge landmark,
+    and a striped insert that remain visible in every z slice.
+    """
     import numpy as np
 
-    x = np.linspace(-3, 3, nx)
-    y = np.linspace(-3, 3, ny)
-    z = np.linspace(-3, 3, nz)
-    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
-    vol = np.exp(-((X**2) / 2 + (Y**2) / 3 + (Z**2) / 1.5))
-    vol += 0.4 * np.exp(-(((X - 1.2) ** 2 + (Y + 0.8) ** 2 + Z**2) / 0.4))
-    vol += 0.25 * np.exp(-(((X + 1.4) ** 2 + (Y - 1.1) ** 2 + (Z - 0.6) ** 2) / 0.2))
-    return vol
+    x = np.linspace(0.0, 1.0, nx, dtype=np.float32)[:, None, None]
+    y = np.linspace(0.0, 1.0, ny, dtype=np.float32)[None, :, None]
+    z = np.linspace(0.0, 1.0, nz, dtype=np.float32)[None, None, :]
+
+    volume = np.broadcast_to(0.08 + 0.12 * x + 0.06 * y + 0.03 * z, (nx, ny, nz)).copy()
+    primary_x = 0.38 + 0.14 * np.sin(2.0 * np.pi * z)
+    primary_y = 0.44 + 0.10 * np.cos(2.0 * np.pi * z)
+    volume += 0.92 * np.exp(-(((x - primary_x) / 0.13) ** 2 + ((y - primary_y) / 0.18) ** 2))
+    secondary_x = 0.70 - 0.08 * np.cos(2.0 * np.pi * z)
+    secondary_y = 0.67 + 0.10 * np.sin(2.0 * np.pi * z)
+    volume += 0.62 * np.exp(-(((x - secondary_x) / 0.08) ** 2 + ((y - secondary_y) / 0.11) ** 2))
+
+    edge_landmark = (x < 0.075) & (y > 0.14) & (y < 0.86)
+    volume += 0.55 * edge_landmark * (0.65 + 0.35 * np.cos(4.0 * np.pi * z))
+    striped_insert = (x > 0.68) & (x < 0.94) & (y > 0.08) & (y < 0.22)
+    stripes = 0.16 + 0.14 * (np.sin(18.0 * np.pi * x + 3.0 * np.pi * z) > 0)
+    volume += striped_insert * stripes
+    return volume.astype(np.float32, copy=False)
 
 
 # --------------------------------------------------------------------------
@@ -966,8 +983,8 @@ class Recorder:
 
 @scenario("showcase")
 def s_showcase(rec: Recorder):
-    win = rec.window(_volume3d(128, 128, 48), size=(1100, 780))
-    rec.caption("asc(data) — a 128×128×48 volume, one call away")
+    win = rec.window(_structured_volume(384, 320, 36), size=(1100, 780))
+    rec.caption("asc(data) — a structured 384×320×36 volume, one call away")
     rec.hold(2.0)
 
     rec.caption("Hover for live coordinates and values")
@@ -987,13 +1004,13 @@ def s_showcase(rec: Recorder):
     )
     rec.hold(0.6)
 
-    rec.caption("Crop a displayed axis with an explicit range")
+    rec.caption("Crop away the bright left landmark with an explicit range")
     axis0_edit = win.dimension_strip.chip(0).slice_edit
     rec.type_into(
         axis0_edit,
-        "16:112",
+        "72:352",
         on_text=lambda text: win._on_slice_text_changed(0, text),
-        label="crop axis 0 to 16:112",
+        label="crop axis 0 to 72:352",
         control_label="the axis 0 slice range",
     )
     rec.hold_until_settled(1.5, tail_s=0.8)
@@ -1103,7 +1120,7 @@ def s_fft(rec: Recorder):
 
 @scenario("montage")
 def s_montage(rec: Recorder):
-    vol = _volume3d(112, 112, 24)
+    vol = _structured_volume(176, 224, 24)
     win = rec.window(vol, size=(1100, 780))
     rec.caption("A 24-slice volume — one slice at a time…")
     rec.hold(1.8)
@@ -1211,7 +1228,7 @@ def s_roi(rec: Recorder):
 
 @scenario("workflow")
 def s_workflow(rec: Recorder):
-    win = rec.window(_volume3d(96, 96, 32), size=(1100, 780))
+    win = rec.window(_structured_volume(192, 160, 32), size=(1100, 780))
     rec.caption("Parameterized operations stay visible and reversible")
     rec.hold(1.2)
 

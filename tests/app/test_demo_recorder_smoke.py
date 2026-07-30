@@ -111,7 +111,7 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         labels = {event["label"] for event in actions}
         assert {
             "scrub axis 2 slices",
-            "crop axis 0 to 16:112",
+            "crop axis 0 to 72:352",
             "restore full axis 0",
             "show image at true 1:1",
         } <= labels
@@ -150,3 +150,15 @@ def test_caption_wrapping_is_bounded_to_two_readable_lines(qt_app):
 
     assert len(lines) == 2
     assert all(metrics.horizontalAdvance(line) <= max_width for line in lines)
+
+
+def test_structured_demo_volume_has_edge_and_through_plane_evidence():
+    namespace = runpy.run_path(str(RECORDER), run_name="arrayscope_demo_volume_test")
+
+    volume = namespace["_structured_volume"](96, 80, 12)
+
+    assert volume.shape == (96, 80, 12)
+    assert str(volume.dtype) == "float32"
+    assert volume[:7, 20:60, :].mean() > volume[10:17, 20:60, :].mean() + 0.2
+    assert abs(float(volume[:, :, 0].mean()) - float(volume[:, :, -1].mean())) > 0.005
+    assert float(volume[:, :, -1].std()) > 0.1
