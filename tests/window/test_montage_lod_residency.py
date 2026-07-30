@@ -50,6 +50,8 @@ from arrayscope.window.frame_effects import (
     FramePipelineEffects,
     _looks_like_shared_preview_rows,
     _priority_ordered_tile_delta,
+    _stage_consumer_scheduling_rank,
+    montage_priority_ranks,
 )
 from arrayscope.window.frame_session import (
     FrameSession,
@@ -447,6 +449,190 @@ def test_backend_boundary_reorders_stale_delta_with_current_camera_context():
     assert tuple(ordered.upserts) == expected
     assert tuple(ordered.priority_ranks) == expected
     assert list(ordered.priority_ranks.values()) == sorted(ordered.priority_ranks.values())
+
+
+def _grid_plan(rows: int, columns: int) -> MontagePlan:
+    """A 2-D montage, so panning changes the visible and near bands."""
+
+    tiles = tuple(
+        MontageTile(
+            montage_index=row * columns + col,
+            source_index=row * columns + col,
+            row=row,
+            col=col,
+            x0=col * TILE,
+            y0=row * TILE,
+            width=TILE,
+            height=TILE,
+            view_state=None,
+        )
+        for row in range(rows)
+        for col in range(columns)
+    )
+    return MontagePlan(
+        axis=0,
+        tile_shape=(TILE, TILE),
+        grid_shape=(rows, columns),
+        columns=columns,
+        rows=rows,
+        gap=0,
+        tiles=tiles,
+    )
+
+
+def _grid_session(rows: int, columns: int):
+    session = _session(mode=LOD_POLICY_NATIVE_ONLY, count=rows * columns)
+    session.plan = _grid_plan(rows, columns)
+    session.visible_tiles = session.plan.tiles
+    session.viewport_shape = (2 * TILE, 2 * TILE)
+    session.view_range = ((0.0, 2.0 * TILE), (0.0, 2.0 * TILE))
+    return session
+
+
+def _rank_cache_counters(session) -> tuple[int, int]:
+    return (
+        int(getattr(session, "_presentation_priority_rank_hits", 0)),
+        int(getattr(session, "_presentation_priority_rank_misses", 0)),
+    )
+
+
+def _fresh_priority_order(session) -> tuple[int, ...]:
+    return prioritize_tile_numbers(
+        range(len(session.plan.tiles)),
+        plan_tiles=session.plan.tiles,
+        context=session.tile_priority_context(),
+    )
+
+
+def test_priority_rank_cache_recomputes_exactly_when_the_camera_changes_the_order():
+    """The rank memo must track ordering changes, not retarget count.
+
+    Each row drives a *real* ``retarget_viewport``, which builds a brand new
+    ordering context every time.  A test that reused one context object would
+    hit the memo trivially and prove nothing; the question here is whether a
+    freshly built but ordering-identical context is recognised as such.
+
+    The ``expect_hit`` column is the whole contract: a still camera between
+    replans must not resort the montage, and every genuine change -- pan,
+    focus, montage window, plan replacement -- must.  ``order_matches`` is the
+    other half, and the one no timing measurement would catch: a memo that
+    returned a stale permutation would change which tiles the user sees first.
+    """
+
+    session = _grid_session(4, 6)
+    near = ((0.5 * TILE, 2.5 * TILE), (0.0, 2.0 * TILE))
+    wide = ((0.5 * TILE, 3.5 * TILE), (0.0, 3.0 * TILE))
+    steps = (
+        ("first retarget", {"view_range": ZOOMED_OUT_RANGE}, False),
+        ("pan", {"view_range": near}, False),
+        ("replan, still camera", {"view_range": near}, True),
+        ("replan, still camera", {"view_range": near}, True),
+        ("focus moves", {"view_range": near, "priority_focus": (96.0, 32.0)}, False),
+        ("replan, same focus", {"view_range": near, "priority_focus": (96.0, 32.0)}, True),
+        (
+            "montage window grows",
+            {
+                "view_range": wide,
+                "viewport_shape": (3 * TILE, 3 * TILE),
+                "priority_focus": (96.0, 32.0),
+            },
+            False,
+        ),
+        (
+            "plan replaced",
+            {
+                "view_range": wide,
+                "viewport_shape": (3 * TILE, 3 * TILE),
+                "priority_focus": (96.0, 32.0),
+                "plan": _grid_plan(4, 6),
+            },
+            False,
+        ),
+        ("pan back", {"view_range": ZOOMED_OUT_RANGE}, False),
+    )
+
+    outcomes = []
+    for label, kwargs, _expected in steps:
+        before = _rank_cache_counters(session)
+        session.retarget_viewport(
+            viewport_shape=kwargs.get("viewport_shape", session.viewport_shape),
+            **{key: value for key, value in kwargs.items() if key != "viewport_shape"},
+        )
+        ranks = montage_priority_ranks(session)
+        after = _rank_cache_counters(session)
+        outcomes.append(
+            (
+                label,
+                after[0] > before[0],
+                tuple(sorted(ranks, key=ranks.__getitem__)) == _fresh_priority_order(session),
+            )
+        )
+
+    assert [(label, hit) for label, hit, _ in outcomes] == [
+        (label, expected) for label, _kwargs, expected in steps
+    ]
+    assert all(order_matches for _label, _hit, order_matches in outcomes)
+
+
+def test_priority_rank_cache_hit_rate_over_a_fill_with_camera_motion():
+    """A pan sequence with a fill running under it, and the resulting rate.
+
+    The shape -- a handful of commits per camera position, with a still-camera
+    replan between them -- is what instrumented montage UI runs show: every
+    retarget in those runs came from ``retarget_viewport``, and 29% of them
+    left the ordering untouched.  Before the incumbent context object was
+    retained across an ordering-identical retarget, every one of those replans
+    forced a fresh whole-montage sort.
+    """
+
+    session = _grid_session(4, 6)
+    _state, delta = session.build_tile_presentation({})
+    assert len(delta.upserts) == 24
+
+    orders = []
+    for step in range(8):
+        view_range = (
+            (0.25 * step * TILE, (2.0 + 0.25 * step) * TILE),
+            (0.0, 2.0 * TILE),
+        )
+        for replan in range(4):
+            session.retarget_viewport(
+                view_range=view_range,
+                viewport_shape=session.viewport_shape,
+                priority_focus=(96.0, 32.0),
+            )
+            ordered = _priority_ordered_tile_delta(session, delta)
+            expected = tuple(
+                tile for tile in _fresh_priority_order(session) if tile in delta.upserts
+            )
+            assert tuple(ordered.upserts) == expected, (step, replan)
+            orders.append(tuple(ordered.upserts))
+
+    hits, misses = _rank_cache_counters(session)
+    assert hits + misses == 32
+    # One sort per camera position, not one per replan.
+    assert misses == 8
+    assert hits == 24
+    # The camera really did move: the sequence is not one frozen order.
+    assert len(set(orders)) > 1
+
+
+def test_stage_scheduling_rank_shares_the_commit_boundary_sort():
+    session = _grid_session(4, 6)
+    session.stage_fan_in.tile_stage_keys = {5: "shared-stage", 11: "shared-stage"}
+    session.retarget_viewport(
+        view_range=ZOOMED_OUT_RANGE,
+        viewport_shape=session.viewport_shape,
+    )
+    _state, delta = session.build_tile_presentation({})
+    ranks = montage_priority_ranks(session)
+    before = _rank_cache_counters(session)
+
+    _priority_ordered_tile_delta(session, delta)
+    rank = _stage_consumer_scheduling_rank(session, "shared-stage")
+
+    assert rank == min(ranks[5], ranks[11])
+    assert _rank_cache_counters(session) == (before[0] + 2, before[1])
 
 
 def test_visible_replacement_retains_presented_payload_until_acknowledged():

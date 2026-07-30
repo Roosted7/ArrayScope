@@ -267,8 +267,8 @@ of how many tiles actually changed.
 | `FramePlanner._plan_montage` (`frame_planner.py:285`) | constructs a fresh `FrameRegion` for **every tile in the montage**. Only the `active`/`planned`/`near` booleans differ between pans; `bounds`, `data_slices`, `view_state`, `materialization_key` are pan-invariant. Not memoized (`frame_controller.py:141`). |
 | `FramePlan.__post_init__` (`frame_planner.py:71`) | four more full passes: `_active_region_ids`, `_planned_region_ids`, `_near_region_ids`, and `scene_region_signature` — the last builds a tuple-of-floats per region. |
 | `TileLifecycle.retarget` (`tile_lifecycle.py:591`) | walks **every record ever created** (records are never removed — `tile_lifecycle.py:470`) and allocates a fresh `TileTarget` for each non-visible one, clearing `task_claim`/`stage_producer_key` and emitting a trace event. O(session history), not O(montage). |
-| `_priority_ordered_tile_delta` (`frame_effects.py:3936`) | full-montage `prioritize_tile_numbers` sort, cached on `(id(plan), id(context))`. `retarget_tile_priority` replaces `_priority_context` with a new object on every retarget (`frame_session.py:5239`), so **the cache misses every pan by construction**. |
-| `_stage_consumer_scheduling_rank` (`frame_effects.py:4625`) | same full-montage sort, no cache. |
+| ~~`_priority_ordered_tile_delta`~~ | **Closed.** Was a full-montage `prioritize_tile_numbers` sort keyed on `(id(plan), id(context))` while `retarget_tile_priority` replaced `_priority_context` on every retarget. `retarget_tile_priority` now keeps the incumbent context object when the new one would rank every tile identically, and both consumers share one memo (`montage_priority_ranks`). See §4.1. |
+| ~~`_stage_consumer_scheduling_rank`~~ | **Closed** with the row above; it no longer sorts for itself. |
 | `sync_lifecycle_scope` (`frame_session.py:1323`) | O(all payloads) scan, called **twice** per retarget (`frame_controller.py:1499` and `frame_session.py:1638`). |
 | `_update_montage_tile_overlays_for_plan` (`frame_runtime.py:736`) | cache key includes the viewport rect, so it misses every pan; the loop body is cheap (skipped tiles only). |
 
@@ -283,6 +283,61 @@ the first place.
 This section is consistent with the measured
 [index-scroll anatomy](../../docs/redesign/) finding that de-duplicating
 per-tile work, not GPU or upload work, produced the −25%.
+
+### 4.1 What the priority-rank rows actually cost, measured
+
+The two closed rows were adjudicated on numbers rather than on the shape of
+the key, because a value-keyed cache with a poor hit rate is worse than no
+cache. Both measurements are on this machine, 2026-07-30.
+
+**How often does a retarget change the ordering?** Instrumented run of
+`tests/ui/{montage_interactions, montage_scroll_settling,
+montage_scroll_level_retention, viewport_interactions, r8_first_pixel_phasing,
+prefetch, lod_demand_freshness}`: **225 retargets, every one of them from
+`retarget_viewport` (`frame_session.py:1641`)** — no hover or
+`refresh_montage_priority_targets` retarget fired at all — of which **66
+(29.3%) produced an ordering-identical context**. Those are replans with a
+still camera, which is what a fill under a stationary viewport looks like on a
+non-persistent-residency backend, where `frame_controller.py:1459`'s converged
+early-out does not apply. Over the same run the commit boundary was reached
+1436 times with a non-empty delta, i.e. **6.4 orderings per retarget**, and the
+shipping `(id(plan), id(context))` key already hit 81% of them — the defect was
+never "misses every commit", it was "one whole-montage sort per retarget,
+including the retargets that changed nothing".
+
+**What one avoided sort is worth.** In-process A/B on a 272-tile montage
+(17×16), interleaved ABBA × 12, replaying that measured population at scale
+(100 retargets, 29% still, 640 commit orderings):
+
+| | rank-memo hit rate | whole-montage sorts | time in `prioritize_tile_numbers` |
+|---|---|---|---|
+| shipping | 84.4% (540/640) | 100 | 110.2 ms median (min 80.8) |
+| retained context | **89.5%** (573/640) | **67** | **72.5 ms** median (min 60.9) |
+
+Cost per sort is 1.10 vs 1.08 ms — the same in both arms, which is the check
+that the win is *fewer* sorts and not cheaper ones. The enclosing loop
+(retarget + ordering) moved 480.8 → 432.9 ms median, but at a standard
+deviation of ~100 ms that number is not separable from machine noise and is
+recorded here only so nobody re-derives it and claims it.
+
+All 640 emitted orders were byte-identical between the two arms across 30
+distinct permutations, which is the property that matters: the memo decides
+*when* to resort, never *what* the order is.
+
+**Not done, and why.** `_priority_ordered_tile_delta` still ranks the whole
+montage to order a delta that is usually a handful of tiles. Ranking only the
+upserts would give the identical relative order (band, focus rank and distance
+are unchanged, and the `sequence` tie-break is monotone in tile number either
+way) for O(k log k) instead of O(N log N) — but the absolute rank values are
+published on the delta as `priority_ranks`, traced as `delta_priority_ranks`,
+and read by the journey matrix (`journey_matrix.py:255`), and
+`_stage_consumer_scheduling_rank` genuinely needs ranks comparable across the
+whole montage. Changing what that number means is a separate adjudication.
+
+Untouched for the same reason of scope: `render/effects.py:1011` runs a third
+full-montage `prioritize_tile_numbers` inside `tile_states`, the ladder
+snapshot previously measured at 93% of the drag-retarget chain. It ranks a
+different candidate set and has no memo at all.
 
 ---
 

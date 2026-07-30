@@ -3929,25 +3929,57 @@ class FramePipelineEffects:
         return True
 
 
+def montage_priority_ranks(session) -> dict[int, int]:
+    """The whole-montage priority order, computed once per distinct ordering.
+
+    Two consumers need a rank that is comparable across the *entire* montage
+    rather than within one batch: the backend command boundary below, which
+    freezes the camera's order onto a delta, and stage scheduling, which
+    compares one stage's best consumer against every other stage's. Both used
+    to sort all N tiles for themselves.
+
+    Both halves of the key are object identity, and both are load-bearing for
+    different reasons. ``make_montage_plan`` is ``lru_cache``d and returns the
+    identical plan across pans on purpose (montage.py:176-188), so ``id(plan)``
+    is stable exactly while the tile geometry is. The ordering context is
+    replaced only by ``retarget_tile_priority``, which keeps the incumbent
+    object when the new one would rank tiles identically, so ``id(context)`` is
+    stable exactly while the order is. Neither is a value hash: the context
+    holds two frozensets and a view range, and comparing those on every commit
+    would pay an O(visible) compare to avoid an O(N log N) sort that is usually
+    already cached -- the identity check is O(1) and, given the retarget-side
+    fix, no less accurate.
+    """
+
+    plan = getattr(session, "plan", None)
+    context = session.tile_priority_context()
+    cache_key = (id(plan), id(context))
+    cached = getattr(session, "_presentation_priority_rank_cache", None)
+    if cached is not None and cached[0] == cache_key:
+        session._presentation_priority_rank_hits = (
+            int(getattr(session, "_presentation_priority_rank_hits", 0)) + 1
+        )
+        return cached[1]
+    plan_tiles = tuple(getattr(plan, "tiles", ()) or ())
+    priority_order = prioritize_tile_numbers(
+        range(len(plan_tiles)),
+        plan_tiles=plan_tiles,
+        context=context,
+    )
+    priority_ranks = {int(tile): int(rank) for rank, tile in enumerate(priority_order)}
+    session._presentation_priority_rank_cache = (cache_key, priority_ranks)
+    session._presentation_priority_rank_misses = (
+        int(getattr(session, "_presentation_priority_rank_misses", 0)) + 1
+    )
+    return priority_ranks
+
+
 def _priority_ordered_tile_delta(session, tile_delta):
     """Freeze current-camera order at the final backend command boundary."""
 
     if not tile_delta.upserts:
         return tile_delta
-    plan_tiles = tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-    context = session.tile_priority_context()
-    cache_key = (id(getattr(session, "plan", None)), id(context))
-    cached = getattr(session, "_presentation_priority_rank_cache", None)
-    if cached is not None and cached[0] == cache_key:
-        priority_ranks = cached[1]
-    else:
-        priority_order = prioritize_tile_numbers(
-            range(len(plan_tiles)),
-            plan_tiles=plan_tiles,
-            context=context,
-        )
-        priority_ranks = {int(tile): int(rank) for rank, tile in enumerate(priority_order)}
-        session._presentation_priority_rank_cache = (cache_key, priority_ranks)
+    priority_ranks = montage_priority_ranks(session)
     ordered_upserts = {
         int(tile): tile_delta.upserts[int(tile)]
         for tile in sorted(
@@ -4622,8 +4654,7 @@ def _stage_consumer_scheduling_rank(session, stage_key) -> int:
     }
     if not consumers:
         return int(UNRANKED_SCHEDULING_RANK)
-    ordered = session._prioritized_tile_numbers(range(len(tuple(session.plan.tiles))))
-    ranks = {int(tile_number): int(rank) for rank, tile_number in enumerate(ordered)}
+    ranks = montage_priority_ranks(session)
     return min(
         (ranks[tile_number] for tile_number in consumers if tile_number in ranks),
         default=int(UNRANKED_SCHEDULING_RANK),

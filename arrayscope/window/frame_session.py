@@ -5299,7 +5299,21 @@ class FrameSession:
         # retargets are the only writer.
         # Rebuilding the context ad hoc per consumer let different stages of
         # the pipeline order the same fill around different anchors.
-        self._priority_context = context
+        #
+        # Because retargets are the only writer, downstream memoization keys
+        # the ordering on this object's *identity*: montage_priority_ranks
+        # does, and MontageTilePriorityQueue's re-key check would for any queue
+        # wired to a context_provider. A retarget that produces an
+        # ordering-identical context must therefore keep the incumbent object,
+        # or those consumers redo O(montage) work for an ordering that did not
+        # move. A replan with a still camera goes through here on every
+        # non-persistent-residency viewport update, so that is not a rare case:
+        # instrumented montage UI runs put it at 29% of all retargets, and
+        # every retarget in those runs came from retarget_viewport.
+        previous = getattr(self, "_priority_context", None)
+        self._priority_context = (
+            previous if _priority_contexts_order_alike(previous, context) else context
+        )
         self.priority_retargeted_tiles = len(
             {int(tile) for tile in tuple(active_tiles or ())}
             | {int(tile) for tile in tuple(near_tiles or ())}
@@ -5758,3 +5772,38 @@ def _view_range_cache_key(view_range) -> tuple[tuple[float, ...], ...] | tuple[o
         )
     except Exception:
         return (repr(view_range),)
+
+
+def _priority_contexts_order_alike(
+    previous: TilePriorityContext | None, current: TilePriorityContext
+) -> bool:
+    """Would these two contexts rank every montage tile identically?
+
+    This is field equality, not ``==`` on the dataclass, for one reason:
+    ``view_range`` is typed ``object`` and arrives from the backends as
+    whatever the camera hands over -- a list of lists from pyqtgraph, a tuple
+    from the viewport plan, potentially an array. ``==`` on an array field
+    returns an array and raises inside the dataclass comparison, which would
+    turn a scheduling optimization into a crash on a path nobody exercises
+    headless. ``_view_range_cache_key`` already owns that normalization, and
+    normalizing is also more honest than identity: the same camera expressed
+    as a list and as a tuple ranks tiles the same way.
+
+    The listed fields are exhaustive over what ``tile_priority_key`` reads, so
+    a true answer means the emitted order is provably unchanged, not merely
+    likely to be. It is deliberately conservative in the other direction: two
+    different cameras can still produce the same permutation, and this returns
+    False for them rather than compute the permutation to find out.
+    """
+
+    if previous is current:
+        return True
+    if previous is None:
+        return False
+    return (
+        previous.focus == current.focus
+        and previous.visible_tiles == current.visible_tiles
+        and previous.near_tiles == current.near_tiles
+        and previous.priority_tiles == current.priority_tiles
+        and _view_range_cache_key(previous.view_range) == _view_range_cache_key(current.view_range)
+    )
