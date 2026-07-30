@@ -90,6 +90,8 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             cursor_x, cursor_y = event["cursor_at_press"]
             assert x <= cursor_x <= x + width
             assert y <= cursor_y <= y + height
+            assert event["detail_inset"] is True
+            assert event["detail_rect"] is not None
         ordered_labels = [event["label"] for event in overlay_choices]
         assert ordered_labels.index("choose log scale") < ordered_labels.index("choose magnitude")
         assert ordered_labels.index("choose magnitude") < ordered_labels.index(
@@ -119,6 +121,8 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         assert not [
             event for event in actions if event["kind"] == "click" and event["target"] is None
         ], "ROI transitions must not imply a click at an unrelated cursor position"
+        inspection = next(event for event in actions if event["label"] == "open inspection panel")
+        assert inspection["detail_inset"] is True
     if name == "showcase":
         labels = {event["label"] for event in actions}
         assert {
@@ -127,6 +131,8 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             "restore full axis 0",
             "show image at true 1:1",
         } <= labels
+        framed_labels = {event["label"] for event in actions if event.get("detail_inset")}
+        assert {"crop axis 0 to 72:352", "show image at true 1:1"} <= framed_labels
     if name == "montage":
         montage_action = next(
             event for event in actions if event["label"] == "enter montage range on axis 2"
@@ -134,6 +140,7 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         assert montage_action["kind"] == "type"
         assert montage_action["target"]["widget_type"] == "SliceIndexEdit"
         assert montage_action["caption"] == "Type ':' to montage the whole dimension"
+        assert montage_action["detail_inset"] is True
     if name == "workflow":
         labels = {event["label"] for event in actions}
         assert {
@@ -144,6 +151,13 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             "apply crop",
             "preview video and PNG export",
         } <= labels
+        assert {
+            "choose crop axis 0",
+            "set crop start to 16",
+            "set crop stop to 80",
+            "apply crop",
+            "preview video and PNG export",
+        } <= {event["label"] for event in actions if event.get("detail_inset")}
 
 
 def test_caption_wrapping_is_bounded_to_two_readable_lines(qt_app):

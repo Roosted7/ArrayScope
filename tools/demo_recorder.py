@@ -145,6 +145,8 @@ CAPTION_FADE_S = 0.2
 CAPTION_LEAD_S = 0.3
 CAPTION_BAND_HEIGHT = 78
 CAPTION_FONT_PX = 22
+DETAIL_INSET_MAX_WIDTH = 390
+DETAIL_INSET_MAX_HEIGHT = 230
 
 # Classic arrow outline in a ~12x19 unit box, hotspot at (0, 0).
 _CURSOR_POLY = (
@@ -191,6 +193,61 @@ def _draw_ripple(painter, pos, age_fraction):
     painter.setPen(QtCore.Qt.PenStyle.NoPen)
     painter.setBrush(QtGui.QColor(255, 193, 7, alpha // 2))
     painter.drawEllipse(pos, 3.5, 3.5)
+
+
+def _draw_detail_inset(image, focus_rect, content_width, content_height):
+    """Magnify the active control without hiding the full application context."""
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    source_rect = QtCore.QRectF(*focus_rect).intersected(
+        QtCore.QRectF(0.0, 0.0, float(content_width), float(content_height))
+    )
+    if source_rect.width() < 2 or source_rect.height() < 2:
+        return
+    source = image.copy(source_rect.toAlignedRect())
+    scale = min(
+        DETAIL_INSET_MAX_WIDTH / source.width(),
+        DETAIL_INSET_MAX_HEIGHT / source.height(),
+    )
+    scale = max(1.0, scale)
+    detail = source.scaled(
+        round(source.width() * scale),
+        round(source.height() * scale),
+        QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+        QtCore.Qt.TransformationMode.SmoothTransformation,
+    )
+    pad = 6
+    header = 28
+    box_width = detail.width() + 2 * pad
+    box_height = detail.height() + header + pad
+    target_left = (
+        16 if source_rect.center().x() > content_width / 2 else content_width - box_width - 16
+    )
+    target_top = 44
+
+    painter = QtGui.QPainter(image)
+    try:
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        box = QtCore.QRectF(target_left, target_top, box_width, box_height)
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 193, 7), 3))
+        painter.setBrush(QtGui.QColor(20, 22, 27, 246))
+        painter.drawRoundedRect(box, 7, 7)
+        font = QtGui.QFont()
+        font.setPixelSize(16)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QtGui.QColor(255, 225, 150))
+        painter.drawText(
+            QtCore.QRectF(target_left + pad, target_top, box_width - 2 * pad, header),
+            QtCore.Qt.AlignmentFlag.AlignVCenter,
+            f"DETAIL {scale:.1f}x",
+        )
+        painter.drawImage(
+            QtCore.QPointF(target_left + pad, target_top + header),
+            detail,
+        )
+    finally:
+        painter.end()
 
 
 def _wrap_caption_lines(metrics, text: str, max_width: float, max_lines: int = 2):
@@ -286,6 +343,7 @@ class Recorder:
         self._open_caption_event: dict | None = None
         self._overlay_widget = None
         self._overlay_top_left = None
+        self._focus_rect = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -409,6 +467,13 @@ class Recorder:
                 _draw_cursor(painter, self.cursor, self.cursor_pressed)
         finally:
             painter.end()
+        if self._focus_rect is not None:
+            _draw_detail_inset(
+                image,
+                self._focus_rect,
+                window_image.width(),
+                window_image.height(),
+            )
         path = self.frames_dir / f"frame_{self.frame_index:05d}.png"
         if not image.save(str(path), "PNG"):
             raise RuntimeError(f"failed to save {path}")
@@ -459,6 +524,27 @@ class Recorder:
             "point": [point.x(), point.y()],
         }
 
+    def _set_focus_target(self, target: dict | None) -> bool:
+        if target is None:
+            self._focus_rect = None
+            return False
+        point_x, point_y = (float(value) for value in target["point"])
+        _, _, width, height = (float(value) for value in target["rect"])
+        context_width = min(float(self.win.width() - 8), max(200.0, width + 36.0))
+        context_height = min(float(self.win.height() - 8), max(120.0, min(height + 36.0, 250.0)))
+        left = max(4.0, min(point_x - context_width / 2.0, self.win.width() - context_width - 4.0))
+        top = max(
+            4.0,
+            min(point_y - context_height / 2.0, self.win.height() - context_height - 4.0),
+        )
+        self._focus_rect = (left, top, context_width, context_height)
+        return True
+
+    def _frame_event(self, event: dict, target: dict | None) -> None:
+        framed = self._set_focus_target(target)
+        event["detail_inset"] = framed
+        event["detail_rect"] = list(self._focus_rect) if framed else None
+
     def _map_widget_point(self, widget, local_point):
         from pyqtgraph.Qt import QtCore
 
@@ -488,6 +574,15 @@ class Recorder:
         y = max(4, min(y, self.win.height() - widget.height() - 4))
         self._overlay_widget = widget
         self._overlay_top_left = QtCore.QPointF(float(x), float(y))
+        self._set_focus_target(
+            {
+                "rect": [float(x), float(y), float(widget.width()), float(widget.height())],
+                "point": [
+                    float(x) + widget.width() / 2.0,
+                    float(y) + widget.height() / 2.0,
+                ],
+            }
+        )
 
     def _overlay_action_target(self, menu, action) -> dict:
         geometry = menu.actionGeometry(action)
@@ -524,6 +619,7 @@ class Recorder:
     def edit_overlay_value(self, widget, value, *, label: str) -> None:
         target = self._widget_target(widget, (0.5, 0.5))
         event = self._start_action("edit", label, target=target)
+        self._frame_event(event, target)
         self.move_to(self.widget_point(widget), seconds=0.45)
         event["press_frame"] = self.frame_index
         event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
@@ -569,6 +665,7 @@ class Recorder:
             label or f"choose {action.text().replace('&', '')}",
             target=target,
         )
+        self._frame_event(event, target)
         menu.setActiveAction(action)
         point = QtCore.QPointF(*target["point"])
         self.move_to(point, seconds=move_s)
@@ -586,6 +683,7 @@ class Recorder:
         self.settle()
         self.hold(0.3)
         self._finish_action(event)
+        self._focus_rect = None
 
     def preview_overlay_action(
         self,
@@ -603,6 +701,7 @@ class Recorder:
             raise RuntimeError("action preview requires the menu to be the active overlay")
         target = self._overlay_action_target(menu, action)
         event = self._start_action("preview", label, target=target)
+        self._frame_event(event, target)
         menu.setActiveAction(action)
         self.move_to(QtCore.QPointF(*target["point"]), seconds=move_s)
         # Record where the pointer actually rests so the inspector can prove
@@ -613,6 +712,7 @@ class Recorder:
         self._finish_action(event)
         self._overlay_widget = None
         self._overlay_top_left = None
+        self._focus_rect = None
 
     def choose_combo_item(
         self,
@@ -699,6 +799,8 @@ class Recorder:
             "end_frame": None,
             "target": target,
             "cursor_at_press": None,
+            "detail_inset": False,
+            "detail_rect": None,
         }
         self._events.append(event)
         return event
@@ -706,7 +808,16 @@ class Recorder:
     def _finish_action(self, event: dict) -> None:
         event["end_frame"] = self.frame_index
 
-    def transition(self, label: str, invoke, *, settle_after: bool = True, hold_s: float = 0.3):
+    def transition(
+        self,
+        label: str,
+        invoke,
+        *,
+        settle_after: bool = True,
+        hold_s: float = 0.3,
+        focus_widget=None,
+        focus_rel=(0.5, 0.5),
+    ):
         """Record an honest non-pointer transition.
 
         Some documented states have no visible control in the current layout.
@@ -714,11 +825,15 @@ class Recorder:
         """
         event = self._start_action("transition", label)
         invoke()
+        if focus_widget is not None:
+            self._frame_event(event, self._widget_target(focus_widget, focus_rel))
         event["activate_frame"] = self.frame_index
         if settle_after:
             self.settle()
         self.hold(hold_s)
         self._finish_action(event)
+        if self._overlay_widget is None:
+            self._focus_rect = None
 
     def begin_gesture(self, label: str) -> dict:
         from pyqtgraph.Qt import QtCore
@@ -822,6 +937,7 @@ class Recorder:
             label or self._widget_label(widget) or "scripted transition",
             target=self._widget_target(widget, rel),
         )
+        self._frame_event(event, event["target"])
         if widget is not None:
             self.move_to(self.widget_point(widget, rel), seconds=move_s)
         event["press_frame"] = self.frame_index
@@ -846,6 +962,8 @@ class Recorder:
             self.settle()
         self.hold(0.25)
         self._finish_action(event)
+        if self._overlay_widget is None:
+            self._focus_rect = None
 
     def toolbar_action_widget(self, toolbar, action):
         widget = toolbar.widgetForAction(action)
@@ -947,6 +1065,7 @@ class Recorder:
             settle_after=False,
             label=f"focus {control_label}",
         )
+        self._frame_event(event, event["target"])
         event["press_frame"] = self.frame_index
         event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
         line_edit.selectAll()
@@ -958,6 +1077,7 @@ class Recorder:
         event["activate_frame"] = self.frame_index
         self.settle()
         self._finish_action(event)
+        self._focus_rect = None
 
     def scrub_text_values(
         self,
@@ -981,6 +1101,7 @@ class Recorder:
             label,
             target=self._widget_target(line_edit, (0.5, 0.5)),
         )
+        self._frame_event(event, event["target"])
         event["press_frame"] = self.frame_index
         event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
         for value in values:
@@ -991,6 +1112,7 @@ class Recorder:
         event["activate_frame"] = max(event["start_frame"], self.frame_index - 1)
         self.settle()
         self._finish_action(event)
+        self._focus_rect = None
 
 
 # --------------------------------------------------------------------------
@@ -1214,7 +1336,13 @@ def s_roi(rec: Recorder):
     rec.finish_gesture(rectangle_gesture, hold_s=0.6)
 
     rec.caption("Statistics and histograms update live")
-    rec.transition("open inspection panel", win._show_inspection_dock)
+    rec.transition(
+        "open inspection panel",
+        win._show_inspection_dock,
+        hold_s=1.2,
+        focus_widget=win.inspection_dock,
+        focus_rel=(0.5, 0.3),
+    )
     rec.hold_until_settled(2.5, tail_s=1.8)
 
     rec.caption("Trace a line profile through the features")

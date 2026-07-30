@@ -330,6 +330,36 @@ def test_a_non_click_action_is_still_held_to_its_recorded_target(inspector):
     assert "edit 'set crop start' cursor misses its target" in messages
 
 
+def test_a_declared_detail_inset_must_name_an_in_frame_source(inspector):
+    events = [
+        _caption("Inspect the control", 0),
+        {
+            "kind": "preview",
+            "label": "show export",
+            "caption": "Inspect the control",
+            "start_frame": 20,
+            "press_frame": None,
+            "activate_frame": 25,
+            "end_frame": 40,
+            "target": None,
+            "cursor_at_press": None,
+            "detail_inset": True,
+            "detail_rect": [1050, 700, 200, 120],
+        },
+    ]
+
+    messages = [
+        finding.message
+        for finding in inspector["timeline_findings"](
+            "probe",
+            _timeline(events),
+            _facts(inspector, "probe", "mp4", width=1100, duration=200 / 30),
+        )
+    ]
+
+    assert "preview 'show export' detail source lies outside the window" in messages
+
+
 def test_an_action_must_be_introduced_by_a_readable_caption(inspector):
     events = [
         _caption("Choose crop", 18),

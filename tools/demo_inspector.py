@@ -409,6 +409,27 @@ def timeline_findings(scenario: str, timeline: dict, media: MediaFacts) -> list[
             continue
         name = f"{kind} {event.get('label', index)!r}"
         findings.extend(_caption_findings(scenario, name, event, captions, min_lead_frames))
+        if event.get("detail_inset"):
+            detail_rect = event.get("detail_rect")
+            if detail_rect is None or len(detail_rect) != 4:
+                findings.append(
+                    Finding("error", scenario, f"{name} has no detail source rectangle")
+                )
+            else:
+                detail_x, detail_y, detail_width, detail_height = (
+                    float(value) for value in detail_rect
+                )
+                if (
+                    detail_x < 0
+                    or detail_y < 0
+                    or detail_width <= 0
+                    or detail_height <= 0
+                    or detail_x + detail_width > width
+                    or detail_y + detail_height > height
+                ):
+                    findings.append(
+                        Finding("error", scenario, f"{name} detail source lies outside the window")
+                    )
         target = event.get("target")
         cursor = event.get("cursor_at_press")
         if target is None:
