@@ -3852,6 +3852,45 @@ class FrameSession:
         )
         return True
 
+    def _superseded_fallback_is_final(self, tile_number: int, payload, tile, *, required) -> bool:
+        """Whether a stale presentable wrapper will never be replaced.
+
+        ``current_presentable_payload`` answers "the best thing the lifecycle
+        holds for this slot", which after a data change can be a wrapper from
+        before it: its ``semantic_generation`` names the previous slice window.
+        ``payload_compatible_with_tile`` is the standing owner of whether such a
+        wrapper may be bound (ADR 0050), and its answer is already no -- let the
+        floor resolver mint the current wrapper rather than bind stale metadata
+        and, on CPU backends, stale pixels.
+
+        What that answer does NOT settle is how long to wait.  For a tile in the
+        required scope "no" is a wait: an owner is evaluating the successor and
+        this wrapper is the floor it stands on, so dropping the slot would leave
+        it with no pixels and nothing able to re-seed it -- a cropped-axis
+        scroll settles through exactly that floor.  Outside the required scope
+        there is no such owner.  Nothing evaluates a tile that is only in the
+        visible MARGIN, so the lifecycle can never gain a target payload for it
+        and this same wrapper is all it will ever return.
+
+        Binding it anyway was self-sustaining.  The bind marked the tile
+        materialized, which shielded it from the drop pass; the wrapper's own
+        staleness kept it out of ``upserts``, so it was never proposed, never
+        acknowledged and never parked; and its dirty entry survived to be
+        reconciled again by the next commit.  Measured on a 272-tile montage one
+        slice step after settling: 13 tiles rebound 186 times across three
+        seconds of idle, holding ``final_commit_pending`` -- and with it the
+        montage prefetch ``_busy`` predicate -- true for the life of the
+        session, on both backends.
+        """
+
+        if tile is None or int(tile_number) in required:
+            return False
+        return not payload_compatible_with_tile(
+            payload,
+            getattr(tile, "view_state", None),
+            shader_display=bool(getattr(self, "shader_display", False)),
+        )
+
     def _may_retain_out_of_view(
         self,
         tile_number: int,
@@ -4079,6 +4118,11 @@ class FrameSession:
         # produce valid target payloads without creating native per-tile
         # ``rendered_tiles`` entries; treating that renderer-local map as the
         # readiness authority removed every such payload from the commit.
+        reconcile_required = frozenset(self.required_tile_numbers())
+        # A commit spends this loop deciding, per dirty slot, whether the
+        # lifecycle still has anything worth binding.  ``reconcile_required`` is
+        # read once: it is the difference between "no successor YET" and "no
+        # successor EVER", and the predicate below turns on exactly that.
         for tile_number in reconcile_numbers:
             current = self.display_tile_payloads.get(int(tile_number))
             if self.lifecycle.payload_is_current(int(tile_number), current):
@@ -4086,6 +4130,18 @@ class FrameSession:
                 continue
             payload = self.lifecycle.current_presentable_payload(int(tile_number))
             if payload is None or getattr(payload, "source_id", None) is None:
+                continue
+            if self._superseded_fallback_is_final(
+                int(tile_number),
+                payload,
+                plan_tiles_by_number.get(int(tile_number)),
+                required=reconcile_required,
+            ):
+                # Leaving the tile out of ``materialized`` hands it to the drop
+                # pass immediately below, which is the one owner of "this slot
+                # holds nothing worth keeping": it retires the payload, the
+                # dirty entry and the pending upsert, and queues the physical
+                # removal that stops the surface drawing superseded pixels.
                 continue
             self.display_tile_payloads[int(tile_number)] = payload
             materialized.add(int(tile_number))
