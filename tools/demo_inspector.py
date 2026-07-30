@@ -330,6 +330,15 @@ def parity_findings(
             findings.append(
                 Finding("error", scenario, f"missing expected formats: {', '.join(missing)}")
             )
+        gif = by_format.get("gif")
+        if gif and gif.width < README_INLINE_WIDTH:
+            findings.append(
+                Finding(
+                    "error",
+                    scenario,
+                    f"GIF is enlarged {README_INLINE_WIDTH / gif.width:.2f}x at README width",
+                )
+            )
         if len(items) < 2:
             continue
         aspects = [item.width / item.height for item in items]
@@ -346,15 +355,6 @@ def parity_findings(
                     "error",
                     scenario,
                     f"encoded durations differ by {max(durations) - min(durations):.3f}s",
-                )
-            )
-        gif = by_format.get("gif")
-        if gif and gif.width < README_INLINE_WIDTH:
-            findings.append(
-                Finding(
-                    "note",
-                    scenario,
-                    f"GIF is enlarged {README_INLINE_WIDTH / gif.width:.2f}x at README width",
                 )
             )
     return findings

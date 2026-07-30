@@ -60,7 +60,7 @@ RECORD_FPS = 30
 # format (all current browsers animate it) and stays near-MP4-sized even on
 # noisy content, where animated WebP ballooned to 10+ MB.
 GIF_FPS = 12
-GIF_WIDTH = 760
+GIF_WIDTH = 880
 GIF_LOSSY = 70
 AVIF_FPS = 20
 AVIF_WIDTH = 880
@@ -882,7 +882,7 @@ def s_showcase(rec: Recorder):
 def s_fft(rec: Recorder):
     from pyqtgraph.Qt import QtWidgets
 
-    win = rec.window(_phantom2d(384), size=(1280, 800))
+    win = rec.window(_phantom2d(384), size=(1100, 760))
     rec.caption("A phantom image — let's look at its k-space")
     rec.hold(1.8)
 
@@ -985,7 +985,7 @@ def s_roi(rec: Recorder):
 
     from arrayscope.core.roi import RoiKind
 
-    win = rec.window(_phantom2d(256), size=(1280, 900))
+    win = rec.window(_phantom2d(256), size=(1100, 820))
     rec.caption("Draw ROIs to inspect regions")
     rec.hold(1.4)
 

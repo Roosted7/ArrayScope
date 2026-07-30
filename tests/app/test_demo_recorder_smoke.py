@@ -56,7 +56,7 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
     assert manifest["schema_version"] == 1
     assert manifest["scenario"] == name
     assert manifest["frame_count"] == len(frames)
-    assert manifest["window_size"][0] > 0
+    assert manifest["window_size"][0] == 1100
     assert manifest["window_size"][1] > 0
     assert manifest["capture_size"] == [
         manifest["window_size"][0],

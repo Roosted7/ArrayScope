@@ -22,7 +22,7 @@ Each scenario is then encoded three ways:
 | Format | Purpose | Settings |
 |---|---|---|
 | `.avif` | Primary inline animation (all current browsers; near-MP4 sizes) | AV1, 20 fps, 880 px wide, CRF 34 |
-| `.gif` | Inline fallback for viewers without AVIF | 12 fps, 760 px wide, diff palette + bayer dither, `gifsicle -O3 --lossy` |
+| `.gif` | Inline fallback for viewers without AVIF | 12 fps, 880 px wide, diff palette + bayer dither, `gifsicle -O3 --lossy` |
 | `.mp4` | Full-quality video (link/download) | H.264 CRF 21, native size and fps |
 
 The README embeds `<picture>` blocks with the AVIF as primary source and the
@@ -73,7 +73,9 @@ The report is written under `tests/artifacts/demo-inspection/` (gitignored):
 Use `--only <substring>` for one scenario and increase `--samples` when an
 interaction needs closer inspection. `--strict` fails when a companion format
 is missing, encoded durations/aspect ratios disagree, or a manifested click
-misses (or lacks) its visible target. A newly recorded scenario writes
+misses (or lacks) its visible target. It also refuses an inline GIF narrower
+than the README's 880 px slot, because browser enlargement damages small text
+and palette edges. A newly recorded scenario writes
 `<scenario>.timeline.json` beside the final media; older media without a
 timeline remains inspectable through uniform samples and is reported as such.
 These structural checks complement, but do not replace, reviewing cursor
@@ -103,6 +105,11 @@ They use a 22 px font, wrap or elide within two bounded lines, and receive a
 lead-in before the described action begins. The timeline distinguishes the
 application `window_size` from the final `capture_size`, so target checks
 remain in the application's coordinate system.
+
+All four walkthrough windows are 1100 px wide and both inline encodes are
+880 px. This gives every scenario the same 0.8× application-to-README scale;
+control-heavy FFT and ROI scenes no longer shrink from 1280 px, and the GIF
+fallback is never enlarged.
 
 ## Staying maintainable
 

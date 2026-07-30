@@ -194,3 +194,32 @@ def test_strict_inspection_rejects_a_click_without_a_visible_target(tiny_video, 
 
     assert proc.returncode == 1
     assert "[error] tiny: click 'disconnected action' has no visible target" in proc.stdout
+
+
+def test_strict_inspection_rejects_a_fallback_that_readme_must_enlarge(tiny_video, tmp_path):
+    gif = tiny_video.with_suffix(".gif")
+    _ffmpeg("-i", str(tiny_video), "-vf", "scale=760:-1", str(gif))
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(INSPECTOR),
+            "--media-root",
+            str(tiny_video.parent),
+            "--out",
+            str(tmp_path / "inspection"),
+            "--expected-formats",
+            "gif",
+            "--samples",
+            "1",
+            "--strict",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+        timeout=60,
+        check=False,
+    )
+
+    assert proc.returncode == 1
+    assert "[error] tiny: GIF is enlarged 1.16x at README width" in proc.stdout
