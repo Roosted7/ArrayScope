@@ -168,6 +168,9 @@ def test_retained_fallback_refinement_caps_admission_and_render_pass():
         )
         == 32
     )
+    rebind = governor.decide_resident_crop_rebind(remaining_items=272)
+    assert rebind.batch_limit == 32
+    assert rebind.model == "named-policy"
 
 
 def test_render_pass_latches_item_independent_cost_and_recovers_floor():

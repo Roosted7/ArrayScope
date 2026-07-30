@@ -114,6 +114,8 @@ _PROFILE_TUNING = {
 _RENDER_PASS_REQUIREMENT_MS = 32.0
 _RENDER_PASS_ITEM_INDEPENDENCE_RATIO = 0.9
 _RENDER_PASS_HARD_LIMIT_MS = 50.0
+_RETAINED_FALLBACK_REBIND_BATCH_LIMIT = 32
+_RETAINED_FALLBACK_REFINEMENT_BATCH_LIMIT = 4
 _MIB = 1024.0 * 1024.0
 
 
@@ -452,7 +454,27 @@ class ResourceGovernor:
         """Bound GUI-side task admission behind an already-visible fallback."""
 
         limit = max(1, int(default_limit))
-        return min(limit, 4) if retained_fallback_refinement else limit
+        return (
+            min(limit, _RETAINED_FALLBACK_REFINEMENT_BATCH_LIMIT)
+            if retained_fallback_refinement
+            else limit
+        )
+
+    def decide_resident_crop_rebind(self, *, remaining_items: int) -> UiWorkDecision:
+        """Bound the retained-crop residency probes in one visible callback."""
+
+        remaining = max(1, int(remaining_items))
+        return UiWorkDecision(
+            "resident_crop_rebind",
+            min(remaining, _RETAINED_FALLBACK_REBIND_BATCH_LIMIT),
+            _RENDER_PASS_REQUIREMENT_MS,
+            0,
+            "R5 retained-crop residency handoff",
+            0,
+            _RENDER_PASS_REQUIREMENT_MS,
+            "named-policy",
+            (f"retained crop rebind cap={_RETAINED_FALLBACK_REBIND_BATCH_LIMIT}",),
+        )
 
     def decide_render_pass(
         self,
@@ -676,7 +698,7 @@ class ResourceGovernor:
         else:
             batch = min(max_batch, latest_count + 1)
         if retained_fallback_refinement:
-            batch = min(batch, 4)
+            batch = min(batch, _RETAINED_FALLBACK_REFINEMENT_BATCH_LIMIT)
         return UiWorkDecision(
             channel,
             batch,
@@ -751,7 +773,11 @@ class ResourceGovernor:
                 ),
                 "target=32.00ms hard=50.00ms",
             )
-            + (("retained fallback refinement cap=4",) if retained_fallback_refinement else ()),
+            + (
+                (f"retained fallback refinement cap={_RETAINED_FALLBACK_REFINEMENT_BATCH_LIMIT}",)
+                if retained_fallback_refinement
+                else ()
+            ),
         )
 
     def begin_render_pass(

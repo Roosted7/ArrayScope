@@ -4369,6 +4369,30 @@ def test_retarget_index_window_remaps_hits_misses_and_unchanged():
     assert session.lifecycle.backend_presented_identities == backend_truth
 
 
+def test_index_window_retarget_rearms_resident_crop_transition_latch():
+    """A reused FrameSession object must not inherit the prior crop's proof."""
+
+    session = _session(count=2)
+    session.resident_crop_rebind_seeded = True
+    session.resident_crop_rebind_stats.update(rebound=2)
+    session.resident_crop_governor_stats.update(seed_admitted_items=2)
+    session.resident_crop_rebound_source_ids.update({0: ("old", 0), 1: ("old", 1)})
+    session.resident_crop_fallback_source_ids.update({0: ("old", 0), 1: ("old", 1)})
+
+    plan = _shifted_plan(count=2, offset=0)
+    _retarget(
+        session,
+        plan,
+        new_source_ids={0: ("src", 0), 1: ("src", 1)},
+    )
+
+    assert session.resident_crop_rebind_seeded is False
+    assert session.resident_crop_rebind_stats == {}
+    assert session.resident_crop_governor_stats == {}
+    assert session.resident_crop_rebound_source_ids == {}
+    assert session.resident_crop_fallback_source_ids == {}
+
+
 def test_paced_followup_rejects_same_slots_with_new_source_mapping():
     """A scroll keeps slot numbers but changes the slices they represent."""
 

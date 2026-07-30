@@ -661,8 +661,14 @@ class FrameRuntimeMixin:
             and int(getattr(kernel_diag, "parked_quota", 0) or 0) == 0
             and (completion_queue is None or completion_queue.empty())
         )
-        if not kernel_idle or bool(getattr(self, "_montage_presentation_gate_armed", False)):
+        presentation_gate_armed = bool(getattr(self, "_montage_presentation_gate_armed", False))
+        if not kernel_idle:
             return
+        # An armed gate is a promise, not progress.  If its receiver-bound Qt
+        # event were ever lost while the live session and kernel were idle,
+        # exempting it here would hide exactly the closed-pipeline strand the
+        # watchdog exists to diagnose.  This remains an assertion only: it
+        # does not resurrect the rejected repeating-continuation scheduler.
         probe = getattr(session, "diagnostic_tile_identity_rows", lambda **_kwargs: ())()
         actionable_probe = tuple(
             row for row in tuple(probe) if _stall_tile_probe_row_actionable(row)
@@ -683,6 +689,8 @@ class FrameRuntimeMixin:
             "committed_frame_stale_reason": committed_frame_stale_reason,
             "flush_pending": bool(session.flush_pending),
             "final_commit_pending": bool(session.final_commit_pending),
+            "presentation_gate_armed": presentation_gate_armed,
+            "presentation_gate_owner": getattr(self, "_montage_presentation_gate_owner", None),
             "stage_active": len(session.stage_fan_in.active_requests),
             "stage_attached": len(session.stage_fan_in.attached_requests),
             "tile_rows": actionable_probe[:20],

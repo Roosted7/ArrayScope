@@ -474,15 +474,28 @@ class FramePipelineEffects:
         governor = getattr(getattr(self.renderer, "win", None), "resource_governor", None)
         decide = getattr(governor, "decide_ladder_admission", None)
         if not callable(decide):
-            return max(1, int(default_limit))
-        return int(
-            decide(
-                default_limit=default_limit,
-                retained_fallback_refinement=bool(
-                    getattr(self.session, "resident_crop_fallback_source_ids", None)
-                ),
+            limit = max(1, int(default_limit))
+        else:
+            limit = int(
+                decide(
+                    default_limit=default_limit,
+                    retained_fallback_refinement=bool(
+                        getattr(self.session, "resident_crop_fallback_source_ids", None)
+                    ),
+                )
             )
-        )
+        if getattr(self.session, "resident_crop_fallback_source_ids", None):
+            evidence = self.session.resident_crop_governor_stats
+            evidence["refinement_admission_requested"] = max(
+                int(evidence.get("refinement_admission_requested", 0)),
+                1,
+                int(default_limit),
+            )
+            evidence["refinement_admission_cap"] = max(
+                int(evidence.get("refinement_admission_cap", 0)),
+                int(limit),
+            )
+        return int(limit)
 
     def _canonical_plane_warm_enabled(self) -> bool:
         """Whether target work may establish a backend's canonical pages."""
@@ -610,12 +623,20 @@ class FramePipelineEffects:
         )
         self.renderer._montage_presentation_gate_armed = True
         self.renderer._montage_presentation_gate_owner = owner
+        self.session.resident_crop_governor_stats["presentation_gate_posts"] = (
+            int(self.session.resident_crop_governor_stats.get("presentation_gate_posts", 0)) + 1
+        )
+        self.session.resident_crop_governor_stats["presentation_gate_pending"] = 1
+        # The receiver-owned Qt event is the primary continuation.  The
+        # montage watchdog is the independent lost-wakeup detector: an armed
+        # gate no longer exempts an otherwise idle, unchanged session from its
+        # stall assertion.
         _post_visible_path_callback(
             self.renderer,
             lambda effects=self, owner=owner: effects._on_presentation_gate(owner),
         )
 
-    def _seed_resident_crop_rebinds_governed(self, scope, *, batch_size: int = 32) -> bool:
+    def _seed_resident_crop_rebinds_governed(self, scope) -> bool:
         """Seed one wide crop rebind across bounded visible-path callbacks."""
 
         if not self._resident_crop_rebind_enabled():
@@ -631,6 +652,17 @@ class FramePipelineEffects:
             return False
         self._expire_canonical_plane_payloads_for_document()
         self.session.resident_crop_rebind_seeded = True
+        governor = getattr(getattr(self.renderer, "win", None), "resource_governor", None)
+        decide = getattr(governor, "decide_resident_crop_rebind", None)
+        decision = decide(remaining_items=len(tile_numbers)) if callable(decide) else None
+        batch_size = max(1, int(getattr(decision, "batch_limit", 1) or 1))
+        governor_stats = self.session.resident_crop_governor_stats
+        governor_stats.update(
+            seed_admitted_items=len(tile_numbers),
+            seed_batch_cap=batch_size,
+            seed_batch_max=0,
+            seed_callbacks=0,
+        )
         # An empty eager-commit gate was armed before the deferred stage plan
         # completed.  Do not let it publish a partial successor between these
         # chunks; the final chunk owns the one complete atomic handoff.
@@ -648,6 +680,7 @@ class FramePipelineEffects:
             if not self.renderer._frame_session_is_current(self.session):
                 return
             chunk = chunks[index]
+            started = perf_counter()
             rebound = self.session.rebind_resident_crop_tiles(
                 physical_resident_fn=resident_fn,
                 tile_numbers=chunk,
@@ -658,6 +691,25 @@ class FramePipelineEffects:
                     tile: canonical_by_tile[tile] for tile in chunk if tile in canonical_by_tile
                 },
                 remember_canonical=self._remember_canonical_plane_payload,
+            )
+            elapsed_ms = (perf_counter() - started) * 1000.0
+            governor_stats["seed_callbacks"] = int(governor_stats["seed_callbacks"]) + 1
+            governor_stats["seed_batch_max"] = max(
+                int(governor_stats["seed_batch_max"]),
+                len(chunk),
+            )
+            _observe_ui(
+                self.renderer,
+                "resident_crop_rebind",
+                elapsed_ms,
+                len(chunk),
+                int(self.session.resident_crop_rebind_stats.get("value_bounds_scan_bytes", 0)),
+                "resident_crop_rebind",
+                image_view_backend_capabilities(self.renderer.win.img_view).name,
+                details=(
+                    f"batch_cap={batch_size}",
+                    f"admitted_items={len(tile_numbers)}",
+                ),
             )
             stats = dict(self.session.resident_crop_rebind_stats)
             for key, value in stats.items():
@@ -1600,6 +1652,14 @@ class FramePipelineEffects:
                 live_session=live_owner[0],
             )
             return
+        governor_stats = getattr(self.session, "resident_crop_governor_stats", None)
+        if isinstance(governor_stats, dict) and int(
+            governor_stats.get("presentation_gate_pending", 0)
+        ):
+            governor_stats["presentation_gate_pending"] = 0
+            governor_stats["presentation_gate_fires"] = (
+                int(governor_stats.get("presentation_gate_fires", 0)) + 1
+            )
         self.renderer._montage_presentation_gate_owner = None
         self.renderer._montage_presentation_gate_armed = False
         if not self._session_is_current():
@@ -2377,18 +2437,12 @@ class FramePipelineEffects:
                 if cpu_atomic_successor or shader_atomic_successor
                 else frozenset()
             )
-            rebound_source_ids = dict(
-                getattr(session, "resident_crop_fallback_source_ids", None) or {}
-            )
             atomic_current_tiles = frozenset(
                 int(tile)
                 for tile, payload in active_payloads.items()
                 if (
                     session.lifecycle.payload_is_current(int(tile), payload)
-                    or (
-                        rebound_source_ids.get(int(tile)) == getattr(payload, "source_id", None)
-                        and session.lifecycle.current_presentable_payload(int(tile)) is payload
-                    )
+                    or session.resident_crop_fallback_is_current(int(tile), payload)
                 )
             )
             if atomic_required_tiles and not atomic_required_tiles.issubset(atomic_current_tiles):
@@ -5720,16 +5774,24 @@ def _commit_batch_decision(
     decide_pass = getattr(governor, "decide_render_pass", None)
     if callable(decide_pass):
         required_target_unsettled = getattr(session, "required_target_unsettled_tiles", None)
-        return decide_pass(
+        retained_refinement = bool(
+            getattr(session, "resident_crop_fallback_source_ids", None)
+            and callable(required_target_unsettled)
+            and required_target_unsettled()
+        )
+        decision = decide_pass(
             interactive=interactive,
             pass_kind=pass_kind,
             remaining_items=remaining_items,
-            retained_fallback_refinement=bool(
-                getattr(session, "resident_crop_fallback_source_ids", None)
-                and callable(required_target_unsettled)
-                and required_target_unsettled()
-            ),
+            retained_fallback_refinement=retained_refinement,
         )
+        if retained_refinement:
+            evidence = session.resident_crop_governor_stats
+            evidence["refinement_render_batch_cap"] = max(
+                int(evidence.get("refinement_render_batch_cap", 0)),
+                int(decision.batch_limit),
+            )
+        return decision
     decide = getattr(governor, "decide_commit_batch", None)
     if callable(decide):
         return decide(interactive=interactive)

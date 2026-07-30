@@ -796,6 +796,9 @@ class FrameSession:
     # NOT avoid; a decline reason distinguishes "never called" from "called and
     # declined per tile" without a debugger.
     resident_crop_rebind_stats: dict[str, int] = field(default_factory=dict)
+    # Work-proportional proof for the governed retained handoff.  Unlike the
+    # wall clock, these counts are stable under pytest/desktop load.
+    resident_crop_governor_stats: dict[str, int] = field(default_factory=dict)
     # Planning is continuation-driven, but crop rebind seeding is a transition
     # action.  A preview-quality retained fallback deliberately leaves T
     # missing; without this latch every planning continuation would re-seed all
@@ -1361,6 +1364,23 @@ class FrameSession:
         else:
             self.lifecycle.fallback_ready(int(ref.payload.tile_number), ref)
 
+    def resident_crop_fallback_is_current(self, tile_number: int, payload) -> bool:
+        """Whether ``payload`` is the complete gate's current retained wrapper.
+
+        The exception is payload-specific, not a quality-wide relaxation:
+        the rebind gate records the source id only after physical residency
+        succeeds, and ``current_presentable_payload`` proves no later wrapper
+        superseded that exact object.  The atomic successor still requires this
+        predicate for every tile in its frozen required scope, so one missing
+        or replaced fallback cannot publish a partial successor.
+        """
+
+        index = int(tile_number)
+        return bool(
+            self.resident_crop_fallback_source_ids.get(index) == getattr(payload, "source_id", None)
+            and self.lifecycle.current_presentable_payload(index) is payload
+        )
+
     def _rebind_reslice_planes(
         self, previous, new_anchor, canonical, *, decline=None
     ) -> dict[str, object] | None:
@@ -1706,6 +1726,16 @@ class FrameSession:
         self.semantic_key = semantic_key
         self.level_key = level_key
         self.render_generation = int(render_generation)
+        # This object survives an index-window retarget, but these proofs do
+        # not: they name one semantic target and one physical handoff.  Reset
+        # them with the generation so a later crop in the same FrameSession
+        # object can seed its own fallback instead of inheriting the one-shot
+        # latch from its predecessor.
+        self.resident_crop_rebind_seeded = False
+        self.resident_crop_rebind_stats.clear()
+        self.resident_crop_governor_stats.clear()
+        self.resident_crop_rebound_source_ids.clear()
+        self.resident_crop_fallback_source_ids.clear()
         previous_anchor_key = getattr(self.source_anchoring, "content_key", None)
         next_anchor_key = getattr(source_anchoring, "content_key", None)
         self.source_anchoring = source_anchoring
@@ -2773,6 +2803,7 @@ class FrameSession:
                 anchor=new_anchor,
                 previous_payload=previous,
                 target_tile=identity_tile,
+                scan_bounds=False,
             ):
                 texture_data = candidate_planes.get("texture_data", previous_payload.texture_data)
                 candidate_lod = candidate_planes.get("lod", previous_payload.lod)
@@ -2787,20 +2818,22 @@ class FrameSession:
                 )
                 # The scan is on the zero-upload fast path, so it reports its
                 # own cost rather than being taken on trust.
-                scan_work: dict[str, int] = {}
-                started_ns = perf_counter_ns()
-                current_bounds = _rebind_current_plane_value_bounds(
-                    previous_payload,
-                    candidate_planes,
-                    work=scan_work,
-                )
-                stats["value_bounds_scan_ns"] = stats.get("value_bounds_scan_ns", 0) + (
-                    perf_counter_ns() - started_ns
-                )
-                stats["value_bounds_scan_bytes"] = stats.get("value_bounds_scan_bytes", 0) + int(
-                    scan_work.get("bytes", 0)
-                )
-                stats["value_bounds_scan_planes"] = stats.get("value_bounds_scan_planes", 0) + 1
+                current_bounds = None
+                if scan_bounds:
+                    scan_work: dict[str, int] = {}
+                    started_ns = perf_counter_ns()
+                    current_bounds = _rebind_current_plane_value_bounds(
+                        previous_payload,
+                        candidate_planes,
+                        work=scan_work,
+                    )
+                    stats["value_bounds_scan_ns"] = stats.get("value_bounds_scan_ns", 0) + (
+                        perf_counter_ns() - started_ns
+                    )
+                    stats["value_bounds_scan_bytes"] = stats.get(
+                        "value_bounds_scan_bytes", 0
+                    ) + int(scan_work.get("bytes", 0))
+                    stats["value_bounds_scan_planes"] = stats.get("value_bounds_scan_planes", 0) + 1
                 return replace(
                     previous_payload,
                     source_anchor=anchor,
@@ -2848,6 +2881,20 @@ class FrameSession:
                     continue
                 stats["crop_local_subset"] = stats.get("crop_local_subset", 0) + 1
                 crop_local_subset_used = True
+                planes = crop_local_subset
+                new_anchor = subset_anchor
+            # Bounds are presentation semantics, not residency identity.  Scan
+            # only after a candidate is physically accepted, and scan the
+            # smallest accepted plane.  The sharpened second-axis path first
+            # declines a canonical candidate and then accepts a crop-local
+            # subset; scanning both doubled cold GUI-thread work.
+            candidate = rebound_candidate(planes, anchor=new_anchor, scan_bounds=True)
+            if getattr(previous, "semantic_data", None) is None:
+                stats["page_backed_superset_rebind"] = (
+                    stats.get("page_backed_superset_rebind", 0) + 1
+                )
+            else:
+                stats["exact_plane_rebind"] = stats.get("exact_plane_rebind", 0) + 1
             self.display_tile_payloads[tile_number] = candidate
             self.record_tile_payload(candidate)
             self.acknowledged_source_ids.add(candidate.source_id)
@@ -5560,11 +5607,7 @@ def _payload_matches_current_tile(session, tile_number: int, payload, plan_tiles
     payload_identity = getattr(payload, "tile_identity", None)
     record = session.lifecycle.peek(int(tile_number))
     target_identity = None if record is None or record.target is None else record.target.identity
-    if (getattr(session, "resident_crop_fallback_source_ids", None) or {}).get(
-        int(tile_number)
-    ) == getattr(payload, "source_id", None) and session.lifecycle.current_presentable_payload(
-        int(tile_number)
-    ) is payload:
+    if session.resident_crop_fallback_is_current(int(tile_number), payload):
         # This wrapper is a current-source fallback physically proved by the
         # backend at the crop-rebind seam.  It intentionally does not satisfy
         # T's quality/LOD identity; accepting it here is what lets the atomic
