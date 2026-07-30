@@ -99,3 +99,41 @@ def closing_line(start: LoadWindow, end: LoadWindow) -> str | None:
         f"WARNING: ~{foreign:.1f} of the load on {_cpu_count()} cores during this run came from "
         "elsewhere. Re-run before attributing a failure or a duration to your change."
     )
+
+
+#: Below this much elapsed wall clock the own-parallelism subtraction is
+#: arithmetic on noise: a few hundred milliseconds of CPU over a few
+#: milliseconds of wall reads as a parallelism of hundreds, and the "foreign"
+#: remainder as a large negative number. Early in a run there is no honest
+#: second sample yet, so the opening one is reported as what it is.
+_SETTLED_SECONDS = 1.0
+
+
+def observation_context(start: LoadWindow | None) -> dict[str, float]:
+    """What the machine looked like at one moment of the run.
+
+    For the flake ledger: an observation is worth keeping the conditions of,
+    because "did this only ever happen on a loaded machine?" is a question a
+    human can answer from four recorded runs and cannot answer from a count.
+
+    Two numbers, and the difference between them matters. ``load`` is the raw
+    one-minute average — everything running, this suite included. ``foreign_load``
+    subtracts this run's own parallelism the way :func:`closing_line` does, so it
+    estimates what *else* was on the machine. Before the run has been going long
+    enough for that subtraction to mean anything, only the opening sample is
+    reported, under a name that says so: ``load_at_start``.
+
+    Recording, not judging. Nothing here classifies an observation, and no
+    caller may use these numbers to discount one.
+    """
+
+    now = LoadWindow.sample()
+    if start is None or now.wall - start.wall < _SETTLED_SECONDS:
+        load = (start or now).load
+        return {} if load is None else {"load_at_start": round(load, 2)}
+    if now.load is None:
+        return {}
+    return {
+        "load": round(now.load, 2),
+        "foreign_load": round(now.load - now.own_parallelism_since(start), 2),
+    }

@@ -494,11 +494,16 @@ def seed_map(rootdir: os.PathLike[str] | str, *, seeding: bool = True) -> str | 
 
 
 def _copy_map(donor: Path, destination: Path) -> bool:
-    """Atomically put ``donor`` at ``destination``, sidecar included.
+    """Atomically put ``donor`` at ``destination``, sidecar and flakes included.
 
     Through a temporary name in the destination directory: a half-written
     SQLite file read by a concurrently starting run would look like a corrupt
     map rather than a missing one.
+
+    Three files travel, and the map is the only one that has to arrive. The two
+    passengers are copied — never linked, for the same reason the map is not —
+    after the map is in place, so a failure in either costs what it carries and
+    nothing else.
     """
 
     import shutil
@@ -513,7 +518,26 @@ def _copy_map(donor: Path, destination: Path) -> bool:
         Path(staged).unlink(missing_ok=True)
         return False
     _seed_coverage_sidecar(donor, destination)
+    _seed_flake_ledger(donor, destination)
     return True
+
+
+def _seed_flake_ledger(donor: Path, destination: Path) -> None:
+    """Carry the donor's flake observations across with its map.
+
+    Without this an observation lives and dies inside one checkout, which is the
+    wrong lifetime for it twice over: a worktree is throwaway, so a branch's
+    observations were being deleted with it, and the map it made them about
+    goes on to be adopted by the main checkout — arriving able to vouch for
+    greens somebody watched flip. Merge rather than replace, because the
+    destination's observations are as real as the donor's; see
+    ``tests/red_ledger.py:carry_flakes``.
+    """
+
+    from tests import red_ledger
+
+    with contextlib.suppress(Exception):  # observations, never a result
+        red_ledger.carry_flakes(donor, destination)
 
 
 def _worktree_heads(rootdir: Path) -> list[tuple[Path, str]]:

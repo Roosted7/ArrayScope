@@ -57,6 +57,11 @@ _red_ledger = None
 _flake_ledger = None
 _forced_reds: frozenset[str] = frozenset()
 _changed_since_recorded: frozenset[str] = frozenset()
+#: What this run *is*, for anything it observes: settled once at sessionstart
+#: because neither the worker count nor the command changes mid-run, unlike the
+#: machine load beside it. See :func:`_flake_observation_context`.
+_flake_run_shape: dict = {}
+_flake_load_start = None
 #: Node ids this run collected, gathered from wherever collection happened.
 _collected: set[str] = set()
 
@@ -1328,10 +1333,13 @@ def pytest_sessionstart(session):
     """
 
     global _red_ledger, _flake_ledger, _forced_reds, _changed_since_recorded
+    global _flake_run_shape, _flake_load_start
     _red_ledger = None
     _flake_ledger = None
     _forced_reds = frozenset()
     _changed_since_recorded = frozenset()
+    _flake_run_shape = {}
+    _flake_load_start = None
     config = session.config
     testmon_config = getattr(config, "testmon_config", None)
     # Both the controller and every worker delete from the map during their own
@@ -1371,6 +1379,8 @@ def pytest_sessionstart(session):
         _changed_since_recorded = frozenset(data.unstable_test_names or ()) | (
             frozenset(_flake_ledger.marks) - frozenset(data.all_tests or ())
         )
+        _flake_run_shape = _run_conditions(config)
+        _flake_load_start = getattr(config, "arrayscope_load_start", None)
     except Exception:  # an unreadable flake ledger costs a trusted green, not a result
         _flake_ledger = None
 
@@ -1429,7 +1439,7 @@ def pytest_runtest_logreport(report):
         # It was red, nothing it executes changed, and it just passed. There is
         # no code-shaped explanation for that, so the map's green is not
         # evidence about it — see tests/red_ledger.py:FlakeLedger.
-        _flake_ledger.observe(report.nodeid, when=_now_iso())
+        _flake_ledger.observe(report.nodeid, when=_now_iso(), context=_flake_observation_context())
     yield
 
 
@@ -1437,6 +1447,69 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _flake_observation_context() -> dict:
+    """The conditions one flake observation happened under.
+
+    Sampled here rather than summarised at the end because the interesting part
+    is per-observation: two flips in one run under very different load are two
+    different facts, and a single end-of-run figure would flatten them into one.
+
+    Recorded and printed, never acted on. See
+    ``tests/red_ledger.py:FlakeLedger`` for why that line is where it is.
+    """
+
+    return {**_flake_run_shape, **load_report.observation_context(_flake_load_start)}
+
+
+def _run_conditions(config) -> dict:
+    """The half of an observation's context that cannot change under it."""
+
+    conditions = {"shape": _run_shape(config)}
+    workers = _worker_count(config)
+    if workers is not None:
+        conditions["workers"] = workers
+    return conditions
+
+
+def _worker_count(config) -> int | None:
+    """Workers this run has, ``0`` for in-process, ``None`` when unknowable.
+
+    The *effective* number, read after the harness's own cap and xdist's auto
+    decision have both landed (see :func:`_cap_explicit_workers`) — the flake
+    ledger records what the test actually ran alongside, not what somebody
+    typed. An unresolved ``auto`` is reported as unknown rather than as zero: a
+    guessed "serial" in this field is worse than a gap, because a reader of the
+    ledger cannot tell it from a measurement.
+    """
+
+    try:
+        return int(getattr(config.option, "numprocesses", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_shape(config) -> str:
+    """Which of the four documented commands this run is.
+
+    Ordered by how much each one weakens the observation, strongest qualifier
+    first. ``noselect`` means the test did not re-run *because* it was red —
+    everything ran — so the "nothing it executes changed" half of the
+    observation came from the map rather than from the run's own shape. Then
+    ``--since``, which re-runs reds as a merge gate; then ``--rerun-reds``,
+    which asks for exactly them; then the plain loop.
+
+    A label, not a judgement: all four record the same observation.
+    """
+
+    if config.getoption("testmon_noselect", False):
+        return "noselect"
+    if config.getoption("since", None) is not None:
+        return "since"
+    if config.getoption("rerun_reds", False):
+        return "rerun-reds"
+    return "loop"
 
 
 def pytest_report_header(config):

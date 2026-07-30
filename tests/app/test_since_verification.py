@@ -386,8 +386,12 @@ def test_a_second_observation_counts_rather_than_replaces(tmp_path):
     again.observe(FLAKY, when="b")
     again.save()
 
+    # The two fields every reader of this file has always used, unchanged by
+    # the per-observation history that now sits beside them
+    # (tests/app/test_flake_context.py owns that half).
     marks = red_ledger.read_flakes(tmp_path / "themap", "env")
-    assert marks[FLAKY] == {"count": 2, "last_seen": "b"}
+    assert marks[FLAKY]["count"] == 2
+    assert marks[FLAKY]["last_seen"] == "b"
 
 
 def test_the_mark_clears_when_the_dependencies_actually_change(tmp_path):

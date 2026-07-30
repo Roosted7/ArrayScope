@@ -51,6 +51,12 @@ FLAKE_SUFFIX = "-flakes.json"
 
 _VERSION = 1
 
+#: Observations kept with their conditions, per test, newest first. Five is
+#: enough to see a pattern or the absence of one, and small enough that the
+#: ledger stays a file a human can read. The ``count`` above it is not capped:
+#: how often is a different question from under what.
+_RECENT_LIMIT = 5
+
 
 def ledger_path(map_path: Path) -> Path:
     return map_path.with_name(map_path.name + LEDGER_SUFFIX)
@@ -164,12 +170,21 @@ class FlakeLedger:
     evidence. It re-runs it instead, which is the one honest thing to do with a
     result the map cannot vouch for.
 
-    Deliberately minimal. No score, no decay, no threshold: one observation is
-    enough to know the fingerprint does not determine the outcome, and a count
-    that had to be tuned would be a second thing to get wrong. The mark clears
-    on exactly one event — the test's dependencies actually changed, so it
-    re-recorded. New code is new evidence, and the old flakiness is no longer
-    about it.
+    Deliberately minimal *as a decision*. No score, no decay, no threshold: one
+    observation is enough to know the fingerprint does not determine the
+    outcome, and a count that had to be tuned would be a second thing to get
+    wrong. The mark clears on exactly one event — the test's dependencies
+    actually changed, so it re-recorded. New code is new evidence, and the old
+    flakiness is no longer about it.
+
+    Not minimal as a *record*. Each observation keeps what the run looked like
+    (:meth:`observe`), because the mark answers "this test flipped" and the
+    first question after it is always "under what?" — a loaded machine, eight
+    workers, a ``--since`` — and that is exactly what nothing was writing down.
+    The two halves are separate on purpose: the conditions are printed, never
+    consulted. A harness that discounted an observation because the machine was
+    busy would be a harness that hides the flakes worth finding, since load is
+    a trigger for the real ones as often as it is an alibi.
     """
 
     def __init__(self, path: Path, environment: str) -> None:
@@ -183,13 +198,27 @@ class FlakeLedger:
     def load(cls, map_path, environment: str) -> FlakeLedger:
         return cls(flake_path(Path(map_path)), environment)
 
-    def observe(self, nodeid: str, when: str) -> None:
-        """Record one red-that-was-not-changed passing. Idempotent-ish: it counts."""
+    def observe(self, nodeid: str, when: str, context: dict | None = None) -> None:
+        """Record one red-that-was-not-changed passing. Idempotent-ish: it counts.
+
+        ``context`` describes the run this happened on — machine load, worker
+        count, run shape — and is kept per observation under ``recent``, newest
+        first, capped at :data:`_RECENT_LIMIT`. ``count`` and ``last_seen`` keep
+        their exact previous meaning and position, so every existing reader of
+        this file is untouched by the addition; ``recent`` is additive and its
+        absence in an older file reads as "no conditions were recorded", which
+        is true.
+
+        The keys inside ``context`` are the caller's business. This class stores
+        and prints them and does nothing else with them — see the class
+        docstring for why that boundary is the point rather than a limitation.
+        """
 
         previous = self.marks.get(nodeid) or {}
         self.marks[nodeid] = {
             "count": int(previous.get("count") or 0) + 1,
             "last_seen": when,
+            "recent": [{"at": when, **(context or {})}, *_recent_of(previous)][:_RECENT_LIMIT],
         }
 
     def forget(self, nodeids) -> None:
@@ -218,6 +247,83 @@ class FlakeLedger:
             self.path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
 
 
+def _recent_of(mark) -> list[dict]:
+    """The per-observation history of one mark, or none. Tolerant by design.
+
+    A ledger written before ``recent`` existed, or one hand-edited into a shape
+    this code did not expect, must read as "no conditions recorded" rather than
+    raise: the conditions are commentary on the mark, and losing the commentary
+    may never cost the mark.
+    """
+
+    recent = mark.get("recent") if isinstance(mark, dict) else None
+    if not isinstance(recent, list):
+        return []
+    return [dict(entry) for entry in recent if isinstance(entry, dict)]
+
+
+def carry_flakes(donor_map, destination_map) -> None:
+    """Merge the donor map's flake observations into the destination map's.
+
+    The observations belong to the map, not to the checkout: they are statements
+    about node ids whose fingerprints the map holds, so a map that moves without
+    them arrives claiming it can vouch for greens that were witnessed flipping.
+    Worktrees are throwaway here, which made that the normal case — every
+    observation a branch made died with it, and the main checkout kept
+    re-learning the same flakes.
+
+    **Union, not replace.** Both sides are records of things that actually
+    happened, and a plain copy would silently discard whichever set of them the
+    destination had made. So per environment and per node id: counts add, the
+    newer ``last_seen`` wins, and the two histories interleave by timestamp back
+    to :data:`_RECENT_LIMIT`. The one thing this cannot do is recognise an
+    observation it is being handed *back* — a mark seeded from main, observed
+    once more in the worktree, and adopted home counts as both. So the count is
+    "how often this kept happening", not an audited total, and nothing here
+    branches on its value.
+
+    Failure is silent and costs observations, never a result: the map it rides
+    with has already been copied by the time this runs, and a ledger that fails
+    to arrive leaves the destination exactly as trustworthy as it was before.
+    """
+
+    donor_file = flake_path(Path(donor_map))
+    destination_file = flake_path(Path(destination_map))
+    theirs = _read_flakes(donor_file)
+    if not theirs:
+        return
+    merged = _merge_environments(theirs, _read_flakes(destination_file))
+    payload = {"version": _VERSION, "environments": merged}
+    with contextlib.suppress(OSError):
+        destination_file.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+
+
+def _merge_environments(theirs: dict, ours: dict) -> dict:
+    return {
+        environment: _merge_marks(theirs.get(environment) or {}, ours.get(environment) or {})
+        for environment in set(theirs) | set(ours)
+    }
+
+
+def _merge_marks(theirs: dict, ours: dict) -> dict:
+    merged = {}
+    for nodeid in set(theirs) | set(ours):
+        mine, yours = ours.get(nodeid) or {}, theirs.get(nodeid) or {}
+        if not mine or not yours:
+            merged[nodeid] = dict(mine or yours)
+            continue
+        merged[nodeid] = {
+            "count": int(mine.get("count") or 0) + int(yours.get("count") or 0),
+            "last_seen": max(str(mine.get("last_seen") or ""), str(yours.get("last_seen") or "")),
+            "recent": sorted(
+                _recent_of(mine) + _recent_of(yours),
+                key=lambda entry: str(entry.get("at") or ""),
+                reverse=True,
+            )[:_RECENT_LIMIT],
+        }
+    return merged
+
+
 def _read_flakes(path: Path) -> dict[str, dict[str, dict]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -236,7 +342,7 @@ def _read_flakes(path: Path) -> dict[str, dict[str, dict]]:
 
 
 def read_flakes(map_path, environment: str) -> dict[str, dict]:
-    """``{node id: {count, last_seen}}``, without loading a whole ledger.
+    """``{node id: {count, last_seen, recent}}``, without loading a whole ledger.
 
     The read-only half, for the two callers that must not write: the ``--since``
     partition, which runs on every xdist worker, and ``tools/test_selection.py``.
