@@ -258,7 +258,10 @@ class FramePipeline:
                 self.counters.interactive_native_deferred += 1
                 continue
             self._pending_admissions.append((intent, step))
-        submitted += self._drain_pending_admissions(admission_generation)
+        submitted += self._drain_pending_admissions(
+            admission_generation,
+            max_inspected=self._admission_chunk_limit(),
+        )
         if self._pending_admissions:
             self._arm_admission_continuation(admission_generation)
         self._flush_ready()
@@ -454,6 +457,14 @@ class FramePipeline:
                 submitted += 1
         return submitted
 
+    def _admission_chunk_limit(self) -> int:
+        decide = getattr(self.effects, "admission_chunk_limit", None)
+        return (
+            max(1, int(decide(self.ADMISSION_CHUNK)))
+            if callable(decide)
+            else int(self.ADMISSION_CHUNK)
+        )
+
     def _arm_admission_continuation(self, generation: int) -> None:
         if int(generation) != int(self._admission_generation) or not self._pending_admissions:
             return
@@ -470,7 +481,10 @@ class FramePipeline:
             if int(generation) != int(self._admission_generation):
                 return
             self._admission_continuation_armed = False
-            self._drain_pending_admissions(generation)
+            self._drain_pending_admissions(
+                generation,
+                max_inspected=self._admission_chunk_limit(),
+            )
             if self._pending_admissions:
                 self._arm_admission_continuation(generation)
 

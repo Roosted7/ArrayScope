@@ -127,6 +127,49 @@ def test_render_pass_knob_still_shrinks_per_item_work_after_overrun():
     assert adapted.model == "r5-feedback"
 
 
+def test_retained_fallback_refinement_caps_admission_and_render_pass():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    for item_count in (8, 16, 32):
+        governor.record_ui_observation(
+            "montage_render_pass_target",
+            20.0,
+            item_count=item_count,
+            byte_count=item_count * 1024,
+            work_class="presentation_upsert",
+            backend="wgpu",
+        )
+
+    ordinary = governor.decide_render_pass(
+        interactive=False,
+        pass_kind="target",
+        remaining_items=272,
+    )
+    retained = governor.decide_render_pass(
+        interactive=False,
+        pass_kind="target",
+        remaining_items=272,
+        retained_fallback_refinement=True,
+    )
+
+    assert ordinary.batch_limit > 4
+    assert retained.batch_limit == 4
+    assert "retained fallback refinement cap=4" in retained.details
+    assert (
+        governor.decide_ladder_admission(
+            default_limit=32,
+            retained_fallback_refinement=True,
+        )
+        == 4
+    )
+    assert (
+        governor.decide_ladder_admission(
+            default_limit=32,
+            retained_fallback_refinement=False,
+        )
+        == 32
+    )
+
+
 def test_render_pass_latches_item_independent_cost_and_recovers_floor():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
     governor.record_ui_observation(

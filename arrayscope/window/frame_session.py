@@ -15,6 +15,7 @@ from arrayscope.display.lod import (
     LodInfo,
     LodPolicyDecision,
     native_lod_policy,
+    reduced_extent,
 )
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
@@ -795,6 +796,11 @@ class FrameSession:
     # NOT avoid; a decline reason distinguishes "never called" from "called and
     # declined per tile" without a debugger.
     resident_crop_rebind_stats: dict[str, int] = field(default_factory=dict)
+    # Planning is continuation-driven, but crop rebind seeding is a transition
+    # action.  A preview-quality retained fallback deliberately leaves T
+    # missing; without this latch every planning continuation would re-seed all
+    # tiles, invalidate their states, and starve the refinement it had armed.
+    resident_crop_rebind_seeded: bool = False
     # ``{tile_number: source_id}`` for tiles this session presented by resident
     # crop rebind rather than by evaluation.  A rebound tile has no
     # ``RenderedTile`` — that is the entire point — so ``mark_presented`` would
@@ -802,6 +808,11 @@ class FrameSession:
     # The source id makes the acceptance about THIS payload: once the slot holds
     # anything else, the entry stops matching and proves nothing.
     resident_crop_rebound_source_ids: dict[int, object] = field(default_factory=dict)
+    # Subset rebinds are retained display-only fallbacks at a predecessor LOD,
+    # unlike ordinary resident crop rebinds that already satisfy the requested
+    # rung.  Keep this narrower proof separate so progressive pacing and
+    # current-payload exceptions cannot perturb the established exact path.
+    resident_crop_fallback_source_ids: dict[int, object] = field(default_factory=dict)
     # This session presented a window no evaluation ever sampled (a resident crop
     # rebind), so its level evidence must be re-anchored from the source rather
     # than inherited from the payloads.  Set by ``rebind_resident_crop_tiles``;
@@ -1406,6 +1417,97 @@ class FrameSession:
             planes[name] = np.ascontiguousarray(array[y0:y1, x0:x1])
         if planes.get("image") is None:
             return None
+        return planes
+
+    def _rebind_crop_local_subset(self, previous, new_anchor) -> dict[str, object] | None:
+        """Re-express a retained reduced plane as a narrower crop without work.
+
+        A second displayed-axis crop is often a strict sub-rectangle of the
+        first crop's exact reduced plane.  Its crop-local GPU pages are not
+        canonical source-plane pages, so the ordinary residency probe rejects
+        them even though they already contain every requested preview sample.
+        Slice only the small immutable CPU descriptor arrays and carry the
+        predecessor anchor as physical provenance; WGPU then binds the same
+        resident pages at the sub-rectangle's offset with zero upload.
+        """
+
+        if getattr(previous, "semantic_data", None) is not None:
+            return None
+        old_anchor = getattr(previous, "source_anchor", None)
+        old_lod = getattr(previous, "lod", None)
+        if old_anchor is None or old_lod is None:
+            return None
+        old_rect = tuple(int(value) for value in tuple(old_anchor.source_rect or ()))
+        new_rect = tuple(int(value) for value in tuple(new_anchor.source_rect or ()))
+        if len(old_rect) != 4 or len(new_rect) != 4:
+            return None
+        old_y0, old_y1, old_x0, old_x1 = old_rect
+        new_y0, new_y1, new_x0, new_x1 = new_rect
+        plane_h, plane_w = (int(value) for value in old_anchor.plane_shape)
+        old_cropped_axes = int((old_y0, old_y1) != (0, plane_h)) + int(
+            (old_x0, old_x1) != (0, plane_w)
+        )
+        new_cropped_axes = int((new_y0, new_y1) != (0, plane_h)) + int(
+            (new_x0, new_x1) != (0, plane_w)
+        )
+        if not (
+            old_y0 <= new_y0 < new_y1 <= old_y1
+            and old_x0 <= new_x0 < new_x1 <= old_x1
+            and new_rect != old_rect
+            and old_cropped_axes == 1
+            and new_cropped_axes == 2
+        ):
+            return None
+        try:
+            factor = int(previous.actual_lod_factor)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if factor != int(getattr(old_lod, "factor", 1) or 1):
+            return None
+        old_shape = (
+            reduced_extent(old_y0, old_y1 - old_y0, factor),
+            reduced_extent(old_x0, old_x1 - old_x0, factor),
+        )
+        row0 = new_y0 // factor - old_y0 // factor
+        col0 = new_x0 // factor - old_x0 // factor
+        new_texture_shape = (
+            reduced_extent(new_y0, new_y1 - new_y0, factor),
+            reduced_extent(new_x0, new_x1 - new_x0, factor),
+        )
+        row1 = row0 + new_texture_shape[0]
+        col1 = col0 + new_texture_shape[1]
+        planes: dict[str, object] = {}
+        for name in ("image", "texture_data", "histogram_data"):
+            source = getattr(previous, name, None)
+            if source is None:
+                planes[name] = None
+                continue
+            array = np.asarray(source)
+            if tuple(int(value) for value in array.shape[:2]) != old_shape:
+                return None
+            planes[name] = array[row0:row1, col0:col1, ...]
+        if planes.get("image") is None or tuple(planes["image"].shape[:2]) != new_texture_shape:
+            return None
+        planes.update(
+            source_shape=tuple(int(value) for value in planes["image"].shape[:2]),
+            lod=LodInfo(
+                level=int(old_lod.level),
+                factor=factor,
+                source_shape=(new_y1 - new_y0, new_x1 - new_x0),
+                texture_shape=new_texture_shape,
+                gutter=int(old_lod.gutter),
+                source_origin=(new_y0, new_x0),
+            ),
+            # The predecessor page set covers a larger semantic window.  Its
+            # physical pages are honest fallback pixels for this strict
+            # subset, but they are not current target evidence.  Demote the
+            # wrapper so the ladder still refines to T and no committed-frame
+            # value probe can mistake the old page-set contract for the new
+            # one.
+            page_backing=None,
+            quality="preview",
+            resident_crop_predecessor_anchor=old_anchor,
+        )
         return planes
 
     def lifecycle_snapshot(self):
@@ -2658,49 +2760,93 @@ class FrameSession:
             if planes is None:
                 decline(declined_reason[0] if declined_reason else "no_reslicable_plane")
                 continue
-            texture_data = planes.get("texture_data", previous.texture_data)
-            new_identity = self.tile_payload_identity(
-                identity_tile,
-                texture_data=texture_data,
-                texture_kind=previous.texture_kind,
-                shader_mapping=previous.shader_mapping,
-                lod=previous.lod,
-                quality=previous.quality,
-            )
-            # The scan is on the zero-upload fast path, so it reports its own
-            # cost rather than being taken on trust: these counters are what
-            # priced it at 4.30-5.33 ms per 50 rebound tiles (13.14 ms worst).
-            scan_work: dict[str, int] = {}
-            started_ns = perf_counter_ns()
-            current_bounds = _rebind_current_plane_value_bounds(
-                previous,
-                planes,
-                work=scan_work,
-            )
-            stats["value_bounds_scan_ns"] = stats.get("value_bounds_scan_ns", 0) + (
-                perf_counter_ns() - started_ns
-            )
-            stats["value_bounds_scan_bytes"] = stats.get("value_bounds_scan_bytes", 0) + int(
-                scan_work.get("bytes", 0)
-            )
-            stats["value_bounds_scan_planes"] = stats.get("value_bounds_scan_planes", 0) + 1
-            candidate = replace(
-                previous,
-                source_anchor=new_anchor,
-                tile_identity=new_identity,
-                level_evidence_window_stale=True,
-                rebind_current_value_bounds=current_bounds,
-                **planes,
-            )
+            # Bind every enclosing-loop value the closure reads as a default
+            # argument.  The retained-LOD path builds more than one candidate
+            # per tile and the governed seed runs chunks across posted
+            # callbacks, so a late-bound ``previous``/``identity_tile`` would
+            # silently describe whichever tile the loop happened to end on
+            # (ruff B023).
+            def rebound_candidate(
+                candidate_planes,
+                *,
+                anchor=new_anchor,
+                previous_payload=previous,
+                target_tile=identity_tile,
+            ):
+                texture_data = candidate_planes.get("texture_data", previous_payload.texture_data)
+                candidate_lod = candidate_planes.get("lod", previous_payload.lod)
+                candidate_quality = str(candidate_planes.get("quality", previous_payload.quality))
+                new_identity = self.tile_payload_identity(
+                    target_tile,
+                    texture_data=texture_data,
+                    texture_kind=previous_payload.texture_kind,
+                    shader_mapping=previous_payload.shader_mapping,
+                    lod=candidate_lod,
+                    quality=candidate_quality,
+                )
+                # The scan is on the zero-upload fast path, so it reports its
+                # own cost rather than being taken on trust.
+                scan_work: dict[str, int] = {}
+                started_ns = perf_counter_ns()
+                current_bounds = _rebind_current_plane_value_bounds(
+                    previous_payload,
+                    candidate_planes,
+                    work=scan_work,
+                )
+                stats["value_bounds_scan_ns"] = stats.get("value_bounds_scan_ns", 0) + (
+                    perf_counter_ns() - started_ns
+                )
+                stats["value_bounds_scan_bytes"] = stats.get("value_bounds_scan_bytes", 0) + int(
+                    scan_work.get("bytes", 0)
+                )
+                stats["value_bounds_scan_planes"] = stats.get("value_bounds_scan_planes", 0) + 1
+                return replace(
+                    previous_payload,
+                    source_anchor=anchor,
+                    tile_identity=new_identity,
+                    level_evidence_window_stale=True,
+                    rebind_current_value_bounds=current_bounds,
+                    **candidate_planes,
+                )
+
+            candidate = rebound_candidate(planes)
             # The residency seam returns True only when the binding is
             # source-anchored over resident pages (or the native fast path);
             # in that binding the wrapper's own pixels are never uploaded, so
             # reusing the predecessor's array is safe.  A window whose pages are
             # cold binds crop-local and reports False, so it falls through to a
             # normal evaluation that produces the missing pixels.
+            crop_local_subset_used = False
             if not bool(physical_resident_fn(candidate)):
-                decline("pages_not_resident")
-                continue
+                # The ordinary rebind keeps its established same-size window
+                # contract.  A newly added second crop is different: its
+                # retained predecessor pages describe a strict smaller native
+                # extent, so build that narrower anchor only for this fallback.
+                source_rect = render_lod.tile_source_rect(self, base_tile)
+                subset_shape = (
+                    int(source_rect[1]) - int(source_rect[0]),
+                    int(source_rect[3]) - int(source_rect[2]),
+                )
+                subset_anchor = self._payload_source_anchor(
+                    subset_shape,
+                    source_index=int(identity_tile.source_index),
+                )
+                crop_local_subset = (
+                    None
+                    if subset_anchor is None
+                    or subset_anchor.content_key != previous.source_anchor.content_key
+                    or subset_anchor.plane_shape != previous.source_anchor.plane_shape
+                    else self._rebind_crop_local_subset(previous, subset_anchor)
+                )
+                if crop_local_subset is None:
+                    decline("pages_not_resident")
+                    continue
+                candidate = rebound_candidate(crop_local_subset, anchor=subset_anchor)
+                if not bool(physical_resident_fn(candidate)):
+                    decline("pages_not_resident")
+                    continue
+                stats["crop_local_subset"] = stats.get("crop_local_subset", 0) + 1
+                crop_local_subset_used = True
             self.display_tile_payloads[tile_number] = candidate
             self.record_tile_payload(candidate)
             self.acknowledged_source_ids.add(candidate.source_id)
@@ -2708,6 +2854,8 @@ class FrameSession:
             self.dirty_payloads[tile_number] = None
             self.lifecycle.remember_presentable(tile_number, candidate)
             self.resident_crop_rebound_source_ids[tile_number] = candidate.source_id
+            if crop_local_subset_used:
+                self.resident_crop_fallback_source_ids[tile_number] = candidate.source_id
             rebound.append(tile_number)
             stats["rebound"] += 1
         if rebound:
@@ -5411,6 +5559,16 @@ def _payload_matches_current_tile(session, tile_number: int, payload, plan_tiles
     payload_identity = getattr(payload, "tile_identity", None)
     record = session.lifecycle.peek(int(tile_number))
     target_identity = None if record is None or record.target is None else record.target.identity
+    if (getattr(session, "resident_crop_fallback_source_ids", None) or {}).get(
+        int(tile_number)
+    ) == getattr(payload, "source_id", None) and session.lifecycle.current_presentable_payload(
+        int(tile_number)
+    ) is payload:
+        # This wrapper is a current-source fallback physically proved by the
+        # backend at the crop-rebind seam.  It intentionally does not satisfy
+        # T's quality/LOD identity; accepting it here is what lets the atomic
+        # successor builder publish first pixels before target refinement.
+        return True
     if payload_identity is not None and target_identity is not None:
         # Typed semantic truth is authoritative once both sides provide it.
         # Falling through to the materialization source id would let a cached

@@ -443,12 +443,24 @@ class ResourceGovernor:
             "montage_present_total", interactive=interactive, byte_cap=byte_cap
         )
 
+    def decide_ladder_admission(
+        self,
+        *,
+        default_limit: int,
+        retained_fallback_refinement: bool,
+    ) -> int:
+        """Bound GUI-side task admission behind an already-visible fallback."""
+
+        limit = max(1, int(default_limit))
+        return min(limit, 4) if retained_fallback_refinement else limit
+
     def decide_render_pass(
         self,
         *,
         interactive: bool,
         pass_kind: str = "preview",
         remaining_items: int | None = None,
+        retained_fallback_refinement: bool = False,
     ) -> UiWorkDecision:
         """Own R5 chunk size and deadline for preview and target passes.
 
@@ -663,12 +675,18 @@ class ResourceGovernor:
             batch = min(max_batch, latest_count + 2)
         else:
             batch = min(max_batch, latest_count + 1)
+        if retained_fallback_refinement:
+            batch = min(batch, 4)
         return UiWorkDecision(
             channel,
             batch,
             _RENDER_PASS_REQUIREMENT_MS,
             0,
-            "R5 governed render-pass target",
+            (
+                "R5 governed render-pass target; retained fallback refinement"
+                if retained_fallback_refinement
+                else "R5 governed render-pass target"
+            ),
             byte_cap,
             _RENDER_PASS_REQUIREMENT_MS,
             "r5-feedback",
@@ -732,7 +750,8 @@ class ResourceGovernor:
                     f"r5-achievable={_optional_bool(hard_achievable)}"
                 ),
                 "target=32.00ms hard=50.00ms",
-            ),
+            )
+            + (("retained fallback refinement cap=4",) if retained_fallback_refinement else ()),
         )
 
     def begin_render_pass(

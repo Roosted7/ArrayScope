@@ -3095,6 +3095,80 @@ def test_misaligned_reduced_crop_without_page_backing_fails_loudly():
     assert "canonical source-plane resident levels=none" in message
 
 
+def test_narrower_crop_rebinds_crop_local_predecessor_pages_without_upload():
+    """A strict crop subset is a source-origin change, not new production."""
+
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import DisplayTilePayload, PayloadSourceAnchor
+    from arrayscope.display.wgpu_imageview2d import _wgpu_payload_binding
+    from arrayscope.gpu.wgpu_executor import SCALAR_R32F
+
+    content_key = ("doc", "crop-local-subset", 7)
+    predecessor_anchor = PayloadSourceAnchor(
+        content_key,
+        (80, 280, 0, 336),
+        plane_shape=(336, 336),
+    )
+    predecessor_texture = np.arange(50 * 84, dtype=np.float32).reshape(50, 84)
+    predecessor = DisplayTilePayload(
+        0,
+        7,
+        predecessor_texture,
+        None,
+        ("crop-local-subset", 7),
+        lod=LodInfo(
+            level=2,
+            factor=4,
+            source_shape=(200, 336),
+            texture_shape=(50, 84),
+            source_origin=(80, 0),
+        ),
+        quality="exact",
+        source_anchor=predecessor_anchor,
+    )
+    predecessor_binding = _wgpu_payload_binding(
+        predecessor,
+        predecessor_texture,
+        representation=SCALAR_R32F,
+        mapping_mode="real",
+        resident_keys=(),
+    )
+    assert predecessor_binding.source_anchored is False
+
+    successor_texture = predecessor_texture[:, 12:63]
+    successor = replace(
+        predecessor,
+        image=successor_texture,
+        lod=LodInfo(
+            level=2,
+            factor=4,
+            source_shape=(200, 200),
+            texture_shape=(50, 51),
+            source_origin=(80, 50),
+        ),
+        source_anchor=PayloadSourceAnchor(
+            content_key,
+            (80, 280, 50, 250),
+            plane_shape=(336, 336),
+        ),
+        resident_crop_predecessor_anchor=predecessor_anchor,
+    )
+
+    rebound = _wgpu_payload_binding(
+        successor,
+        successor_texture,
+        representation=SCALAR_R32F,
+        mapping_mode="real",
+        resident_keys=predecessor_binding.page_keys,
+    )
+
+    assert rebound.plane_identity == predecessor_binding.plane_identity
+    assert rebound.page_keys == predecessor_binding.page_keys
+    assert rebound.source_origin_xy == (50.0, 0.0)
+    assert rebound.plane_shape == (200, 336)
+    assert rebound.lod_level == 2
+
+
 def test_cold_wide_odd_aligned_reduced_window_uploads_all_local_pages(qt_app):
     """A valid multi-page cold crop falls back to a packed local upload."""
 

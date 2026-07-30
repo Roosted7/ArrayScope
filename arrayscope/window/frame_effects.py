@@ -468,6 +468,22 @@ class FramePipelineEffects:
         self._resident_crop_rebind_flag = bool(enabled)
         return bool(enabled)
 
+    def admission_chunk_limit(self, default_limit: int) -> int:
+        """Ask the governor how much refinement admission fits one callback."""
+
+        governor = getattr(getattr(self.renderer, "win", None), "resource_governor", None)
+        decide = getattr(governor, "decide_ladder_admission", None)
+        if not callable(decide):
+            return max(1, int(default_limit))
+        return int(
+            decide(
+                default_limit=default_limit,
+                retained_fallback_refinement=bool(
+                    getattr(self.session, "resident_crop_fallback_source_ids", None)
+                ),
+            )
+        )
+
     def _canonical_plane_warm_enabled(self) -> bool:
         """Whether target work may establish a backend's canonical pages."""
 
@@ -533,6 +549,12 @@ class FramePipelineEffects:
         if not tile_numbers:
             self._record_resident_crop_rebind(gate="no-visible-tiles")
             return
+        if self.session.resident_crop_rebind_seeded:
+            # The governed second-axis transition already installed its
+            # complete retained fallback.  Re-seeding it on each refinement
+            # replan would overwrite newly exact tiles with the predecessor
+            # wrapper and leave the final cohort permanently unsettled.
+            return
         # The last committed frame is the pre-scrub (predecessor-window) truth:
         # a new session's live payload map is empty at plan time, so the
         # committed wrappers are what a resident rebind clones from.
@@ -545,11 +567,15 @@ class FramePipelineEffects:
             remember_canonical=self._remember_canonical_plane_payload,
         )
         if rebound:
-            # Arm the fail-safe before the asynchronous evidence producer (and
-            # therefore before its presentation wakeup).  A rebound commit can
-            # otherwise reuse the predecessor target once with the new-window
-            # wrappers and only discover their exact bounds on the following
-            # commit -- one physically clipped frame.
+            # Ordinary rebinds remain on the established commit path.  Only
+            # the governed second-axis handoff below owns an explicit complete
+            # presentation gate.
+            #
+            # Arm the R3 fail-safe before the asynchronous evidence producer
+            # (and therefore before its presentation wakeup).  A rebound commit
+            # can otherwise reuse the predecessor target once with the
+            # new-window wrappers and only discover their exact bounds on the
+            # following commit -- one physically clipped frame.
             _arm_resident_crop_rebind_level_clamp(self.session, rebound)
             # A rebound window is presented without any evaluation sampling it,
             # so the only producer that can anchor its levels is the semantic
@@ -562,6 +588,153 @@ class FramePipelineEffects:
             rebound=len(rebound),
             stats=dict(getattr(self.session, "resident_crop_rebind_stats", None) or {}),
         )
+
+    def _publish_resident_crop_rebinds(self) -> None:
+        """Arm evidence and the atomic mapping handoff after all slots rebind."""
+
+        self.renderer.rearm_crop_rebind_level_evidence(self.session)
+        owner = (
+            int(getattr(self.session, "session_id", 0) or 0),
+            id(self.session),
+        )
+        self.renderer._montage_presentation_gate_armed = True
+        self.renderer._montage_presentation_gate_owner = owner
+        _post_visible_path_callback(
+            self.renderer,
+            lambda effects=self, owner=owner: effects._on_presentation_gate(owner),
+        )
+
+    def _seed_resident_crop_rebinds_governed(self, scope, *, batch_size: int = 32) -> bool:
+        """Seed one wide crop rebind across bounded visible-path callbacks."""
+
+        if not self._resident_crop_rebind_enabled():
+            return False
+        win = getattr(self.renderer, "win", None)
+        resident_fn = getattr(getattr(win, "img_view", None), "tiledPayloadResident", None)
+        tile_numbers = tuple(getattr(scope, "visible_tile_numbers", ()) or ())
+        if (
+            not callable(resident_fn)
+            or not tile_numbers
+            or self.session.resident_crop_rebind_seeded
+        ):
+            return False
+        self._expire_canonical_plane_payloads_for_document()
+        self.session.resident_crop_rebind_seeded = True
+        # An empty eager-commit gate was armed before the deferred stage plan
+        # completed.  Do not let it publish a partial successor between these
+        # chunks; the final chunk owns the one complete atomic handoff.
+        self.renderer._montage_presentation_gate_owner = None
+        self.renderer._montage_presentation_gate_armed = False
+        previous_by_tile = previous_tiled_payloads(getattr(win, "_committed_display_frame", None))
+        canonical_by_tile = self._canonical_plane_memo()
+        chunks = tuple(
+            tile_numbers[start : start + max(1, int(batch_size))]
+            for start in range(0, len(tile_numbers), max(1, int(batch_size)))
+        )
+        aggregate: dict[str, int] = {}
+
+        def run_chunk(index: int) -> None:
+            if not self.renderer._frame_session_is_current(self.session):
+                return
+            chunk = chunks[index]
+            rebound = self.session.rebind_resident_crop_tiles(
+                physical_resident_fn=resident_fn,
+                tile_numbers=chunk,
+                previous_by_tile={
+                    tile: previous_by_tile[tile] for tile in chunk if tile in previous_by_tile
+                },
+                canonical_by_tile={
+                    tile: canonical_by_tile[tile] for tile in chunk if tile in canonical_by_tile
+                },
+                remember_canonical=self._remember_canonical_plane_payload,
+            )
+            stats = dict(self.session.resident_crop_rebind_stats)
+            for key, value in stats.items():
+                aggregate[key] = int(aggregate.get(key, 0)) + int(value)
+            self._record_resident_crop_rebind(
+                gate="attempted",
+                tile_numbers=len(chunk),
+                rebound=len(rebound),
+                stats=stats,
+            )
+            next_index = index + 1
+            if next_index < len(chunks):
+                _post_visible_path_callback(
+                    self.renderer,
+                    lambda next_index=next_index: run_chunk(next_index),
+                )
+                return
+            self.session.resident_crop_rebind_stats = aggregate
+            if int(aggregate.get("rebound", 0)) > 0:
+                self._publish_resident_crop_rebinds()
+            else:
+                self.renderer.request_montage_replan(self.session)
+
+        run_chunk(0)
+        return True
+
+    def _needs_governed_crop_local_subset_rebind(self, scope) -> bool:
+        """Whether this transition is the retained sharpened-crop case."""
+
+        win = getattr(self.renderer, "win", None)
+        previous_by_tile = previous_tiled_payloads(getattr(win, "_committed_display_frame", None))
+        plan_tiles = {
+            int(tile.montage_index): tile
+            for tile in tuple(getattr(getattr(self.session, "plan", None), "tiles", ()) or ())
+        }
+        for raw_tile in tuple(getattr(scope, "visible_tile_numbers", ()) or ()):
+            tile_number = int(raw_tile)
+            previous = previous_by_tile.get(tile_number)
+            base_tile = plan_tiles.get(tile_number)
+            if (
+                previous is None
+                or base_tile is None
+                or getattr(previous, "semantic_data", None) is not None
+                or getattr(previous, "source_anchor", None) is None
+                or int(previous.source_index) != int(base_tile.source_index)
+            ):
+                continue
+            source_rect = render_lod.tile_source_rect(self.session, base_tile)
+            native_shape = (
+                int(source_rect[1]) - int(source_rect[0]),
+                int(source_rect[3]) - int(source_rect[2]),
+            )
+            identity_tile = self.session._identity_tile_for(base_tile)
+            new_anchor = self.session._payload_source_anchor(
+                native_shape,
+                source_index=int(identity_tile.source_index),
+            )
+            if new_anchor is None:
+                continue
+            old_anchor = previous.source_anchor
+            old_rect = tuple(int(value) for value in tuple(old_anchor.source_rect or ()))
+            new_rect = tuple(int(value) for value in tuple(new_anchor.source_rect or ()))
+            plane_shape = tuple(int(value) for value in tuple(old_anchor.plane_shape or ()))
+            if len(old_rect) != 4 or len(new_rect) != 4 or len(plane_shape) != 2:
+                continue
+            old_cropped_axes = sum(
+                (
+                    (old_rect[0], old_rect[1]) != (0, plane_shape[0]),
+                    (old_rect[2], old_rect[3]) != (0, plane_shape[1]),
+                )
+            )
+            new_cropped_axes = sum(
+                (
+                    (new_rect[0], new_rect[1]) != (0, plane_shape[0]),
+                    (new_rect[2], new_rect[3]) != (0, plane_shape[1]),
+                )
+            )
+            if (
+                old_cropped_axes == 1
+                and new_cropped_axes == 2
+                and old_anchor.content_key == new_anchor.content_key
+                and old_anchor.plane_shape == new_anchor.plane_shape
+                and old_rect[0] <= new_rect[0] < new_rect[1] <= old_rect[1]
+                and old_rect[2] <= new_rect[2] < new_rect[3] <= old_rect[3]
+                and old_rect != new_rect
+            ):
+                return True
+        return False
 
     def _record_resident_crop_rebind(
         self,
@@ -2193,10 +2366,19 @@ class FramePipelineEffects:
                 if cpu_atomic_successor or shader_atomic_successor
                 else frozenset()
             )
+            rebound_source_ids = dict(
+                getattr(session, "resident_crop_fallback_source_ids", None) or {}
+            )
             atomic_current_tiles = frozenset(
                 int(tile)
                 for tile, payload in active_payloads.items()
-                if session.lifecycle.payload_is_current(int(tile), payload)
+                if (
+                    session.lifecycle.payload_is_current(int(tile), payload)
+                    or (
+                        rebound_source_ids.get(int(tile)) == getattr(payload, "source_id", None)
+                        and session.lifecycle.current_presentable_payload(int(tile)) is payload
+                    )
+                )
             )
             if atomic_required_tiles and not atomic_required_tiles.issubset(atomic_current_tiles):
                 # The generic builder can legitimately return an empty active
@@ -2490,7 +2672,32 @@ class FramePipelineEffects:
                     "interactive-residency-deferred", wakeup="interaction-stop-edge"
                 )
                 return
-            requires_hidden_warm = bool(atomic_successor or cold_gpu_successor)
+            rebound_source_ids = dict(
+                getattr(session, "resident_crop_fallback_source_ids", None) or {}
+            )
+            rebound_scope = (
+                frozenset(int(tile) for tile in session.atomic_successor_required_scope())
+                if atomic_successor
+                else frozenset()
+            )
+            resident_rebind_handoff = bool(
+                rebound_scope
+                and rebound_scope.issubset(active_payloads)
+                and all(
+                    rebound_source_ids.get(tile)
+                    == getattr(active_payloads[tile], "source_id", None)
+                    for tile in rebound_scope
+                )
+            )
+            # The crop-rebind seed already asked the backend to prove every
+            # successor binding physically resident.  Those pages remain
+            # pinned by the currently committed predecessor until this atomic
+            # mapping handoff.  Re-probing the complete 272-tile scope here is
+            # neither warming nor a safety gain; it was an ungoverned
+            # GUI-thread scan immediately before the mapping-only submit.
+            requires_hidden_warm = bool(
+                (atomic_successor and not resident_rebind_handoff) or cold_gpu_successor
+            )
             if (
                 requires_hidden_warm
                 and bool(tile_delta.upserts)
@@ -4097,7 +4304,28 @@ def submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles) -> bool:
         )
         merge_stage_fan_in_plan(current, stage_plan)
         submit_stage_tasks(renderer, current, stage_plan["stage_requests"])
-        renderer.retarget_frame_pipeline(current)
+        # A stage-plan completion is one kernel-bridge callback.  Running the
+        # complete 272-tile ladder retarget inline here made that single
+        # callback 320-330 ms on the field crop.  Seed backend-proven retained
+        # pixels first; their physical ACK owns the refinement replan.  When
+        # no rebind is available, preserve the ordinary inline retarget.
+        pipeline = renderer._frame_pipeline_for_session(current)
+        scope = renderer._lod_admission_scope(
+            current,
+            renderer._montage_render_intent(current),
+        )
+        governed_rebind = bool(
+            pipeline.effects._needs_governed_crop_local_subset_rebind(scope)
+            and pipeline.effects._seed_resident_crop_rebinds_governed(scope)
+        )
+        if governed_rebind:
+            # Preview work admitted before the async stage answer is now
+            # superseded by physically complete retained pixels.  Close that
+            # intent so its late completions cannot publish partial preview
+            # cohorts between the governed rebind chunks.
+            pipeline.close()
+        else:
+            renderer.retarget_frame_pipeline(current)
 
     def stale(session_id=session.session_id, session_key=session.key):
         current = getattr(renderer, "_frame_session", None)
@@ -5145,14 +5373,33 @@ def tile_layer_first_pixels_wait_for_level_source(
 
     if not bool(first_display_commit):
         return False
-    if str(getattr(session, "round_level_evidence_source", "") or "") == "preview-cohort-pending":
+    shader_windowing = bool(image_view_backend_capabilities(window.win.img_view).shader_windowing)
+    rebound_source_ids = dict(getattr(session, "resident_crop_fallback_source_ids", None) or {})
+    required_scope = frozenset(
+        int(tile)
+        for tile in tuple(getattr(session, "atomic_successor_required_scope", lambda: ())() or ())
+    )
+    retained_shader_rebind = bool(
+        shader_windowing and required_scope and required_scope.issubset(rebound_source_ids)
+    )
+    if (
+        str(getattr(session, "round_level_evidence_source", "") or "") == "preview-cohort-pending"
+        and not retained_shader_rebind
+    ):
         # The fallback semantic sweep is deliberately parked while the preview
         # cohort owns the round-level decision. That is safe only while no tile
         # from the round can reach a backend. A complete cohort is admitted
         # atomically, so holding both backend families here costs no normal
         # shared-preview progress and keeps the parked window unobservable.
         return True
-    shader_windowing = bool(image_view_backend_capabilities(window.win.img_view).shader_windowing)
+    if retained_shader_rebind:
+        # WGPU can present the backend-proven retained crop immediately under
+        # the predecessor's already-applied uniform.  This is display-only
+        # fallback, not new round evidence: ``level_evidence_reanchor`` remains
+        # armed and the semantic owner publishes the successor window before
+        # target convergence.  Waiting for that scan here turned free retained
+        # pixels into a multi-second first-pixel dependency.
+        return False
     has_rough_source = bool(
         level_stats is not None
         and getattr(level_stats, "bounds", None) is not None
@@ -5461,10 +5708,16 @@ def _commit_batch_decision(
         )
     decide_pass = getattr(governor, "decide_render_pass", None)
     if callable(decide_pass):
+        required_target_unsettled = getattr(session, "required_target_unsettled_tiles", None)
         return decide_pass(
             interactive=interactive,
             pass_kind=pass_kind,
             remaining_items=remaining_items,
+            retained_fallback_refinement=bool(
+                getattr(session, "resident_crop_fallback_source_ids", None)
+                and callable(required_target_unsettled)
+                and required_target_unsettled()
+            ),
         )
     decide = getattr(governor, "decide_commit_batch", None)
     if callable(decide):

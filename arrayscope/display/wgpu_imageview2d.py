@@ -3802,7 +3802,7 @@ def _wgpu_payload_plane_identity(payload) -> object:
     return ("wgpu-content-plane", source_id)
 
 
-def _wgpu_payload_local_plane_identity(payload) -> object:
+def _wgpu_payload_local_plane_identity(payload, *, anchor=None) -> object:
     """Identity for texels whose (0, 0) is local to one source window.
 
     ``payload.source_id`` deliberately stays invariant across displayed-axis
@@ -3814,7 +3814,7 @@ def _wgpu_payload_local_plane_identity(payload) -> object:
     """
 
     identity = _wgpu_payload_plane_identity(payload)
-    anchor = getattr(payload, "source_anchor", None)
+    anchor = getattr(payload, "source_anchor", None) if anchor is None else anchor
     source_rect = tuple(int(value) for value in tuple(getattr(anchor, "source_rect", ()) or ()))
     plane_shape = tuple(int(value) for value in tuple(getattr(anchor, "plane_shape", ()) or ()))
     if len(source_rect) != 4:
@@ -4011,6 +4011,59 @@ def _wgpu_payload_binding(
         return local_binding()
     if (y1 - y0, x1 - x0) != tuple(int(value) for value in local_source_shape):
         return local_binding()
+
+    predecessor_anchor = getattr(payload, "resident_crop_predecessor_anchor", None)
+    predecessor_rect = tuple(getattr(predecessor_anchor, "source_rect", ()) or ())
+    if len(predecessor_rect) == 4:
+        old_y0, old_y1, old_x0, old_x1 = (int(value) for value in predecessor_rect)
+        if (
+            old_y0 <= y0 < y1 <= old_y1
+            and old_x0 <= x0 < x1 <= old_x1
+            and predecessor_anchor.content_key == anchor.content_key
+            and predecessor_anchor.plane_shape == anchor.plane_shape
+        ):
+            source_page = PAGE << int(lod_level)
+            offset_y = y0 - old_y0
+            offset_x = x0 - old_x0
+            chunk_y0 = offset_y // source_page
+            chunk_x0 = offset_x // source_page
+            chunk_y1 = -(-(offset_y + y1 - y0) // source_page)
+            chunk_x1 = -(-(offset_x + x1 - x0) // source_page)
+            chunks = tuple(
+                (chunk_y, chunk_x)
+                for chunk_y in range(chunk_y0, chunk_y1)
+                for chunk_x in range(chunk_x0, chunk_x1)
+            )
+            predecessor_shape = (old_y1 - old_y0, old_x1 - old_x0)
+            predecessor_identity = _wgpu_payload_local_plane_identity(
+                payload,
+                anchor=predecessor_anchor,
+            )
+            predecessor_keys = tuple(
+                plane_chunk_key(
+                    predecessor_identity,
+                    "live",
+                    lod_level,
+                    chunk_x,
+                    chunk_y,
+                    dtype=_WGPU_REP_DTYPES[representation],
+                    representation=representation,
+                    plane_shape=predecessor_shape,
+                    reducer=lod_reducer,
+                )
+                for chunk_y, chunk_x in chunks
+            )
+            resident = set(resident_keys)
+            if all(key in resident for key in predecessor_keys):
+                return _WgpuPayloadBinding(
+                    plane_identity=predecessor_identity,
+                    plane_shape=predecessor_shape,
+                    source_origin_xy=(float(offset_x), float(offset_y)),
+                    page_keys=predecessor_keys,
+                    upload_chunks=chunks,
+                    source_anchored=False,
+                    lod_level=lod_level,
+                )
 
     source_page = PAGE << int(lod_level)
     chunk_y0 = y0 // source_page

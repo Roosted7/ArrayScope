@@ -327,6 +327,12 @@ class DisplayTilePayload:
     # A page-backed rebind may instead carry the mapped complete-native-plane
     # range as a proven superset. Computed once at the rebind seam.
     rebind_current_value_bounds: tuple[float, float] | None = None
+    # Physical-only provenance for a resident displayed-axis crop rebind.  The
+    # successor window may be a strict sub-rectangle of a crop-local plane the
+    # backend already owns.  The current ``source_anchor`` remains semantic
+    # truth; this predecessor anchor only lets the backend address those
+    # retained pages with a new source origin instead of uploading them again.
+    resident_crop_predecessor_anchor: PayloadSourceAnchor | None = None
 
     def __post_init__(self) -> None:
         quality = str(self.quality or "exact")
