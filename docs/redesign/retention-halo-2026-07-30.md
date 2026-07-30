@@ -219,6 +219,17 @@ panel is populated from `setRoiInfoRows` off `_set_committed_display_frame`
 (`display_presenter.py:527`), which is a different event-loop turn. Under load
 the assert can land first.
 
+A second `--since` run flagged a different single test,
+`tests/ui/test_resident_crop_rebind.py::test_rebind_and_evaluation_paths_settle_identical_levels`
+— in the file `main` is documented to carry 19 of its 25 pre-existing reds in.
+Same treatment, serially, one process at a time: **main 2 of 5 failed, this
+branch 1 of 3** -- comparable rates, and neither arm is clean. The failing runs take ~28 s
+against ~10 s for the passing ones, so it is a settle timeout, not a wrong
+answer.
+
+That the two `--since` runs flagged *disjoint* sets is itself the signal: a
+regression does not move.
+
 Two other tests in the same `--since` selection —
 `test_wgpu_expanded_montage_never_hides_retained_sixty` and
 `test_single_slice_to_full_montage_presents_around_retained_exact_tile[scalar]`
