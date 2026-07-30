@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from arrayscope.operations.input_slots import OperationInputSlot, ResolvedSlot, SlotBinding
 from arrayscope.operations.pipeline import (
+    SMOOTH_BOUNDARIES,
     CenteredFFT,
     CenteredIFFT,
     Clip,
@@ -40,6 +41,7 @@ from arrayscope.operations.pipeline import (
     Roll,
     RootSumSquares,
     Scale,
+    Smooth,
     SoftThreshold,
     SplitComplexAxis,
     Squeeze,
@@ -561,6 +563,43 @@ OPERATION_REGISTRY = {
         group="Reshape",
         description="Pad one axis asymmetrically using zero, edge, or reflect values.",
         icon="border_outer",
+    ),
+    "smooth": OperationEntry(
+        id="smooth",
+        label="Smooth axis...",
+        operation_type=Smooth,
+        parameters=(
+            OperationParameter(
+                "width",
+                "Width",
+                default=3,
+                minimum=1,
+                maximum=1_000_000,
+                step=1,
+                description="Moving-average window length, in samples.",
+            ),
+            OperationParameter(
+                "boundary",
+                "Boundary",
+                kind="enum",
+                choices=SMOOTH_BOUNDARIES,
+                default="reflect",
+                description="How samples beyond the ends of the axis are filled.",
+            ),
+            OperationParameter(
+                "normalize_edges",
+                "Normalize edges",
+                kind="bool",
+                default=True,
+                description=(
+                    "With the zero boundary, divide by the samples the window "
+                    "actually covered so the ends keep the signal's level."
+                ),
+            ),
+        ),
+        group="Transform",
+        description="Moving average along one axis with a named boundary rule.",
+        icon="blur_on",
     ),
     "resample": OperationEntry(
         id="resample",

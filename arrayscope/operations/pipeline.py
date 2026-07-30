@@ -712,6 +712,65 @@ class Pad:
 
 
 @dataclass(frozen=True)
+class Smooth:
+    """Moving average along one axis, with a named boundary rule.
+
+    The first built-in whose parameters are not all numbers: ``boundary`` is an
+    enum and ``normalize_edges`` a bool.  The boundary names are deliberately the
+    ones scipy.ndimage and scikit-image use, since a wrapped toolbox operation is
+    what the vocabulary exists for.
+    """
+
+    axis: int
+    width: int
+    boundary: str
+    normalize_edges: bool
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        return _smooth(data, axis, self.width, self.boundary, self.normalize_edges)
+
+    def output_shape(self, shape: Shape) -> Shape:
+        _validate_axis(shape, self.axis)
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        if _is_integer_dtype(input_dtype):
+            return np.dtype(np.float32)
+        return np.dtype(input_dtype)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        # The window reaches beyond any sub-region on the smoothed axis, so the
+        # axis blocks -- the same shape ``Normalize`` declares.
+        return _capabilities(
+            OperationKind.TRANSFORM,
+            ndim=len(input_shape),
+            blocking_axes=(axis,),
+            expands_request_axes=(axis,),
+            temp_multiplier=3.0,
+            cache_stage=True,
+        )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        return replace_region_axis(output_region, axis, AxisRegion(AxisRegionKind.ALL))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del evaluation_context
+        axis = _validate_axis(input_region.axes, self.axis)
+        slab_axis = axis_in_region_result(input_region, axis)
+        smoothed = _smooth(data, slab_axis, self.width, self.boundary, self.normalize_edges)
+        return take_axis_region(
+            smoothed, output_region.axes[axis], smoothed.shape[slab_axis], axis=slab_axis
+        )
+
+
+@dataclass(frozen=True)
 class Resample:
     axis: int
     factor: float
@@ -1804,6 +1863,64 @@ def _pad(data, axis, before, after, mode):
     if mode_name == "reflect" and np.shape(data)[axis] < 2 and (before or after):
         raise ValueError("reflect padding requires at least two samples on the axis")
     return np.pad(data, widths, mode=mode_name)
+
+
+# Boundary names -> the ``_pad`` mode they select. These are the scipy /
+# scikit-image spellings on purpose: an enum parameter exists so a wrapped
+# toolbox operation can be given the *toolbox's* vocabulary.
+SMOOTH_BOUNDARIES: tuple[str, ...] = ("reflect", "edge", "zero")
+_SMOOTH_BOUNDARY_MODES = {"zero": 0, "edge": 1, "reflect": 2}
+
+
+def _sliding_sum(values, axis, width):
+    """Sum of every ``width``-long window along ``axis`` (one per output sample)."""
+
+    cumulative = np.cumsum(values, axis=axis)
+    leading = tuple(
+        slice(0, 1) if index == axis else slice(None) for index in range(np.ndim(values))
+    )
+    cumulative = np.concatenate((np.zeros_like(cumulative[leading]), cumulative), axis=axis)
+    upper = tuple(
+        slice(width, None) if index == axis else slice(None) for index in range(np.ndim(values))
+    )
+    lower = tuple(
+        slice(0, -width) if index == axis else slice(None) for index in range(np.ndim(values))
+    )
+    return cumulative[upper] - cumulative[lower]
+
+
+def _smooth(data, axis, width, boundary, normalize_edges):
+    array = np.asarray(data)
+    width = int(width)
+    if width < 1:
+        raise ValueError("smoothing width must be at least one sample")
+    if boundary not in _SMOOTH_BOUNDARY_MODES:
+        raise ValueError(f"boundary must be one of: {', '.join(SMOOTH_BOUNDARIES)}")
+    output_dtype = np.dtype(np.float32) if _is_integer_dtype(array.dtype) else array.dtype
+    if width == 1:
+        return array.astype(output_dtype, copy=False)
+    before = width // 2
+    after = width - 1 - before
+    mode = _SMOOTH_BOUNDARY_MODES[boundary]
+    # Accumulate wide: a running sum in float32 drifts visibly over a long axis,
+    # and the result is narrowed back to the promised dtype before it is
+    # returned.
+    accumulator = np.complex128 if np.iscomplexobj(array) else np.float64
+    padded = _pad(array, axis, before, after, mode).astype(accumulator, copy=False)
+    totals = _sliding_sum(padded, axis, width)
+    if mode == 0 and normalize_edges:
+        # Zero padding contributed samples that are not data. Dividing by how
+        # many real samples the window actually covered keeps the edges at the
+        # signal's own level instead of fading them toward zero.
+        weights = np.zeros(padded.shape[axis], dtype=np.float64)
+        weights[before : padded.shape[axis] - after] = 1.0
+        counts = _sliding_sum(weights, 0, width)
+        broadcast = [1] * array.ndim
+        broadcast[axis] = counts.size
+        totals = totals / np.maximum(counts.reshape(broadcast), 1.0)
+    else:
+        totals = totals / float(width)
+    return totals.astype(output_dtype, copy=False)
 
 
 def _resampled_length(length, factor):

@@ -59,10 +59,13 @@ editable fields:
 - the remaining positional-or-keyword and keyword-only arguments become rows
   under **Parameters**.
 
-Only `int` and `float` parameters are supported. An annotation is used first to
-infer the kind, then a literal default; otherwise the inferred kind is
-`float`. Inference seeds the visible controls once. You can edit them
-afterwards.
+Parameters may be `int`, `float`, `string`, `enum`, `bool`, or `path`. An
+annotation is used first to infer the kind, then a literal default; otherwise
+the inferred kind is `float`. `str` infers `string`, `bool` infers `bool`,
+`Path` infers `path`, and a `Literal["reflect", "edge"]` infers an `enum` with
+those choices — so a function that takes `mode="reflect"` arrives with a combo
+box already filled in. Inference seeds the visible controls once. You can edit
+them afterwards.
 
 Choose the storage mode before or after selecting the source:
 
@@ -90,10 +93,15 @@ Each **Parameters** row has these columns:
 **Name**, **Kind**, **Default**, **Min**, **Max**, **Step**, and
 **Description**.
 
-The name must match the function keyword. **Kind** controls conversion and the
-spinbox type. **Default** supplies the initial value; if it is blank, the lower
-bound or zero seeds the form. **Min** and **Max** are inclusive bounds, **Step**
-controls the spinbox increment, and **Description** becomes field help.
+The name must match the function keyword. **Kind** controls conversion and which
+control the parameter popup renders: a spinbox for `int`/`float`, a combo box
+for `enum`, a check box for `bool`, a text field for `string`, and a text field
+with a browse button for `path`. **Default** supplies the initial value; if it
+is blank, the lower bound or the kind's empty value seeds the form. **Min**,
+**Max**, and **Step** apply to `int` and `float` only, and **Description**
+becomes field help. An `enum` additionally carries its list of admissible
+values; a value outside that list is refused rather than snapped to a
+neighbour.
 
 For the example above, keep `level` as `float`, use `0.25` as **Default**, and
 add bounds appropriate to your data, such as `0.0` and `1.0`. When a user adds
@@ -110,8 +118,10 @@ additional array under **Input slots**, with:
 **Name** is a Python-style identifier and must match the function keyword.
 **Accepts** is a comma-separated list of source kinds. The available kinds are
 current dimension set, another open Compare document, one ROI as a mask or
-coordinates, and a saved `.npy` array; use the exact persisted names from the
-[input-slot schema](plugin-operations.md#wrapper-schema).
+coordinates, a saved `.npy` array, and a plain file; use the exact persisted
+names from the [input-slot schema](plugin-operations.md#wrapper-schema). The
+`file` kind is the one that delivers a **path** rather than an array — use it
+for a model checkpoint or a database the operation opens itself.
 
 Suppose the function is:
 

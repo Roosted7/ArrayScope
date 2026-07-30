@@ -16,6 +16,7 @@ from arrayscope.operations.pipeline import (
     Pad,
     Resample,
     Roll,
+    Smooth,
     Squeeze,
     Transpose,
 )
@@ -52,6 +53,55 @@ def test_pad_supports_asymmetric_zero_edge_and_reflect(complex_data, mode, numpy
     np.testing.assert_array_equal(result, np.pad(complex_data, widths, mode=numpy_mode))
     assert result.shape == operation.output_shape(complex_data.shape) == (4, 11, 5)
     assert result.dtype == complex_data.dtype
+
+
+@pytest.mark.parametrize("boundary", ["reflect", "edge", "zero"])
+def test_smooth_matches_scipy_for_each_named_boundary(complex_data, boundary):
+    """The enum names are scipy's on purpose, so scipy is the oracle."""
+
+    operation = Smooth(axis=1, width=3, boundary=boundary, normalize_edges=False)
+    scipy_mode = {"reflect": "mirror", "edge": "nearest", "zero": "constant"}[boundary]
+
+    result = operation.apply(complex_data)
+
+    reference = ndimage.uniform_filter1d(
+        complex_data.astype(np.complex128), size=3, axis=1, mode=scipy_mode, cval=0.0
+    )
+    np.testing.assert_allclose(result, reference, rtol=1e-5, atol=1e-4)
+    assert result.shape == operation.output_shape(complex_data.shape) == complex_data.shape
+    assert result.dtype == operation.output_dtype(complex_data.dtype) == complex_data.dtype
+
+
+def test_smooth_normalize_edges_only_changes_the_zero_boundary_ends():
+    data = np.ones((5,), dtype=np.float32)
+
+    faded = Smooth(axis=0, width=3, boundary="zero", normalize_edges=False).apply(data)
+    kept = Smooth(axis=0, width=3, boundary="zero", normalize_edges=True).apply(data)
+
+    # Without normalization the window averages in the two zeros it padded with.
+    np.testing.assert_allclose(faded, [2 / 3, 1, 1, 1, 2 / 3], rtol=1e-6)
+    np.testing.assert_allclose(kept, np.ones(5), rtol=1e-6)
+
+    # With a boundary that supplies real samples the flag is inert.
+    for boundary in ("reflect", "edge"):
+        with_flag = Smooth(axis=0, width=3, boundary=boundary, normalize_edges=True).apply(data)
+        without = Smooth(axis=0, width=3, boundary=boundary, normalize_edges=False).apply(data)
+        np.testing.assert_array_equal(with_flag, without)
+
+
+def test_smooth_width_one_is_the_identity_and_integers_widen_to_float32():
+    data = np.arange(6, dtype=np.int16)
+    operation = Smooth(axis=0, width=1, boundary="reflect", normalize_edges=True)
+
+    result = operation.apply(data)
+
+    np.testing.assert_array_equal(result, data)
+    assert result.dtype == operation.output_dtype(data.dtype) == np.dtype(np.float32)
+
+
+def test_smooth_refuses_a_boundary_it_does_not_know():
+    with pytest.raises(ValueError, match="reflect, edge, zero"):
+        Smooth(axis=0, width=3, boundary="wrap", normalize_edges=True).apply(np.ones(4))
 
 
 @pytest.mark.parametrize(("factor", "target"), [(0.6, 4), (1.0, 6), (1.5, 9), (2.25, 14)])
@@ -122,6 +172,7 @@ def test_difference_gradient_and_cumulative_sum_match_numpy(complex_data, operat
         Roll(axis=1, amount=2),
         Pad(axis=1, before=1, after=2, mode=0),
         Resample(axis=1, factor=1.5, order=1, mode=2),
+        Smooth(axis=1, width=3, boundary="reflect", normalize_edges=True),
         Difference(axis=1),
         Gradient(axis=1),
         CumulativeSum(axis=1),

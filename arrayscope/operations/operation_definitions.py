@@ -216,6 +216,9 @@ def _parameter_payloads(parameters: tuple[OperationParameter, ...]) -> list[dict
             "label": parameter.label,
             "kind": parameter.kind,
             "default": parameter.default,
+            # Only ever set on an enum, and mandatory there: an exported
+            # definition that dropped them would not reload as itself.
+            **({"choices": list(parameter.choices)} if parameter.choices else {}),
             "minimum": parameter.minimum,
             "maximum": parameter.maximum,
             "step": parameter.step,
