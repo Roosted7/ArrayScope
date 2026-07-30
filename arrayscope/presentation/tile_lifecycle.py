@@ -596,14 +596,31 @@ class TileLifecycle:
             # retention rather than left unsatisfied.
             rec.satisfaction_traced = False
             self._note_retained_satisfaction(rec)
-        for tile_number, rec in tuple(self._records.items()):
-            if tile_number in wanted or rec.target is None:
+        for tile_number, rec in self._records.items():
+            target = rec.target
+            if tile_number in wanted or target is None:
+                continue
+            if (
+                not target.visible
+                and target.identity is None
+                and rec.task_claim is None
+                and rec.stage_producer_key is None
+            ):
+                # Already released, and releasing is a fixed point: the target
+                # below is built only from fields this branch copies verbatim
+                # (``quality`` is invariantly "exact"), so re-running it would
+                # allocate an equal ``TileTarget`` and re-clear two already-None
+                # fields.  Records are never removed
+                # (see ``_backend_identities`` above), so without this test the
+                # loop pays a full release for every slot the session has ever
+                # shown, on every camera move — O(session history) where only
+                # the tiles that just left the viewport changed anything.
                 continue
             rec.target = TileTarget(
-                tile_number=rec.target.tile_number,
-                source_index=rec.target.source_index,
-                semantic_source_id=rec.target.semantic_source_id,
-                lod_level=rec.target.lod_level,
+                tile_number=target.tile_number,
+                source_index=target.source_index,
+                semantic_source_id=target.semantic_source_id,
+                lod_level=target.lod_level,
                 visible=False,
             )
             rec.task_claim = None

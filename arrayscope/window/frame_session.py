@@ -1211,6 +1211,13 @@ class FrameSession:
             # no longer speak for those slots.
             self._forget_recorded_payloads(self.lifecycle.retarget(targets))
             self._lifecycle_target_signature = target_signature
+        # The sole producer of targets is also the sole publisher of the
+        # snapshot they were built under, so a second consumer that changed
+        # none of those inputs can adopt this set instead of paying for one
+        # typed identity per visible tile to learn it is identical.  The
+        # snapshot is taken *after* the build for exactly that reason: it must
+        # describe the inputs this dict was actually produced from.
+        self._published_lifecycle_targets = (self._lifecycle_target_inputs(), targets)
         return targets
 
     def _recorded_payloads(self, container: str, payloads) -> dict[int, object]:
@@ -1262,33 +1269,74 @@ class FrameSession:
                 recorded.pop(index, None)
 
     def _lifecycle_target_inputs(self) -> tuple[object, ...]:
-        """Everything ``_sync_lifecycle_targets`` reads that a caller can move.
+        """Everything ``_sync_lifecycle_targets`` reads.
 
-        The rest of that computation reads the document, the semantic/level
-        keys and the display-mode flags, none of which change under a caller
-        that is mid-method.  A caller still holding an unchanged snapshot
-        therefore holds targets identical to what a recompute would yield.
+        This used to carry only the three values "a caller mid-method" could
+        move, on the argument that the document, the semantic key and the
+        display-mode flags cannot change underneath such a caller.  That is
+        true, but it makes the snapshot a claim about the caller rather than
+        about the session, and only a caller that can vouch for its own
+        straight-line control flow may use it.  Naming every input instead
+        makes currency a property of the session, so a snapshot may be held
+        across a call that does not obviously leave them alone.
+
+        ``base_data`` is held by object, not by ``id()``: an id can be recycled
+        by a later array, and a snapshot that silently ages into a false
+        positive is worse than one that recomputes.
         """
 
+        document = getattr(self, "document", None)
         return (
             self.visible_tiles,
             frozenset(self.skipped_tiles),
             getattr(self, "lod_policy_decision", None),
+            self.semantic_key,
+            self.key,
+            self.output_dtype,
+            bool(getattr(self, "shader_display", False)),
+            bool(getattr(self, "canonical_orientation", False)),
+            document,
+            getattr(document, "base_data", None),
+            int(getattr(document, "revision", 0) or 0),
+            tuple(getattr(document, "steps", ()) or ()),
         )
 
     def _lifecycle_targets_still_current(self, snapshot: tuple[object, ...]) -> bool:
         """Whether targets computed under ``snapshot`` are still authoritative.
 
-        ``visible_tiles`` and the policy decision are compared by identity, not
-        equality: both are replaced wholesale rather than mutated, so identity
-        is exactly as strong here and does not walk 100 tiles per call.  A
-        rebuilt-but-equal tuple simply falls through to a recompute.
+        ``visible_tiles``, the policy decision, the document and its base array
+        are compared by identity, not equality: each is replaced wholesale
+        rather than mutated, so identity is exactly as strong here and does not
+        walk 100 tiles per call.  A rebuilt-but-equal tuple simply falls
+        through to a recompute.
         """
 
-        visible, skipped, decision = snapshot
+        (
+            visible,
+            skipped,
+            decision,
+            semantic_key,
+            key,
+            output_dtype,
+            shader_display,
+            canonical_orientation,
+            document,
+            base_data,
+            revision,
+            steps,
+        ) = snapshot
         return bool(
             self.visible_tiles is visible
             and getattr(self, "lod_policy_decision", None) is decision
+            and getattr(self, "document", None) is document
+            and getattr(document, "base_data", None) is base_data
+            and self.semantic_key == semantic_key
+            and self.key == key
+            and self.output_dtype == output_dtype
+            and bool(getattr(self, "shader_display", False)) == shader_display
+            and bool(getattr(self, "canonical_orientation", False)) == canonical_orientation
+            and int(getattr(document, "revision", 0) or 0) == revision
+            and tuple(getattr(document, "steps", ()) or ()) == steps
             and frozenset(self.skipped_tiles) == skipped
         )
 
@@ -1299,6 +1347,21 @@ class FrameSession:
         # a typed identity per tile, and an index-window retarget publishes its
         # targets before the per-tile remap and then lands here immediately
         # afterwards.
+        #
+        # A viewport retarget lands here twice by design and neither call is
+        # removable: this one publishes the targets and the *previous* frame
+        # plan's required scope, and the controller's second call is the only
+        # one that sees the new ``frame_plan`` — ``required_tile_numbers`` reads
+        # ``frame_plan.active_region_ids``, so deleting it would leave the
+        # scheduling policy retargeted to the scope of the pan before last.
+        # What is genuinely duplicated is the target rebuild, which is why the
+        # last computed set is republished for it (measured: 751 us of an
+        # 805 us call, at 36 visible tiles, dominated by one typed identity per
+        # tile).
+        if targets is None:
+            published = getattr(self, "_published_lifecycle_targets", None)
+            if published is not None and self._lifecycle_targets_still_current(published[0]):
+                targets = published[1]
         targets = self._sync_lifecycle_targets() if targets is None else targets
         required = {int(tile) for tile in self.required_tile_numbers()}
         scheduling_scope_signature = tuple(
