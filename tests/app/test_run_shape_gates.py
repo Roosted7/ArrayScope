@@ -440,3 +440,100 @@ def test_an_oversized_worker_count_is_capped_rather_than_refused():
     assert worker_ceiling(4) == 2
     assert worker_ceiling(2) == 2, "a 2-core CI runner must keep its parallelism"
     assert worker_ceiling(1) == 2
+
+
+# --------------------------------------------------------------------------- #
+# The two bypass spellings are not the same act, and no longer share one rule
+# --------------------------------------------------------------------------- #
+
+
+def test_no_testmon_is_allowed_only_for_named_tests():
+    """A cheap file used to slip through, which is how the habit is taught.
+
+    ``docs/testing/test-selection.md`` has always claimed a file is refused;
+    the price-only rule let ``pytest --no-testmon tests/app/test_test_selection.py``
+    run, because that file is under 5 s. One narrowed sweep costs seconds, reads
+    as a clean pass, and nothing pushes back — and the habit it forms is later
+    aimed at the whole suite. ``--no-testmon`` records nothing, so its shape has
+    to be the rule; price alone cannot express "this leaves the map no better
+    than it found it".
+    """
+
+    from tests.conftest import untraced_run_refusal
+
+    assert untraced_run_refusal(True, 1.9, "") == ""
+    assert "named tests" in untraced_run_refusal(False, 0.3, ""), "a cheap file is still a file"
+    assert "named tests" in untraced_run_refusal(False, 1320.0, "")
+    # Even a list of node ids has a ceiling: past it, it is a sweep with names on.
+    assert untraced_run_refusal(True, 222.0, "")
+    assert untraced_run_refusal(False, 1320.0, "explicitly forced") == ""
+
+
+def test_noselect_is_refused_only_when_it_would_change_nothing():
+    """Priced on whether it has a *product*, not on what it costs.
+
+    ``--no-testmon`` leaves nothing behind, so its cost is the whole story.
+    ``--testmon-noselect`` leaves a repaired map, so its cost is an investment —
+    and the honest rule is that an investment is refusable exactly when there is
+    nothing to repair. The price rule got this wrong in a way that mattered:
+    three places (this page, the ``--since`` >400-file error, and
+    ``tools/test_selection.py``'s epilog) send you to a command that was refused
+    at 1320 s, so the sanctioned repair was a dead end.
+    """
+
+    from tests.conftest import noselect_run_refusal
+
+    # A map with holes, or a tree that differs from it: this run repairs something.
+    assert noselect_run_refusal(3941, unmapped_files=2, changed_files=0, permitted_because="") == ""
+    assert noselect_run_refusal(3941, unmapped_files=0, changed_files=7, permitted_because="") == ""
+    # Nothing recorded at all: there is nothing to compare, so let it record.
+    assert noselect_run_refusal(0, unmapped_files=0, changed_files=0, permitted_because="") == ""
+    # Complete and current: 222 s, ~1 spurious ordering failure, a byte-identical map.
+    refusal = noselect_run_refusal(3941, unmapped_files=0, changed_files=0, permitted_because="")
+    assert "change nothing" in refusal
+
+
+def test_the_honest_distrust_command_is_the_one_that_rebuilds():
+    """`rm .testmondata && pytest` re-seeds from the donor it was handed.
+
+    Measured: the map comes straight back — 3933 tests, "seeded this checkout's
+    map from ...". So the escape hatch the gate offered for *a map you distrust*
+    handed you the same map you distrusted. The spelling that actually rebuilds
+    is `--no-seed-map`, and it has to be the one the refusal prints, because the
+    refusal is where somebody reads it.
+    """
+
+    from tests import conftest
+
+    printed = "\n".join(conftest._RUN_IT_SELECTED)
+    assert "rm .testmondata && pytest --no-seed-map" in printed
+    document = (REPO_ROOT / "docs/testing/test-selection.md").read_text(encoding="utf-8")
+    assert "rm .testmondata && pytest --no-seed-map" in document
+    assert "`rm .testmondata && pytest`" not in document
+
+
+def test_no_document_names_a_flag_that_does_not_exist():
+    """`--no-testmon-force` was printed twice in the reference and is not a flag.
+
+    pytest disables argparse's prefix abbreviation, so it exits 4 with
+    ``unrecognized arguments`` — a documented command that cannot be run, handed
+    to somebody who is already convinced the harness is broken. Pinned rather
+    than merely corrected, because the short form is the one a person would
+    naturally write down.
+    """
+
+    import re
+
+    abbreviated = re.compile(r"--no-testmon-force(?!-please-i-really-consider-it-needed)")
+    offenders = []
+    for relative in ("docs/testing/test-selection.md", "AGENTS.md", "docs/testing/README.md"):
+        path = REPO_ROOT / relative
+        if not path.exists():
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if abbreviated.search(line):
+                offenders.append(f"{relative}:{number}")
+    assert not offenders, (
+        "these lines name a flag pytest does not accept (abbreviation is off); "
+        f"write the full --no-testmon-force-please-i-really-consider-it-needed: {offenders}"
+    )

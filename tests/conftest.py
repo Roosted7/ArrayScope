@@ -309,6 +309,85 @@ def unselected_run_refusal(seconds, permitted_because) -> str:
     )
 
 
+#: A ``--no-testmon`` run may name at most this much recorded work. Past it,
+#: a list of node ids is a sweep with names on it. Six times the general bypass
+#: allowance, because this shape is the one legitimate question and answering it
+#: on a slow test should not need an override.
+_UNTRACED_ABORT_SECONDS = 30.0
+
+
+def untraced_run_refusal(named_only, seconds, permitted_because) -> str:
+    """Why a ``--no-testmon`` run is refused, or ``""``. Shape first, then price.
+
+    ``--no-testmon`` records nothing, so unlike every other bypass its cost is
+    the whole story — and price alone could not express the part that matters.
+    Under the old price-only rule ``pytest --no-testmon tests/app/test_test_selection.py``
+    ran, because that file is under 5 s, while ``docs/testing/test-selection.md``
+    had always claimed a file was refused. That gap is how the habit gets
+    taught: one narrowed sweep costs seconds, reads as a clean pass, nothing
+    pushes back, and the same shape is later aimed at the whole suite.
+
+    So the allow is written around the one question ``--no-testmon`` uniquely
+    answers — *is the tracer itself causing this?* — which is asked of named
+    tests and answered in seconds. Anything wider is somebody reaching past
+    selection and paying twice: once in wall clock, and again because the run
+    leaves the map exactly as it found it.
+    """
+
+    if permitted_because:
+        return ""
+    if not named_only:
+        return (
+            "--no-testmon is for named tests only. It records nothing, so a bare run, "
+            "a directory or a whole file leaves the map exactly as it found it"
+        )
+    if seconds > _UNTRACED_ABORT_SECONDS:
+        return (
+            f"--no-testmon names ~{seconds:.0f} s of recorded tests, which is a sweep "
+            "with a list of names on it"
+        )
+    return ""
+
+
+def noselect_run_refusal(mapped_tests, unmapped_files, changed_files, permitted_because) -> str:
+    """Why a ``--testmon-noselect`` sweep is refused, or ``""``. Product, not price.
+
+    The bypass gate's principle is "the cost is the thing worth refusing", and
+    that is right for ``--no-testmon``, which leaves nothing behind.
+    ``--testmon-noselect`` leaves a *repaired map*, so its cost is an
+    investment — and the honest rule is that an investment is refusable exactly
+    when there is nothing to repair.
+
+    Pricing it instead was a real dead end, not a theoretical one: bare
+    ``--testmon-noselect`` was refused at 1320 s while three separate places
+    named it as the sanctioned repair — this page, ``tools/test_selection.py``'s
+    epilog, and the ``--since`` >400-file error, which told you to run a command
+    that exits 4.
+
+    What the three branches buy:
+
+    * **Nothing mapped** — there is nothing to compare against, so let it record.
+    * **Holes, or a tree that differs from the map** — a big rebase, a >400-file
+      ``--since``, a refactored directory. This run repairs something, which is
+      the only reason to type it.
+    * **Complete and current** — 222 s, about one spurious ordering failure (the
+      reorder this suite's latent couplings cost), and a byte-identical map.
+      That is ceremony, and the refusal is itself the answer to the question the
+      sweep was asking.
+    """
+
+    if permitted_because:
+        return ""
+    if not mapped_tests:
+        return ""
+    if unmapped_files or changed_files:
+        return ""
+    return (
+        f"the map is complete for this tree ({mapped_tests} tests, 0 unmapped files, "
+        "0 files differ), so this sweep would re-run everything and change nothing"
+    )
+
+
 def unselected_run_seconds(test_seconds, scope, under) -> float:
     """Recorded cost of the tests a bypassing run would execute."""
 
@@ -421,19 +500,55 @@ def _refuse_unselected_run(config) -> None:
     if not _bypasses_selection(config):
         return
     permitted = _bypass_permitted(config)
-    peek = _map_peek(config)
     named_only = node_ids_only(config.args)
+
+    if vars(config.option).get("testmon_noselect"):
+        # The one bypass with a product. Priced on whether it has one, not on
+        # what it costs — and exempt from the fail-closed rule below, because an
+        # empty map is the single best reason to run it.
+        peek = _map_peek(config, with_changed_files=True)
+        reason = noselect_run_refusal(
+            0 if peek is None else peek.mapped_tests,
+            unmapped_files=0 if peek is None else len(_unmapped_test_files(config, peek)),
+            changed_files=0 if peek is None else len(peek.changed_files),
+            permitted_because=permitted,
+        )
+        if reason:
+            _refuse(config, reason, _NOTHING_TO_REPAIR)
+        return
+
+    peek = _map_peek(config)
     unpriceable = unpriceable_bypass_refusal(
         None if peek is None else peek.mapped_tests, permitted, node_ids_only=named_only
     )
     if unpriceable:
         _refuse(config, unpriceable, _RECORD_ONE_FIRST)
         return
+
     scope = _run_scope(config)
-    seconds = unselected_run_seconds(_recorded_test_seconds(config), scope, testmon_policy.under)
+    recorded = _recorded_test_seconds(config)
+    if vars(config.option).get("no-testmon"):
+        seconds = sum(recorded.get(str(name), 0.0) for name in (config.args or ()))
+        reason = untraced_run_refusal(named_only, seconds, permitted)
+        if reason:
+            _refuse(config, reason, _NAME_THE_TESTS)
+        return
+
+    seconds = unselected_run_seconds(recorded, scope, testmon_policy.under)
     reason = unselected_run_refusal(seconds, permitted)
     if reason:
         _refuse(config, reason, _RUN_IT_SELECTED)
+
+
+def _unmapped_test_files(config, peek) -> set[str]:
+    """Test files under this run's scope that the map has never recorded."""
+
+    paths = testmon_policy.path_arguments(config)
+    return {
+        name
+        for name in testmon_policy.collect_test_files(config.rootdir, paths)
+        if name not in peek.mapped_files
+    }
 
 
 #: What to say instead, when the run was refused on price: the same tests are
@@ -463,6 +578,42 @@ _RECORD_ONE_FIRST = (
     "",
     "  Naming the tests you actually want is never refused, map or no map:",
     "    pytest --no-testmon tests/ui/test_thing.py::test_one",
+)
+
+#: What to say instead, when ``--no-testmon`` named more than a few tests. The
+#: point is not that the run is expensive -- it is that it records nothing, so
+#: the alternative has to be the spelling that leaves the map better.
+_NAME_THE_TESTS = (
+    "records nothing. Whatever it tells you, the next run plans from the same",
+    "map this one started with, so a wide --no-testmon pays twice.",
+    "",
+    "  It answers exactly one question nothing else can -- is the TRACER doing",
+    "  this? -- and that question is asked of named tests:",
+    "    pytest --no-testmon tests/ui/test_thing.py::test_one",
+    "",
+    "  For everything else:",
+    "    pytest                     what your tree affects",
+    "    pytest --since             everything this branch changed, before merging",
+    "    pytest --testmon-noselect  run it all AND leave the map repaired",
+)
+
+#: What to say instead, when a ``--testmon-noselect`` sweep would repair nothing.
+#: This refusal is unusual in that it is itself the answer: the question the
+#: sweep was asking has already been settled by the map it would rewrite.
+_NOTHING_TO_REPAIR = (
+    "would spend ~222 s re-running every test to write a byte-identical map --",
+    "and reorder the run on the way through, which costs this suite about one",
+    "spurious failure per sweep. This refusal is the answer: nothing in this",
+    "tree differs from what was recorded, so there is nothing a sweep could",
+    "find that the map does not already know.",
+    "",
+    "  A map with holes or a tree that moved is never refused here -- that is",
+    "  what this command is for, and it is the right call after a big rebase.",
+    "",
+    "  If you distrust the map itself rather than its coverage, rebuild it:",
+    "    rm .testmondata && pytest --no-seed-map",
+    "  (plain `rm .testmondata && pytest` re-seeds from a sibling checkout, so",
+    "   it hands you back the very map you distrusted.)",
 )
 
 
@@ -496,17 +647,22 @@ def _run_scope(config) -> tuple[str, ...]:
     return () if set(scope) == set(testpaths) else scope
 
 
-def _map_peek(config):
+def _map_peek(config, *, with_changed_files: bool = False):
     """One cached read of the map for every gate. ``None`` if it is unusable.
 
-    Cached on the config because three gates now price the same run — the
-    bypass gate, the fail-closed rule above it, and the serial gate — and each
-    ``peek`` opens the SQLite map and runs testmon's whole stability
-    determination. Sharing the read is also what keeps them from disagreeing
-    about what a run costs.
+    Cached on the config because four gates now price the same run — the bypass
+    gate, the fail-closed rule above it, the ``--no-testmon`` shape rule and the
+    serial gate — and each ``peek`` opens the SQLite map and runs testmon's whole
+    stability determination. Sharing the read is also what keeps them from
+    disagreeing about what a run costs.
+
+    ``with_changed_files`` is a separate slot rather than the default because
+    answering it hashes every file of interest in the tree. Only the
+    ``--testmon-noselect`` rule needs it, and that run is about to spend 222 s.
     """
 
-    cached = getattr(config, "arrayscope_map_peek", "unset")
+    attribute = "arrayscope_map_peek_full" if with_changed_files else "arrayscope_map_peek"
+    cached = getattr(config, attribute, "unset")
     if cached != "unset":
         return cached
     try:
@@ -514,10 +670,11 @@ def _map_peek(config):
             config.rootdir,
             testmon_policy.resolve_environment(config.getini("environment_expression")),
             tuple(config.getini("testmon_ignore_dependencies")),
+            with_changed_files=with_changed_files,
         )
     except Exception:  # a broken map must never be the reason a run cannot start
         peek = None
-    config.arrayscope_map_peek = peek
+    setattr(config, attribute, peek)
     return peek
 
 

@@ -1193,6 +1193,12 @@ def apply_since_baseline(config, explicit_ref: str | None) -> tuple[str, int]:
 
     checksums = baseline_method_checksums(config.rootdir, merge_base)
     if checksums is None:
+        # The command named here has to be one that actually runs. It used to be
+        # `pytest --testmon-noselect`, which the bypass gate refused at 1320 s --
+        # a documented remedy that exited 4. It is now priced on whether it
+        # repairs anything, and a branch this size always differs from the map,
+        # so the recommendation is sound again. Should it ever refuse, the
+        # refusal is itself the answer: nothing differs, so nothing to find.
         raise UsageError(
             f"--since {ref}: this branch changed more than {_MAX_BASELINE_FILES} files, "
             "which reaches everything anyway. Run `pytest --testmon-noselect` — same "

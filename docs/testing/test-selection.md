@@ -26,9 +26,10 @@ runs*, never *which ring a claim needs*.
    may be far behind if nothing has been pushed — the run is then honest but
    enormous, and the printed distance is what says so.
 4. **`--no-testmon` runs only a short list of node ids.** Everything else —
-   a bare sweep, a directory, a file, or node ids costing over 5 s — is
+   a bare sweep, a directory, a file, or node ids costing over 30 s — is
    **refused** (exit 4), and the answer is `--testmon-noselect`, which runs
-   the same tests *and updates the map*. See [Why `--no-testmon` is
+   the same tests *and updates the map*. That one is refused only when it
+   would repair nothing. See [Why `--no-testmon` is
    refused](#why---no-testmon-is-refused).
 5. **Never `-p no:randomly`.** pytest-randomly is not installed here, so the
    flag does nothing — and the run **aborts** if you pass it. It is worse than
@@ -90,14 +91,14 @@ passes says the affected tests pass — a strictly smaller claim.
 | What the map does *not* cover, which reds are yours | `python tools/test_selection.py status` |
 | The current reds are not yours (stale worktree, stacked branch) | `python tools/test_selection.py accept-reds` |
 | Re-run the inherited reds too | `pytest --rerun-reds` (implied by `--since`) |
-| Rebuild the map from scratch | `rm .testmondata && pytest` |
+| Rebuild the map from scratch | `rm .testmondata && pytest --no-seed-map` (without the flag the next run **re-seeds from a sibling checkout**, handing you back the map you distrusted) |
 | Re-record without deselecting | `pytest --testmon-noselect` |
 | Run a whole file or directory regardless of selection | `pytest --testmon-noselect <paths>` |
 | Run specific tests regardless of selection | `pytest <node ids>` — a `file.py::test` argument already defeats deselection, so adding `--testmon-noselect` is a no-op and the run says so |
 | Which functions the suite executes | `python tools/test_selection.py coverage` |
 | New code on this branch that no test runs | `python tools/test_selection.py coverage --since` |
 | The coverage baseline is not yours | `python tools/test_selection.py accept-coverage` |
-| Regenerate artifacts, or settle a map you suspect | `pytest --no-testmon-force` (a plain `--no-testmon` sweep is refused — see below) |
+| Regenerate artifacts, or settle a map you suspect | `pytest --no-testmon-force-please-i-really-consider-it-needed` (a plain `--no-testmon` sweep is refused — see below; the flag has no short form, pytest disables abbreviation) |
 | Artifacts, CI | already exhaustive — see below |
 
 Scoping still works and still narrows further: `pytest tests/ui` runs the
@@ -231,7 +232,7 @@ it stays wrong.
 ### Why `--no-testmon` is refused
 
 The runner exits 4 with a `UsageError` unless the run is **a list of specific
-node ids costing under 5 s**:
+node ids costing under 30 s**:
 
 ```
 pytest --no-testmon                                   # refused: sweeps the whole suite
@@ -239,6 +240,10 @@ pytest --no-testmon tests/ui                          # refused: names a directo
 pytest --no-testmon tests/ui/test_thing.py            # refused: names a file
 pytest --no-testmon tests/ui/test_thing.py::test_one  # runs (and still warns)
 ```
+
+The shape is checked before the price, and that ordering is the fix for a real
+hole: until 2026-07-30 the rule was price-only, so a *cheap* file ran — the
+third line above was a lie for as long as this page has carried it.
 
 The permission is written as a narrow allow rather than a list of bans because
 there is exactly one question `--no-testmon` answers that nothing else can —
@@ -257,10 +262,19 @@ least inclined to read a yellow line. Added 2026-07-30 after that sequence
 played out twice in two sessions, the second time burning ~6 minutes of sweeps
 that recorded nothing, despite the docs and an after-the-fact runtime hint.
 
-Every untraced run still prints `WARNING: --no-testmon records nothing...` —
-before the run in the header, and again in the summary — including a permitted
-one and one forced through with **`--no-testmon-force`**. Force is what
-regenerating `tests/artifacts/` or settling a distrusted map uses.
+Every run that actually bypassed selection — a permitted one, a CI one, a
+coverage one, and one forced through — closes with what it cost and a defect
+ask:
+
+```
+Bypassed selection (explicitly forced) and ran 214 s.
+!!! IF THIS WAS NEEDED, REPORT AND FIX THE TEST HARNESS !!!
+```
+
+The override is **`--no-testmon-force-please-i-really-consider-it-needed`**,
+in full: pytest disables argparse's prefix abbreviation, so any shorter
+spelling exits 4 with `unrecognized arguments`. Force is what regenerating
+`tests/artifacts/` or settling a distrusted map uses.
 
 ### Why keep `--no-testmon` at all, then?
 
@@ -293,6 +307,30 @@ So: `--since` before merging, `--testmon-noselect` to repair the map,
 gets driven to zero — the latent couplings declared with `coupled_order`, or
 fixed — then `--testmon-noselect` really would dominate `--no-testmon` locally,
 and this section should be revisited.
+
+### When `--testmon-noselect` is refused
+
+It is priced on whether it has a **product**, not on what it costs. That is the
+difference between the two flags in one sentence: `--no-testmon` leaves nothing
+behind, so its cost is the whole story; `--testmon-noselect` leaves a repaired
+map, so its cost is an investment — and an investment is refusable exactly when
+there is nothing to repair.
+
+| The map | Verdict |
+|---|---|
+| holds nothing for this environment | **runs** — nothing to compare against, so let it record |
+| has unmapped test files, or the tree differs from it | **runs** — this is what the command is for (a big rebase, a >400-file `--since`, a refactored directory) |
+| complete and current | **refused** — ~222 s to write a byte-identical map, plus about one spurious failure from the reorder |
+
+That last refusal is unusual in being *itself the answer*: if nothing in the
+tree differs from what was recorded, there is nothing a sweep could find that
+the map does not already know. If you distrust the map rather than its coverage,
+`rm .testmondata && pytest --no-seed-map` is the command that rebuilds it.
+
+Until 2026-07-30 this was priced like `--no-testmon`, so a bare
+`--testmon-noselect` was refused at 1320 s — while three separate places (this
+page, `tools/test_selection.py`'s epilog, and the `--since` >400-file error)
+named it as the sanctioned repair. The documented remedy exited 4.
 
 ## The map
 
