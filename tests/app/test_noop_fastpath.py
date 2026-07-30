@@ -175,6 +175,21 @@ class _FakeData:
         self.all_tests = {f"tests/test_a.py::test_{index}": {} for index in range(mapped)}
 
 
+@pytest.fixture
+def as_the_controller(monkeypatch):
+    """Report as the process the fast path actually runs in.
+
+    ``_report_map_erosion`` and ``_report_function_coverage`` both return
+    immediately on an xdist worker, because one process must own the sidecar.
+    These tests execute *on* a worker, so without this they would assert against
+    a run that had declined to report — and they did, silently passing under
+    ``-n 0`` and failing under ``-n auto``. Production never hits it: the fast
+    path itself refuses on a worker before any of this.
+    """
+
+    monkeypatch.setattr(harness, "_XDIST_WORKER", None)
+
+
 def _printing_config(tmp_path, mapped=4028):
     peek = testmon_policy.MapPeek(
         environment="offscreen",
@@ -199,7 +214,9 @@ def _printing_config(tmp_path, mapped=4028):
     return config, peek
 
 
-def test_the_fast_path_prints_what_the_full_path_prints(tmp_path, capsys, monkeypatch):
+def test_the_fast_path_prints_what_the_full_path_prints(
+    tmp_path, capsys, monkeypatch, as_the_controller
+):
     """The lines, in the order ``pytest_terminal_summary`` emits them.
 
     Not a golden file: each assertion names the line it is there to keep, so a
@@ -227,7 +244,9 @@ def test_the_fast_path_prints_what_the_full_path_prints(tmp_path, capsys, monkey
     assert "no tests ran in" in lines[-1]
 
 
-def test_the_exit_code_is_the_one_the_full_path_produces(tmp_path, monkeypatch, capsys):
+def test_the_exit_code_is_the_one_the_full_path_produces(
+    tmp_path, monkeypatch, capsys, as_the_controller
+):
     """Measured, not assumed: a no-op selected run exits 0 today. A fast path
     exiting 5 (``NO_TESTS_COLLECTED``) would break every script that treats a
     clean loop as success."""
@@ -238,7 +257,9 @@ def test_the_exit_code_is_the_one_the_full_path_produces(tmp_path, monkeypatch, 
     capsys.readouterr()
 
 
-def test_the_coverage_measure_still_runs_on_a_run_that_ran_nothing(tmp_path, monkeypatch, capsys):
+def test_the_coverage_measure_still_runs_on_a_run_that_ran_nothing(
+    tmp_path, monkeypatch, capsys, as_the_controller
+):
     """The one thing that must not be skipped for speed.
 
     An edit can delete or rename a covered function while affecting no test, and
@@ -258,7 +279,9 @@ def test_the_coverage_measure_still_runs_on_a_run_that_ran_nothing(tmp_path, mon
     assert measured, "the fast path skipped the coverage measure"
 
 
-def test_the_erosion_canary_still_runs_on_a_run_that_ran_nothing(tmp_path, monkeypatch, capsys):
+def test_the_erosion_canary_still_runs_on_a_run_that_ran_nothing(
+    tmp_path, monkeypatch, capsys, as_the_controller
+):
     """A map that lost a chunk of itself reports "nothing affected" — which is
     exactly the shape of run this path is for, so the canary has to be on it."""
 
