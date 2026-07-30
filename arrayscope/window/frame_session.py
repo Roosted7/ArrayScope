@@ -6061,8 +6061,11 @@ def _priority_contexts_order_alike(
 
     This is field equality, not ``==`` on the dataclass, for one reason:
     ``view_range`` is typed ``object`` and arrives from the backends as
-    whatever the camera hands over -- a list of lists from pyqtgraph, a tuple
-    from the viewport plan, potentially an array. ``==`` on an array field
+    whatever the camera hands over -- a list of lists from one backend's view
+    box, a tuple from the viewport plan, potentially an array. (Naming that
+    backend here would be a false positive for the guard that keeps this
+    module free of any backend, which is worth more than the example.)
+    ``==`` on an array field
     returns an array and raises inside the dataclass comparison, which would
     turn a scheduling optimization into a crash on a path nobody exercises
     headless. ``_view_range_cache_key`` already owns that normalization, and
