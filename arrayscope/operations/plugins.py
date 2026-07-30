@@ -207,10 +207,31 @@ class PluginOperationSpec:
         return self.fn  # type: ignore[return-value]
 
     def current_unavailable_reason(self) -> str:
+        """Why this operation cannot run right now, or ``""``.
+
+        The ``availability`` callable is a *probe of the outside world* -- it
+        resolves environments, renders command templates, and stats
+        executables. Any of that can raise on a definition the user is allowed
+        to author: a command operation combining a conda environment with
+        shell execution makes ``build_command`` raise ValueError, and both
+        halves of that combination are one click apart in the manager.
+
+        This is the boundary where such a raise must stop. It is called from
+        ``registry._pack_operation_entry``, so an escaping exception does not
+        disable one operation -- it takes down ``all_operations()``, and with
+        it the operation manager, the add popup, and the command palette, i.e.
+        every surface the user would repair the definition from. Reporting the
+        exception text as the unavailable reason keeps the definition listed,
+        editable, and self-describing.
+        """
+
         if self.unavailable_reason:
             return str(self.unavailable_reason)
         if self.availability is not None:
-            return str(self.availability() or "")
+            try:
+                return str(self.availability() or "")
+            except Exception as exc:  # never let one definition break the listing
+                return f"Availability check failed: {exc}"
         return ""
 
     def resolve_output_shape(
