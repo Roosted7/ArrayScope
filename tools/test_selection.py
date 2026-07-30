@@ -10,9 +10,10 @@ the tests does not:
   is the number to put in a handoff, and the one that catches "this render fix
   touches thirteen `tests/ui` files".
 * **Is the map trustworthy right now?** — `status` names what it does *not*
-  cover: test files it has never recorded, and declared child-process entry
-  points that have moved. A map with a hole in it selects confidently and
-  wrongly, so the hole has to be visible.
+  cover: test files it has never recorded, declared child-process entry points
+  that have moved, and the tests observed to flip outcome with no code change
+  at all. A map with a hole in it selects confidently and wrongly, so the hole
+  has to be visible.
 * **What does the suite actually execute?** — `coverage` unions the map's
   recorded blocks into an executed-function figure, for the price of one query.
   It is *not* coverage.py's line percentage and prints its own caveats; see
@@ -221,6 +222,19 @@ def command_status(args) -> int:
         print()
         print("    pytest --rerun-reds    re-runs them")
         print("    pytest --since         adds what this branch changed (pre-merge)")
+        print()
+
+    flakes = red_ledger.read_flakes(testmon_policy.map_path(REPO_ROOT), environment)
+    if flakes:
+        print(
+            f"observed flakes ({len(flakes)}) — went red, nothing they execute changed, "
+            "then passed."
+        )
+        print("`--since` never trusts their recorded green; the mark clears when their")
+        print("dependencies change:")
+        for name, mark in sorted(flakes.items()):
+            seen = mark.get("last_seen") or "?"
+            print(f"    {mark.get('count', 1)}x  last {seen}  {name}")
         print()
     print()
     print("declared child-process dependencies (invisible to coverage):")

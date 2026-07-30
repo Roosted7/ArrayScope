@@ -26,6 +26,10 @@ One deliberate asymmetry: a test that appears in the map for the first time
 *already failing* counts as new only if the map was populated when the run
 started. On the very first recording pass there is no such thing as a
 regression, only an inventory.
+
+The second ledger here — :class:`FlakeLedger` — writes down the opposite
+observation, and for the same reason: it is a fact only a run can see, and every
+run used to throw it away. See its docstring.
 """
 
 from __future__ import annotations
@@ -36,6 +40,14 @@ from pathlib import Path
 
 #: Sits next to the map, shares its lifetime, gitignored like it.
 LEDGER_SUFFIX = "-newreds.json"
+
+#: The flake ledger's own file. Deliberately *not* another key in the file
+#: above: the two records are written on different events and cleared on
+#: different ones, and a single writer that had to merge them is one careless
+#: rewrite away from dropping the field it did not think about — which is
+#: exactly the defect ``cbf3f254`` fixed in the coverage sidecar. Two files, two
+#: owners, no merge.
+FLAKE_SUFFIX = "-flakes.json"
 
 _VERSION = 1
 
@@ -125,3 +137,109 @@ def read_new_reds(map_path, environment: str) -> set[str]:
     """The recorded set, without loading a whole ledger. For read-only callers."""
 
     return set(_read(ledger_path(Path(map_path))).get(environment, ()))
+
+
+def flake_path(map_path: Path) -> Path:
+    return map_path.with_name(map_path.name + FLAKE_SUFFIX)
+
+
+class FlakeLedger:
+    """Tests observed to flip from red to green with no code change at all.
+
+    The map is an evidence ledger: a recorded green is trusted for as long as
+    the test's fingerprint holds, because content-addressing means an unchanged
+    fingerprint is an unchanged *body of executed code*. That inference has one
+    counter-example, and the suite produces it regularly — a test whose outcome
+    depends on something the fingerprint does not describe (a timer, a worker
+    pool, the order two threads happened to reach a queue).
+
+    Such a test is observable, and every run used to throw the observation away.
+    A red that re-ran **only because it was red** — its dependencies unchanged,
+    so it was in the forced set rather than the affected set — and then *passed*
+    has, by construction, flipped its outcome with no code change. That is the
+    definition of a flake, witnessed rather than guessed, and it costs nothing
+    to notice because the run had already paid to execute the test.
+
+    What the mark buys: ``--since`` never counts that test's recorded green as
+    evidence. It re-runs it instead, which is the one honest thing to do with a
+    result the map cannot vouch for.
+
+    Deliberately minimal. No score, no decay, no threshold: one observation is
+    enough to know the fingerprint does not determine the outcome, and a count
+    that had to be tuned would be a second thing to get wrong. The mark clears
+    on exactly one event — the test's dependencies actually changed, so it
+    re-recorded. New code is new evidence, and the old flakiness is no longer
+    about it.
+    """
+
+    def __init__(self, path: Path, environment: str) -> None:
+        self.path = path
+        self.environment = environment
+        self._environments = _read_flakes(path)
+        self.marks: dict[str, dict] = dict(self._environments.get(environment, {}))
+        self._initial = json.dumps(self.marks, sort_keys=True)
+
+    @classmethod
+    def load(cls, map_path, environment: str) -> FlakeLedger:
+        return cls(flake_path(Path(map_path)), environment)
+
+    def observe(self, nodeid: str, when: str) -> None:
+        """Record one red-that-was-not-changed passing. Idempotent-ish: it counts."""
+
+        previous = self.marks.get(nodeid) or {}
+        self.marks[nodeid] = {
+            "count": int(previous.get("count") or 0) + 1,
+            "last_seen": when,
+        }
+
+    def forget(self, nodeids) -> None:
+        """Drop marks that have stopped being evidence about anything.
+
+        Two reasons, both meaning "this mark is no longer about the test in
+        front of us": the test's dependencies changed, so it re-recorded against
+        code the flake was never observed on; or the test is gone from the map
+        entirely, and a mark nothing can ever clear would force a re-run of a
+        node id that does not exist.
+        """
+
+        for nodeid in nodeids:
+            self.marks.pop(nodeid, None)
+
+    def save(self) -> None:
+        if json.dumps(self.marks, sort_keys=True) == self._initial:
+            return
+        if self.marks:
+            self._environments[self.environment] = self.marks
+        else:
+            self._environments.pop(self.environment, None)
+        payload = {"version": _VERSION, "environments": self._environments}
+        # A lost ledger costs a trusted green, never a wrong result.
+        with contextlib.suppress(OSError):
+            self.path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+
+
+def _read_flakes(path: Path) -> dict[str, dict[str, dict]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("version") != _VERSION:
+        return {}
+    environments = payload.get("environments")
+    if not isinstance(environments, dict):
+        return {}
+    return {
+        str(name): {str(node): dict(mark) for node, mark in marks.items() if isinstance(mark, dict)}
+        for name, marks in environments.items()
+        if isinstance(marks, dict)
+    }
+
+
+def read_flakes(map_path, environment: str) -> dict[str, dict]:
+    """``{node id: {count, last_seen}}``, without loading a whole ledger.
+
+    The read-only half, for the two callers that must not write: the ``--since``
+    partition, which runs on every xdist worker, and ``tools/test_selection.py``.
+    """
+
+    return _read_flakes(flake_path(Path(map_path))).get(environment, {})

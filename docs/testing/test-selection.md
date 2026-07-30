@@ -14,7 +14,10 @@ runs*, never *which ring a claim needs*.
 
 1. **`pytest` is the loop.** No flags, no path to guess.
 2. **`pytest --since` before merging** — and after a rebase, or in a checkout
-   somebody else was iterating in. Still selected, still fast.
+   somebody else was iterating in. Still selected, still fast. It reports the
+   whole set your branch reaches and runs only the part the map cannot already
+   vouch for; `--fresh` re-runs the lot. See
+   [`--since`](#since-a-verification-report-for-the-whole-branch).
 3. **`pytest --rerun-reds` when the red you are fixing is one you inherited.**
    Selection does not re-run those, so even a node id reports it deselected.
    `--since` implies it: a merge gate that declined to run a red is not a gate,
@@ -108,7 +111,9 @@ that did not run could only have re-confirmed fingerprints that still hold.
 | Goal | Command |
 |---|---|
 | Inner loop | `pytest` |
-| Everything this whole branch changed — pre-merge, after a rebase, or in a borrowed checkout | `pytest --since` (it prints which baseline it picked, and how far back) |
+| Everything this whole branch changed — pre-merge, after a rebase, or in a borrowed checkout | `pytest --since` (it prints which baseline it picked, how far back, and what it verified without running) |
+| The last five commits, or one named sha | `pytest --since HEAD~5`, `pytest --since <sha>` |
+| Distrust the recorded greens — a flake hunt | `pytest --since --fresh` (re-runs everything the branch reaches) |
 | Landing a worktree branch: give the main checkout the map that recorded it | automatic on merge (`.githooks/post-merge`), or `python tools/test_selection.py adopt-map` |
 | Blast radius without running anything | `python tools/test_selection.py` |
 | What the map does *not* cover, which reds are yours | `python tools/test_selection.py status` |
@@ -633,22 +638,94 @@ dependency set of the run that failed:
 pytest --rerun-reds
 ```
 
-## `--since`: what this whole branch changed
+## `--since`: a verification report for the whole branch
 
 The map answers *what changed since the last run*. That is the right question in
 an edit loop and the wrong one before merging: by then every file has been
 recorded, so the map reports nothing affected while the branch has changed twenty
-files. Measured on this branch — plain `pytest` selects **1 test**; `--since`
-selects **65**.
+files. Measured on this branch — plain `pytest` reaches **1 test**; `--since`
+reaches **65**.
 
 ```bash
 pytest --since                  # resolve the baseline (below)
 pytest --since origin/release   # or name it
+pytest --since HEAD~5           # any ref works: a tag, a sha, a range endpoint
+pytest --since 7d08135a
 ```
 
 Merge-base semantics (`ref...HEAD`), plus the working tree and untracked files,
 so it answers "what has this branch done" rather than "how does it differ from
-wherever `ref` has got to since".
+wherever `ref` has got to since". Any ref git can resolve is a valid argument,
+including a raw sha or `HEAD~N` — the merge base of `HEAD~5` and `HEAD` is
+`HEAD~5`, so that spelling means "the last five commits plus my working tree".
+
+### What it runs, and what it reports instead of running
+
+The map is an **evidence ledger**. A test's fingerprint is content-addressed:
+if it is stable, the last recorded run of that test executed byte-identical code
+to what is on disk now. So a stable test whose last outcome was green is
+*verified for this tree* — running it again cannot produce information, only a
+copy of the record.
+
+`--since` therefore partitions the reached set rather than re-running it:
+
+```
+--since main: branch reaches 65 tests — 60 verified green against this exact tree
+from recorded runs, 5 run now (1 broken here, 3 without evidence, 1 known flake).
+```
+
+| Bucket | Meaning |
+|---|---|
+| **verified** | stable, recorded green, not in the flake ledger — reported, not run |
+| **broken here** | the red ledger owns it; the map cannot vouch for a red it recorded |
+| **without evidence** | unstable (a bare `pytest` would run it anyway), or never recorded — every new test lands here |
+| **inherited red** | stable, recorded, last outcome red. A merge gate owns those: the moment the branch lands, an inherited red is `main`'s red |
+| **known flake** | stable and green, but observed to flip outcome with no code change (below) |
+
+This is the part worth being precise about: **a verified green is evidence
+acquired earlier, not a test that just passed.** It is exactly as good as the
+claim that the fingerprint describes everything the outcome depends on — which
+is true for ordinary code and false for a flake, which is why the flake ledger
+exists. It was measured at ~95% of the reached set on a faithfully-iterated
+branch, i.e. `--since` used to spend almost all of its time re-confirming
+records it already held.
+
+Any failure to compute the partition — an unreadable ledger, a testmon upgrade,
+a map that will not answer — falls back to running everything reached. Never to
+skipping more.
+
+### `--fresh`: re-acquire all evidence
+
+```bash
+pytest --since --fresh
+```
+
+Runs every test the branch reaches, verified or not — the behaviour `--since`
+had before the partition. It is the right call for a flake hunt, or for a map
+you distrust for a reason you can name (in which case also
+[report it](#the-map)). On its own, without `--since`, it is an error: there is
+no reached set for it to be fresh about, and a flag that silently does nothing
+is how a phantom sweep gets believed.
+
+### The flake ledger
+
+One case defeats the evidence model: a test whose outcome does not depend only
+on the code its fingerprint describes. Those are observable, and every run used
+to throw the observation away.
+
+A red that re-ran **only because it was red** — its dependencies unchanged, so
+it was in the forced set rather than the affected set — and then *passed* has
+flipped its outcome with no code change. That is a flake, witnessed rather than
+guessed, and noticing it is free: the run had already paid to execute the test.
+It is written to a ledger beside the map
+([`tests/red_ledger.py`](../../tests/red_ledger.py)) and listed by
+`python tools/test_selection.py status`.
+
+A marked test is never verified-skipped; `--since` always runs it. The mark
+clears on exactly one event — its dependencies actually changed, so it
+re-recorded. New code is new evidence, and the old flakiness was never about it.
+No score, no decay, no threshold: one observation is enough to know the
+fingerprint does not determine the outcome.
 
 **The baseline is resolved, not assumed**, and the run prints which ref it used.
 In order: `ARRAYSCOPE_BASELINE_REF`, then the branch's upstream, then `main`,
@@ -683,8 +760,8 @@ do a changed body and a new import.
 
 `--since` is the pre-merge command precisely because it is still a *selected*
 run: the branch-sized answer at map speed. It does not pretend to be a sweep —
-it still cannot see the blind spots above, which is what CI's exhaustive jobs
-are for on every push, and rings 3–4 for real pixels.
+it still cannot see [the blind spots above](#what-it-cannot-see), which is what
+CI's exhaustive jobs are for, and rings 3–4 for real pixels.
 
 ## Coverage, for free
 

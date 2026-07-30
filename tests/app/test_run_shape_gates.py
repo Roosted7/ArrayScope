@@ -547,7 +547,8 @@ def test_the_closing_line_states_a_result_rather_than_a_deficit():
 def test_the_closing_line_still_reports_what_since_pulled_back_in():
     from tests.conftest import unaffected_summary
 
-    widened = "\n".join(unaffected_summary(65, 3480, 3545, 222.0, since=("main", 65)))
+    report = testmon_policy.SinceReport("main", reached=65, verified=0, running=(("x", 65),))
+    widened = "\n".join(unaffected_summary(65, 3480, 3545, 222.0, since=report))
     assert "--since main" in widened
     assert "pytest --since" not in widened, "no point suggesting the flag that is on"
     assert "pytest --since" in "\n".join(unaffected_summary(1, 3540, 3541, 222.0, since=None))

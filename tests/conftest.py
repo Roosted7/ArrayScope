@@ -52,6 +52,11 @@ from tests import coverage_map, load_report, red_ledger, testmon_policy
 
 #: Written by the controller (or a serial run) only; workers read the file.
 _red_ledger = None
+#: Same writer, same lifetime: the flake ledger and the two map facts it needs
+#: from *before* anything ran. See :func:`pytest_sessionstart`.
+_flake_ledger = None
+_forced_reds: frozenset[str] = frozenset()
+_changed_since_recorded: frozenset[str] = frozenset()
 #: Node ids this run collected, gathered from wherever collection happened.
 _collected: set[str] = set()
 
@@ -92,6 +97,16 @@ def pytest_addoption(parser):
             "Run everything this branch changed since REF (merge-base). Bare --since "
             "resolves the baseline: ARRAYSCOPE_BASELINE_REF, the upstream, then main. "
             "Use it before merging, after a rebase, or in a borrowed checkout."
+        ),
+    )
+    group.addoption(
+        "--fresh",
+        action="store_true",
+        default=False,
+        help=(
+            "With --since: re-acquire all evidence. Runs every test this branch "
+            "reaches, including the ones the map already holds a green for against "
+            "this exact code. For a flake hunt, or a map you distrust."
         ),
     )
     group.addoption(
@@ -960,6 +975,7 @@ def pytest_configure(config):
     # to the punch is a crash nobody gets a sentence about.
     _refuse_harmful_plugin_disables(config)
     _refuse_pointless_flags(config)
+    _refuse_fresh_without_since(config)
     # Seed *before* pricing, and for every run rather than only a selected one.
     # Seeding is a file copy from a sibling checkout, and a bypass run is
     # precisely the run that most needs a real map to be priced against: gating
@@ -1003,10 +1019,15 @@ def pytest_collection(session):
     since = config.getoption("since")
     if since is not None and _selection_is_narrowing(config):
         try:
-            ref, reached = testmon_policy.apply_since_baseline(config, since or None)
+            report = testmon_policy.apply_since_baseline(
+                config,
+                since or None,
+                _new_reds(config),
+                fresh=bool(config.getoption("fresh", False)),
+            )
         except testmon_policy.UsageError as error:
             raise pytest.UsageError(str(error)) from error
-        config.arrayscope_since = (ref, reached)
+        config.arrayscope_since = report
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -1063,8 +1084,11 @@ def pytest_sessionstart(session):
     and one writer means no lock and no lost update.
     """
 
-    global _red_ledger
+    global _red_ledger, _flake_ledger, _forced_reds, _changed_since_recorded
     _red_ledger = None
+    _flake_ledger = None
+    _forced_reds = frozenset()
+    _changed_since_recorded = frozenset()
     config = session.config
     testmon_config = getattr(config, "testmon_config", None)
     # Both the controller and every worker delete from the map during their own
@@ -1090,6 +1114,21 @@ def pytest_sessionstart(session):
         )
     except Exception:  # a missing ledger costs a re-run, never a wrong result
         _red_ledger = None
+    try:
+        _flake_ledger = red_ledger.FlakeLedger.load(
+            testmon_policy.map_path(config.rootdir), data.environment
+        )
+        # Both read now, before a single test can move them. ``_forced_reds`` is
+        # the set that will re-run *only* because it is red — one of them
+        # passing is the flake observation. ``_changed_since_recorded`` is what
+        # the tree already moved under, and a flake mark on any of those stops
+        # being evidence the moment this run re-records it.
+        _forced_reds = frozenset(testmon_policy.known_red_tests(config))
+        _changed_since_recorded = frozenset(data.unstable_test_names or ()) | (
+            frozenset(_flake_ledger.marks) - frozenset(data.all_tests or ())
+        )
+    except Exception:  # an unreadable flake ledger costs a trusted green, not a result
+        _flake_ledger = None
 
 
 def pytest_collection_finish(session):
@@ -1110,6 +1149,9 @@ def pytest_sessionfinish(session):
     if _red_ledger is not None:
         _red_ledger.forget_missing(_collected)
         _red_ledger.save()
+    if _flake_ledger is not None:
+        _flake_ledger.forget(_changed_since_recorded)
+        _flake_ledger.save()
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -1134,7 +1176,23 @@ def pytest_runtest_logreport(report):
             _red_ledger.record(report.nodeid, failed=True)
         elif report.when == "call" and report.passed:
             _red_ledger.record(report.nodeid, failed=False)
+    if (
+        _flake_ledger is not None
+        and report.when == "call"
+        and report.passed
+        and report.nodeid in _forced_reds
+    ):
+        # It was red, nothing it executes changed, and it just passed. There is
+        # no code-shaped explanation for that, so the map's green is not
+        # evidence about it — see tests/red_ledger.py:FlakeLedger.
+        _flake_ledger.observe(report.nodeid, when=_now_iso())
     yield
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def pytest_report_header(config):
@@ -1451,6 +1509,33 @@ def _refuse_pointless_flags(config) -> None:
     )
 
 
+def _refuse_fresh_without_since(config) -> None:
+    """``--fresh`` alone is a request the loop cannot honour, so it is an error.
+
+    It reads as "ignore the map and run everything", and a plain ``pytest`` has
+    no reached set to be fresh *about* — the flag would silently do nothing,
+    which is the failure mode where somebody believes they ran a sweep. The
+    commands that really do run more are named instead.
+    """
+
+    if not config.getoption("fresh", False) or config.getoption("since", None) is not None:
+        return
+    raise pytest.UsageError(
+        "\n".join(
+            (
+                "--fresh only means something with --since: it re-acquires the evidence",
+                "for the tests this branch reaches. On its own there is no reached set,",
+                "so the flag would quietly do nothing.",
+                "",
+                "    pytest --since --fresh    re-run everything this branch changed",
+                "    pytest --testmon-noselect run and re-record the whole suite",
+                "",
+                "Read docs/testing/test-selection.md.",
+            )
+        )
+    )
+
+
 def _report_gate_run_cost(terminalreporter, config) -> None:
     """Close every selection-bypassing run with what it cost and a defect ask.
 
@@ -1529,19 +1614,21 @@ def pytest_terminal_summary(terminalreporter, config):
     if not mapped or not unaffected:
         return
     since = getattr(config, "arrayscope_since", None) or _since_on_the_controller(config)
-    reached = 0
-    if since is not None:
-        reached = since[1]
 
     new_reds = _red_ledger.new_reds if _red_ledger is not None else _new_reds(config)
     inherited = testmon_policy.known_red_tests(config) - new_reds
-    # Every count here is "of the tests the map called unaffected", so anything
-    # pulled back in — by --since, or by the flag that re-runs inherited reds —
-    # has to come back out, or the line claims a gap that was already closed.
-    skipped = unaffected - reached
+    # ``unaffected`` counts the *stable* tests, so the correction has to be over
+    # stable tests too. Two things pull one back in: --since running it despite
+    # the map, and the flag that re-runs inherited reds. Intersecting is not
+    # decoration — --since reaches unstable tests as well, and subtracting those
+    # from a count they were never in used to underreport the gap.
+    stable = frozenset(getattr(data, "stable_test_names", ()) or ())
+    ran_anyway: set[str] = set()
+    if since is not None:
+        ran_anyway |= set(since.run_tests) & stable
     if testmon_policy.rerun_known_red_tests(config):
-        skipped -= len(inherited)
-    skipped = max(0, skipped)
+        ran_anyway |= inherited & stable
+    skipped = max(0, unaffected - len(ran_anyway))
     sweep = sum(_recorded_test_seconds(config).values())
     for line in unaffected_summary(
         tests_executed(terminalreporter), skipped, mapped, sweep, since=since
@@ -1606,9 +1693,13 @@ def unaffected_summary(ran, skipped, mapped, sweep_seconds, since) -> list[str]:
             f"by any of the {mapped} recorded tests."
         )
         lines.append("  That is a result, not a gap.")
-    if since is not None and since[1]:
-        lines.append(f"  Widened by +{since[1]} --since {since[0]}.")
-    elif since is None:
+    if since is not None:
+        # The verification report, always — including when it widened by zero.
+        # "Your branch reaches 65 tests and 65 are already proven" is the most
+        # useful thing --since can say, and the old line, printed only when the
+        # run grew, could not say it at all.
+        lines.append(f"  {since.sentence()}")
+    else:
         lines.append("  Branch-sized question, before merging:  pytest --since")
     return lines
 
@@ -1639,7 +1730,7 @@ def broken_here_lines(new_reds) -> list[str]:
 
 
 def _since_on_the_controller(config):
-    """``(ref, count)`` for a ``--since`` run whose collection happened elsewhere.
+    """The ``SinceReport`` for a run whose collection happened somewhere else.
 
     ``config.arrayscope_since`` is written during ``pytest_collection``, which
     under xdist runs on the workers — so the controller, the only process with a
@@ -1650,6 +1741,10 @@ def _since_on_the_controller(config):
     Recomputed here rather than forwarded: the query is read-only and the workers
     have no channel to hand a number back on. It costs a couple of seconds, and
     ``--since`` is the pre-merge step, not the inner loop.
+
+    The partition has to be recomputed the same way too, through the same
+    function the workers applied — the counts in the printed sentence are the
+    ones the run acted on, or they are fiction.
     """
 
     if config.getoption("since", default=None) is None:
@@ -1665,9 +1760,17 @@ def _since_on_the_controller(config):
         if checksums is None:
             return None
         reached = testmon_policy.tests_reached_since_baseline(data, checksums)
+        if reached is None:
+            return None
+        return testmon_policy.since_verification(
+            ref,
+            reached,
+            config,
+            _new_reds(config),
+            fresh=bool(config.getoption("fresh", False)),
+        )
     except Exception:  # a summary line is not worth failing a finished run over
         return None
-    return None if reached is None else (ref, len(reached))
 
 
 #: A map that loses more than this share of its recorded tests between runs has

@@ -36,20 +36,23 @@ testmon traces Python lines executed **in the pytest process**. So:
 1. **Child processes.** A test that shells out gets nothing from the child.
    The tests that really do spawn one are declared in
    :data:`OUT_OF_PROCESS_DEPENDENCIES`, which puts the entry point back in the
-   map; the modules that entry point *imports* remain invisible, and CI's
+   map; the modules that entry point *imports* remain invisible, and an
    exhaustive sweep is what covers them.
 2. **Non-Python inputs.** Icons and fixture arrays have no fingerprint.
 3. **Real rendering.** Rings 3–4 (``docs/testing/README.md``) prove things
    about pixels a compositor drew. Selection has nothing to say there and the
    ring rules are unchanged.
 
+Blind spots 1 and 2 are swept exhaustively by CI; blind spot 3 has no offscreen
+answer at all and belongs to rings 3–4.
+
 ``pytest --since`` is the pre-merge command: it asks what the whole *branch*
-changed rather than what moved since the last run, and still selects through
-the map. Blind spots 1 and 2 are swept exhaustively by CI on every push;
-blind spot 3 has no offscreen answer at all and belongs to rings 3–4.
-``pytest --no-testmon`` stays available for the narrow cases — regenerating
-the canonical artifacts, or settling a run this map is suspected of getting
-wrong — and is not a routine sweep.
+changed rather than what moved since the last run, and reports the answer as
+evidence — the map already holds a passing run against byte-identical code for
+most of what a settled branch reaches, so only the gaps run. ``--fresh``
+re-acquires the lot. ``pytest --no-testmon`` stays available for the narrow
+cases — regenerating the canonical artifacts, or settling a run this map is
+suspected of getting wrong — and is not a routine sweep.
 """
 
 from __future__ import annotations
@@ -1174,8 +1177,138 @@ def tests_reached_since_baseline(data, checksums) -> frozenset[str] | None:
     )
 
 
-def apply_since_baseline(config, explicit_ref: str | None) -> tuple[str, int]:
-    """Un-deselect everything this branch changed since its baseline.
+#: Why a test this branch reaches cannot be skipped, most-specific first. The
+#: order is both the tie-break (a test qualifying twice gets the first label)
+#: and the order the closing sentence prints them in.
+RUN_REASONS = ("broken here", "without evidence", "inherited red", "known flake")
+
+#: The other half of the partition: the map already holds a green for this exact
+#: code, so running it again could only reproduce it.
+VERIFIED = "verified"
+
+
+def partition_reached(
+    reached,
+    *,
+    recorded: frozenset[str] | set[str],
+    stable: frozenset[str] | set[str],
+    failed: frozenset[str] | set[str],
+    broken_here: frozenset[str] | set[str],
+    flaky: frozenset[str] | set[str],
+) -> dict[str, frozenset[str]]:
+    """Split the tests a branch reaches into "already proven" and "must run".
+
+    The map is an evidence ledger, and this is the reading of it. A test is
+    **verified for the current tree** when its fingerprint is stable — which,
+    content-addressing being what it is, means its last recorded run executed
+    byte-identical code to what is on disk — and that run passed. Re-running it
+    cannot produce new information; it can only reproduce the record.
+
+    Everything else reaches the run, for one of four reasons:
+
+    * ``broken here`` — the red ledger owns it. The map cannot vouch for a red
+      it recorded, because the map was written by the run that broke it.
+    * ``without evidence`` — unstable (a bare ``pytest`` would run it anyway) or
+      never recorded at all. New tests land here, which is the point.
+    * ``inherited red`` — stable, recorded, and its last outcome was a failure.
+      ``--since`` is a merge gate and the moment the branch lands an inherited
+      red is ``main``'s red, so the gate owns it.
+    * ``known flake`` — stable and green, but observed to flip outcome with no
+      code change (``tests/red_ledger.py``), so its green is not evidence.
+
+    Pure, and total: every reached name lands in exactly one bucket, and the
+    counts therefore add up in the sentence the run prints. Membership in
+    ``recorded``/``stable``/``failed`` is read the way :func:`known_red_tests`
+    reads it, from the map, so a serial run and an xdist controller agree.
+    """
+
+    buckets: dict[str, set[str]] = {name: set() for name in (VERIFIED, *RUN_REASONS)}
+    for name in reached:
+        if name in broken_here:
+            buckets["broken here"].add(name)
+        elif name not in recorded or name not in stable:
+            buckets["without evidence"].add(name)
+        elif name in failed:
+            buckets["inherited red"].add(name)
+        elif name in flaky:
+            buckets["known flake"].add(name)
+        else:
+            buckets[VERIFIED].add(name)
+    return {reason: frozenset(names) for reason, names in buckets.items()}
+
+
+@dataclass(frozen=True)
+class SinceReport:
+    """What one ``--since`` run found, and what it decided to do about it."""
+
+    ref: str
+    reached: int
+    verified: int
+    #: ``(reason, count)`` in :data:`RUN_REASONS` order, empty reasons dropped.
+    running: tuple[tuple[str, int], ...] = ()
+    #: The node ids to un-deselect. Only the applying process needs these; the
+    #: controller recomputes the counts read-only for its summary.
+    run_tests: frozenset[str] = frozenset()
+    #: ``--fresh``: evidence was deliberately not consulted.
+    fresh: bool = False
+
+    @property
+    def run(self) -> int:
+        return sum(count for _, count in self.running)
+
+    def sentence(self) -> str:
+        """The one line every ``--since`` run prints, whatever its shape."""
+
+        tests = "test" if self.reached == 1 else "tests"
+        head = f"--since {self.ref}: branch reaches {self.reached} {tests}"
+        if self.fresh:
+            return f"{head} — --fresh, so all {self.reached} run and re-acquire their evidence."
+        if not self.reached:
+            return f"{head} — nothing to verify."
+        why = ", ".join(f"{count} {reason}" for reason, count in self.running)
+        return (
+            f"{head} — {self.verified} verified green against this exact tree from "
+            f"recorded runs, {self.run} run now ({why})."
+            if why
+            else f"{head} — all {self.verified} verified green against this exact tree "
+            "from recorded runs, nothing left to run."
+        )
+
+
+def since_partition(config, reached, new_reds) -> dict[str, frozenset[str]] | None:
+    """:func:`partition_reached` fed from this run's map and ledgers.
+
+    ``None`` when any input cannot be read. Every caller turns that into "run
+    everything reached", which is the pre-partition behaviour — the degradation
+    direction is always *more* tests, never fewer.
+    """
+
+    from tests import red_ledger
+
+    data = getattr(config, "testmon_data", None)
+    if data is None:
+        return None
+    try:
+        all_tests = dict(data.all_tests or {})
+        flaky = red_ledger.read_flakes(map_path(config.rootdir), data.environment)
+        return partition_reached(
+            reached,
+            recorded=frozenset(all_tests),
+            stable=frozenset(data.stable_test_names or ()),
+            failed=frozenset(
+                name for name, report in all_tests.items() if (report or {}).get("failed")
+            ),
+            broken_here=frozenset(new_reds or ()),
+            flaky=frozenset(flaky),
+        )
+    except Exception:  # an unreadable map or ledger must widen the run, not narrow it
+        return None
+
+
+def apply_since_baseline(
+    config, explicit_ref: str | None, new_reds=(), *, fresh: bool = False
+) -> SinceReport:
+    """Run the evidence gaps this branch opened, and *report* the rest as proven.
 
     The map answers "what changed since the last run", which is the right
     question during an edit loop and the wrong one before merging: by then every
@@ -1183,13 +1316,28 @@ def apply_since_baseline(config, explicit_ref: str | None) -> tuple[str, int]:
     branch has changed twenty files. ``--since`` asks the other question, and it
     is the pre-merge command precisely because it still selects: it is the
     branch-sized answer at map speed, not a sweep.
+
+    This used to un-deselect **everything** the branch reached, which on a
+    faithfully-iterated branch is ~95% re-confirmation: those tests already ran,
+    against byte-identical code, and passed. The map is an evidence ledger, so
+    the honest pre-merge act is to *read* it — report the reached set, state
+    which part of it is already proven for this exact tree, and run only the
+    gaps. See :func:`partition_reached` for what counts as a gap.
+
+    ``fresh`` restores the old behaviour verbatim: re-acquire all evidence.
+    That is the right call for a flake hunt, or for a map you distrust.
+
+    **Degradation.** Any failure to compute the partition — an unreadable
+    ledger, a testmon upgrade, a map that will not answer — falls back to
+    running everything reached. Never to skipping more: a wrong answer here has
+    to cost time, not coverage.
     """
 
     ref, merge_base = resolve_baseline(config.rootdir, explicit_ref)
     plugin = config.pluginmanager.get_plugin("TestmonSelect")
     data = getattr(config, "testmon_data", None)
     if plugin is None or data is None:
-        return ref, 0
+        return SinceReport(ref, 0, 0)
 
     checksums = baseline_method_checksums(config.rootdir, merge_base)
     if checksums is None:
@@ -1206,16 +1354,51 @@ def apply_since_baseline(config, explicit_ref: str | None) -> tuple[str, int]:
         )
     reached = tests_reached_since_baseline(data, checksums)
     if reached is None:
-        return ref, 0
+        return SinceReport(ref, 0, 0)
+    report = since_verification(ref, reached, config, new_reds, fresh=fresh)
     try:
-        plugin.deselected_tests = set(plugin.deselected_tests) - reached
-        keep = {name.split("::", 1)[0] for name in reached}
+        plugin.deselected_tests = set(plugin.deselected_tests) - report.run_tests
+        keep = {name.split("::", 1)[0] for name in report.run_tests}
         plugin.deselected_files = {
             name for name in set(plugin.deselected_files) if name not in keep
         }
     except (AttributeError, TypeError):  # a testmon upgrade renamed them
-        return ref, 0
-    return ref, len(reached)
+        return SinceReport(ref, len(reached), 0)
+    return report
+
+
+def since_verification(ref, reached, config, new_reds=(), *, fresh: bool = False) -> SinceReport:
+    """The read-only half of :func:`apply_since_baseline`, decided once.
+
+    Split out because two processes need the same answer from the same inputs:
+    the one that mutates testmon's deselection lists (an xdist *worker*, where
+    collection happens) and the one that owns the terminal (the controller,
+    which never collects and so recomputes this instead). A number derived twice
+    by two code paths is a number that eventually disagrees with itself.
+    """
+
+    reached = frozenset(reached)
+    partition = None if fresh else since_partition(config, reached, new_reds)
+    if partition is None:
+        # Degraded, or asked for: run everything reached. Reported as one bucket
+        # rather than guessed at, because a fabricated breakdown of an unread
+        # ledger is worse than no breakdown.
+        return SinceReport(
+            ref,
+            len(reached),
+            0,
+            (("without evidence", len(reached)),) if not fresh and reached else (),
+            reached,
+            fresh=fresh,
+        )
+    running = tuple((reason, len(partition[reason])) for reason in RUN_REASONS if partition[reason])
+    return SinceReport(
+        ref,
+        len(reached),
+        len(partition[VERIFIED]),
+        running,
+        frozenset().union(*(partition[reason] for reason in RUN_REASONS)),
+    )
 
 
 COUPLED_MARKER = "coupled_order"
