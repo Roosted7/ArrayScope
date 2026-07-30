@@ -34,16 +34,24 @@ evidence, not live direction.
 
 ## Environment
 
-The maintained local workflow uses the `arrayscope` conda environment through direnv:
+The maintained environment is the `arrayscope` conda env. How you enter it depends on who you are:
+
+- **Interactive shell**: direnv, as before — it activates once per `cd` and costs nothing afterwards.
+- **Scripts, agents, anything that runs commands one at a time**: `tools/env <command>`.
 
 ```bash
-PATH=~/miniconda3/bin:$PATH direnv exec . <command>
+tools/env pytest              # the loop
+tools/env pytest --since      # before merging
+tools/env ruff check .
+tools/env git commit ...      # puts ruff+python on PATH for the pre-commit hook
 ```
+
+Do **not** wrap per-command invocations in `direnv exec .`: it re-evaluates the conda hook every call — measured **1.56 s before the command starts**, which is 3× the suite's entire no-op fast path. `tools/env` execs the env's binaries directly (~80 ms), which is all activation was buying (verified against a Qt/offscreen test in a process that never saw conda). A non-standard install location is stated once with `ARRAYSCOPE_ENV_PREFIX=/path/to/envs/arrayscope`.
 
 When dependencies change:
 
 ```bash
-PATH=~/miniconda3/bin:$PATH direnv exec . conda env update -f environment.yml --prune
+tools/env conda env update -f environment.yml --prune
 ```
 
 Headless GUI tests normally use `QT_QPA_PLATFORM=offscreen`. WGPU/Vulkan tests still need separate real-hardware runs before performance or Wayland claims are accepted.
