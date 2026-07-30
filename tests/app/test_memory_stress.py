@@ -32,6 +32,7 @@ def test_montage_tile_residency_rss_stays_bounded(qtbot):
     from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 
     from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.core.memory_policy import MIN_RENDER_CAP_MB
     from arrayscope.tools.presentation_settlement import (
         presentation_is_settled,
         presentation_settlement_diagnostic,
@@ -40,7 +41,12 @@ def test_montage_tile_residency_rss_stays_bounded(qtbot):
     from arrayscope.window import ArrayScopeWindow
     from tests.ui.helpers import clear_arrayscope_settings
 
-    budget = 8 * 1024 * 1024
+    # Exercise the smallest render budget the application will actually adopt.
+    # The page cache and display cache remain independent owners: the former is
+    # governed by this render cap, while the latter has its own policy budget.
+    # The test checks each installed cap directly rather than imposing the
+    # render cap on their sum.
+    render_budget_mb = MIN_RENDER_CAP_MB
     clear_arrayscope_settings()
     data = np.zeros((256, 256, 64), dtype=np.float32)
     process = psutil.Process()
@@ -52,11 +58,12 @@ def test_montage_tile_residency_rss_stays_bounded(qtbot):
         fft_backend=win.app_settings.fft_backend,
         fft_workers=win.app_settings.fft_workers,
         memory_profile=win.app_settings.memory_profile,
-        render_memory_budget_mb=8,
+        render_memory_budget_mb=render_budget_mb,
     )
     qtbot.addWidget(win)
     rss_samples = []
     accounted_samples = []
+    owner_cap_samples = []
     try:
         win.show()
         try:
@@ -101,6 +108,7 @@ def test_montage_tile_residency_rss_stays_bounded(qtbot):
             assert display_cache.bytes_used <= display_cache.max_bytes
             rss_samples.append(process.memory_info().rss)
             accounted_samples.append(page_cache.bytes_used + display_cache.bytes_used)
+            owner_cap_samples.append(page_cache.max_bytes + display_cache.max_bytes)
 
         initial_target = presentation_target_token(win)
         assert initial_target is not None
@@ -109,16 +117,33 @@ def test_montage_tile_residency_rss_stays_bounded(qtbot):
         )
         win.render(reason="rss-stress")
         wait_and_sample_residency(previous_target=initial_target)
-        for row in (1, 3, 5):
-            previous_target = presentation_target_token(win)
-            assert previous_target is not None
-            y0 = row * (256 + 1)
-            win.img_view.getView().setRange(xRange=(0, 256), yRange=(y0, y0 + 256), padding=0)
-            win.update_image_view()
-            wait_and_sample_residency(previous_target=previous_target)
+        rows = (1, 3, 5)
+        for _pass in range(2):
+            for row in rows:
+                previous_target = presentation_target_token(win)
+                assert previous_target is not None
+                y0 = row * (256 + 1)
+                win.img_view.getView().setRange(
+                    xRange=(0, 256),
+                    yRange=(y0, y0 + 256),
+                    padding=0,
+                )
+                win.update_image_view()
+                wait_and_sample_residency(previous_target=previous_target)
 
-        tolerance = budget + 128 * 1024 * 1024
-        assert max(accounted_samples) <= budget
+        # The first traversal is allowed to populate the working set. Repeating
+        # the exact same semantic windows must reuse or evict within that
+        # high-water mark; a cache keyed by transient session/view objects would
+        # grow again on the second traversal.
+        first_walk = accounted_samples[1 : 1 + len(rows)]
+        second_walk = accounted_samples[1 + len(rows) :]
+        assert len(first_walk) == len(second_walk) == len(rows)
+        assert max(second_walk) <= max(first_walk)
+
+        # RSS includes allocator/backend overhead beyond the two counters. Base
+        # its absolute envelope on the caps actually installed for those owners,
+        # plus the existing 128 MiB process/backend allowance.
+        tolerance = max(owner_cap_samples) + 128 * 1024 * 1024
         assert max(rss_samples) - window_baseline < tolerance
         assert max(rss_samples) - min(rss_samples) < tolerance
     finally:
