@@ -304,7 +304,13 @@ def _bypass_permitted(config) -> str:
         return "explicitly forced"
     if os.environ.get("CI"):
         return "CI, where every job is a gate"
-    if options.get("cov") or options.get("cov_report"):
+    # ``cov_source``, not ``cov``: pytest-cov registers ``--cov`` with
+    # ``dest="cov_source"`` and there is no ``cov`` key at all, so the old
+    # spelling read ``None`` for every coverage run and priced it. Measured:
+    # ``pytest --cov <scope>`` exited 4 — a documented, legitimate command
+    # refused by a typo. This has to read what ``testmon_policy.decide`` reads,
+    # or the two disagree about what kind of run this is.
+    if options.get("cov_source") or options.get("cov_report"):
         return "coverage, which is false over a subset"
     if not testmon_policy.testmon_installed():
         return "pytest-testmon is not installed"
@@ -387,6 +393,9 @@ def pytest_configure(config):
     it lazily further down instead.)
     """
 
+    # Harmful first: one of these entries is a crash, and a crash that beats us
+    # to the punch is a crash nobody gets a sentence about.
+    _refuse_harmful_plugin_disables(config)
     _refuse_pointless_flags(config)
     _refuse_unselected_run(config)
     decision = testmon_policy.decide(config)
@@ -598,8 +607,64 @@ _GATE_NUDGE_SECONDS = 5.0
 #: Plugins it is pointless to disable here, and what to say about each. These
 #: arrive by habit from other repositories; the flag then makes a command look
 #: like it is stabilising something when it is doing nothing at all.
+#:
+#: Fires while the named plugin is **absent** — the complaint is inertness, so
+#: installing the plugin retires the entry by itself.
 _POINTLESS_PLUGIN_DISABLES = {
     "randomly": "pytest-randomly is not installed",
+}
+
+#: Plugins that this harness genuinely depends on, and what to say about each:
+#: ``(module whose presence makes the disable bite — ``None`` for a pytest
+#: builtin, which is always there —, what the disable does, what to do instead)``.
+#:
+#: The predicate is the **opposite** of the table above. That one fires while
+#: the plugin is absent, because an inert flag is its whole complaint. These
+#: fire while it is present, because here the effect *is* the damage.
+#:
+#: Both entries were measured on 2026-07-30, and both come from the same
+#: imported incantation (``-n 0 -q -p no:cacheprovider``).
+_HARMFUL_PLUGIN_DISABLES = {
+    "cacheprovider": (
+        None,
+        "\n".join(
+            (
+                "it crashes the run.",
+                "",
+                "pytest-testmon reads config.option['lf'] directly, and that option only",
+                "exists while the cache plugin is registered. Disabling it does not make",
+                "the run cleaner -- it makes pytest exit 3 with an INTERNALERROR",
+                "traceback that looks like this repository is broken. It is not.",
+            )
+        ),
+        "\n".join(
+            (
+                "`-n 0 -q -p no:cacheprovider` is a habit from repositories where cached",
+                "state makes runs unreproducible. Here the cached state IS the feature:",
+                "`.testmondata` is what lets `pytest` run the handful of tests your change",
+                "reaches instead of all 3941. Clearing it costs ~222 s and buys nothing.",
+            )
+        ),
+    ),
+    "pytest-testmon": (
+        "testmon",
+        "\n".join(
+            (
+                "it turns off change selection AND recording, with nothing to say so.",
+                "",
+                "The header would still print `test selection: on ... this run records",
+                "the map`, and both halves of that would be false. A run nobody can tell",
+                "apart from a selected one is worse than a slow one.",
+            )
+        ),
+        "\n".join(
+            (
+                "Drop it. `pytest` is already the narrow run. If you want everything and",
+                "want the map left repaired, `pytest --testmon-noselect` is the spelling",
+                "that says so out loud and has a gate to answer to.",
+            )
+        ),
+    ),
 }
 
 
@@ -622,6 +687,76 @@ def pointless_plugin_disables(plugins, installed) -> list[tuple[str, str]]:
             continue
         found.append((name, why))
     return found
+
+
+def harmful_plugin_disables(plugins, installed) -> list[tuple[str, str, str]]:
+    """``(flag, what it does, what to do instead)`` for each ``-p no:X`` that bites.
+
+    ``installed`` answers "is this module here, so that blocking its plugin
+    would actually take something away?", injected for the same reason as in
+    :func:`pointless_plugin_disables`. An entry with no module to probe is a
+    pytest builtin: there is no environment in which it is absent, so the
+    disable always takes effect.
+
+    Deliberately short. Only the *silent* disables belong here — ``-p
+    no:xdist`` turns ``addopts`` into a usage error, ``-p no:mark`` is refused
+    by pytest itself, and ``-p no:testmon`` misses the entry point name
+    entirely. Each of those answers instantly and unambiguously, so listing
+    them would buy nothing but a list to keep in sync.
+    """
+
+    found = []
+    for plugin in tuple(plugins or ()):
+        name = str(plugin)
+        if not name.startswith("no:"):
+            continue
+        entry = _HARMFUL_PLUGIN_DISABLES.get(name[3:])
+        if entry is None:
+            continue
+        module, what, instead = entry
+        if module is not None and not installed(module):
+            continue
+        found.append((name, what, instead))
+    return found
+
+
+def _refuse_harmful_plugin_disables(config) -> None:
+    """Replace a crash, or a silent bypass, with a sentence.
+
+    This has to run before testmon's own ``pytest_configure``, and it does:
+    ``testpaths`` makes this an *initial* conftest, so its ``tryfirst``
+    configure is ahead of every plugin's. Verified by measurement — ``-p
+    no:cacheprovider -p no:randomly`` printed the repository's refusal rather
+    than testmon's ``KeyError``, which is what proves the interception point is
+    early enough.
+
+    Why a refusal rather than a warning: the run these flags come from is
+    already being typed by somebody who believes the harness is broken. An
+    INTERNALERROR confirms that belief, and the next command is wider. This
+    message is the only string guaranteed to be read at that moment.
+    """
+
+    from importlib.util import find_spec
+
+    harmful = harmful_plugin_disables(
+        getattr(config.option, "plugins", ()),
+        lambda module: find_spec(module) is not None,
+    )
+    if not harmful:
+        return
+    lines: list[str] = []
+    for flag, what, instead in harmful:
+        lines.extend((f"-p {flag} is refused here: {what}", "", instead, ""))
+    lines.extend(
+        (
+            "    pytest                   the loop -- already narrow, already reproducible",
+            "    pytest --since           everything this branch changed, before merging",
+            "    pytest -n 0 f.py::test   serial, for the one test you are debugging",
+            "",
+            "Read docs/testing/test-selection.md rule 5.",
+        )
+    )
+    raise pytest.UsageError("\n".join(lines))
 
 
 def _refuse_pointless_flags(config) -> None:
