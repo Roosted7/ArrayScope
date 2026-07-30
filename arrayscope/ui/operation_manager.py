@@ -1,21 +1,24 @@
 """Operation manager: browse, arrange, duplicate and edit operations.
 
-This is the operations analogue of :mod:`arrayscope.ui.colormap_designer`. It is
-the flagship UI of the custom-operations feature and deliberately mirrors the
-colormap designer's interaction model:
+The operations half of the shared manager grammar
+(:mod:`arrayscope.ui.user_library_manager`, ADR 0063), whose colormap sibling is
+:mod:`arrayscope.ui.colormap_manager`. The tree, the button bar and its icons,
+the filter row, the markers, Revert, the Problems group, group rename and layout
+persistence live in the base; this module contributes the operation editor.
 
 - The library tree (left) is drag-reorderable: ops move within and between
-  groups and groups reorder; the arrangement persists through
+  groups and groups reorder and rename inline; the arrangement persists through
   :func:`arrayscope.operations.library.apply_library_layout` and drives every
   UI surface that lists operations.
 - Built-in / pack ("system") ops are read-only definitions: they can only be
   hidden (hide-not-delete, restorable) or moved to another group. User ops are
-  fully editable and are removed outright.
-- Edits save automatically (on edit-finish / toggle), matching the colormap
-  designer -- no explicit Save button, no silent loss.
+  fully editable and are removed outright, behind a confirmation.
+- Edits save automatically (on edit-finish / toggle) -- no explicit Save button,
+  no silent loss. ``Revert`` undoes the most recent change made in this session.
 - The right column is the product's one operation editor. ``New`` creates an
   unfinished entry in place; source/callable selection and copy/link storage
-  live in this same editor rather than a second modal editor.
+  live in this same editor rather than a second modal editor. A definition the
+  loader rejected is repaired in that same column (ADR 0062).
 
 The dialog registers a library listener so an external mutation (a recipe load,
 another window's edit) rebuilds the tree in place, preserving selection by id.
@@ -27,24 +30,19 @@ import json
 import os
 import shutil
 
-from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.operations import library
 from arrayscope.operations.operation_definitions import export_operation_definition
 from arrayscope.operations.registry import get_operation_entry
-from arrayscope.ui.file_dialogs import get_open_file_name
+from arrayscope.ui.file_dialogs import get_open_file_name, get_save_file_name
 from arrayscope.ui.icons import material_icon, set_button_icon, set_label_icon
 from arrayscope.ui.toasts import show_status_message
+from arrayscope.ui.user_library_manager import (
+    ITEM_ROLE as _ID_ROLE,
+)
+from arrayscope.ui.user_library_manager import UserLibraryManagerDialog
 
-_ID_ROLE = QtCore.Qt.ItemDataRole.UserRole
-_GROUP_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1
-_VIRTUAL_ROLE = QtCore.Qt.ItemDataRole.UserRole + 2
-# A Problems row's identity is its wrapper file path, never an operation id: the
-# id lives inside a payload the loader could not accept. See
-# ``library.OperationProblem`` for why the whole channel is keyed this way.
-_PROBLEM_PATH_ROLE = QtCore.Qt.ItemDataRole.UserRole + 3
-
-_PROBLEMS_GROUP = "Problems"
 _KIND_CHOICES = ("int", "float")
 _PARAM_LABEL_ROLE = QtCore.Qt.ItemDataRole.UserRole
 _RUNTIME_CHOICES = (
@@ -79,127 +77,30 @@ class _RawField:
             raise AttributeError(name) from None
 
 
-class _OperationTree(QtWidgets.QTreeWidget):
-    """Groups as parents, operations as draggable children."""
+class OperationManagerDialog(UserLibraryManagerDialog):
+    ITEM_NOUN = "operation"
+    # The operations analogue of the colormap manager's kind filter: what
+    # *sort* of definition this is, which is the axis a user narrows by.
+    FILTER_CHOICES = (
+        ("All operations", None),
+        ("User", "user"),
+        ("System", "system"),
+        ("Hidden", "hidden"),
+        ("Unavailable", "unavailable"),
+    )
+    TREE_MINIMUM_WIDTH = 210
 
-    orderEdited = QtCore.Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setHeaderHidden(True)
-        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
-        self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
-        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        self.setExpandsOnDoubleClick(False)
-
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        self._normalize()
-        self.orderEdited.emit()
-
-    def _normalize(self):
-        """Keep the two-level shape: groups top-level, ops under groups."""
-
-        index = 0
-        while index < self.topLevelItemCount():
-            item = self.topLevelItem(index)
-            if item.data(0, _VIRTUAL_ROLE):
-                # The Problems group is not part of the arrangement: its rows
-                # carry a file path rather than an operation id, so the
-                # id-shaped normalization below would evict every one of them
-                # to the top level on the next unrelated drop.
-                index += 1
-                continue
-            if item.data(0, _ID_ROLE):
-                # An op dropped at the top level slides into the nearest group.
-                self.takeTopLevelItem(index)
-                target = self.topLevelItem(max(0, index - 1))
-                if target is not None and not target.data(0, _VIRTUAL_ROLE):
-                    target.addChild(item)
-                    target.setExpanded(True)
-                continue
-            child_index = 0
-            while child_index < item.childCount():
-                child = item.child(child_index)
-                if child.data(0, _ID_ROLE):
-                    child_index += 1
-                    continue
-                # A group nested under a group moves back to the top level.
-                item.takeChild(child_index)
-                self.insertTopLevelItem(self.indexOfTopLevelItem(item) + 1, child)
-            index += 1
-
-
-class OperationManagerDialog(QtWidgets.QDialog):
     def __init__(self, window):
-        super().__init__(window)
-        self._window = window
-        self.setWindowTitle("Operations")
-        self.setWindowFlag(QtCore.Qt.WindowType.Tool, True)
-        self.resize(780, 720)
-        self.setMinimumSize(720, 620)
-        self.setSizeGripEnabled(True)
         self._loaded_id = None
         self._loaded_problem = None
-        self._problems_by_path = {}
-        self._suppress = False
-        self._reloading = False
         self._source_infos = {}
         self._editing_environment_id = ""
+        super().__init__(window, title="Operations")
+        self.resize(780, 720)
+        self.setMinimumSize(720, 620)
+        self.start_listening()
 
-        root = QtWidgets.QHBoxLayout(self)
-
-        # -- left: library tree -------------------------------------------
-        left = QtWidgets.QVBoxLayout()
-        self.tree = _OperationTree(self)
-        self.tree.setMinimumWidth(210)
-        left.addWidget(self.tree, 1)
-        hint = QtWidgets.QLabel("Drag to rearrange operations and groups")
-        hint.setObjectName("OperationsMetaLabel")
-        left.addWidget(hint)
-
-        self.new_button = QtWidgets.QToolButton(self)
-        set_button_icon(self.new_button, "add", tooltip="New operation")
-        self.new_button.setText("New")
-        self.new_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        # Compatibility for callers of the original manager API; this is now
-        # an in-manager creation action, never a modal import editor.
-        self.add_button = self.new_button
-        self.duplicate_button = QtWidgets.QToolButton(self)
-        set_button_icon(self.duplicate_button, "data_object", tooltip="Duplicate selected to edit")
-        self.duplicate_button.setText("Duplicate")
-        self.duplicate_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        primary_buttons = QtWidgets.QHBoxLayout()
-        primary_buttons.addWidget(self.new_button)
-        primary_buttons.addWidget(self.duplicate_button)
-        primary_buttons.addStretch(1)
-        left.addLayout(primary_buttons)
-
-        tree_buttons = QtWidgets.QHBoxLayout()
-        self.remove_button = QtWidgets.QToolButton(self)
-        set_button_icon(self.remove_button, "delete", tooltip="Hide")
-        self.unhide_button = QtWidgets.QToolButton(self)
-        set_button_icon(self.unhide_button, "visibility", tooltip="Restore / unhide")
-        self.open_file_button = QtWidgets.QToolButton(self)
-        set_button_icon(self.open_file_button, "edit", tooltip="Open the code file")
-        self.open_folder_button = QtWidgets.QToolButton(self)
-        set_button_icon(
-            self.open_folder_button, "folder_open", tooltip="Open the operations folder"
-        )
-        self.reset_all_button = QtWidgets.QToolButton(self)
-        set_button_icon(self.reset_all_button, "refresh", tooltip="Reset layout and unhide all")
-        for button in (
-            self.remove_button,
-            self.unhide_button,
-            self.open_file_button,
-            self.open_folder_button,
-        ):
-            tree_buttons.addWidget(button)
-        tree_buttons.addStretch(1)
-        tree_buttons.addWidget(self.reset_all_button)
-        left.addLayout(tree_buttons)
-        root.addLayout(left)
-
+    def build_editor(self, root):
         # -- right: editor ------------------------------------------------
         right_widget = QtWidgets.QWidget(self)
         right = QtWidgets.QVBoxLayout(right_widget)
@@ -469,23 +370,18 @@ class OperationManagerDialog(QtWidgets.QDialog):
 
         actions = QtWidgets.QHBoxLayout()
         actions.addStretch(1)
+        self.apply_button = QtWidgets.QPushButton("Apply", self)
+        set_button_icon(self.apply_button, "done")
+        self.apply_button.setToolTip("Add this operation to the current window and close")
         self.done_button = QtWidgets.QPushButton("Done", self)
-        set_button_icon(self.done_button, "done")
+        actions.addWidget(self.apply_button)
         actions.addWidget(self.done_button)
         right.addLayout(actions)
         root.addWidget(self.editor_scroll, 1)
 
         # -- wiring -------------------------------------------------------
-        self.tree.currentItemChanged.connect(lambda *_: self._load_editor())
-        self.tree.orderEdited.connect(self._persist_layout)
-        self.new_button.clicked.connect(self._new_operation)
-        self.duplicate_button.clicked.connect(self._duplicate_operation)
-        self.remove_button.clicked.connect(self._remove_or_hide)
-        self.unhide_button.clicked.connect(self._unhide)
-        self.open_file_button.clicked.connect(self._open_code_file)
-        self.open_folder_button.clicked.connect(self._open_folder)
-        self.reset_all_button.clicked.connect(self._reset_all)
         self.raw_json_save_button.clicked.connect(self._save_raw_wrapper)
+        self.apply_button.clicked.connect(self._apply_and_close)
         self.done_button.clicked.connect(self.accept)
 
         self.label_edit.editingFinished.connect(self._apply_user_edits)
@@ -519,205 +415,62 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.environment_save_button.clicked.connect(self._save_environment)
         self.environment_remove_button.clicked.connect(self._remove_environment)
 
-        library.add_library_listener(self._refresh_tree)
-        self._refresh_tree()
-
-    # ------------------------------------------------------------------
-    # Teardown
-    # ------------------------------------------------------------------
-
-    def closeEvent(self, event):
-        library.remove_library_listener(self._refresh_tree)
-        super().closeEvent(event)
-
-    def reject(self):
-        library.remove_library_listener(self._refresh_tree)
-        super().reject()
-
-    def accept(self):
-        library.remove_library_listener(self._refresh_tree)
-        super().accept()
-
     # ------------------------------------------------------------------
     # Tree building
     # ------------------------------------------------------------------
 
-    def _refresh_tree(self):
-        selected = self.selected_operation_id()
-        problem_path = self.selected_problem_path()
+    def populate_tree(self):
+        hidden = library.hidden_operations()
+        for group, entries in library.grouped_operations(include_hidden=True):
+            group_item = self.group_item(group)
+            for entry in entries:
+                group_item.addChild(
+                    self.item_row(
+                        entry.id,
+                        entry.label,
+                        icon=material_icon(entry.icon or "data_array"),
+                        tooltip=entry.unavailable_reason or entry.description or entry.id,
+                        hidden=entry.id in hidden,
+                        user=_is_user_op(entry.id),
+                        unavailable=bool(entry.unavailable_reason),
+                    )
+                )
+            group_item.setExpanded(True)
+
+    def row_matches(self, item, text, choice, group):
+        operation_id = str(item.data(0, _ID_ROLE))
+        if choice is not None:
+            is_user = _is_user_op(operation_id)
+            if choice == "user" and not is_user:
+                return False
+            if choice == "system" and is_user:
+                return False
+            if choice == "hidden" and operation_id not in library.hidden_operations():
+                return False
+            if choice == "unavailable" and "(unavailable)" not in item.text(0):
+                return False
+        if not text:
+            return True
+        # Label, id and group: the three things a user has to go on when they
+        # remember an operation but not where the manager filed it.
+        return (
+            text in item.text(0).casefold()
+            or text in operation_id.casefold()
+            or (text in group.casefold())
+        )
+
+    def repaired_item_id(self):
         # A repair that works makes the row leave Problems, so "keep the
-        # selection" has to mean the definition, not the row: fall through to
-        # the id the repaired payload claims.
-        repaired_id = self._loaded_problem.operation_id if self._loaded_problem else None
-        self._reloading = True
-        try:
-            self.tree.clear()
-            hidden = library.hidden_operations()
-            for group, entries in library.grouped_operations(include_hidden=True):
-                group_item = self._group_item(group)
-                self.tree.addTopLevelItem(group_item)
-                for entry in entries:
-                    group_item.addChild(self._operation_item(entry, entry.id in hidden))
-                group_item.setExpanded(True)
-            self._append_problems_group()
-        finally:
-            self._reloading = False
-        restored = (
-            (selected is not None and self.select_operation(selected))
-            or (problem_path is not None and self.select_problem_path(problem_path))
-            or (repaired_id is not None and self.select_operation(repaired_id))
-        )
-        if not restored:
-            self._select_first_operation()
-        self._load_editor()
+        # selection" has to mean the definition, not the row.
+        return self._loaded_problem.item_id if self._loaded_problem else None
 
-    def _group_item(self, group: str) -> QtWidgets.QTreeWidgetItem:
-        item = QtWidgets.QTreeWidgetItem([group])
-        item.setData(0, _GROUP_ROLE, group)
-        font = item.font(0)
-        font.setBold(True)
-        item.setFont(0, font)
-        item.setFlags(
-            QtCore.Qt.ItemFlag.ItemIsEnabled
-            | QtCore.Qt.ItemFlag.ItemIsDropEnabled
-            | QtCore.Qt.ItemFlag.ItemIsDragEnabled
-        )
-        return item
-
-    def _operation_item(self, entry, hidden: bool) -> QtWidgets.QTreeWidgetItem:
-        markers = []
-        if hidden:
-            markers.append("(hidden)")
-        if _is_user_op(entry.id):
-            markers.append("(user)")
-        if entry.unavailable_reason:
-            markers.append("(unavailable)")
-        suffix = ("  " + " ".join(markers)) if markers else ""
-        item = QtWidgets.QTreeWidgetItem([f"{entry.label}{suffix}"])
-        item.setIcon(0, material_icon(entry.icon or "data_array"))
-        item.setData(0, _ID_ROLE, entry.id)
-        item.setToolTip(0, entry.unavailable_reason or entry.description or entry.id)
-        item.setFlags(
-            QtCore.Qt.ItemFlag.ItemIsEnabled
-            | QtCore.Qt.ItemFlag.ItemIsSelectable
-            | QtCore.Qt.ItemFlag.ItemIsDragEnabled
-        )
-        if hidden:
-            item.setForeground(
-                0,
-                self.palette().brush(
-                    QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text
-                ),
-            )
-            font = item.font(0)
-            font.setItalic(True)
-            item.setFont(0, font)
-        return item
-
-    def _append_problems_group(self):
-        self._problems_by_path = {}
-        problems = library.user_operation_problems()
-        if not problems:
-            return
-        group_item = self._group_item(_PROBLEMS_GROUP)
-        group_item.setData(0, _VIRTUAL_ROLE, True)
-        group_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
-        self.tree.addTopLevelItem(group_item)
-        for problem in problems:
-            self._problems_by_path[problem.path] = problem
-            label = problem.operation_id or os.path.basename(problem.path)
-            child = QtWidgets.QTreeWidgetItem([label])
-            # Only the *group* stays virtual. The row itself is addressable by
-            # file path, which is what makes it selectable, editable, and
-            # removable instead of a dead end.
-            child.setData(0, _PROBLEM_PATH_ROLE, problem.path)
-            child.setIcon(0, material_icon("warning"))
-            child.setToolTip(0, f"{os.path.basename(problem.path)} — {problem.message}")
-            child.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
-            group_item.addChild(child)
-        group_item.setExpanded(True)
-
+    # Compatibility names for callers (the gallery, the recipe surfaces) that
+    # speak operations rather than the shared vocabulary.
     def select_operation(self, operation_id: str) -> bool:
-        for group_index in range(self.tree.topLevelItemCount()):
-            group_item = self.tree.topLevelItem(group_index)
-            for child_index in range(group_item.childCount()):
-                child = group_item.child(child_index)
-                if child.data(0, _ID_ROLE) == str(operation_id):
-                    self.tree.setCurrentItem(child)
-                    return True
-        return False
-
-    def select_problem_path(self, path: str) -> bool:
-        """Select the Problems row for one stored wrapper file."""
-
-        for group_index in range(self.tree.topLevelItemCount()):
-            group_item = self.tree.topLevelItem(group_index)
-            for child_index in range(group_item.childCount()):
-                child = group_item.child(child_index)
-                if child.data(0, _PROBLEM_PATH_ROLE) == str(path):
-                    self.tree.setCurrentItem(child)
-                    return True
-        return False
-
-    def _select_first_operation(self):
-        for group_index in range(self.tree.topLevelItemCount()):
-            group_item = self.tree.topLevelItem(group_index)
-            if group_item.data(0, _VIRTUAL_ROLE):
-                continue
-            if group_item.childCount():
-                self.tree.setCurrentItem(group_item.child(0))
-                return
+        return self.select_key(operation_id)
 
     def selected_operation_id(self):
-        item = self.tree.currentItem()
-        if item is None or item.data(0, _VIRTUAL_ROLE):
-            return None
-        value = item.data(0, _ID_ROLE)
-        return None if value is None else str(value)
-
-    def selected_problem_path(self):
-        """Wrapper file path of the selected Problems row, or ``None``.
-
-        The sibling of :meth:`selected_operation_id`. A Problems row has no
-        registered operation, so that method answers ``None`` for it -- which
-        is exactly right, and exactly why this one has to exist: every action
-        that used to early-return on ``None`` now has a second question to ask
-        before deciding the selection is unaddressable.
-        """
-
-        item = self.tree.currentItem()
-        if item is None:
-            return None
-        value = item.data(0, _PROBLEM_PATH_ROLE)
-        return None if value is None else str(value)
-
-    # ------------------------------------------------------------------
-    # Layout persistence (drag & drop)
-    # ------------------------------------------------------------------
-
-    def _tree_layout(self, override: dict | None = None):
-        group_order = []
-        op_groups = {}
-        op_order = {}
-        for group_index in range(self.tree.topLevelItemCount()):
-            group_item = self.tree.topLevelItem(group_index)
-            if group_item.data(0, _VIRTUAL_ROLE):
-                continue
-            group = str(group_item.data(0, _GROUP_ROLE))
-            group_order.append(group)
-            for child_index in range(group_item.childCount()):
-                operation_id = str(group_item.child(child_index).data(0, _ID_ROLE))
-                op_groups[operation_id] = group
-                op_order[operation_id] = child_index
-        if override:
-            op_groups.update(override)
-        return group_order, op_groups, op_order
-
-    def _persist_layout(self, override: dict | None = None):
-        group_order, op_groups, op_order = self._tree_layout(override)
-        library.apply_library_layout(
-            group_order=group_order, op_groups=op_groups, op_order=op_order
-        )
+        return self.selected_key()
 
     # ------------------------------------------------------------------
     # Editor
@@ -750,14 +503,14 @@ class OperationManagerDialog(QtWidgets.QDialog):
         finally:
             self._suppress = False
 
-    def _load_editor(self):
+    def load_editor(self):
         if self._reloading:
             return
-        operation_id = self.selected_operation_id()
+        operation_id = self.selected_key()
         problem_path = self.selected_problem_path()
         self._loaded_id = operation_id
         self._loaded_problem = (
-            self._problems_by_path.get(problem_path) if problem_path is not None else None
+            self.problem_for_path(problem_path) if problem_path is not None else None
         )
         if self._loaded_problem is not None:
             self._load_repair_editor(self._loaded_problem)
@@ -1465,10 +1218,34 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.params_table.setItem(row, 6, QtWidgets.QTableWidgetItem(description))
 
     def _add_parameter_row(self):
+        """Append a *named* parameter row.
+
+        A blank row used to be appended and then thrown away: ``_table_parameters``
+        skips an unnamed row, so the autosave persisted nothing, and the library
+        refresh listener refilled the table from the wrapper -- wiping the row the
+        click had just created (measured rowCount 0 → 0). Naming it is what makes
+        it survive its own save; the name is an ordinary editable cell.
+        """
+
         if not self._editing_definition():
             return
-        self._append_parameter_row(None, editable=True)
+        self._append_parameter_row(
+            _RawField({"name": self._unused_row_name(self.params_table, "parameter")}),
+            editable=True,
+        )
         self._apply_user_edits()
+
+    @staticmethod
+    def _unused_row_name(table, stem: str) -> str:
+        taken = {
+            table.item(row, 0).text().strip()
+            for row in range(table.rowCount())
+            if table.item(row, 0) is not None
+        }
+        index = 1
+        while f"{stem}_{index}" in taken:
+            index += 1
+        return f"{stem}_{index}"
 
     def _remove_parameter_row(self):
         row = self.params_table.currentRow()
@@ -1511,9 +1288,21 @@ class OperationManagerDialog(QtWidgets.QDialog):
             self.slots_table.setItem(row, column, item)
 
     def _add_input_slot_row(self):
+        """Append a *named* input-slot row -- see :meth:`_add_parameter_row`."""
+
         if not self._editing_definition():
             return
-        self._append_input_slot_row()
+        name = self._unused_row_name(self.slots_table, "input")
+        self._append_input_slot_row(
+            _RawField(
+                {
+                    "name": name,
+                    "label": name.replace("_", " ").title(),
+                    "accepts": ["dimension-set", "open-document", "saved-array"],
+                    "description": "",
+                }
+            )
+        )
         self._apply_user_edits()
 
     def _remove_input_slot_row(self):
@@ -1640,7 +1429,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
             return
         if _is_user_op(operation_id):
             library.update_user_operation(operation_id, group=new_group)
-        self._persist_layout(override={operation_id: new_group})
+        self.persist_layout(override={operation_id: new_group})
 
     def _on_common_toggled(self, checked):
         if self._suppress or self._reloading:
@@ -1662,90 +1451,89 @@ class OperationManagerDialog(QtWidgets.QDialog):
     # ------------------------------------------------------------------
 
     def _sync_button_states(self):
-        operation_id = self.selected_operation_id()
+        operation_id = self.selected_key()
         if operation_id is None:
             problem_path = self.selected_problem_path()
             # A Problems row is a stored definition like any other: it can be
-            # deleted and its file can be opened. Only Duplicate and Restore
-            # genuinely need a registered operation.
+            # deleted and its file can be opened. Only Duplicate, Export and
+            # Restore genuinely need a registered operation.
             self.duplicate_button.setEnabled(False)
+            self.export_button.setEnabled(False)
             self.unhide_button.setEnabled(False)
             self.remove_button.setEnabled(problem_path is not None)
             self.open_file_button.setEnabled(problem_path is not None)
-            if problem_path is not None:
-                set_button_icon(
-                    self.remove_button,
-                    "delete",
-                    tooltip="Remove this stored definition and its files",
-                )
-                set_button_icon(
-                    self.open_file_button, "edit", tooltip="Open the stored wrapper file"
-                )
+            self.apply_button.setEnabled(False)
+            self._set_remove_affordance(destructive=True)
+            self.sync_revert_button()
             return
         is_user = _is_user_op(operation_id)
         hidden = operation_id in library.hidden_operations()
         self.duplicate_button.setEnabled(True)
+        self.export_button.setEnabled(True)
         self.remove_button.setEnabled(True)
-        # The icon follows the action, not just the tooltip: hiding a system op
-        # is reversible (the Restore button brings it back), so a trash can
-        # overstates it. Deleting a user op really does remove its files.
-        set_button_icon(
-            self.remove_button,
-            "delete" if is_user else "visibility_off",
-            tooltip="Remove this user operation" if is_user else "Hide this operation",
-        )
+        self._set_remove_affordance(destructive=is_user)
         self.unhide_button.setEnabled(hidden)
         self.open_file_button.setEnabled(is_user)
-        set_button_icon(self.open_file_button, "edit", tooltip="Open the code file")
+        self.apply_button.setEnabled(self._can_apply(operation_id))
+        self.sync_revert_button()
 
-    def _remove_or_hide(self):
-        operation_id = self.selected_operation_id()
-        if operation_id is None:
-            problem_path = self.selected_problem_path()
-            if problem_path is None:
-                return
-            confirm = QtWidgets.QMessageBox.question(
-                self,
-                "Remove operation",
-                f"Remove the stored definition “{os.path.basename(problem_path)}” "
-                "and delete its files?",
-            )
-            if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
-                return
-            if library.remove_user_operation_file(problem_path):
-                show_status_message(
-                    self._window,
-                    f"Removed “{os.path.basename(problem_path)}”.",
-                    timeout=2500,
-                )
+    def _can_apply(self, operation_id) -> bool:
+        if operation_id is None or not hasattr(self._window, "request_operation"):
+            return False
+        try:
+            return not get_operation_entry(operation_id).unavailable_reason
+        except Exception:
+            return False
+
+    def _apply_and_close(self, _checked=False):
+        """Add the selected operation to the window this manager was opened from.
+
+        The colormap manager has closed on "Apply" since it shipped; the
+        operation manager was a dead end you had to leave before you could use
+        what you had just written (ADR 0063).
+        """
+
+        operation_id = self.selected_key()
+        if not self._can_apply(operation_id):
             return
+        axis = None
+        try:
+            entry = get_operation_entry(operation_id)
+            if entry.requires_axis:
+                axis = self._window._default_operation_axis()
+        except Exception:
+            axis = None
+        self.accept()
+        self._window.request_operation(operation_id, axis)
+
+    def library_delete_or_hide(self):
+        operation_id = self.selected_key()
+        if operation_id is None:
+            return
+        entry_label = self._current_label(operation_id)
         if _is_user_op(operation_id):
-            entry_label = self._current_label(operation_id)
-            confirm = QtWidgets.QMessageBox.question(
-                self,
+            if not self.confirm(
                 "Remove operation",
                 f"Remove the user operation “{entry_label}” and delete its files?",
-            )
-            if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
+            ):
                 return
+            self.snapshot_before_change(operation_id)
             library.remove_user_operation(operation_id)
-            show_status_message(self._window, f"Removed operation “{entry_label}”.", timeout=2500)
+            self.status(f"Removed operation “{entry_label}”.", timeout=2500)
         else:
+            if not self.confirm("Hide operation", f"Hide “{entry_label}”? Restore brings it back."):
+                return
+            self.snapshot_before_change(operation_id)
             library.set_operation_hidden(operation_id, True)
-            show_status_message(
-                self._window,
-                f"Hid “{self._current_label(operation_id)}” — select it and press Restore.",
-                timeout=3000,
-            )
+            self.status(f"Hid “{entry_label}” — select it and press Restore.")
 
-    def _unhide(self):
-        operation_id = self.selected_operation_id()
+    def library_restore(self):
+        operation_id = self.selected_key()
         if operation_id is None:
             return
+        self.snapshot_before_change(operation_id)
         if library.reset_operation(operation_id):
-            show_status_message(
-                self._window, f"Restored “{self._current_label(operation_id)}”.", timeout=2500
-            )
+            self.status(f"Restored “{self._current_label(operation_id)}”.", timeout=2500)
 
     def _current_label(self, operation_id):
         try:
@@ -1753,69 +1541,100 @@ class OperationManagerDialog(QtWidgets.QDialog):
         except Exception:
             return operation_id
 
-    def _open_code_file(self):
-        operation_id = self.selected_operation_id()
-        if operation_id is None:
-            problem_path = self.selected_problem_path()
-            if problem_path is None:
-                return
+    def library_open_file(self):
+        problem_path = self.selected_problem_path()
+        if problem_path is not None:
             # The wrapper file itself: for a definition the loader rejected it
             # is the file that needs editing, and it is always there.
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(problem_path))
+            self.open_path(problem_path)
             return
-        if not _is_user_op(operation_id):
+        operation_id = self.selected_key()
+        if operation_id is None or not _is_user_op(operation_id):
             return
         path = library.user_operation_source_path(operation_id)
         if not path or not os.path.exists(path):
-            show_status_message(self._window, "Could not locate the code file.", timeout=3000)
+            self.status("Could not locate the code file.", timeout=3000)
             return
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
+        self.open_path(path)
 
-    def _open_folder(self):
-        directory = library.user_operations_directory()
-        os.makedirs(directory, exist_ok=True)
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(directory))
-
-    def _reset_all(self):
-        confirm = QtWidgets.QMessageBox.question(
-            self,
-            "Reset operations",
-            "Reset the layout to defaults and unhide every hidden operation?",
-        )
-        if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
-            return
+    def library_reset_all(self):
         for operation_id in tuple(library.hidden_operations()):
             library.set_operation_hidden(operation_id, False)
         library.reset_layout()
-        show_status_message(self._window, "Reset operations to defaults.", timeout=2500)
 
-    def _new_operation(self):
+    def library_new(self):
         try:
             operation_id = library.create_empty_user_operation()
         except Exception as exc:
-            show_status_message(self._window, f"Could not create operation: {exc}", timeout=4000)
+            self.status(f"Could not create operation: {exc}", timeout=4000)
             return
         self.select_operation(operation_id)
-        show_status_message(
-            self._window,
-            "Created an empty operation — choose a source file or open its code.",
-            timeout=3500,
+        self.status(
+            "Created an empty operation — choose a source file or open its code.", timeout=3500
         )
 
-    def _duplicate_operation(self):
-        source_id = self.selected_operation_id()
+    def library_duplicate(self):
+        source_id = self.selected_key()
         if source_id is None:
             return
         try:
             operation_id = library.duplicate_operation(source_id)
         except Exception as exc:
-            show_status_message(self._window, f"Duplicate failed: {exc}", timeout=4000)
+            self.status(f"Duplicate failed: {exc}", timeout=4000)
             return
         self.select_operation(operation_id)
         wrapper = library.user_operation_wrapper(operation_id) or {}
         template = wrapper.get("template") or {}
-        message = str(template.get("message") or "Created an editable copy.")
-        show_status_message(self._window, message, timeout=4500)
+        self.status(str(template.get("message") or "Created an editable copy."), timeout=4500)
+
+    def library_import(self):
+        """Import a wrapper-shaped definition JSON, the sibling of Export.
+
+        A definition arriving from another machine is a stored definition like
+        any other: if the loader refuses it, it lands in Problems and is
+        repairable there rather than being rejected at the door. Command
+        definitions arrive quarantined -- ADR 0060's review boundary -- because
+        an imported command template is arbitrary code the user has not read.
+        """
+
+        path, _ = get_open_file_name(
+            self, "Import operation definition", "", "Operation definitions (*.json);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path) as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                raise ValueError("an operation definition must be a JSON object")
+            operation_id = library.import_operation_definition(payload)
+        except Exception as exc:
+            self.status(f"Import failed: {exc}", timeout=4000)
+            return
+        self.select_operation(operation_id)
+        self.status(f"Imported “{self._current_label(operation_id)}”.", timeout=3500)
+
+    def library_export(self):
+        operation_id = self.selected_key()
+        if operation_id is None:
+            return
+        label = self._current_label(operation_id)
+        suggestion = f"{operation_id.split(':')[-1]}.json"
+        path, _ = get_save_file_name(
+            self, "Export operation definition", suggestion, "JSON (*.json)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        try:
+            definition = export_operation_definition(operation_id)
+            with open(path, "w") as handle:
+                json.dump(definition, handle, indent=2)
+        except Exception as exc:
+            self.status(f"Export failed: {exc}", timeout=4000)
+            return
+        self.status(f"Exported “{label}” to {path}", timeout=2500)
 
     # ------------------------------------------------------------------
     # Source / callable editor
@@ -1909,6 +1728,83 @@ class OperationManagerDialog(QtWidgets.QDialog):
                 infer=infer,
             )
         except Exception as exc:
-            show_status_message(self._window, f"Could not update source: {exc}", timeout=4000)
+            self.status(f"Could not update source: {exc}", timeout=4000)
             return
         self.select_operation(operation_id)
+
+    # ------------------------------------------------------------------
+    # The shared library contract
+    # ------------------------------------------------------------------
+
+    def library_directory(self):
+        return library.user_operations_directory()
+
+    def library_add_listener(self, callback):
+        library.add_library_listener(callback)
+
+    def library_remove_listener(self, callback):
+        library.remove_library_listener(callback)
+
+    def library_problems(self):
+        return library.user_operation_problems()
+
+    def library_remove_problem_file(self, path):
+        return library.remove_user_operation_file(path)
+
+    def library_apply_layout(self, group_order, groups, order):
+        library.apply_library_layout(group_order=group_order, op_groups=groups, op_order=order)
+
+    def library_rename_group(self, old, new):
+        return library.rename_group(old, new)
+
+    def library_is_hidden(self, key):
+        return str(key) in library.hidden_operations()
+
+    def library_snapshot_payload(self, key):
+        """The whole stored definition, so Revert can put it *all* back.
+
+        The wrapper alone is not the definition: removing a user operation
+        deletes its ``.py`` too, and a wrapper restored without its code file is
+        a definition the loader refuses -- i.e. undoing a delete would land the
+        user in Problems. ``None`` for a system operation, which has no stored
+        document; the only thing Revert can undo there is the hidden flag, which
+        the base snapshots separately.
+        """
+
+        key = str(key)
+        if not _is_user_op(key):
+            return None
+        wrapper = library.user_operation_wrapper(key)
+        if wrapper is None:
+            return None
+        source_text = None
+        source_path = library.user_operation_source_path(key)
+        source = wrapper.get("source") if isinstance(wrapper.get("source"), dict) else {}
+        # Only a copied ("import") file is ours to delete and therefore ours to
+        # restore; a linked file lives where the user put it and is untouched.
+        if source.get("mode") == "import" and source_path and os.path.exists(source_path):
+            try:
+                with open(source_path) as handle:
+                    source_text = handle.read()
+            except OSError:
+                source_text = None
+        return {"wrapper": wrapper, "source_text": source_text}
+
+    def library_restore_snapshot(self, key, payload, was_hidden):
+        key = str(key)
+        if payload is not None:
+            wrapper = payload["wrapper"]
+            directory = library.user_operations_directory()
+            source = wrapper.get("source") if isinstance(wrapper.get("source"), dict) else {}
+            if payload["source_text"] is not None and source.get("mode") == "import":
+                os.makedirs(directory, exist_ok=True)
+                with open(os.path.join(directory, str(source.get("path"))), "w") as handle:
+                    handle.write(payload["source_text"])
+            path = library._wrapper_path_for_id(key) or os.path.join(
+                directory, f"{key.split(':', 1)[-1]}.json"
+            )
+            library.write_user_operation_wrapper(path, wrapper)
+        elif _is_user_op(key):
+            library.remove_user_operation(key)
+        if was_hidden != (key in library.hidden_operations()):
+            library.set_operation_hidden(key, was_hidden)

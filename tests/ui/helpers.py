@@ -9,6 +9,24 @@ def process_events(qtbot, count=8):
         qtbot.wait(10)
 
 
+def auto_confirm_message_boxes(monkeypatch, *, answer=True):
+    """Answer every ``QMessageBox.question`` without showing it.
+
+    Destroying a stored definition asks first in both library managers, and an
+    offscreen modal never gets an answer -- the run just stops. Tests that
+    exercise a destructive button pick the answer up front.
+    """
+
+    from pyqtgraph.Qt import QtWidgets
+
+    standard = QtWidgets.QMessageBox.StandardButton
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "question",
+        staticmethod(lambda *args, **kwargs: standard.Yes if answer else standard.No),
+    )
+
+
 def clear_arrayscope_settings():
     from pyqtgraph.Qt import QtCore
 
