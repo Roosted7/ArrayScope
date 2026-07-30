@@ -67,9 +67,7 @@ def _open_montage(qtbot, *, backend: str):
         )
     )
     win.update_image_view()
-    qtbot.waitUntil(
-        lambda: frame_session_settled(win), timeout=8 * INTERACTION_SETTLE_HARD_LIMIT_MS
-    )
+    qtbot.waitUntil(lambda: frame_session_settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     return win
 
 
@@ -78,14 +76,17 @@ def _tile_extent(win) -> tuple[float, float]:
     return width / COLUMNS, height / ROWS
 
 
-def _goto(win, qtbot, box, *, settle_ms=4 * INTERACTION_SETTLE_HARD_LIMIT_MS) -> None:
+def _goto(win, qtbot, box, *, settle_ms=INTERACTION_SETTLE_HARD_LIMIT_MS) -> None:
     x0, x1, y0, y1 = box
     win.img_view.getView().setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
     win.update_image_view()
     # A slow offscreen fill is not this test's subject; the assertions below
     # read counters and payload state, not wall time.
     with contextlib.suppress(Exception):
-        qtbot.waitUntil(lambda: frame_session_settled(win), timeout=settle_ms)
+        qtbot.waitUntil(
+            lambda: frame_session_settled(win),
+            timeout=min(settle_ms, INTERACTION_SETTLE_HARD_LIMIT_MS),
+        )
 
 
 def _republications(win) -> int:
@@ -147,7 +148,7 @@ def test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope(qtbot):
         # finishes the round.
         qtbot.waitUntil(
             lambda: not win.renderer._frame_session.required_target_unsettled_tiles(),
-            timeout=4 * INTERACTION_SETTLE_HARD_LIMIT_MS,
+            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         session = win.renderer._frame_session
         assert session.visible_plan_complete()
