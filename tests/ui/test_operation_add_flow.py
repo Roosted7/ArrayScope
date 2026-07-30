@@ -51,8 +51,8 @@ def test_crop_opens_params_popup_and_commits_on_accept(qtbot):
     win.request_operation("crop", 1)
     popup = win._operation_params_popup
     assert popup is not None
-    popup._spins["start"].setValue(2)
-    popup._spins["stop"].setValue(6)
+    popup._editors["start"].setValue(2)
+    popup._editors["stop"].setValue(6)
     process_events(qtbot, count=2)
     popup._accept()
     process_events(qtbot)
@@ -80,7 +80,7 @@ def test_add_popup_parameterized_op_chains_to_params_popup(qtbot):
     process_events(qtbot)
     params_popup = win._operation_params_popup
     assert params_popup is not None
-    params_popup._spins["stop"].setValue(3)
+    params_popup._editors["stop"].setValue(3)
     process_events(qtbot, count=2)
     params_popup._accept()
     process_events(qtbot)
@@ -96,9 +96,9 @@ def test_edit_operation_seeds_and_replaces_generic_op(qtbot):
     popup = win._operation_params_popup
     assert popup is not None
     # Seeded with the operation's current values.
-    assert popup._spins["start"].value() == 1
-    assert popup._spins["stop"].value() == 5
-    popup._spins["stop"].setValue(4)
+    assert popup._editors["start"].value() == 1
+    assert popup._editors["stop"].value() == 5
+    popup._editors["stop"].setValue(4)
     process_events(qtbot, count=2)
     popup._accept()
     process_events(qtbot)
@@ -113,7 +113,7 @@ def test_native_soft_threshold_parameter_flow(qtbot):
     win.request_operation("soft_threshold")  # requires_axis=False
     popup = win._operation_params_popup
     assert popup is not None
-    popup._spins["threshold"].setValue(0.5)
+    popup._editors["threshold"].setValue(0.5)
     process_events(qtbot, count=2)
     popup._accept()
     process_events(qtbot)
@@ -146,7 +146,7 @@ def test_bart_pics_lands_from_ui_with_a_bound_second_array(qtbot, tmp_path, monk
     win.request_operation("bart:pics")
     popup = win._operation_params_popup
     assert popup is not None
-    popup._spins["iterations"].setValue(7)
+    popup._editors["iterations"].setValue(7)
     popup._slot_combos["sensitivities"].setCurrentIndex(1)
     popup._accept()
     process_events(qtbot)

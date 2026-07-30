@@ -335,6 +335,75 @@ def test_import_shift_with_axis_and_param(tmp_path):
     assert np.allclose(operation.apply(data), np.roll(data, 2, axis=2))
 
 
+_MODES_SRC = '''
+from typing import Literal
+
+
+def blur(data, mode: Literal["reflect", "edge", "zero"] = "reflect", verbose=False, note="x"):
+    """Blur with an explicit boundary mode."""
+    return data
+
+
+'''
+
+
+def test_import_reads_the_non_numeric_kinds_a_toolbox_wrapper_needs(tmp_path):
+    """`mode="reflect"`, a flag, and a name import as themselves, not as numbers.
+
+    This is the scipy/scikit-image/SigPy shape: the blocking gap was that
+    ``int``/``float`` were the whole vocabulary, so such a function could not be
+    wrapped at all.
+    """
+
+    src = _write_source(tmp_path, "blur.py", _MODES_SRC)
+    op_id = library.import_custom_operation(src, "blur")
+
+    entry = registry.get_operation_entry(op_id)
+    by_name = {parameter.name: parameter for parameter in entry.parameters}
+    assert by_name["mode"].kind == "enum"
+    assert by_name["mode"].choices == ("reflect", "edge", "zero")
+    assert by_name["mode"].default == "reflect"
+    assert by_name["verbose"].kind == "bool"
+    assert by_name["verbose"].default is False
+    assert by_name["note"].kind == "string"
+
+    operation = registry.create_operation(
+        op_id, parameters={"mode": "edge", "verbose": True, "note": "hello"}
+    )
+    assert dict(operation.params) == {"mode": "edge", "verbose": True, "note": "hello"}
+
+
+def test_wrapper_with_a_self_contradictory_parameter_is_a_problem_not_a_crash(tmp_path):
+    """An enum without choices is skipped and recorded, like an unknown kind."""
+
+    ops_dir = tmp_path / "operations"
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    (ops_dir / "modal.py").write_text(_DOUBLE_SRC)
+    (ops_dir / "modal.json").write_text(
+        json.dumps(
+            {
+                "format": "arrayscope-operation",
+                "version": 1,
+                "id": "user:modal",
+                "source": {"mode": "import", "path": "modal.py", "callable": "double"},
+                "parameters": [{"name": "mode", "kind": "enum"}],
+            }
+        )
+    )
+    library.refresh_user_operations()
+
+    assert "user:modal" not in {entry.id for entry in registry.all_operations()}
+    problems = library.user_operation_problems()
+    problem = next(p for p in problems if "modal.json" in p.path)
+    assert "must declare choices" in problem.message
+
+    repaired = dict(problem.payload)
+    repaired["parameters"] = [{"name": "mode", "kind": "enum", "choices": ["a", "b"]}]
+    assert library.update_user_operation_file(problem.path, repaired)
+    entry = registry.get_operation_entry("user:modal")
+    assert entry.parameters[0].choices == ("a", "b")
+
+
 def test_user_op_recipe_round_trip(tmp_path):
     src = _write_source(tmp_path, "s.py", _SHIFT_SRC)
     op_id = library.import_custom_operation(src, "shift")

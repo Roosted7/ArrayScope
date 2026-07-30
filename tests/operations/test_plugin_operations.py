@@ -63,6 +63,31 @@ def make_roll():
     )
 
 
+def make_offset_by_mode():
+    """An op whose result depends on an enum, a bool, and a string parameter."""
+
+    STEPS = {"none": 0.0, "one": 1.0, "ten": 10.0}
+
+    def build(axis, params):
+        step = STEPS[params["mode"]]
+        sign = -1.0 if params["negate"] else 1.0
+        marker = float(len(params["note"]))
+        return lambda array: array + sign * step + marker
+
+    return PluginOperationSpec(
+        id="demo-ops:offset_by_mode",
+        label="Offset by mode (demo)",
+        build=build,
+        parameters=(
+            OperationParameter(
+                "mode", "Mode", kind="enum", choices=("none", "one", "ten"), default="one"
+            ),
+            OperationParameter("negate", "Negate", kind="bool", default=False),
+            OperationParameter("note", "Note", kind="string", default=""),
+        ),
+    )
+
+
 def make_drop_first():
     def fn(array):
         return array[1:]
@@ -98,6 +123,7 @@ def demo_plugin(tmp_path, monkeypatch):
         _entry_point("demo-ops:reverse_rows", "make_reverse_rows"),
         _entry_point("demo-ops:roll", "make_roll"),
         _entry_point("demo-ops:drop_first", "make_drop_first"),
+        _entry_point("demo-ops:offset_by_mode", "make_offset_by_mode"),
     )
 
     def fake_entry_points(*, group=None):
@@ -183,6 +209,46 @@ def test_recipe_round_trip_reconstructs_equal_plugin_step(demo_plugin):
     recipe = recipes.recipe_from_steps(steps)
     assert recipe["operations"][0]["id"] == "demo-ops:reverse_rows"
     assert recipe["operations"][1]["parameters"] == {"shift": 2}
+
+
+def test_recipe_round_trips_enum_bool_and_string_parameters(demo_plugin):
+    """Non-numeric parameter values survive JSON serialization unconverted.
+
+    A recipe stores parameters by name, so nothing about the kinds is written
+    down: a bool that came back as the string ``"True"``, or an enum silently
+    floated, would rebuild a *different* operation from the same file.
+    """
+
+    data = np.zeros((3, 2))
+    operation = registry.create_operation(
+        "demo-ops:offset_by_mode",
+        parameters={"mode": "ten", "negate": True, "note": "k-space"},
+    )
+    np.testing.assert_allclose(operation.apply(data), data - 10.0 + 7.0)
+
+    text = recipes.dumps_recipe((OperationStep(operation),))
+    assert '"negate": true' in text
+    assert '"mode": "ten"' in text
+
+    (rebuilt,) = recipes.loads_recipe_steps(text, base_shape=(3, 2))
+    assert rebuilt.operation == operation
+    assert dict(rebuilt.operation.params) == {
+        "mode": "ten",
+        "negate": True,
+        "note": "k-space",
+    }
+    np.testing.assert_allclose(rebuilt.operation.apply(data), operation.apply(data))
+
+
+def test_recipe_with_an_unknown_enum_choice_is_refused_not_clamped(demo_plugin):
+    recipe = {
+        "version": recipes.RECIPE_VERSION,
+        "operations": [
+            {"id": "demo-ops:offset_by_mode", "parameters": {"mode": "hundred"}, "enabled": True}
+        ],
+    }
+    with pytest.raises(ValueError, match="none, one, ten"):
+        recipes.steps_from_recipe(recipe, base_shape=(3, 2))
 
 
 def test_shape_changing_plugin_op_uses_its_adapter(demo_plugin):

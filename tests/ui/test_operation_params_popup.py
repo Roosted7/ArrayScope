@@ -18,7 +18,11 @@ from arrayscope.operations.input_slots import (
     SlotSourceOption,
 )
 from arrayscope.operations.parameter_forms import build_parameter_form
-from arrayscope.operations.registry import OperationEntry, get_operation_entry
+from arrayscope.operations.registry import (
+    OperationEntry,
+    OperationParameter,
+    get_operation_entry,
+)
 from arrayscope.ui.operation_params_popup import OperationParamsPopup
 from tests.ui.helpers import process_events
 
@@ -43,11 +47,11 @@ def test_crop_form_renders_two_spinboxes_and_derived_line(qtbot):
 def test_editing_start_past_stop_nudges_stop(qtbot):
     popup, form = _crop_popup(qtbot, on_accept=lambda values, bindings: None)
     # Full axis is [0, 10). Drag start up to 10 -> stop is nudged to stay above.
-    popup._spins["start"].setValue(10)
+    popup._editors["start"].setValue(10)
     process_events(qtbot, count=2)
     assert form.field("start").value < form.field("stop").value
     # Widgets re-synced from the interdependence-adjusted model.
-    assert popup._spins["stop"].value() == form.field("stop").value
+    assert popup._editors["stop"].value() == form.field("stop").value
 
 
 def test_invalid_state_disables_confirm(qtbot):
@@ -71,8 +75,8 @@ def test_invalid_state_disables_confirm(qtbot):
 def test_accept_delivers_values_dict(qtbot):
     captured = {}
     popup, _form = _crop_popup(qtbot, on_accept=lambda values, bindings: captured.update(values))
-    popup._spins["start"].setValue(2)
-    popup._spins["stop"].setValue(7)
+    popup._editors["start"].setValue(2)
+    popup._editors["stop"].setValue(7)
     process_events(qtbot, count=2)
     popup._accept()
     assert captured == {"start": 2, "stop": 7}
@@ -133,6 +137,64 @@ def test_float_op_uses_double_spinbox(qtbot):
     popup = OperationParamsPopup(entry, form, lambda values, bindings: None)
     qtbot.addWidget(popup)
     assert popup.findChildren(QtWidgets.QDoubleSpinBox)
-    popup._spins["threshold"].setValue(0.5)
+    popup._editors["threshold"].setValue(0.5)
     process_events(qtbot, count=2)
     assert form.field("threshold").value == pytest.approx(0.5)
+
+
+def _kinds_popup(qtbot, on_accept=lambda values, bindings: None):
+    entry = OperationEntry(
+        id="test:kinds-popup",
+        label="Kinds",
+        operation_type=object,
+        requires_axis=False,
+        parameters=(
+            OperationParameter(
+                "mode", "Mode", kind="enum", choices=("reflect", "edge"), default="reflect"
+            ),
+            OperationParameter("verbose", "Verbose", kind="bool", default=False),
+            OperationParameter("wavelet", "Wavelet", kind="string", default="db4"),
+            OperationParameter("model", "Model", kind="path"),
+        ),
+    )
+    form = build_parameter_form(entry, shape=(4, 5), axis=0)
+    popup = OperationParamsPopup(entry, form, on_accept)
+    qtbot.addWidget(popup)
+    return popup, form
+
+
+def test_each_parameter_kind_renders_its_own_widget(qtbot):
+    popup, form = _kinds_popup(qtbot)
+
+    assert isinstance(popup._editors["mode"], QtWidgets.QComboBox)
+    assert isinstance(popup._editors["verbose"], QtWidgets.QCheckBox)
+    assert isinstance(popup._editors["wavelet"], QtWidgets.QLineEdit)
+    assert isinstance(popup._editors["model"], QtWidgets.QLineEdit)
+    # Only the path field carries a browse button beside its line edit.
+    assert popup._editors["mode"].count() == 2
+
+    popup._editors["mode"].setCurrentIndex(1)
+    popup._editors["verbose"].setChecked(True)
+    popup._editors["wavelet"].setText("sym8")
+    popup._editors["wavelet"].editingFinished.emit()
+    process_events(qtbot, count=2)
+
+    assert form.values() == {
+        "mode": "edge",
+        "verbose": True,
+        "wavelet": "sym8",
+        "model": "",
+    }
+
+
+def test_path_field_gets_a_browse_button_beside_its_line_edit(qtbot):
+    popup, form = _kinds_popup(qtbot)
+
+    row = popup._editors["model"].parentWidget()
+    assert row.layout().count() == 2  # line edit + browse
+    assert popup._editors["wavelet"].parentWidget() is not row
+
+    popup._form.set_value("model", "/tmp/weights.pt")
+    popup._sync_from_form()
+    assert popup._editors["model"].text() == "/tmp/weights.pt"
+    assert form.values()["model"] == "/tmp/weights.pt"

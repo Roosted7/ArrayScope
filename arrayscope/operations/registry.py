@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -48,6 +49,65 @@ from arrayscope.operations.pipeline import (
     Variance,
 )
 
+# The complete parameter vocabulary, exported so every surface that has to
+# enumerate kinds (form model, widget factory, wrapper loader, manager UI)
+# reads one list instead of repeating its own.
+#
+# ``int``/``float`` were the whole vocabulary until now, which is why an
+# external toolbox could not be wrapped at all: scipy.ndimage and scikit-image
+# take ``mode="reflect"``, SigPy takes a wavelet name, a torch pack takes a model
+# path and a device, and any of them takes boolean flags. A wrapper declaring one
+# of those was rejected outright rather than degraded.
+PARAMETER_KINDS: tuple[str, ...] = ("int", "float", "string", "enum", "bool", "path")
+
+# Bounds and a step describe a number line; they are meaningless on the others,
+# so declaring them there is an authoring error rather than something to ignore.
+NUMERIC_PARAMETER_KINDS: frozenset[str] = frozenset({"int", "float"})
+
+_TRUE_TOKENS = frozenset({"true", "yes", "on", "1"})
+_FALSE_TOKENS = frozenset({"false", "no", "off", "0"})
+
+
+def coerce_parameter_value(kind: str, value, *, choices: tuple[str, ...] = ()):
+    """Coerce one authored / deserialized value to ``kind``.
+
+    The single coercion point for parameter values: the form model, the built-in
+    ``create_operation``, and the plugin binder all route here, so a recipe, a
+    palette invocation, and a popup edit cannot disagree about what a value
+    means. An ``enum`` value is *rejected* rather than clamped -- an unknown
+    choice is a typo or a stale recipe, and silently substituting a neighbour
+    would run a different operation than the one that was asked for.
+    """
+
+    if kind == "int":
+        return int(value)
+    if kind == "float":
+        return float(value)
+    if kind == "string":
+        return str(value).strip()
+    if kind == "path":
+        # Existence is deliberately not checked here: a path parameter may name
+        # an output that does not exist yet, and availability owns the "this file
+        # is gone" reason for the inputs that must exist.
+        return os.path.expanduser(str(value).strip())
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        token = str(value).strip().lower()
+        if token in _TRUE_TOKENS:
+            return True
+        if token in _FALSE_TOKENS:
+            return False
+        raise ValueError(f"{value!r} is not a boolean value")
+    if kind == "enum":
+        text = str(value).strip()
+        if text not in choices:
+            raise ValueError(f"{text!r} is not one of: {', '.join(choices)}")
+        return text
+    raise ValueError(f"unknown parameter kind: {kind!r}")
+
 
 @dataclass(frozen=True)
 class OperationParameter:
@@ -57,11 +117,42 @@ class OperationParameter:
     # Richer metadata for form rendering / value coercion. All optional so
     # existing constructions (positional name/label/kind) keep working and older
     # recipes/packs that never set these fields behave exactly as before.
-    default: int | float | None = None
+    default: int | float | str | bool | None = None
     minimum: int | float | None = None
     maximum: int | float | None = None
     step: int | float | None = None
     description: str = ""
+    # The admissible values of an ``enum`` parameter, in presentation order.
+    choices: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.kind not in PARAMETER_KINDS:
+            raise ValueError(
+                f"parameter {self.name!r} has unsupported kind {self.kind!r} "
+                f"(one of: {', '.join(PARAMETER_KINDS)})"
+            )
+        choices = tuple(dict.fromkeys(str(choice) for choice in self.choices))
+        if self.kind == "enum":
+            if not choices:
+                raise ValueError(f"enum parameter {self.name!r} must declare choices")
+        elif choices:
+            raise ValueError(f"{self.kind} parameter {self.name!r} must not declare choices")
+        object.__setattr__(self, "choices", choices)
+        if self.kind not in NUMERIC_PARAMETER_KINDS:
+            for field_name in ("minimum", "maximum", "step"):
+                if getattr(self, field_name) is not None:
+                    raise ValueError(
+                        f"{self.kind} parameter {self.name!r} cannot declare {field_name}"
+                    )
+        if self.default is not None:
+            try:
+                object.__setattr__(
+                    self,
+                    "default",
+                    coerce_parameter_value(self.kind, self.default, choices=choices),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"parameter {self.name!r} has an invalid default: {exc}") from exc
 
 
 # Group taxonomy for presenting operations in menus / palettes. Entries keep
@@ -895,12 +986,9 @@ def create_operation(
                 parameters[parameter.name] = parameter.default
             else:
                 raise ValueError(f"operation {operation_id} requires parameter {parameter.name}")
-        value = parameters[parameter.name]
-        if parameter.kind == "int":
-            value = int(value)
-        elif parameter.kind == "float":
-            value = float(value)
-        kwargs[parameter.name] = value
+        kwargs[parameter.name] = coerce_parameter_value(
+            parameter.kind, parameters[parameter.name], choices=parameter.choices
+        )
 
     return entry.operation_type(**kwargs)
 

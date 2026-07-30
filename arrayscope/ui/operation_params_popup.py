@@ -2,8 +2,12 @@
 
 Stage 2 of the two-stage add flow (and the pencil-edit flow): given an
 :class:`~arrayscope.operations.registry.OperationEntry` and a built
-:class:`~arrayscope.operations.parameter_forms.ParameterForm`, render one
-spinbox per field, the form's read-only derived lines, and a confirm button.
+:class:`~arrayscope.operations.parameter_forms.ParameterForm`, render one editor
+per field, the form's read-only derived lines, and a confirm button.
+
+One widget per parameter kind: a spinbox for ``int``/``float``, a combo box for
+``enum``, a check box for ``bool``, a line edit for ``string``, and a line edit
+plus a browse button for ``path``.
 
 Editing any field routes through :meth:`ParameterForm.set_value`, which may
 adjust *other* fields (crop ``start`` nudging ``stop``); every widget is then
@@ -64,7 +68,7 @@ class OperationParamsPopup(EditBubble):
         self._entry = entry
         self._form = form
         self._on_accept = on_accept
-        self._spins: dict[str, QtWidgets.QAbstractSpinBox] = {}
+        self._editors: dict[str, QtWidgets.QWidget] = {}
         self._slot_combos: dict[str, QtWidgets.QComboBox] = {}
         self._derived_labels: list[QtWidgets.QLabel] = []
         self._syncing = False
@@ -117,9 +121,9 @@ class OperationParamsPopup(EditBubble):
                 row_layout.addWidget(browse)
             self._fields_layout.addRow(slot.label, row)
         for field in form.fields:
-            spin = self._make_spin(field)
-            self._spins[field.name] = spin
-            self._fields_layout.addRow(field.label, spin)
+            editor, row = self._make_editor(field)
+            self._editors[field.name] = editor
+            self._fields_layout.addRow(field.label, row)
         column.addLayout(self._fields_layout)
 
         self._derived_layout = QtWidgets.QVBoxLayout()
@@ -168,6 +172,53 @@ class OperationParamsPopup(EditBubble):
             header.addWidget(subtitle)
         return header
 
+    def _make_editor(self, field) -> tuple[QtWidgets.QWidget, QtWidgets.QWidget]:
+        """The value widget for one field, plus the widget to put in the row.
+
+        They differ only for ``path``, where the row also carries a browse
+        button; every other kind edits in place.
+        """
+
+        if field.kind == "enum":
+            combo = QtWidgets.QComboBox(self)
+            combo.addItems([str(choice) for choice in field.choices])
+            combo.setCurrentIndex(max(0, combo.findText(str(field.value))))
+            combo.setEnabled(not field.read_only)
+            combo.currentIndexChanged.connect(lambda _index, name=field.name: self._on_edit(name))
+            self._finish_editor(combo, field)
+            return combo, combo
+        if field.kind == "bool":
+            check = QtWidgets.QCheckBox(self)
+            check.setChecked(bool(field.value))
+            check.setEnabled(not field.read_only)
+            check.toggled.connect(lambda _checked, name=field.name: self._on_edit(name))
+            self._finish_editor(check, field)
+            return check, check
+        if field.kind in ("string", "path"):
+            line = QtWidgets.QLineEdit(self)
+            line.setText(str(field.value))
+            line.setReadOnly(bool(field.read_only))
+            line.editingFinished.connect(lambda name=field.name: self._on_edit(name))
+            self._finish_editor(line, field)
+            if field.kind != "path":
+                return line, line
+            row = QtWidgets.QWidget(self)
+            row_layout = QtWidgets.QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
+            row_layout.addWidget(line, 1)
+            browse = QtWidgets.QToolButton(self)
+            set_button_icon(browse, "folder_open", tooltip="Choose a file")
+            browse.clicked.connect(lambda _checked=False, name=field.name: self._choose_path(name))
+            row_layout.addWidget(browse)
+            return line, row
+        spin = self._make_spin(field)
+        return spin, spin
+
+    def _finish_editor(self, widget: QtWidgets.QWidget, field) -> None:
+        if field.description:
+            widget.setToolTip(field.description)
+
     def _make_spin(self, field) -> QtWidgets.QAbstractSpinBox:
         if field.kind == "float":
             spin = QtWidgets.QDoubleSpinBox(self)
@@ -192,10 +243,36 @@ class OperationParamsPopup(EditBubble):
 
     # -- interaction ----------------------------------------------------------
 
+    def _editor_value(self, name: str):
+        editor = self._editors[name]
+        if isinstance(editor, QtWidgets.QComboBox):
+            return editor.currentText()
+        if isinstance(editor, QtWidgets.QCheckBox):
+            return editor.isChecked()
+        if isinstance(editor, QtWidgets.QLineEdit):
+            return editor.text()
+        return editor.value()
+
     def _on_edit(self, name: str) -> None:
         if self._syncing:
             return
-        self._form.set_value(name, self._spins[name].value())
+        try:
+            self._form.set_value(name, self._editor_value(name))
+        except ValueError as exc:
+            # A free-text field can hold something the kind refuses (an enum the
+            # user typed, a malformed boolean). Report it and keep the model on
+            # its last good value rather than crashing the popup.
+            self._warning.setText(str(exc))
+            self._warning.setVisible(True)
+            self._confirm.setEnabled(False)
+            return
+        self._sync_from_form()
+
+    def _choose_path(self, name: str) -> None:
+        path, _selected_filter = get_open_file_name(self, "Choose file", "", "All files (*)")
+        if not path:
+            return
+        self._form.set_value(name, path)
         self._sync_from_form()
 
     def _on_slot_changed(self, name: str) -> None:
@@ -238,13 +315,19 @@ class OperationParamsPopup(EditBubble):
         self._syncing = True
         try:
             for field in self._form.fields:
-                spin = self._spins[field.name]
-                spin.blockSignals(True)
-                if field.kind == "float":
-                    spin.setValue(float(field.value))
+                editor = self._editors[field.name]
+                editor.blockSignals(True)
+                if isinstance(editor, QtWidgets.QComboBox):
+                    editor.setCurrentIndex(max(0, editor.findText(str(field.value))))
+                elif isinstance(editor, QtWidgets.QCheckBox):
+                    editor.setChecked(bool(field.value))
+                elif isinstance(editor, QtWidgets.QLineEdit):
+                    editor.setText(str(field.value))
+                elif field.kind == "float":
+                    editor.setValue(float(field.value))
                 else:
-                    spin.setValue(int(field.value))
-                spin.blockSignals(False)
+                    editor.setValue(int(field.value))
+                editor.blockSignals(False)
         finally:
             self._syncing = False
         self._refresh_derived()

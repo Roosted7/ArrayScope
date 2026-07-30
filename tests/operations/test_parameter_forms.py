@@ -8,6 +8,8 @@ provider seeding ``size`` from the current axis length, and validation.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from arrayscope.operations import plugins, registry
@@ -16,7 +18,11 @@ from arrayscope.operations.parameter_forms import (
     ParameterField,
     build_parameter_form,
 )
-from arrayscope.operations.registry import get_operation_entry
+from arrayscope.operations.registry import (
+    OperationEntry,
+    OperationParameter,
+    get_operation_entry,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -155,3 +161,81 @@ def test_form_values_feed_create_operation():
     form.set_value("stop", 7)
     operation = registry.create_operation("crop", axis=1, parameters=form.values())
     assert operation.output_shape((4, 10, 6)) == (4, 5, 6)
+
+
+# --- non-numeric kinds -------------------------------------------------------
+
+
+def _kinds_entry(*parameters: OperationParameter) -> OperationEntry:
+    return OperationEntry(
+        id="test:kinds",
+        label="Kinds",
+        operation_type=object,
+        parameters=parameters,
+        requires_axis=False,
+    )
+
+
+def test_non_numeric_fields_seed_from_their_kind():
+    form = build_parameter_form(
+        _kinds_entry(
+            OperationParameter("mode", "Mode", kind="enum", choices=("reflect", "edge", "zero")),
+            OperationParameter("wavelet", "Wavelet", kind="string"),
+            OperationParameter("verbose", "Verbose", kind="bool"),
+            OperationParameter("model", "Model", kind="path"),
+        )
+    )
+
+    assert form.values() == {"mode": "reflect", "wavelet": "", "verbose": False, "model": ""}
+    assert form.field("mode").choices == ("reflect", "edge", "zero")
+    assert form.validate() is None
+
+
+def test_enum_rejects_a_value_outside_its_choices_instead_of_clamping():
+    form = build_parameter_form(
+        _kinds_entry(
+            OperationParameter(
+                "mode", "Mode", kind="enum", choices=("reflect", "edge"), default="edge"
+            )
+        )
+    )
+    assert form.field("mode").value == "edge"
+
+    with pytest.raises(ValueError, match="reflect, edge"):
+        form.set_value("mode", "wrap")
+    assert form.field("mode").value == "edge"
+
+
+def test_bool_and_path_fields_coerce_their_serialized_forms():
+    form = build_parameter_form(
+        _kinds_entry(
+            OperationParameter("verbose", "Verbose", kind="bool", default=True),
+            OperationParameter("model", "Model", kind="path"),
+        )
+    )
+    assert form.field("verbose").value is True
+
+    # Recipes carry real booleans; a hand-written wrapper may carry the token.
+    form.set_value("verbose", "false")
+    assert form.field("verbose").value is False
+    form.set_value("verbose", 1)
+    assert form.field("verbose").value is True
+    with pytest.raises(ValueError, match="not a boolean"):
+        form.set_value("verbose", "maybe")
+
+    # A path is expanded but never required to exist: availability owns that.
+    form.set_value("model", "~/weights.pt")
+    assert form.field("model").value == os.path.expanduser("~/weights.pt")
+
+
+def test_bounds_and_choices_are_refused_where_they_mean_nothing():
+    with pytest.raises(ValueError, match="must declare choices"):
+        OperationParameter("mode", "Mode", kind="enum")
+    with pytest.raises(ValueError, match="must not declare choices"):
+        OperationParameter("count", "Count", kind="int", choices=("a",))
+    with pytest.raises(ValueError, match="cannot declare minimum"):
+        OperationParameter("name", "Name", kind="string", minimum=0)
+    with pytest.raises(ValueError, match="invalid default"):
+        OperationParameter("mode", "Mode", kind="enum", choices=("a",), default="b")
+    with pytest.raises(ValueError, match="unsupported kind"):
+        OperationParameter("tag", "Tag", kind="str")

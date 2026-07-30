@@ -22,7 +22,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from arrayscope.operations.input_slots import SlotBinding, SlotSourceOption
-from arrayscope.operations.registry import OperationEntry, OperationParameter
+from arrayscope.operations.registry import (
+    OperationEntry,
+    OperationParameter,
+    coerce_parameter_value,
+)
 
 Shape = tuple[int, ...]
 
@@ -33,13 +37,15 @@ class ParameterField:
 
     name: str
     label: str
-    kind: str  # "int" | "float"
-    value: int | float
+    kind: str  # one of registry.PARAMETER_KINDS
+    value: int | float | str | bool
     minimum: int | float | None = None
     maximum: int | float | None = None
     step: int | float | None = None
     description: str = ""
     read_only: bool = False
+    # Admissible values for an ``enum`` field, in presentation order.
+    choices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,12 +68,8 @@ class SlotField:
     binding: SlotBinding = field(default_factory=lambda: SlotBinding(""))
 
 
-def _coerce(kind: str, value) -> int | float:
-    if kind == "int":
-        return int(value)
-    if kind == "float":
-        return float(value)
-    raise ValueError(f"unknown parameter kind: {kind!r}")
+def _coerce(kind: str, value, choices: tuple[str, ...] = ()) -> int | float | str | bool:
+    return coerce_parameter_value(kind, value, choices=choices)
 
 
 class ParameterForm:
@@ -101,7 +103,7 @@ class ParameterForm:
                 return candidate
         raise KeyError(name)
 
-    def values(self) -> dict[str, int | float]:
+    def values(self) -> dict[str, int | float | str | bool]:
         """The parameter mapping to hand to ``create_operation``."""
 
         return {candidate.name: candidate.value for candidate in self.fields}
@@ -120,7 +122,7 @@ class ParameterForm:
         """Set one field's value (coerced), then apply interdependence."""
 
         target = self.field(name)
-        target.value = _coerce(target.kind, value)
+        target.value = _coerce(target.kind, value, target.choices)
         if self._adjust is not None:
             self._adjust(self, name)
 
@@ -133,6 +135,8 @@ class ParameterForm:
         """Return ``None`` when valid, else a human-readable message."""
 
         for candidate in self.fields:
+            if candidate.kind == "enum" and candidate.value not in candidate.choices:
+                return f"{candidate.label} must be one of: {', '.join(candidate.choices)}."
             if candidate.minimum is not None and candidate.value < candidate.minimum:
                 return f"{candidate.label} must be at least {candidate.minimum}."
             if candidate.maximum is not None and candidate.value > candidate.maximum:
@@ -159,16 +163,30 @@ class ParameterForm:
 # --- default form (metadata-driven) ------------------------------------------
 
 
-def _seed_value(parameter: OperationParameter) -> int | float:
-    """Initial value for a field: the declared default, else the low bound, else 0."""
+# The value a field starts at when the parameter declares no default and has no
+# low bound to borrow: the empty value of its kind. An enum has no empty value,
+# so it seeds from its first choice (see ``_seed_value``).
+_EMPTY_BY_KIND: dict[str, int | float | str | bool] = {
+    "int": 0,
+    "float": 0.0,
+    "string": "",
+    "path": "",
+    "bool": False,
+}
+
+
+def _seed_value(parameter: OperationParameter) -> int | float | str | bool:
+    """Initial value for a field: the declared default, else the low bound, else empty."""
 
     if parameter.default is not None:
         source = parameter.default
     elif parameter.minimum is not None:
         source = parameter.minimum
+    elif parameter.kind == "enum":
+        source = parameter.choices[0]
     else:
-        source = 0
-    return _coerce(parameter.kind, source)
+        source = _EMPTY_BY_KIND.get(parameter.kind, 0)
+    return _coerce(parameter.kind, source, parameter.choices)
 
 
 def _default_field(parameter: OperationParameter) -> ParameterField:
@@ -181,6 +199,7 @@ def _default_field(parameter: OperationParameter) -> ParameterField:
         maximum=parameter.maximum,
         step=parameter.step,
         description=parameter.description,
+        choices=parameter.choices,
     )
 
 

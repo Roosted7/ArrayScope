@@ -39,11 +39,12 @@ Each user op is a wrapper JSON ``<slug>.json`` in
             {
                 "name": ...,
                 "label": ...,
-                "kind": "int" | "float",
+                "kind": "int" | "float" | "string" | "enum" | "bool" | "path",
                 "default": ...,
-                "minimum": ...,
-                "maximum": ...,
-                "step": ...,
+                "choices": [...],  # enum only, and required there
+                "minimum": ...,  # int / float only
+                "maximum": ...,  # int / float only
+                "step": ...,  # int / float only
                 "description": ...,
             }
         ],
@@ -88,6 +89,7 @@ from arrayscope.operations.plugins import PluginOperationSpec
 from arrayscope.operations.registry import (
     COMMON_OPERATION_IDS,
     DEFAULT_GROUP_ORDER,
+    PARAMETER_KINDS,
     OperationEntry,
     OperationParameter,
 )
@@ -854,23 +856,34 @@ def _parameters_from_payload(raw) -> tuple[OperationParameter, ...]:
         if not name:
             continue
         kind = str(item.get("kind") or "float")
-        if kind not in ("int", "float"):
+        if kind not in PARAMETER_KINDS:
             # An unknown kind (e.g. "str") would survive load only to crash
             # later in form building / value coercion, so reject the wrapper
             # here -> recorded as a problem, skipped, rest of the library loads.
             raise ValueError(f"unsupported parameter kind {kind!r} for parameter {name!r}")
-        parameters.append(
-            OperationParameter(
-                name=name,
-                label=str(item.get("label") or name.replace("_", " ").title()),
-                kind=kind,
-                default=item.get("default"),
-                minimum=item.get("minimum"),
-                maximum=item.get("maximum"),
-                step=item.get("step"),
-                description=str(item.get("description") or ""),
+        raw_choices = item.get("choices") or ()
+        if not isinstance(raw_choices, (list, tuple)):
+            raise ValueError(f"parameter {name!r} choices must be a list")
+        try:
+            parameters.append(
+                OperationParameter(
+                    name=name,
+                    label=str(item.get("label") or name.replace("_", " ").title()),
+                    kind=kind,
+                    default=item.get("default"),
+                    minimum=item.get("minimum"),
+                    maximum=item.get("maximum"),
+                    step=item.get("step"),
+                    description=str(item.get("description") or ""),
+                    choices=tuple(str(choice) for choice in raw_choices),
+                )
             )
-        )
+        except ValueError as exc:
+            # Same contract as an unknown kind: a self-contradictory parameter
+            # (an enum with no choices, a bound on a string, a default outside
+            # the choices) is a problem on this one wrapper, not a broken
+            # library.
+            raise ValueError(f"invalid parameter {name!r}: {exc}") from exc
     return tuple(parameters)
 
 
@@ -997,8 +1010,11 @@ def _make_user_build(path: str, slug: str, callable_name: str):
 @dataclass(frozen=True)
 class CallableParam:
     name: str
-    kind: str  # "int" | "float"
+    kind: str  # one of registry.PARAMETER_KINDS
     default: object | None = None
+    # Populated when the annotation is a ``Literal[...]`` of strings, which is
+    # exactly how a wrapped toolbox function spells an enumerated mode.
+    choices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1061,10 +1077,12 @@ def _callable_info_from_node(node) -> CallableInfo:
             continue
         default_node = default_by_arg.get(name)
         default_value = _literal_from_node(default_node)
-        kind = _kind_from_annotation(arg.annotation)
+        kind, choices = _kind_from_annotation(arg.annotation)
         if kind is None:
             kind = _kind_from_value(default_value)
-        params.append(CallableParam(name=name, kind=kind, default=default_value))
+        if kind == "enum" and default_value is not None and str(default_value) not in choices:
+            choices = (*choices, str(default_value))
+        params.append(CallableParam(name=name, kind=kind, default=default_value, choices=choices))
 
     return CallableInfo(
         name=node.name,
@@ -1074,28 +1092,71 @@ def _callable_info_from_node(node) -> CallableInfo:
     )
 
 
-def _kind_from_annotation(annotation) -> str | None:
+_ANNOTATION_KINDS: dict[str, str] = {
+    "int": "int",
+    "float": "float",
+    "str": "string",
+    "bool": "bool",
+    "Path": "path",
+    "PathLike": "path",
+}
+
+
+def _literal_choices(annotation) -> tuple[str, ...]:
+    """String members of a ``Literal[...]`` annotation, else ``()``."""
+
+    if not isinstance(annotation, ast.Subscript):
+        return ()
+    base = annotation.value
+    name = (
+        base.attr
+        if isinstance(base, ast.Attribute)
+        else base.id
+        if isinstance(base, ast.Name)
+        else ""
+    )
+    if name != "Literal":
+        return ()
+    members = (
+        annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
+    )
+    choices = []
+    for member in members:
+        if not isinstance(member, ast.Constant) or not isinstance(member.value, str):
+            return ()
+        choices.append(member.value)
+    return tuple(dict.fromkeys(choices))
+
+
+def _kind_from_annotation(annotation) -> tuple[str | None, tuple[str, ...]]:
+    """The declared kind and, for a string ``Literal``, its choices."""
+
     if annotation is None:
-        return None
+        return None, ()
+    choices = _literal_choices(annotation)
+    if choices:
+        return "enum", choices
     name = None
     if isinstance(annotation, ast.Name):
         name = annotation.id
+    elif isinstance(annotation, ast.Attribute):
+        name = annotation.attr
     elif isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
         name = annotation.value
-    if name in ("int",):
-        return "int"
-    if name in ("float",):
-        return "float"
-    return None
+    return _ANNOTATION_KINDS.get(name or ""), ()
 
 
 def _kind_from_value(value) -> str:
+    # bool before int: bool is an int subclass, and a flag rendered as a spinbox
+    # over {0, 1} was the workaround this vocabulary exists to remove.
     if isinstance(value, bool):
-        return "int"
+        return "bool"
     if isinstance(value, int):
         return "int"
     if isinstance(value, float):
         return "float"
+    if isinstance(value, str):
+        return "string"
     return "float"
 
 
@@ -1535,6 +1596,8 @@ def _parameter_payload(param: CallableParam) -> dict:
         "label": param.name.replace("_", " ").title(),
         "kind": param.kind,
     }
+    if param.choices:
+        payload["choices"] = list(param.choices)
     if param.default is not None:
         payload["default"] = param.default
     return payload

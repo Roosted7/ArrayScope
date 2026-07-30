@@ -124,11 +124,36 @@ observed result.
 | --- | --- | --- |
 | `name` | — | Keyword the op's `build`/constructor receives. |
 | `label` | — | Human-readable field label. |
-| `kind` | `"int"` | `"int"` or `"float"`; the value is coerced to it. |
+| `kind` | `"int"` | One of `registry.PARAMETER_KINDS` (below); the value is coerced to it. |
 | `default` | `None` | Seed value. **A missing parameter that declares a default is filled from it**; a missing parameter *without* a default still raises, so recipes/CLI never silently drop a required value. |
-| `minimum` / `maximum` | `None` | Inclusive bounds used to seed and validate the form field. |
-| `step` | `None` | Suggested increment for a spinbox. |
+| `choices` | `()` | Admissible values of an `enum`, in presentation order. Required there, refused on every other kind. |
+| `minimum` / `maximum` | `None` | Inclusive bounds used to seed and validate the form field. `int`/`float` only. |
+| `step` | `None` | Suggested increment for a spinbox. `int`/`float` only. |
 | `description` | `""` | One-line help text shown beside the field. |
+
+#### Parameter kinds
+
+`arrayscope.operations.registry.PARAMETER_KINDS` is the single list; every
+surface that has to enumerate kinds reads it rather than repeating its own.
+
+| kind | value type | widget | notes |
+| --- | --- | --- | --- |
+| `int` | `int` | spin box | `minimum`/`maximum`/`step` apply. |
+| `float` | `float` | double spin box | `minimum`/`maximum`/`step` apply. |
+| `string` | `str` | line edit | Stripped of surrounding whitespace. |
+| `enum` | `str` | combo box | Must be one of `choices`; an unknown value is **rejected**, never clamped to a neighbour. |
+| `bool` | `bool` | check box | Accepts real booleans, `0`/`1`, and the tokens `true`/`false`/`yes`/`no`/`on`/`off`. |
+| `path` | `str` | line edit + browse | `~` is expanded. Existence is **not** checked at coercion time — a path may name an output, and availability owns the "this file is gone" reason for inputs that must exist. |
+
+`string`, `enum`, `bool`, and `path` are what make an external toolbox
+wrappable: `mode="reflect"` (scipy.ndimage, scikit-image), a wavelet name
+(SigPy), a model path and a device (torch), and any boolean flag. Values are
+serialized in recipes by name and as their JSON type, so a bool stays a bool and
+an enum stays its exact string across a save/load cycle.
+
+In a command template, a value substitutes as exactly **one** argument whatever
+it contains — a path with spaces and a value starting with `-` both survive
+intact — and a boolean renders lowercase `true` / `false`.
 
 The Qt-free form model (`arrayscope.operations.parameter_forms`) turns an
 `OperationEntry` plus the current array context (shape + axis) into a
@@ -402,7 +427,16 @@ wrapper JSON `<slug>.json`; an *imported* op also has its copied code file
     }
   ],
   "parameters": [
-    {"name": "amount", "label": "Amount", "kind": "int", "default": 1}
+    {"name": "amount", "label": "Amount", "kind": "int", "default": 1},
+    {
+      "name": "mode",
+      "label": "Boundary mode",
+      "kind": "enum",
+      "choices": ["reflect", "edge", "zero"],
+      "default": "reflect"
+    },
+    {"name": "verbose", "label": "Verbose", "kind": "bool", "default": false},
+    {"name": "model", "label": "Model file", "kind": "path"}
   ]
 }
 ```
@@ -551,8 +585,26 @@ so a link-mode edit that changes the signature is honored:
   that name (or `**kwargs`).
 
 So `f(data)`, `f(data, axis)`, `f(data, **params)` and `f(data, axis, **params)`
-all work without you writing any glue. Parameter `kind` (`int`/`float`) is guessed
-from the annotation, then the default value, falling back to `float`.
+all work without you writing any glue. Parameter `kind` is guessed from the
+annotation, then from the default value, falling back to `float`:
+
+| annotation | kind |
+| --- | --- |
+| `int` / `float` | `int` / `float` |
+| `str` | `string` |
+| `bool` | `bool` |
+| `Path` / `PathLike` | `path` |
+| `Literal["reflect", "edge", ...]` | `enum` with those `choices` |
+
+Without an annotation the default value decides — `bool` before `int` (a flag is
+not a two-valued spinbox), then `int`, `float`, `str`. So
+
+```python
+def blur(data, mode: Literal["reflect", "edge"] = "reflect", verbose=False):
+    ...
+```
+
+imports as an enum combo box and a check box with no JSON authored by hand.
 
 A user op is **Tier-1 OPAQUE** (whole-array). Its output is still characterized
 by the same adjudicator and cache as Tier-2 region claims, but it makes no

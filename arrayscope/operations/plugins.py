@@ -62,7 +62,11 @@ from arrayscope.operations.regions import (
     RegionSpec,
     apply_region,
 )
-from arrayscope.operations.registry import OperationEntry, OperationParameter
+from arrayscope.operations.registry import (
+    OperationEntry,
+    OperationParameter,
+    coerce_parameter_value,
+)
 
 Shape = tuple[int, ...]
 
@@ -627,12 +631,14 @@ def create_plugin_operation(
                 raise ValueError(
                     f"plugin operation {operation_id} requires parameter {parameter.name}"
                 )
-        value = parameters[parameter.name]
-        if parameter.kind == "int":
-            value = int(value)
-        elif parameter.kind == "float":
-            value = float(value)
-        bound_params.append((parameter.name, value))
+        bound_params.append(
+            (
+                parameter.name,
+                coerce_parameter_value(
+                    parameter.kind, parameters[parameter.name], choices=parameter.choices
+                ),
+            )
+        )
 
     raw_bindings = dict(slot_bindings or {})
     supplied_resolved = dict(resolved_slots or {})

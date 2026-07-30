@@ -177,6 +177,32 @@ def _python_environment_operation(tmp_path, monkeypatch, *, handoff, body, param
     return build(None, dict(parameters or {}), {})
 
 
+def test_python_environment_parameters_keep_their_kinds_across_the_json_hop(tmp_path, monkeypatch):
+    """The out-of-process runtime hands parameters over as JSON.
+
+    An enum / string arrives as ``str``, a bool as ``bool``, and a path as the
+    plain string it was -- nothing is stringified or floated on the way.
+    """
+
+    import numpy as np
+
+    bound = _python_environment_operation(
+        tmp_path,
+        monkeypatch,
+        handoff="npy",
+        body=(
+            "def run(array, mode, verbose, model, count):\n"
+            "    assert (mode, verbose, model, count) == "
+            "('reflect', True, '/models/w.pt', 3), (mode, verbose, model, count)\n"
+            "    return array * 2\n"
+        ),
+        parameters={"mode": "reflect", "verbose": True, "model": "/models/w.pt", "count": 3},
+    )
+    data = np.arange(4, dtype=np.float32)
+
+    assert np.array_equal(bound(data), data * 2)
+
+
 def test_python_environment_cfl_handoff_hands_the_callable_the_rank_it_was_given(
     tmp_path, monkeypatch
 ):

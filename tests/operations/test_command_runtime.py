@@ -54,6 +54,55 @@ def test_template_tokenization_preserves_spaces_and_flag_like_parameters(tmp_pat
     assert not (tmp_path / "not-an-option").exists()
 
 
+def test_non_numeric_parameters_stay_one_token_each(tmp_path):
+    """A string / enum / path / bool value renders as exactly one argument.
+
+    These kinds are what an external toolbox needs (`mode="reflect"`, a model
+    path, a device name), and they are also the values most likely to contain a
+    space or to start with a dash. Booleans render lowercase so a wrapper author
+    can predict the text without knowing the host language.
+    """
+
+    executable = _fake_npy_command(tmp_path)
+    record = tmp_path / "argv record.json"
+    model = tmp_path / "my models" / "weights.pt"
+    template = (
+        f'"{executable}" --record="{record}" --mode {{mode}} --model {{model}} '
+        "--note {note} --verbose {verbose} {in} {out}"
+    )
+
+    run_command_template(
+        template,
+        np.arange(4, dtype=np.float32),
+        parameters={
+            "mode": "reflect",
+            "model": str(model),
+            "note": "-- leading dashes and spaces",
+            "verbose": True,
+        },
+    )
+
+    argv = json.loads(record.read_text())
+    assert argv[1:9] == [
+        "--mode",
+        "reflect",
+        "--model",
+        str(model),
+        "--note",
+        "-- leading dashes and spaces",
+        "--verbose",
+        "true",
+    ]
+
+
+def test_boolean_parameters_render_lowercase(tmp_path):
+    command = build_command(
+        "tool --flag {flag} {in} {out}",
+        {"flag": False, "in": "input", "out": "output"},
+    )
+    assert command == ["tool", "--flag", "false", "input", "output"]
+
+
 def test_template_never_interprets_shell_syntax_without_opt_in(tmp_path):
     marker = tmp_path / "shell-was-run"
     command = build_command(

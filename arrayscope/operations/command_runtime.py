@@ -123,6 +123,21 @@ class _StrictFields(dict):
         raise ValueError(f"command template references unknown placeholder {{{key}}}")
 
 
+def _rendered(value: object) -> str:
+    """One parameter value as a command-line token.
+
+    A boolean renders lowercase ``true`` / ``false``: Python's ``"True"`` is not
+    what any command-line tool, JSON reader, or shell test expects, and the
+    wrapper author has to be able to predict the text without knowing the host
+    language. Every other value is its plain ``str``; argv boundaries are the
+    tokenizer's job, not this function's.
+    """
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 def template_fields(template: str) -> frozenset[str]:
     """Return simple named placeholders and reject attribute/index expressions."""
 
@@ -164,7 +179,7 @@ def build_command(
     missing = sorted(fields - set(values))
     if missing:
         raise ValueError(f"command template is missing values for: {', '.join(missing)}")
-    rendered_values = _StrictFields({str(key): str(value) for key, value in values.items()})
+    rendered_values = _StrictFields({str(key): _rendered(value) for key, value in values.items()})
     if shell:
         rendered = template.format_map(rendered_values)
         if prefix:
