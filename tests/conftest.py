@@ -383,6 +383,15 @@ def noselect_run_refusal(mapped_tests, unmapped_files, changed_files, permitted_
       reorder this suite's latent couplings cost), and a byte-identical map.
       That is ceremony, and the refusal is itself the answer to the question the
       sweep was asking.
+
+    One measured caveat on the middle branch. ``changed_files`` comes from
+    testmon's ``fetch_unknown_files``, which reports every file whose recorded
+    fsha row does not match — a *byte-level* question, not "which tests are
+    affected". On this repository's map that is a standing set of six files that
+    re-recording does not clear, so in practice this rule nearly always permits.
+    That is the safe direction (the refused command was the documented repair,
+    and over-permitting it costs four minutes rather than a wrong answer), but
+    the third branch should not be described as well-exercised.
     """
 
     if permitted_because:
@@ -1183,30 +1192,47 @@ _HARNESS_FILES = ("tests/conftest.py", "tests/testmon_policy.py")
 
 
 def _harness_files_changed(config) -> frozenset[str]:
-    """Which of :data:`_HARNESS_FILES` differ from what the map recorded.
+    """Which of :data:`_HARNESS_FILES` this working tree has uncommitted edits to.
 
-    Asked of exactly two paths rather than of the tree, because the general
-    question hashes every file of interest and this one is on the header path of
-    every run. It cannot come from ``unstable_files``: that is the set of *test*
-    files the affected tests live in, and ``tests/conftest.py`` holds no tests,
-    so editing the harness never appears there however much it changes.
+    From git, not from the map, after trying the map and measuring it. Two
+    map-shaped answers were candidates and both are wrong here:
+
+    * ``unstable_files`` is the set of *test* files the affected tests live in.
+      ``tests/conftest.py`` holds no tests, so a harness edit never appears
+      there however much it changes.
+    * ``db.fetch_unknown_files`` reports every file whose recorded fsha row does
+      not match, which on this map is a standing set of six — four of them in
+      ``arrayscope/`` and untouched by this branch — and re-recording does not
+      clear it. A notice that fires on every run forever is worse than no notice.
+
+    Uncommitted is also the sharper question. The doubt this answers is "I am
+    editing the thing that decides what runs, right now"; once the edit is
+    committed, ``pytest --since`` is the answer and this line names it.
     """
 
-    data = getattr(config, "testmon_data", None)
-    if data is None:
-        return frozenset()
     try:
-        fshas = {}
-        for name in _HARNESS_FILES:
-            module = data.source_tree.get_file(name)
-            if module is not None:
-                fshas[name] = module.fs_fsha
-        return frozenset(data.db.fetch_unknown_files(fshas, data.exec_id))
-    except Exception:  # a header line is not worth failing a run over
+        import subprocess
+
+        finished = subprocess.run(
+            ("git", "status", "--porcelain", "--", *_HARNESS_FILES),
+            cwd=str(config.rootdir),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):  # not a checkout, or no git
         return frozenset()
+    if finished.returncode != 0:
+        return frozenset()
+    return frozenset(
+        name
+        for name in _HARNESS_FILES
+        if any(name in line for line in finished.stdout.splitlines())
+    )
 
 
-def harness_self_edit_notice(affected_files) -> str:
+def harness_self_edit_notice(changed_files) -> str:
     """One line for the run that changed the thing doing the selecting.
 
     Editing ``tests/conftest.py`` makes an agent doubt the harness that just
@@ -1216,7 +1242,7 @@ def harness_self_edit_notice(affected_files) -> str:
     keeps the doubt from becoming a sweep.
     """
 
-    touched = sorted(name for name in (affected_files or ()) if name in _HARNESS_FILES)
+    touched = sorted(name for name in (changed_files or ()) if name in _HARNESS_FILES)
     if not touched:
         return ""
     return (
