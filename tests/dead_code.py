@@ -63,6 +63,8 @@ _STRUCTURAL_BASES = {"Protocol", "ABC"}
 
 _WORD = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
+_PACKAGE = "arrayscope"
+
 
 # Real entry points with no in-tree caller by construction. Everything else is
 # either deleted or listed below with its reason -- the rule is never widened
@@ -85,6 +87,11 @@ _ALLOWLIST = (
         "arrayscope/operations/plugins.py",
         "_reset_plugin_cache",
         "re-discovery seam; production discovers entry points once",
+    ),
+    (
+        "arrayscope/operations/registry.py",
+        "_reset_operation_packs",
+        "pack re-load seam; production loads packs once per process",
     ),
     # --- Oracles: the CPU mirror IS the reference, the shader is the caller --
     (
@@ -436,10 +443,125 @@ def _pending(definition: Definition) -> bool:
     return (definition.relative, definition.name) in _PENDING_ADJUDICATION
 
 
+@dataclass(frozen=True)
+class Dangling:
+    relative: str
+    lineno: int
+    alias: str
+    module: str
+    name: str
+
+    def __str__(self) -> str:
+        return f"{self.relative}:{self.lineno} {self.alias}.{self.name} ({self.module})"
+
+
+def _module_of(relative: str) -> str:
+    parts = relative[: -len(".py")].split("/")
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _module_level_bindings(tree: ast.Module) -> set[str]:
+    """Every name a module binds at import time, over-approximated.
+
+    Over-approximating is the safe direction here: a name this misses would be
+    reported as dangling when it is not, and a guard that is wrong once gets
+    deleted. Anything bound by any module-level statement counts, however it
+    was bound.
+    """
+
+    bound: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, _DEFINITION):
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add(alias.asname or alias.name.split(".")[0])
+        else:
+            for child in ast.walk(node):
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                    bound.add(child.id)
+    return bound
+
+
+def _module_aliases(tree: ast.Module) -> dict[str, str]:
+    """``local name -> arrayscope module`` for every module imported by a file.
+
+    Collected from anywhere, not just module level: lazy imports inside
+    functions are load-bearing in this codebase (``PLC0415`` is ignored for
+    exactly that reason), and a call through one dangles just as hard.
+    """
+
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(_PACKAGE):
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith(_PACKAGE) and alias.asname:
+                    aliases[alias.asname] = alias.name
+    return aliases
+
+
+def dangling_module_attributes(root: Path) -> list[Dangling]:
+    """``module.name`` references inside ``arrayscope/`` that resolve to nothing.
+
+    The mirror image of the dead-code scan: that one finds a definition with no
+    reference, this one finds a reference with no definition. Python does not
+    catch it until the line executes, so a call through a module alias can sit
+    green in an untouched file indefinitely.
+
+    It exists because of a failure git cannot see. A branch deleted
+    ``render/effects.py::presented_first_pixel_payload``, correctly: nothing
+    named it at that branch's base. Meanwhile ``7d50f5b0`` landed a caller in
+    ``window/frame_effects.py``. The rebase touched different files, so it
+    merged clean, and five ``tests/ui`` tests died on ``AttributeError`` --
+    found by running the suite, which is the expensive way. This is the cheap
+    way, and it is exactly as useful after a rebase as after an edit.
+
+    A module with a PEP 562 ``__getattr__`` is skipped: anything resolves there.
+    """
+
+    modules: dict[str, set[str]] = {}
+    files: list[tuple[str, ast.Module]] = []
+    for path in _python_files(root / _PACKAGE):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        relative = path.relative_to(root).as_posix()
+        files.append((relative, tree))
+        modules[_module_of(relative)] = _module_level_bindings(tree)
+
+    lazy = {name for name, bound in modules.items() if "__getattr__" in bound}
+
+    found: list[Dangling] = []
+    for relative, tree in files:
+        aliases = _module_aliases(tree)
+        if not aliases:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+                continue
+            target = aliases.get(node.value.id)
+            if target is None or target in lazy or target not in modules:
+                continue
+            if node.attr not in modules[target]:
+                found.append(Dangling(relative, node.lineno, node.value.id, target, node.attr))
+    return found
+
+
 def problems(root: Path = ROOT) -> list[str]:
     """Every reason this tree should be refused, most actionable first."""
 
     unreachable, test_only = unreferenced_definitions(root)
+
+    dangling = [
+        f"dangling reference (nothing defines it): {entry}"
+        for entry in dangling_module_attributes(root)
+    ]
+    if dangling:
+        dangling.append("  -> a rebase can do this with no textual conflict: the caller and")
+        dangling.append("     the deleted definition live in different files.")
 
     found = [
         f"unreachable (nothing names it):   {definition}"
@@ -475,4 +597,4 @@ def problems(root: Path = ROOT) -> list[str]:
             f"{len(_PENDING_ADJUDICATION)} pending entries against a ceiling of "
             f"{_PENDING_CEILING}: adjudicate one instead of raising the ceiling."
         )
-    return found + stale + ceiling
+    return dangling + found + stale + ceiling

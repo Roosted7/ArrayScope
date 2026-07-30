@@ -16,6 +16,7 @@ from tests.dead_code import (
     _ALLOWLIST,
     _PENDING_ADJUDICATION,
     _PENDING_CEILING,
+    dangling_module_attributes,
     unreferenced_definitions,
 )
 
@@ -137,3 +138,42 @@ def test_guard_separates_dead_code_from_every_exempt_entry_point(tmp_path):
     # entry/main/__getattr__/pytest_configure/Protocols are never reported;
     # kept_by_* and reached_dynamically prove import, attribute, sibling-call
     # and getattr-string references all count.
+
+
+def test_a_reference_to_a_missing_module_attribute_is_found(tmp_path):
+    """The mirror of the dead-code scan: a reference with nothing behind it.
+
+    This is the shape a rebase produces with no textual conflict — the caller
+    and the deleted definition live in different files, so git merges cleanly
+    and Python says nothing until the line runs. It cost five `tests/ui`
+    failures to find that way once.
+    """
+
+    package = tmp_path / "arrayscope"
+    package.mkdir()
+    (package / "target.py").write_text(
+        "CONSTANT = 1\n\n\ndef exists():\n    return 2\n\n\nclass Shape:\n    pass\n",
+        encoding="utf-8",
+    )
+    (package / "lazy.py").write_text("def __getattr__(name):\n    return None\n", encoding="utf-8")
+    (package / "caller.py").write_text(
+        "from arrayscope import lazy\n"
+        "from arrayscope import target as aliased\n"
+        "\n"
+        "def use():\n"
+        "    aliased.exists()\n"
+        "    aliased.Shape()\n"
+        "    print(aliased.CONSTANT)\n"
+        "    lazy.anything_at_all()\n"
+        "    return aliased.was_deleted()\n",
+        encoding="utf-8",
+    )
+
+    found = dangling_module_attributes(tmp_path)
+
+    # Only the one that resolves to nothing. Functions, classes and plain
+    # module-level assignments all count as definitions, and a PEP 562
+    # __getattr__ module resolves anything.
+    assert [(entry.alias, entry.name) for entry in found] == [("aliased", "was_deleted")]
+    assert found[0].module == "arrayscope.target"
+    assert found[0].relative == "arrayscope/caller.py"

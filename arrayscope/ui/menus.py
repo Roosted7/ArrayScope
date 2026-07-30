@@ -487,13 +487,6 @@ class WindowMenuMixin:
         # Operation packs / plugins: point at a BART toolbox and inspect which
         # built-in / pack / third-party plugin operations are loaded.
         performance_menu.addSeparator()
-        bart_action = QtGui.QAction("Set BART Toolbox Folder…", self)
-        bart_action.setToolTip(
-            "Choose your BART install folder (contains the 'bart' binary) to make "
-            "BART operations available in the operation dock."
-        )
-        bart_action.triggered.connect(self._configure_bart_toolbox)
-        performance_menu.addAction(bart_action)
         loaded_ops_action = QtGui.QAction("Loaded Operations && Plugins…", self)
         loaded_ops_action.setToolTip(
             "List the built-in, pack (BART), and third-party plugin "
@@ -851,37 +844,6 @@ class WindowMenuMixin:
             self.render(reason="host-cache-codec-changed")
             show_status_message(
                 self, f"Host cache compression: {choice.value} (applied to this window)."
-            )
-
-    def _configure_bart_toolbox(self):
-        import os
-
-        from arrayscope.operations import registry
-        from arrayscope.operations.packs import bart_pack
-
-        start_dir = os.environ.get(bart_pack.BART_TOOLBOX_ENV, "")
-        folder = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Select BART toolbox folder (contains the 'bart' binary)", start_dir
-        )
-        if not folder:
-            return
-        os.environ[bart_pack.BART_TOOLBOX_ENV] = folder
-        self._settings.setValue("bart_toolbox_path", folder)
-        # Re-discover packs so BART's ops register now that the toolbox is set.
-        registry._reset_operation_packs()
-        registry.load_operation_packs()
-        if bart_pack.bart_available():
-            show_status_message(
-                self,
-                f"BART toolbox set: {folder}. BART operations are now available.",
-                timeout=5000,
-            )
-        else:
-            show_status_message(
-                self,
-                f"Set {folder}, but no runnable 'bart' binary was found there or on PATH "
-                "(and it needs its runtime libraries, e.g. MKL, on the library path).",
-                timeout=8000,
             )
 
     def _show_loaded_operations(self):
