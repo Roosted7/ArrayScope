@@ -135,9 +135,20 @@ def command_impact(args) -> int:
     print(f"map          {testmon_policy.map_path(REPO_ROOT)}  ({peek.mapped_tests} tests)")
     print()
     if peek.changed_files:
-        print(f"differs from the map ({len(peek.changed_files)}):")
+        print(f"differs from the map ({len(peek.changed_files)}), whole-file:")
         for name in sorted(peek.changed_files):
             print(f"    {name}")
+        if not peek.affected_tests:
+            # Two different granularities, and reading one as the other is why
+            # "8 files changed, 0 tests to run" looks broken. testmon
+            # fingerprints the lines a test *executed*; a whole-file hash also
+            # moves for a comment, an import order, or a function no test
+            # enters. Nothing is stuck: there is genuinely nothing to re-run.
+            print()
+            print(
+                "    ...but no test executed a block that changed, so there is nothing\n"
+                "    to run. File hashes are whole-file; selection is block-level."
+            )
         print()
     if not peek.affected_tests:
         print("affected: nothing — the recorded tests all still hold for this tree.")
