@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+from time import monotonic
 
 import pytest
 
@@ -62,17 +63,32 @@ _SERIAL_BELOW_SECONDS = 2.5
 
 
 def pytest_addoption(parser):
-    parser.addoption(
+    # One group, so the pointer to the reference is printed once for all of
+    # these rather than repeated in every option's help.
+    group = parser.getgroup(
+        "arrayscope selection",
+        "arrayscope test selection — docs/testing/test-selection.md",
+    )
+    group.addoption(
         "--since",
         metavar="REF",
         nargs="?",
         const="",
         default=None,
         help=(
-            "Also run everything this branch changed since REF (merge-base semantics). "
-            "Bare --since resolves the baseline itself: ARRAYSCOPE_BASELINE_REF, then "
-            "the branch's upstream, then main. The map only knows what changed since "
-            "the last run, which before merging is the wrong question."
+            "Run everything this branch changed since REF (merge-base). Bare --since "
+            "resolves the baseline: ARRAYSCOPE_BASELINE_REF, the upstream, then main. "
+            "Use it before merging, after a rebase, or in a borrowed checkout."
+        ),
+    )
+    group.addoption(
+        "--rerun-reds",
+        action="store_true",
+        default=False,
+        help=(
+            "Also re-run the reds this checkout inherited; selection skips them by "
+            "default. Use it while fixing one. Same as "
+            "ARRAYSCOPE_TESTMON_RERUN_FAILING=1."
         ),
     )
 
@@ -151,7 +167,7 @@ def _selection_workload(config):
     # policy: the ones this checkout broke always, the inherited ones only under
     # the flag.
     forced_files = {red.split("::", 1)[0] for red in _new_reds(config)}
-    if testmon_policy.rerun_known_red_tests():
+    if testmon_policy.rerun_known_red_tests(config):
         forced_files |= set(peek.forced_files)
         seconds += peek.forced_seconds
     affected |= {name for name in forced_files if testmon_policy.under(name, paths)}
@@ -224,6 +240,7 @@ def pytest_configure(config):
         # off the shared directory the way an xdist worker already is.
         os.environ.setdefault("ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_config_root, "artifacts"))
     config.arrayscope_load_start = load_report.LoadWindow.sample()
+    config.arrayscope_started = monotonic()
 
 
 def pytest_collection(session):
@@ -406,6 +423,83 @@ def pytest_report_header(config):
     return lines
 
 
+#: Below this, an exhaustive run cost nothing worth naming an alternative for.
+_GATE_NUDGE_SECONDS = 5.0
+
+#: Plugins it is pointless to disable here, and what to say about each. These
+#: arrive by habit from other repositories; the flag then makes a command look
+#: like it is stabilising something when it is doing nothing at all.
+_POINTLESS_PLUGIN_DISABLES = {
+    "randomly": "pytest-randomly is not installed",
+}
+
+
+def _report_pointless_flags(terminalreporter, config) -> None:
+    """Say so when a run carried a flag that could not have had an effect.
+
+    Cheaper than a documentation rule nobody reads at the moment they type it,
+    and it cannot go stale: if the plugin is ever really added, the check stops
+    firing by itself.
+    """
+
+    from importlib.util import find_spec
+
+    for plugin in tuple(getattr(config.option, "plugins", ()) or ()):
+        name = str(plugin)
+        if not name.startswith("no:"):
+            continue
+        disabled = name[3:]
+        why = _POINTLESS_PLUGIN_DISABLES.get(disabled)
+        if why is None:
+            continue
+        if find_spec(f"pytest_{disabled}") is not None:
+            continue
+        terminalreporter.write_line(f"-p {name}: no effect ({why}).", bold=True, yellow=True)
+
+
+def _report_gate_run_cost(terminalreporter, config) -> None:
+    """Name the focused answers after a wide ``--no-testmon`` sweep.
+
+    ``--no-testmon`` has legitimate narrow uses — regenerating the canonical
+    artifacts, or settling a run you suspect the map got wrong. It is not the
+    pre-merge gate, and this fires when it was used as one.
+
+    What an exhaustive *offscreen* run adds over selection is narrower than it
+    looks: the map-erosion hole that once made it the only trustworthy answer is
+    closed (:func:`protect_map_outside_the_scope`), the child-process class is
+    declared and guarded, and rings 3–4 are not in it either way. CI sets
+    ``CI``, which turns selection off, so every push is already swept
+    exhaustively by a machine. ``--since`` is the branch-sized question a person
+    should be asking before merging, and it costs a fraction of this.
+
+    The trap this exists for is specific and hard to see from inside: while
+    fixing an inherited red, a targeted ``pytest path::test`` answers
+    "deselected", because selection deliberately does not re-run reds this
+    checkout did not break — and ``--no-testmon`` is the first thing that
+    visibly works. It costs ~222 s against a few-second loop, every iteration.
+    Whoever just paid that is the only person who can be told at the moment it
+    is useful.
+
+    Deliberately not fired for the other exhaustive runs (CI, ``--cov``): those
+    chose nothing and have no faster alternative.
+    """
+
+    if not vars(config.option).get("no-testmon"):
+        return
+    started = getattr(config, "arrayscope_started", None)
+    if started is None:
+        return
+    elapsed = monotonic() - started
+    if elapsed < _GATE_NUDGE_SECONDS:
+        return
+    terminalreporter.write_line(
+        f"--no-testmon: swept {elapsed:.0f} s, recorded nothing. Pre-merge is "
+        "`--since`; see `pytest --help`.",
+        bold=True,
+        yellow=True,
+    )
+
+
 def pytest_terminal_summary(terminalreporter, config):
     """State the size of the gap between "this run" and "the suite".
 
@@ -426,6 +520,8 @@ def pytest_terminal_summary(terminalreporter, config):
             terminalreporter.write_line(busy, bold=True, yellow=True)
 
     _report_function_coverage(terminalreporter, config)
+    _report_pointless_flags(terminalreporter, config)
+    _report_gate_run_cost(terminalreporter, config)
 
     if not _selection_is_narrowing(config):
         return
@@ -437,12 +533,7 @@ def pytest_terminal_summary(terminalreporter, config):
     since = getattr(config, "arrayscope_since", None) or _since_on_the_controller(config)
     reached = 0
     if since is not None:
-        ref, reached = since
-        terminalreporter.write_line(
-            f"test selection: --since {ref} added {reached} tests this branch changed "
-            "since its baseline, on top of what the map called affected.",
-            bold=True,
-        )
+        reached = since[1]
 
     new_reds = _red_ledger.new_reds if _red_ledger is not None else _new_reds(config)
     inherited = testmon_policy.known_red_tests(config) - new_reds
@@ -450,20 +541,19 @@ def pytest_terminal_summary(terminalreporter, config):
     # pulled back in — by --since, or by the flag that re-runs inherited reds —
     # has to come back out, or the line claims a gap that was already closed.
     skipped = unaffected - reached
-    if testmon_policy.rerun_known_red_tests():
+    if testmon_policy.rerun_known_red_tests(config):
         skipped -= len(inherited)
     skipped = max(0, skipped)
+    widened = f" +{reached} --since {since[0]}" if since is not None and reached else ""
+    hint = "" if since is not None else " Pre-merge: `--since`."
     terminalreporter.write_line(
-        f"test selection: {skipped} of {mapped} mapped tests were unaffected by this "
-        "working tree and did not run. The whole suite is `pytest --no-testmon`.",
+        f"test selection: {skipped}/{mapped} mapped unaffected, not run{widened}.{hint}",
         bold=True,
     )
-    if inherited and not testmon_policy.rerun_known_red_tests():
+    if inherited and not testmon_policy.rerun_known_red_tests(config):
         terminalreporter.write_line(
-            f"test selection: {len(inherited)} of those were already failing when this "
-            "checkout's map arrived and nothing they use changed, so they were not re-run "
-            "(`ARRAYSCOPE_TESTMON_RERUN_FAILING=1` re-runs them; "
-            "`python tools/test_selection.py status` names them).",
+            f"test selection: {len(inherited)} inherited reds not re-run; "
+            "`--rerun-reds` runs them.",
             bold=True,
             yellow=True,
         )
@@ -564,21 +654,15 @@ def _report_function_coverage(terminalreporter, config):
         # baseline rule tests/red_ledger.py uses for reds.
         baselines[environment] = coverage_map.baseline_from(reach)
         terminalreporter.write_line(
-            f"coverage: {reach.covered} of {reach.total} functions in {roots}/ are "
-            f"executed by a recorded test ({reach.percent:.1f}%) — baseline for this "
-            "checkout.",
+            f"coverage: baseline recorded for this checkout ({roots}/).",
             bold=True,
         )
     elif drift.moved:
-        terminalreporter.write_line(
-            f"coverage: {reach.covered} of {reach.total} functions executed "
-            f"({reach.percent:.1f}%), {reach.covered - drift.baseline_covered:+d} since "
-            f"this checkout's baseline ({len(drift.gained)} newly covered, "
-            f"{len(drift.lost)} no longer). "
-            "`python tools/test_selection.py coverage` names them.",
-            bold=True,
-            yellow=bool(drift.lost),
-        )
+        points = reach.percent - (100.0 * drift.baseline_covered / max(1, reach.total))
+        line = f"coverage: +{len(drift.gained)} -{len(drift.lost)} functions ({points:+.1f} pts)"
+        if drift.lost:
+            line += " — `tools/test_selection.py coverage` names the lost ones"
+        terminalreporter.write_line(f"{line}.", bold=True, yellow=bool(drift.lost))
 
     # The option, not ``config.arrayscope_since``: that is set during collection,
     # which under xdist happens on the workers, so the controller — the only
@@ -612,14 +696,12 @@ def _report_new_code_coverage(terminalreporter, config, environment, map_path, s
         return
     if not fresh.uncovered:
         terminalreporter.write_line(
-            f"coverage: every one of the {fresh.total} functions this branch adds or "
-            f"changes since {ref} is executed by a test.",
+            f"coverage: {fresh.total}/{fresh.total} new functions since {ref} are tested.",
             bold=True,
         )
         return
     terminalreporter.write_line(
-        f"coverage: of {fresh.total} functions this branch adds or changes since {ref}, "
-        f"{len(fresh.uncovered)} are executed by no test:",
+        f"coverage: {len(fresh.uncovered)}/{fresh.total} new functions since {ref} have no test:",
         bold=True,
         yellow=True,
     )
@@ -627,8 +709,8 @@ def _report_new_code_coverage(terminalreporter, config, environment, map_path, s
         terminalreporter.write_line(f"    {function}", yellow=True)
     if len(fresh.uncovered) > 12:
         terminalreporter.write_line(
-            f"    ... and {len(fresh.uncovered) - 12} more "
-            "(`python tools/test_selection.py coverage --since` lists them)",
+            f"    ... +{len(fresh.uncovered) - 12} more "
+            "(`tools/test_selection.py coverage --since`)",
             yellow=True,
         )
 

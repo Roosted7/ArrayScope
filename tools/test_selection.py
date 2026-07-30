@@ -199,9 +199,8 @@ def command_status(args) -> int:
         for name in sorted(inherited):
             print(f"    {name}")
         print()
-        print("    ARRAYSCOPE_TESTMON_RERUN_FAILING=1 pytest   re-runs them")
-        print("    pytest --since                              adds what this branch changed")
-        print("    pytest --no-testmon                         runs everything")
+        print("    pytest --rerun-reds    re-runs them")
+        print("    pytest --since         adds what this branch changed (pre-merge)")
         print()
     print()
     print("declared child-process dependencies (invisible to coverage):")

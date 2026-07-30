@@ -10,6 +10,24 @@ and [`tests/conftest.py`](../../tests/conftest.py); the reporting tool is
 inside are in [README.md](README.md) — selection changes *which tests a ring
 runs*, never *which ring a claim needs*.
 
+## The rules
+
+1. **`pytest` is the loop.** No flags, no path to guess.
+2. **`pytest --since` before merging** — and after a rebase, or in a checkout
+   somebody else was iterating in. Still selected, still fast.
+3. **`pytest --rerun-reds` when the red you are fixing is one you inherited.**
+   Selection does not re-run those, so even a node id reports it deselected.
+4. **`--no-testmon` is not the gate.** Use it to take the tracer out of the
+   picture; use `--testmon-noselect` when you want everything *and* a repaired
+   map. Neither is a routine sweep — CI sweeps every push.
+5. **Never `-p no:randomly`.** pytest-randomly is not installed here; the flag
+   does nothing. The run says so if you pass it.
+6. **Suspect the map? Report it.** Do not route around it silently.
+
+Rules 4 and 5 are enforced by the run, which warns instead of relying on anyone
+having read this; `pytest --help` carries the per-flag detail. Reasoning for
+rule 4: [Why not just sweep?](#why-not-just-sweep).
+
 ## The problem it solves
 
 The defect that keeps recurring is not a red suite that got shipped. It is:
@@ -43,8 +61,7 @@ what it did in two places:
 ```
 test selection: on (default) — 20 of 3540 mapped tests affected
 ...
-test selection: 3520 of 3540 mapped tests were unaffected by this working
-tree and did not run. The whole suite is `pytest --no-testmon`.
+test selection: 3520 of 3540 mapped tests unaffected, not run. Pre-merge: `--since`.
 ```
 
 Read the second line before writing "suite green" anywhere. A selected run that
@@ -53,17 +70,17 @@ passes says the affected tests pass — a strictly smaller claim.
 | Goal | Command |
 |---|---|
 | Inner loop | `pytest` |
-| Everything this whole branch changed | `pytest --since` |
-| The whole suite (pre-merge, or after anything below) | `pytest --no-testmon` |
+| Everything this whole branch changed — pre-merge, after a rebase, or in a borrowed checkout | `pytest --since` |
 | Blast radius without running anything | `python tools/test_selection.py` |
 | What the map does *not* cover, which reds are yours | `python tools/test_selection.py status` |
 | The current reds are not yours (stale worktree, stacked branch) | `python tools/test_selection.py accept-reds` |
-| Re-run the inherited reds too | `ARRAYSCOPE_TESTMON_RERUN_FAILING=1 pytest` |
+| Re-run the inherited reds too | `pytest --rerun-reds` |
 | Rebuild the map from scratch | `rm .testmondata && pytest` |
 | Re-record without deselecting | `pytest --testmon-noselect` |
 | Which functions the suite executes | `python tools/test_selection.py coverage` |
 | New code on this branch that no test runs | `python tools/test_selection.py coverage --since` |
 | The coverage baseline is not yours | `python tools/test_selection.py accept-coverage` |
+| Regenerate artifacts, or settle a map you suspect | `pytest --no-testmon` (not a routine sweep — see below) |
 | Artifacts, CI | already exhaustive — see below |
 
 Scoping still works and still narrows further: `pytest tests/ui` runs the
@@ -105,13 +122,9 @@ therefore invisible, and none of them are fixed by running `pytest` again:
    unchanged: whoever touches a display/render/kernel/window lane still runs
    those rings themselves.
 
-The escape hatch for all three is one flag:
-
-```bash
-pytest --no-testmon       # everything, untraced, exactly as before
-```
-
-Run it before merging. Selection is for the loop, not for the gate.
+Item 3 has no local escape hatch at all: `--no-testmon` runs the whole
+*offscreen* suite, and rings 3–4 are not in it either way, so nothing on this
+page substitutes for running them — see [the ring rules](README.md).
 
 ## Where selection turns itself off
 
@@ -156,6 +169,64 @@ of testmon's environment key, so it discards the map by itself.
 Regenerating the canonical `tests/artifacts/` PNGs is a `--no-testmon` job. A
 selected run redirects `ARRAYSCOPE_ARTIFACT_DIR` to a private directory the way
 an xdist worker already does, so it cannot overwrite them from a partial run.
+
+## Why not just sweep?
+
+It is the flag people reach for reflexively, and as a routine wide sweep it is
+close to pure cost: ~222 s against a few seconds, and it records nothing, so the
+next selected run still plans from the same map it started with.
+
+**`pytest --since` is the pre-merge command.** It asks the question that actually
+matters before merging — everything *this branch* changed against its baseline,
+not merely what moved since the last run — and it still selects through the map,
+so it stays fast. It is equally the right call after a rebase, or in a checkout
+somebody else was iterating in, where "since the last run" is simply the wrong
+window.
+
+Nor is a local sweep the thing standing between a mistake and `main`:
+
+- CI sets `CI`, which turns selection off, so **every push is already swept
+  exhaustively** whether or not anyone did it by hand.
+- The map-erosion hole that once made this the only trustworthy run is closed
+  (`protect_map_outside_the_scope`, below).
+- To repair a map, `pytest --testmon-noselect` runs the same tests *and*
+  re-records them, which `--no-testmon` does not.
+
+That leaves narrow, real uses. And if you do suspect the map, **report it**: a
+wrong map is worth fixing once for everybody, and quietly sweeping past it is how
+it stays wrong.
+
+### Why keep `--no-testmon` at all, then?
+
+Because they are not the same tool, and the difference cuts both ways.
+
+`--testmon-noselect` runs every test **and re-records**, so it leaves the map
+repaired — which is why it, not `--no-testmon`, is the answer when the map is the
+thing you are fixing. It is the better command whenever "run it all" and "leave
+the map right" are both wanted.
+
+What it cannot do is take testmon out of the picture. Two cases need that:
+
+- **Suspecting the tracer itself.** `--testmon-noselect` still traces every line.
+  In a suite this timing-sensitive — Qt event loops, real GPU contexts, 2 s/5 s
+  interaction budgets — "is the instrumentation causing this?" is a legitimate
+  question, and `--no-testmon` is the only way to ask it.
+- **Recording nothing on purpose.** CI throws its map away, so tracing there
+  would be ~3.5% spent on a file nobody reads. CI gets this via the `CI`
+  variable rather than the flag, but it is the same choice.
+
+There is also a cost on the other side, which is why `--testmon-noselect` is not
+simply promoted to "the sweep": it reorders, running the deselected group last.
+Declared `coupled_order` groups are reassembled afterwards
+(`testmon_policy.py`), but *undeclared* order coupling is not, and this suite has
+enough of it that a reshuffle has measured about one spurious failure per run. A
+sweep whose job is to be trusted is the wrong place to spend that.
+
+So: `--since` before merging, `--testmon-noselect` to repair the map,
+`--no-testmon` to get the tracer out of the way. If the reordering flakiness ever
+gets driven to zero — the latent couplings declared with `coupled_order`, or
+fixed — then `--testmon-noselect` really would dominate `--no-testmon` locally,
+and this section should be revisited.
 
 ## The map
 
@@ -356,9 +427,10 @@ how widely the touched code is executed. Non-Python changes — a fixture array,
 icon — have no method structure, so they fall back to reaching every test that
 recorded them.
 
-`--since` is the cheap step between an inner-loop run and the full
-`--no-testmon` gate. It is not a replacement for the gate: it still cannot see
-the three blind spots above.
+`--since` is the pre-merge command precisely because it is still a *selected*
+run: the branch-sized answer at map speed. It does not pretend to be a sweep —
+it still cannot see the blind spots above, which is what CI's exhaustive jobs
+are for on every push, and rings 3–4 for real pixels.
 
 ## Coverage, for free
 

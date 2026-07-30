@@ -36,15 +36,20 @@ testmon traces Python lines executed **in the pytest process**. So:
 1. **Child processes.** A test that shells out gets nothing from the child.
    The tests that really do spawn one are declared in
    :data:`OUT_OF_PROCESS_DEPENDENCIES`, which puts the entry point back in the
-   map; the modules that entry point *imports* remain invisible, and the
-   pre-merge ``--no-testmon`` run is what covers them.
+   map; the modules that entry point *imports* remain invisible, and CI's
+   exhaustive sweep is what covers them.
 2. **Non-Python inputs.** Icons and fixture arrays have no fingerprint.
 3. **Real rendering.** Rings 3–4 (``docs/testing/README.md``) prove things
    about pixels a compositor drew. Selection has nothing to say there and the
    ring rules are unchanged.
 
-The escape hatch for all three is one flag: ``pytest --no-testmon`` runs
-everything, untraced, exactly as before.
+``pytest --since`` is the pre-merge command: it asks what the whole *branch*
+changed rather than what moved since the last run, and still selects through
+the map. Blind spots 1 and 2 are swept exhaustively by CI on every push;
+blind spot 3 has no offscreen answer at all and belongs to rings 3–4.
+``pytest --no-testmon`` stays available for the narrow cases — regenerating
+the canonical artifacts, or settling a run this map is suspected of getting
+wrong — and is not a routine sweep.
 """
 
 from __future__ import annotations
@@ -224,7 +229,7 @@ def map_path(rootdir: os.PathLike[str] | str) -> Path:
     return Path(rootdir) / os.environ.get("TESTMON_DATAFILE", MAP_FILENAME)
 
 
-def rerun_known_red_tests() -> bool:
+def rerun_known_red_tests(config=None) -> bool:
     """Whether *every* previously-failing test re-runs, changed or not.
 
     testmon's own answer is always yes: a failed test stops at the failure, so
@@ -240,11 +245,24 @@ def rerun_known_red_tests() -> bool:
     not moved since the map was written" is worthless evidence when the map was
     written by the run that broke it.
 
-    Set ``ARRAYSCOPE_TESTMON_RERUN_FAILING=1`` to re-run the inherited ones as
-    well — the right choice while you are fixing one of them, since the fix can
-    land outside the truncated dependency set of the run that failed.
+    ``--rerun-reds`` re-runs the inherited ones as well — the right choice while
+    you are fixing one of them, since the fix can land outside the truncated
+    dependency set of the run that failed. It is a flag rather than only an
+    environment variable because that is the case where somebody who cannot find
+    it reaches for ``--no-testmon`` instead and trades a few-second loop for the
+    whole suite. ``ARRAYSCOPE_TESTMON_RERUN_FAILING=1`` still works and is the
+    form to use from a script or a CI step, and it is what an xdist worker reads
+    when it is handed no command line of its own.
     """
 
+    if config is not None:
+        try:
+            if bool(config.getoption("rerun_reds", False)):
+                return True
+        except (AttributeError, ValueError):
+            # Not a pytest run, or the option was never registered — the
+            # environment variable is the answer for both.
+            pass
     return os.environ.get("ARRAYSCOPE_TESTMON_RERUN_FAILING", "").strip().lower() in {
         "1",
         "on",
@@ -299,7 +317,7 @@ def apply_known_red_policy(config, new_reds: set[str]) -> int:
     about one spurious failure per run.
     """
 
-    if rerun_known_red_tests():
+    if rerun_known_red_tests(config):
         return 0
     testmon_config = getattr(config, "testmon_config", None)
     if testmon_config is None or not testmon_config.select:
@@ -795,8 +813,9 @@ def apply_since_baseline(config, explicit_ref: str | None) -> tuple[str, int]:
     The map answers "what changed since the last run", which is the right
     question during an edit loop and the wrong one before merging: by then every
     file has been recorded, so the map reports *nothing* affected while the
-    branch has changed twenty files. ``--since`` asks the other question, and is
-    the cheap step between an inner-loop run and the full ``--no-testmon`` gate.
+    branch has changed twenty files. ``--since`` asks the other question, and it
+    is the pre-merge command precisely because it still selects: it is the
+    branch-sized answer at map speed, not a sweep.
     """
 
     ref, merge_base = resolve_baseline(config.rootdir, explicit_ref)
@@ -809,7 +828,8 @@ def apply_since_baseline(config, explicit_ref: str | None) -> tuple[str, int]:
     if checksums is None:
         raise UsageError(
             f"--since {ref}: this branch changed more than {_MAX_BASELINE_FILES} files, "
-            "which reaches everything anyway. Run `pytest --no-testmon`."
+            "which reaches everything anyway. Run `pytest --testmon-noselect` — same "
+            "tests, and it re-records the map on the way through."
         )
     reached = tests_reached_since_baseline(data, checksums)
     if reached is None:

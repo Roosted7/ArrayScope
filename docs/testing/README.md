@@ -48,17 +48,18 @@ the deleted `tests/artifacts/` tree).
 provably does not — including, deliberately, tests in directories the change
 does not resemble. That is a defense against law 1's failure mode, not an
 exception to it: selection changes *which tests a ring runs*, never *which ring
-a claim needs*. Every ring command below still means what it says, and the
-pre-merge run is still the exhaustive one:
+a claim needs*. Every ring command below still means what it says:
 
 ```bash
-pytest                 # the loop: everything this change affects
-pytest --no-testmon    # the gate: everything, untraced
+pytest                 # the loop
+pytest --since         # before merging, after a rebase, in a borrowed checkout
+pytest --rerun-reds    # when the red you are fixing is one you inherited
 ```
 
-Read [test-selection.md](test-selection.md) before trusting a green selected
-run — it names the three dependency classes selection cannot see, and coverage
-runs, CI and artifact regeneration are all exhaustive by policy.
+`--no-testmon` is not the gate and is not a routine sweep; CI sweeps every push.
+The rules, and the reasoning behind them, are in
+[test-selection.md](test-selection.md) — which also names what selection cannot
+see. Read it before trusting a green selected run.
 
 ## The rings
 

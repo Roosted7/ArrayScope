@@ -106,22 +106,23 @@ directories; that guess is the thing this replaces. Full reference:
 [`docs/testing/test-selection.md`](docs/testing/test-selection.md).
 
 ```bash
-pytest                 # the loop: everything this working tree affects
-pytest --since         # everything this whole branch changed, vs its baseline
-pytest --no-testmon    # the gate: the whole suite, before merging
+pytest                 # the loop
+pytest --since         # before merging, after a rebase, in a borrowed checkout
+pytest --rerun-reds    # when the red you are fixing is one you inherited
 ```
 
-A selected run that passes says *the affected tests* pass. The run prints how
-many mapped tests it skipped, which reds it inherited, and — under a
-`BROKEN HERE` heading — any test that was passing in this checkout and is not.
-Read those before writing "suite green" anywhere, and run the gate before
-claiming it. A test you broke is never skipped, whatever the map says; inherited
-reds are. Selection cannot see into child processes, non-Python inputs, or real
-rendering; rings 3–4 are unchanged.
+All three select through the map, so all three are fast. `--no-testmon` is not
+the pre-merge gate: it is for taking the tracer out of the picture, and
+`--testmon-noselect` is for wanting everything *with* a repaired map. Neither is
+a routine sweep — CI sweeps every push. Never pass `-p no:randomly`;
+pytest-randomly is not installed here. The run warns about both by itself.
 
-`pytest --since` exists because the map only knows what changed since the *last
-run*: after iterating it reports nothing affected while the branch has changed
-twenty files. It resolves its baseline (upstream, then `main`) and says which.
+A selected run that passes says *the affected tests* pass. It prints how many
+mapped tests it skipped, which reds it inherited, and — under a `BROKEN HERE`
+heading — any test that was passing in this checkout and is not. Read those
+before writing "suite green" anywhere. Selection cannot see child processes or
+non-Python inputs, and says nothing about real rendering: rings 3–4 are
+unchanged and no offscreen run substitutes for them. Suspect the map? Report it.
 
 `python tools/test_selection.py` reports the blast radius without running
 anything — worth quoting in a handoff. `... status` names the known-red tests

@@ -1052,3 +1052,46 @@ def test_seeding_without_a_donor_sidecar_is_not_an_error(tmp_path, monkeypatch):
 
     assert testmon_policy.seed_map(worktree) == str(donor)
     assert (worktree / "themap").read_bytes() == b"donor-map"
+
+
+# --- Reaching the inherited reds without leaving selection ------------------
+
+
+def test_rerun_reds_is_reachable_as_a_flag_and_as_the_variable(monkeypatch):
+    """The flag exists because the variable was not findable when it mattered.
+
+    Fixing an inherited red is the one everyday task selection actively works
+    against — it does not re-run those, so even a targeted node id reports
+    "deselected" — and the escape everybody reached for instead was
+    ``--no-testmon``, trading a few-second loop for the whole suite.
+    """
+
+    monkeypatch.delenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", raising=False)
+
+    assert testmon_policy.rerun_known_red_tests() is False
+    assert testmon_policy.rerun_known_red_tests(_option_config(rerun_reds=False)) is False
+    assert testmon_policy.rerun_known_red_tests(_option_config(rerun_reds=True)) is True
+
+    # The variable still answers on its own, for scripts, CI steps, and any
+    # xdist worker handed no command line of its own.
+    monkeypatch.setenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", "1")
+    assert testmon_policy.rerun_known_red_tests() is True
+    assert testmon_policy.rerun_known_red_tests(_option_config(rerun_reds=False)) is True
+
+
+def test_a_config_without_the_option_falls_back_to_the_variable(monkeypatch):
+    """`tools/test_selection.py` builds configs that never registered it."""
+
+    monkeypatch.delenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", raising=False)
+
+    class _NoOptions:
+        def getoption(self, name, default=None):
+            raise ValueError(f"no option named {name!r}")
+
+    assert testmon_policy.rerun_known_red_tests(_NoOptions()) is False
+    monkeypatch.setenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", "yes")
+    assert testmon_policy.rerun_known_red_tests(_NoOptions()) is True
+
+
+def _option_config(**options):
+    return SimpleNamespace(getoption=lambda name, default=None: options.get(name, default))
