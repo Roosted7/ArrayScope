@@ -37,6 +37,13 @@ DEFAULT_MEDIA_ROOT = REPO_ROOT / "docs" / "media"
 DEFAULT_OUT = REPO_ROOT / "tests" / "artifacts" / "demo-inspection"
 DEFAULT_FORMATS = ("mp4", "avif", "gif")
 README_INLINE_WIDTH = 880
+# MP4 is linked, not embedded; every other format is rendered in the README
+# slot and must therefore be at least as wide as it.
+LINKED_FORMATS = frozenset({"mp4"})
+# The recorder establishes a caption before the action it describes. Verify
+# that here rather than trusting construction, and scale it by the run's
+# speed factor so a fast smoke timeline is judged on its own time base.
+CAPTION_LEAD_MIN_S = 0.25
 
 
 @dataclass(frozen=True)
@@ -119,7 +126,10 @@ def probe(path: Path) -> MediaFacts:
         stream_index=int(video.get("index") or 0),
         duration_s=duration,
         size_bytes=int(payload["format"].get("size") or path.stat().st_size),
-        inline_scale=min(1.0, README_INLINE_WIDTH / int(video["width"])),
+        # Report the true README scale. Clamping this to 1.0 would hide the
+        # one direction that damages the artifact: a file narrower than its
+        # slot, which the browser enlarges.
+        inline_scale=README_INLINE_WIDTH / int(video["width"]),
     )
 
 
@@ -261,7 +271,13 @@ def render_event_sheet(
     *,
     thumb_width: int,
 ) -> int:
-    actions = [event for event in timeline["events"] if event["kind"] != "caption"]
+    # Order by the frame each row is centered on, not by emission order: a
+    # typed action opens before the focus click nested inside it, so the raw
+    # list would show the later frames first.
+    actions = sorted(
+        (event for event in timeline["events"] if event["kind"] != "caption"),
+        key=lambda event: _event_frame_triplet(event)[1][1],
+    )
     if not actions:
         return 0
     columns = 3
@@ -330,13 +346,14 @@ def parity_findings(
             findings.append(
                 Finding("error", scenario, f"missing expected formats: {', '.join(missing)}")
             )
-        gif = by_format.get("gif")
-        if gif and gif.width < README_INLINE_WIDTH:
+        for item in sorted(items, key=lambda value: value.format):
+            if item.format in LINKED_FORMATS or item.width >= README_INLINE_WIDTH:
+                continue
             findings.append(
                 Finding(
                     "error",
                     scenario,
-                    f"GIF is enlarged {README_INLINE_WIDTH / gif.width:.2f}x at README width",
+                    f"{item.format.upper()} is enlarged {item.inline_scale:.2f}x at README width",
                 )
             )
         if len(items) < 2:
@@ -378,49 +395,73 @@ def timeline_findings(scenario: str, timeline: dict, media: MediaFacts) -> list[
             )
         )
     width, height = (float(value) for value in window_size)
+    min_lead_frames = CAPTION_LEAD_MIN_S * fps / max(1.0, float(timeline.get("speed") or 1.0))
+    captions: list[dict] = []
     for index, event in enumerate(timeline.get("events", ())):
         start = event.get("start_frame")
         end = event.get("end_frame")
         if start is None or end is None or not (0 <= int(start) < int(end) <= frame_count):
             findings.append(Finding("error", scenario, f"event {index} has an invalid frame range"))
             continue
-        if event.get("kind") != "click":
+        kind = event.get("kind")
+        if kind == "caption":
+            captions.append(event)
             continue
+        name = f"{kind} {event.get('label', index)!r}"
+        findings.extend(_caption_findings(scenario, name, event, captions, min_lead_frames))
         target = event.get("target")
         cursor = event.get("cursor_at_press")
         if target is None:
-            findings.append(
-                Finding(
-                    "error",
-                    scenario,
-                    f"click {event.get('label', index)!r} has no visible target",
-                )
-            )
+            # Only a click asserts "the pointer caused this". A transition,
+            # gesture, or viewport move is honest without a widget target.
+            if kind == "click":
+                findings.append(Finding("error", scenario, f"{name} has no visible target"))
             continue
         x, y, target_width, target_height = (float(value) for value in target["rect"])
         if x < 0 or y < 0 or x + target_width > width or y + target_height > height:
-            findings.append(
-                Finding(
-                    "error",
-                    scenario,
-                    f"click {event.get('label', index)!r} target lies outside the window",
-                )
-            )
+            findings.append(Finding("error", scenario, f"{name} target lies outside the window"))
         if cursor is None:
-            findings.append(
-                Finding("error", scenario, f"click {event.get('label', index)!r} has no cursor")
-            )
-        else:
-            cursor_x, cursor_y = (float(value) for value in cursor)
-            if not (x <= cursor_x <= x + target_width and y <= cursor_y <= y + target_height):
-                findings.append(
-                    Finding(
-                        "error",
-                        scenario,
-                        f"click {event.get('label', index)!r} cursor misses its target",
-                    )
-                )
+            if kind == "click":
+                findings.append(Finding("error", scenario, f"{name} has no cursor"))
+            continue
+        cursor_x, cursor_y = (float(value) for value in cursor)
+        if not (x <= cursor_x <= x + target_width and y <= cursor_y <= y + target_height):
+            findings.append(Finding("error", scenario, f"{name} cursor misses its target"))
     return findings
+
+
+def _caption_findings(
+    scenario: str,
+    name: str,
+    event: dict,
+    captions: list[dict],
+    min_lead_frames: float,
+) -> list[Finding]:
+    """An action the viewer cannot read an explanation for is not evidence."""
+    text = event.get("caption")
+    if not text:
+        return [Finding("error", scenario, f"{name} runs with no caption on screen")]
+    owner = next(
+        (
+            caption
+            for caption in reversed(captions)
+            if caption.get("text") == text
+            and int(caption["start_frame"]) <= int(event["start_frame"])
+        ),
+        None,
+    )
+    if owner is None:
+        return [Finding("error", scenario, f"{name} claims a caption that never started before it")]
+    lead = int(event["start_frame"]) - int(owner["start_frame"])
+    if lead < min_lead_frames:
+        return [
+            Finding(
+                "error",
+                scenario,
+                f"{name} starts {lead} frames after its caption, before it can be read",
+            )
+        ]
+    return []
 
 
 def _write_html(
@@ -502,6 +543,7 @@ def inspect(
     samples: int,
     columns: int,
     thumb_width: int,
+    require_timelines: bool = False,
 ) -> tuple[dict, list[Finding]]:
     media = sorted(
         path
@@ -535,7 +577,16 @@ def inspect(
     for scenario, items in sorted(grouped.items()):
         timeline_path = media_root / f"{scenario}.timeline.json"
         if not timeline_path.exists():
-            findings.append(Finding("note", scenario, "no event timeline; uniform samples only"))
+            # Without a timeline nothing can adjudicate cursor targets or
+            # caption timing, so a gate that accepts it is a gate that
+            # cannot fail. Legacy media stays inspectable, never certified.
+            findings.append(
+                Finding(
+                    "error" if require_timelines else "note",
+                    scenario,
+                    "no event timeline; uniform samples only",
+                )
+            )
             continue
         timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
         timelines[scenario] = timeline
@@ -588,7 +639,10 @@ def main() -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="return non-zero for structural errors such as missing or mismatched companions",
+        help=(
+            "return non-zero for structural errors such as missing or mismatched "
+            "companions, and require every scenario to ship an event timeline"
+        ),
     )
     args = parser.parse_args()
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
@@ -614,6 +668,7 @@ def main() -> int:
             samples=args.samples,
             columns=args.columns,
             thumb_width=args.thumb_width,
+            require_timelines=args.strict,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"demo inspection failed: {exc}", file=sys.stderr)

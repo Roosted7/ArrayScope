@@ -1,8 +1,17 @@
-"""End-to-end checks for agent-readable README walkthrough inspection."""
+"""End-to-end checks for agent-readable README walkthrough inspection.
+
+The subprocess cases below prove the command works. They cannot, however, put
+``tools/demo_inspector.py`` in any test's coverage fingerprint — a child
+process is invisible to selection — so a change to the gate would never
+re-run the tests that guard it. The in-process cases load the module and
+exercise its decisions directly, which is both the finer-grained coverage and
+the reason an edit to the inspector is selected at all.
+"""
 
 from __future__ import annotations
 
 import json
+import runpy
 import shutil
 import subprocess
 import sys
@@ -13,6 +22,43 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
 INSPECTOR = ROOT / "tools" / "demo_inspector.py"
+
+
+@pytest.fixture(scope="module")
+def inspector():
+    return runpy.run_path(str(INSPECTOR), run_name="arrayscope_demo_inspector")
+
+
+def _facts(inspector, scenario, fmt, *, width, height=600, duration=10.0):
+    return inspector["MediaFacts"](
+        path=f"/tmp/{scenario}.{fmt}",
+        scenario=scenario,
+        format=fmt,
+        width=width,
+        height=height,
+        fps=30.0,
+        frames=300,
+        stream_index=0,
+        duration_s=duration,
+        size_bytes=1000,
+        inline_scale=inspector["README_INLINE_WIDTH"] / width,
+    )
+
+
+def _timeline(events, *, frame_count=200, fps=30, speed=1.0):
+    return {
+        "schema_version": 1,
+        "scenario": "probe",
+        "record_fps": fps,
+        "speed": speed,
+        "frame_count": frame_count,
+        "window_size": [1100, 780],
+        "events": events,
+    }
+
+
+def _caption(text, start):
+    return {"kind": "caption", "text": text, "start_frame": start, "end_frame": start + 100}
 
 
 def _ffmpeg(*args: str) -> None:
@@ -223,3 +269,144 @@ def test_strict_inspection_rejects_a_fallback_that_readme_must_enlarge(tiny_vide
 
     assert proc.returncode == 1
     assert "[error] tiny: GIF is enlarged 1.16x at README width" in proc.stdout
+
+
+def test_every_inline_format_must_fill_the_readme_slot(inspector):
+    """The AVIF is the primary inline source, not just the GIF fallback."""
+    grouped = {
+        "narrow": [
+            _facts(inspector, "narrow", "mp4", width=1100),
+            _facts(inspector, "narrow", "avif", width=760),
+            _facts(inspector, "narrow", "gif", width=760),
+        ]
+    }
+
+    messages = [
+        finding.message for finding in inspector["parity_findings"](grouped, ("mp4", "avif", "gif"))
+    ]
+
+    assert "AVIF is enlarged 1.16x at README width" in messages
+    assert "GIF is enlarged 1.16x at README width" in messages
+    # The linked MP4 is never placed in the 880 px slot.
+    assert not [message for message in messages if message.startswith("MP4")]
+
+
+def test_reported_inline_scale_shows_enlargement_rather_than_clamping(inspector):
+    facts = _facts(inspector, "narrow", "gif", width=760)
+    assert facts.inline_scale > 1.0
+
+
+def test_a_non_click_action_is_still_held_to_its_recorded_target(inspector):
+    """An edit or preview names a control too; a cursor elsewhere is a lie."""
+    events = [
+        _caption("Edit the bounds", 0),
+        {
+            "kind": "edit",
+            "label": "set crop start",
+            "caption": "Edit the bounds",
+            "start_frame": 20,
+            "press_frame": 25,
+            "activate_frame": 26,
+            "end_frame": 40,
+            "target": {
+                "widget_type": "QSpinBox",
+                "object_name": "",
+                "rect": [100, 100, 60, 24],
+                "point": [130, 112],
+            },
+            "cursor_at_press": [400, 400],
+        },
+    ]
+
+    messages = [
+        finding.message
+        for finding in inspector["timeline_findings"](
+            "probe",
+            _timeline(events),
+            _facts(inspector, "probe", "mp4", width=1100, duration=200 / 30),
+        )
+    ]
+
+    assert "edit 'set crop start' cursor misses its target" in messages
+
+
+def test_an_action_must_be_introduced_by_a_readable_caption(inspector):
+    events = [
+        _caption("Choose crop", 18),
+        {
+            "kind": "click",
+            "label": "choose crop",
+            "caption": "Choose crop",
+            "start_frame": 20,
+            "press_frame": 22,
+            "activate_frame": 23,
+            "end_frame": 40,
+            "target": {
+                "widget_type": "QMenuAction",
+                "object_name": "crop",
+                "rect": [100, 100, 60, 24],
+                "point": [130, 112],
+            },
+            "cursor_at_press": [130, 112],
+        },
+    ]
+
+    messages = [
+        finding.message
+        for finding in inspector["timeline_findings"](
+            "probe",
+            _timeline(events),
+            _facts(inspector, "probe", "mp4", width=1100, duration=200 / 30),
+        )
+    ]
+
+    assert messages == [
+        "click 'choose crop' starts 2 frames after its caption, before it can be read"
+    ]
+
+
+def test_a_caption_lead_is_judged_on_the_runs_own_time_base(inspector):
+    """A smoke run divides every duration; its leads shrink with them."""
+    events = [
+        _caption("Choose crop", 18),
+        {
+            "kind": "transition",
+            "label": "open the panel",
+            "caption": "Choose crop",
+            "start_frame": 20,
+            "press_frame": None,
+            "activate_frame": 21,
+            "end_frame": 40,
+            "target": None,
+            "cursor_at_press": None,
+        },
+    ]
+
+    assert not inspector["timeline_findings"](
+        "probe",
+        _timeline(events, speed=6.0),
+        _facts(inspector, "probe", "mp4", width=1100, duration=200 / 30),
+    )
+
+
+def test_event_evidence_is_ordered_by_the_frame_it_shows(inspector):
+    """A typed action opens before the focus click nested inside it."""
+    typed = {
+        "kind": "type",
+        "label": "type a range",
+        "start_frame": 89,
+        "press_frame": 101,
+        "activate_frame": 110,
+        "end_frame": 115,
+    }
+    focus = {
+        "kind": "click",
+        "label": "focus the range",
+        "start_frame": 89,
+        "press_frame": 90,
+        "activate_frame": 91,
+        "end_frame": 100,
+    }
+    triplet = inspector["_event_frame_triplet"]
+
+    assert triplet(focus)[1][1] < triplet(typed)[1][1]
