@@ -1009,3 +1009,36 @@ def test_a_user_operation_may_ask_for_the_axis_set_itself(tmp_path):
     data = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
 
     np.testing.assert_array_equal(operation.apply(data), data.sum(axis=(0, 2), keepdims=True))
+
+
+def test_duplicating_an_axis_set_builtin_produces_a_working_axis_set_copy():
+    """The generated copy takes ``axes`` and computes what the original does.
+
+    ``native_editable_source`` turns dataclass fields into function arguments,
+    so an axis-set operation's field has to become an ``axes`` argument -- and
+    the body has to reach only module-level helpers, or the copy names
+    something undefined.
+    """
+
+    duplicate_id = library.duplicate_operation("mean_axes")
+
+    entry = registry.get_operation_entry(duplicate_id)
+    assert entry.axis_selection == "set"
+
+    data = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+    copy = registry.create_operation(duplicate_id, axes=(0, 2), ndim=3)
+
+    np.testing.assert_array_equal(copy.apply(data), data.mean(axis=(0, 2)))
+
+
+def test_the_external_adapter_template_forwards_an_axis_set():
+    from arrayscope.operations.operation_definitions import adapter_template_source
+
+    source = adapter_template_source(registry.get_operation_entry("centered_fftn"), "wrapped")
+
+    assert "def wrapped(data, axes):" in source
+    assert "axes=axes" in source
+    # A single-axis operation keeps forwarding an axis and nothing else.
+    single = adapter_template_source(registry.get_operation_entry("centered_fft"), "wrapped")
+    assert "def wrapped(data, axis):" in single
+    assert "axes=None" in single
