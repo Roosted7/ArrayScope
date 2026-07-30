@@ -171,3 +171,43 @@ The final gate is the affected pytest selection plus `pytest --since`, Ruff,
 the dead-code/pre-commit hook, `demo_inspector.py --strict`, and direct review
 of every changed final-format storyboard. Offscreen PyQtGraph media is visual
 documentation, not WGPU or real-compositor certification.
+
+## Landed outcome
+
+The baseline above is retained as the before-state. The completed media set has
+five scenarios and fifteen final encodes:
+
+| Scenario | Final MP4 duration | Final source frame | Closed findings |
+|---|---:|---:|---|
+| `showcase` | 30.00 s | 1100×858 | Visible slice scrub, explicit crop/restore, real 1:1 and fit actions |
+| `fft` | 27.63 s | 1100×838 | Real menus/combos, exact stack checkbox, no ambiguous linear-magnitude failure beat |
+| `montage` | 12.50 s | 1100×858 | Caption precedes trigger, semantic `:` action, incomplete→complete presentation, zoom/fit |
+| `roi` | 17.37 s | 1100×898 | Honest panel transitions, animated rectangle/polyline, visible live-profile activation |
+| `workflow` | 13.27 s | 1100×858 | Real parameterized Crop form and highlighted dimension video/PNG export entry |
+
+All inline AVIF and GIF files are 880 px wide, so the README renders them at
+native width rather than enlarging a smaller GIF. Every format has a companion
+timeline, and strict inspection produced no structural, scale, duration,
+cursor-target, or companion-file finding.
+
+The bounded implementation history is:
+
+1. `bf5d69b4` — final-format storyboard, report, and HTML inspection.
+2. `f8eeffec` — this baseline audit and explicit acceptance gates.
+3. `a2e322c8` — action timelines and before/act/after event sheets.
+4. `f0822cb2` — faithful FFT popup/combo composition and targets.
+5. `00387f6b` — honest click ownership and animated ROI gestures.
+6. `06027661` — dedicated, wrapped caption band.
+7. `ade2da63` — native-width inline media and readable source layouts.
+8. `52170845` — showcase crop and real 1:1 behavior.
+9. `1456bbd5` — unambiguous logarithmic-magnitude FFT sequence.
+10. `aba21ba4` — parameterized-operation and export-menu workflow.
+11. `bd67f356` — semantic montage trigger and readable hold.
+12. `8dbbf437` — direct coverage of the production export-menu seam.
+
+Some README claims deliberately remain prose: flip/FFT-shift variants, every
+ROI shape, resource diagnostics/WGPU behavior, and asynchronous file loading.
+Adding those to these tours would either duplicate an existing narrative or
+misrepresent offscreen PyQtGraph capture as hardware/file-stream evidence.
+The new workflow previews export discoverability but intentionally does not
+open a modal dialog or write a user file.
