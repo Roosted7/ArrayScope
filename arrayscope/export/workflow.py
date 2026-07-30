@@ -27,7 +27,12 @@ class ExportWorkflowMixin:
                 lambda pos, btn=sec_btn, dim=i: self._show_export_context_menu(pos, btn, dim)
             )
 
-    def _show_export_context_menu(self, pos, btn, dim):
+    def _build_export_context_menu(self, dim):
+        """Build dimension actions without entering a blocking popup loop.
+
+        Keeping construction separate lets visual documentation and tests
+        inspect the exact production menu instead of duplicating its entries.
+        """
         menu = QtWidgets.QMenu(self)
 
         operations_menu = menu.addMenu("Operations")
@@ -46,7 +51,10 @@ class ExportWorkflowMixin:
         export_action = menu.addAction("Export along this dimension...")
         set_action_icon(export_action, "download")
         export_action.triggered.connect(lambda: self._start_export(dim))
+        return menu
 
+    def _show_export_context_menu(self, pos, btn, dim):
+        menu = self._build_export_context_menu(dim)
         # Show menu at cursor position
         menu.exec(btn.mapToGlobal(pos))
 

@@ -118,6 +118,13 @@ plan (token unification, backend de-duplication, hardware evidence) is in the
 
 Video/PNG-frame export is available from a dimension action.
 
+<picture>
+  <source srcset="docs/media/workflow.avif" type="image/avif">
+  <img src="docs/media/workflow.gif" alt="Choosing a parameterized crop, editing its bounds, applying it to the reversible operation stack, and opening dimension video/PNG export" width="880">
+</picture>
+
+<sub>[workflow.mp4](docs/media/workflow.mp4)</sub>
+
 Supported command-line inputs include:
 
 | Format | Suffix or input | Notes |

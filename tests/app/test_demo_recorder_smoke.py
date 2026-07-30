@@ -115,6 +115,16 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             "restore full axis 0",
             "show image at true 1:1",
         } <= labels
+    if name == "workflow":
+        labels = {event["label"] for event in actions}
+        assert {
+            "choose crop axis 0",
+            "show crop parameter popup",
+            "set crop start to 16",
+            "set crop stop to 80",
+            "apply crop",
+            "preview video and PNG export",
+        } <= labels
 
 
 def test_caption_wrapping_is_bounded_to_two_readable_lines(qt_app):

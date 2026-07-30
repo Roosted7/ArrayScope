@@ -432,8 +432,8 @@ class Recorder:
     def _widget_target(self, widget, rel) -> dict | None:
         if widget is None:
             return None
-        top_left = widget.mapTo(self.win, widget.rect().topLeft())
         rect = widget.rect()
+        top_left = self._map_widget_point(widget, rect.topLeft())
         point = self.widget_point(widget, rel)
         return {
             "widget_type": type(widget).__name__,
@@ -441,6 +441,15 @@ class Recorder:
             "rect": [top_left.x(), top_left.y(), rect.width(), rect.height()],
             "point": [point.x(), point.y()],
         }
+
+    def _map_widget_point(self, widget, local_point):
+        from pyqtgraph.Qt import QtCore
+
+        overlay = self._overlay_widget
+        if overlay is not None and (widget is overlay or overlay.isAncestorOf(widget)):
+            in_overlay = widget.mapTo(overlay, local_point)
+            return self._overlay_top_left + QtCore.QPointF(in_overlay)
+        return QtCore.QPointF(widget.mapTo(self.win, local_point))
 
     def _show_overlay(self, widget, anchor_widget, *, placement: str) -> None:
         from pyqtgraph.Qt import QtCore
@@ -485,6 +494,33 @@ class Recorder:
             settle_after=False,
             label=label,
         )
+
+    def open_overlay_widget(self, widget, anchor_widget, *, placement: str, label: str):
+        self.transition(
+            label,
+            lambda: self._show_overlay(widget, anchor_widget, placement=placement),
+            settle_after=False,
+            hold_s=0.55,
+        )
+
+    def edit_overlay_value(self, widget, value, *, label: str) -> None:
+        target = self._widget_target(widget, (0.5, 0.5))
+        event = self._start_action("edit", label, target=target)
+        self.move_to(self.widget_point(widget), seconds=0.45)
+        event["press_frame"] = self.frame_index
+        event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
+        widget.setValue(value)
+        event["activate_frame"] = self.frame_index
+        self.hold(0.6)
+        self._finish_action(event)
+
+    def click_overlay_widget(self, widget, *, label: str) -> None:
+        def activate():
+            widget.click()
+            self._overlay_widget = None
+            self._overlay_top_left = None
+
+        self.click(widget, invoke=activate, label=label)
 
     def choose_overlay_action(
         self,
@@ -532,6 +568,30 @@ class Recorder:
         self.settle()
         self.hold(0.3)
         self._finish_action(event)
+
+    def preview_overlay_action(
+        self,
+        menu,
+        action,
+        *,
+        label: str,
+        move_s: float = 0.5,
+        readable_hold_s: float = 1.2,
+    ) -> None:
+        """Highlight a real action without invoking a modal/file-writing path."""
+        from pyqtgraph.Qt import QtCore
+
+        if menu is not self._overlay_widget:
+            raise RuntimeError("action preview requires the menu to be the active overlay")
+        target = self._overlay_action_target(menu, action)
+        event = self._start_action("preview", label, target=target)
+        menu.setActiveAction(action)
+        self.move_to(QtCore.QPointF(*target["point"]), seconds=move_s)
+        event["activate_frame"] = self.frame_index
+        self.hold(readable_hold_s)
+        self._finish_action(event)
+        self._overlay_widget = None
+        self._overlay_top_left = None
 
     def choose_combo_item(self, combo, data, *, label: str, after_trigger=None) -> None:
         """Show a faithful composited choice list and activate the combo item."""
@@ -655,7 +715,7 @@ class Recorder:
 
         rect = widget.rect()
         local = QtCore.QPointF(rect.width() * rel[0], rect.height() * rel[1])
-        return QtCore.QPointF(widget.mapTo(self.win, local.toPoint()))
+        return self._map_widget_point(widget, local.toPoint())
 
     def view_fraction_point(self, fx: float, fy: float):
         """Image-space point at a fractional position of the current view
@@ -1113,6 +1173,73 @@ def s_roi(rec: Recorder):
         win._update_live_profile_from_pending_pos()
         rec.hold_until_settled(1.5, tail_s=0.3)
     rec.hold(1.6)
+
+
+@scenario("workflow")
+def s_workflow(rec: Recorder):
+    win = rec.window(_volume3d(96, 96, 32), size=(1100, 780))
+    rec.caption("Parameterized operations stay visible and reversible")
+    rec.hold(1.2)
+
+    rec.caption("Choose Crop axis… from the real dimension menu")
+    chip = win.dimension_strip.chip(0)
+    anchor = chip.ops_button.mapToGlobal(chip.ops_button.rect().topLeft())
+    menu = win._build_operation_context_menu(0, anchor)
+    crop_action = next((action for action in menu.actions() if action.data() == "crop"), None)
+    if crop_action is None:
+        raise RuntimeError("axis operation menu has no crop action")
+    rec.open_overlay_menu(
+        chip.ops_button,
+        menu,
+        placement="above",
+        label="open axis 0 operation menu",
+    )
+    rec.choose_overlay_action(menu, crop_action, label="choose crop axis 0")
+
+    popup = win._operation_params_popup
+    if popup is None:
+        raise RuntimeError("crop action did not open its parameter popup")
+    rec.caption("Edit start and stop; the derived shape updates in place")
+    rec.open_overlay_widget(
+        popup,
+        chip.ops_button,
+        placement="above",
+        label="show crop parameter popup",
+    )
+    rec.edit_overlay_value(popup._spins["start"], 16, label="set crop start to 16")
+    rec.edit_overlay_value(popup._spins["stop"], 80, label="set crop stop to 80")
+    rec.click_overlay_widget(popup._confirm, label="apply crop")
+    rec.hold_until_settled(2.0, tail_s=1.0)
+    from arrayscope.operations.registry import operation_id_for
+
+    if len(win.document.steps) != 1 or operation_id_for(win.document.steps[0].operation) != "crop":
+        raise RuntimeError("crop parameter flow did not commit one crop step")
+
+    rec.caption("Right-click a dimension to export video or PNG frames")
+    export_menu = win._build_export_context_menu(2)
+    export_action = next(
+        (
+            action
+            for action in export_menu.actions()
+            if action.text().startswith("Export along this dimension")
+        ),
+        None,
+    )
+    if export_action is None:
+        raise RuntimeError("dimension actions have no export entry")
+    export_anchor = win.dimension_strip.chip(2).slice_edit
+    rec.open_overlay_menu(
+        export_anchor,
+        export_menu,
+        placement="above",
+        label="open dimension actions",
+    )
+    rec.preview_overlay_action(
+        export_menu,
+        export_action,
+        label="preview video and PNG export",
+    )
+    rec.hold(1.0)
 
 
 # --------------------------------------------------------------------------

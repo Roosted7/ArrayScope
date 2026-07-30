@@ -4,6 +4,10 @@ Every animation in the top-level [README](../../README.md) is rendered by an
 automated pipeline — nothing here is screen-recorded by hand, so the demos can
 be regenerated at any time and never drift from the current UI.
 
+The `workflow` scenario deliberately stops on the highlighted dimension-export
+entry. It proves discoverability without opening a modal save dialog or writing
+files during documentation generation.
+
 ## How it works
 
 [`tools/demo_recorder.py`](../../tools/demo_recorder.py) drives the real
