@@ -22,6 +22,7 @@ from arrayscope.operations import plugins
 from arrayscope.operations.capabilities import OperationClass, OperationKind
 from arrayscope.operations.plugin_conformance import (
     CharacterizationMismatch,
+    CharacterizationUnavailable,
     characterization_stats,
     characterize_operation,
     verify_region_conformance,
@@ -385,3 +386,109 @@ def test_runtime_mismatch_withholds_result_invalidates_and_demotes():
     assert operation.capabilities(data.shape, data.dtype).cache_stage is True
     assert operation._characterization_hint.predictable is False
     assert characterization_stats()["invalidated"] == 1
+
+
+# --- rank-changing shape rules ("fixed_and_mapped") --------------------------
+#
+# Every rank increase lands in this class, and it had no coverage at all.
+
+
+@pytest.mark.parametrize(
+    ("operation_id", "input_shape", "fn", "expected_kind", "expected_shape"),
+    [
+        # A new axis stacked in front: no input axis maps to output axis 0.
+        (
+            "demo:stack-new-axis",
+            (7, 9),
+            lambda a: np.stack([a, a], axis=0),
+            "fixed_and_mapped",
+            (2, 7, 9),
+        ),
+        # A trailing size-1 axis appended (the "add a component axis" shape).
+        ("demo:trailing-expand", (7, 9), lambda a: a[..., None], "fixed_and_mapped", (7, 9, 1)),
+        # keepdims: the reduced axis survives as a fixed 1 rather than vanishing.
+        (
+            "demo:keepdims",
+            (7, 9),
+            lambda a: a.mean(axis=0, keepdims=True),
+            "fixed_and_mapped",
+            (1, 9),
+        ),
+        (
+            "demo:multi-axis-keepdims",
+            (5, 7, 9),
+            lambda a: a.mean(axis=(0, 1), keepdims=True),
+            "fixed_and_mapped",
+            (1, 1, 9),
+        ),
+        # The same reduction without keepdims is the neighbouring class, and is
+        # here so the boundary between the two is pinned rather than assumed.
+        (
+            "demo:multi-axis-reduce",
+            (5, 7, 9),
+            lambda a: a.mean(axis=(0, 1)),
+            "axis_reduced",
+            (9,),
+        ),
+    ],
+)
+def test_characterization_fits_rank_changing_shape_rules(
+    operation_id, input_shape, fn, expected_kind, expected_shape
+):
+    spec = PluginOperationSpec(id=operation_id, label=operation_id, fn=fn, changes_shape=True)
+
+    result = characterize_operation(spec, input_shape, np.dtype("float32"))
+
+    assert result.predictable is True
+    assert result.shape_rule.kind == expected_kind
+    assert result.output_shape == expected_shape
+    # The rule must extrapolate, not merely describe the one probed signature.
+    doubled = tuple(size * 2 for size in input_shape)
+    assert result.predict_shape(doubled) == tuple(np.asarray(fn(np.zeros(doubled))).shape)
+
+
+# --- probe failure is a probe result, not the caller's exception -------------
+
+
+def _min_size_op(operation_id, minimum=8):
+    def fn(array):
+        if array.shape[0] < minimum:
+            raise ValueError(f"model requires shape[0] >= {minimum}, got {array.shape[0]}")
+        return np.stack([array, array], axis=0)
+
+    return PluginOperationSpec(id=operation_id, label=operation_id, fn=fn, changes_shape=True)
+
+
+def test_probe_failure_becomes_characterization_unavailable_with_the_original_cause():
+    # (16, 1024) exceeds the exact-probe element budget, so the probes are
+    # synthetic 5-per-axis compactions -- below this operation's minimum. That
+    # is invisible on a small array, where the base probe IS the real shape.
+    spec = _min_size_op("demo:min-size-probe")
+
+    with pytest.raises(CharacterizationUnavailable) as raised:
+        characterize_operation(spec, (16, 1024), np.dtype("float32"))
+
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert "model requires shape[0] >= 8" in str(raised.value.__cause__)
+
+
+def test_min_size_constrained_op_characterizes_and_evaluates_from_the_exact_input():
+    from arrayscope.operations.pipeline import ArrayDocument
+
+    plugins._reset_plugin_cache()
+    try:
+        spec = _min_size_op("demo:min-size-exact")
+        plugins._SPEC_CACHE[spec.id] = spec
+        operation = plugins.create_plugin_operation(spec.id)
+        data = np.arange(16 * 1024, dtype=np.float32).reshape(16, 1024)
+
+        # Re-raising the operation's own ValueError took it straight past
+        # evaluate_shape, which catches only CharacterizationUnavailable, so the
+        # exact-input fallback never engaged and this raised.
+        document = ArrayDocument(data, operations=(operation,))
+
+        assert document.current_shape == (2, 16, 1024)
+        assert operation._characterization_hint.whole_array_calls == 1
+        np.testing.assert_array_equal(document.materialize(), np.stack([data, data], axis=0))
+    finally:
+        plugins._reset_plugin_cache()

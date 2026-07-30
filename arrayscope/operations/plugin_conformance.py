@@ -222,7 +222,19 @@ def characterize_operation(
 
     rule = None if failure is not None else _fit_shape_rule(probe_shapes, observations, param_map)
     if failure is not None and not observations and exact_input is None:
-        raise failure
+        # A probe raising is a *probe* result, not the caller's error. Probe
+        # shapes are synthetic compactions (5/3/2 per axis once the real array
+        # exceeds the element budget), so any shape-constrained operation -- a
+        # NUFFT with a coordinate slot, a fixed-input model -- fails them while
+        # being perfectly runnable on the real array. Re-raising the operation's
+        # own exception verbatim took it straight past `evaluate_shape`, which
+        # catches only CharacterizationUnavailable, so the exact-input fallback
+        # that answers this in a fraction of a millisecond never engaged. The
+        # original is chained, so diagnostics still show the real error.
+        raise CharacterizationUnavailable(
+            f"operation {getattr(spec, 'id', '<anonymous>')!r} failed every bounded probe "
+            f"(smallest {probe_shapes[0] if probe_shapes else ()}): {failure}"
+        ) from failure
     predictable = rule is not None
     reason = ""
     if rule is None:
