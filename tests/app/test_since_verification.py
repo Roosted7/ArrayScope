@@ -280,6 +280,37 @@ def test_an_unreadable_ledger_widens_the_run_it_never_narrows_it(tmp_path, monke
     assert report.verified == 0
 
 
+def test_the_controller_reads_the_partition_before_anything_runs(monkeypatch):
+    """*When* the controller computes it changes the answer.
+
+    Under xdist the controller never collects, so it recomputes the report for
+    its own summary — and it used to do that at summary time, after every test
+    had re-recorded its fingerprint. Measured: a ``--since --fresh`` run printed
+    "ran the 233 tests your tree reaches" directly above "branch reaches 185".
+    Same paragraph, same run, two different trees.
+
+    The call site is pinned by source, not by driving the hook: this file runs
+    inside a live session, and calling ``pytest_sessionstart`` from a test
+    resets the very ledgers that session is keeping — which it did, silently
+    swallowing this test's own result on the first attempt.
+    """
+
+    import inspect
+
+    from tests import conftest
+
+    monkeypatch.setattr(conftest, "_since_on_the_controller", lambda config: "before-the-run")
+    off = SimpleNamespace(getoption=lambda name, default=None: default)
+    on = SimpleNamespace(getoption=lambda name, default=None: {"since": ""}.get(name, default))
+
+    assert conftest.since_before_the_run(off) is None
+    assert conftest.since_before_the_run(on) == "before-the-run"
+    assert "since_before_the_run" in inspect.getsource(conftest.pytest_sessionstart), (
+        "asking at summary time describes a tree the run has already moved"
+    )
+    assert "arrayscope_since_controller" in inspect.getsource(conftest.pytest_terminal_summary)
+
+
 def test_the_report_sentence_states_numbers_that_add_up():
     report = testmon_policy.SinceReport(
         "main",

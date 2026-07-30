@@ -1099,6 +1099,7 @@ def pytest_sessionstart(session):
         testmon_policy.protect_map_outside_the_scope(config)
     if _XDIST_WORKER or not testmon_config or not testmon_config.collect:
         return
+    config.arrayscope_since_controller = since_before_the_run(config)
     data = getattr(config, "testmon_data", None)
     if data is None:
         return
@@ -1614,7 +1615,14 @@ def pytest_terminal_summary(terminalreporter, config):
     unaffected = len(getattr(data, "stable_test_names", ()) or ())
     if not mapped or not unaffected:
         return
-    since = getattr(config, "arrayscope_since", None) or _since_on_the_controller(config)
+    since = (
+        # In order of authority: what this process actually applied, what the
+        # controller read before anything ran, and a late recompute for a shape
+        # neither of the first two covers.
+        getattr(config, "arrayscope_since", None)
+        or getattr(config, "arrayscope_since_controller", None)
+        or _since_on_the_controller(config)
+    )
 
     new_reds = _red_ledger.new_reds if _red_ledger is not None else _new_reds(config)
     inherited = testmon_policy.known_red_tests(config) - new_reds
@@ -1730,6 +1738,24 @@ def broken_here_lines(new_reds) -> list[str]:
     return lines
 
 
+def since_before_the_run(config):
+    """The ``--since`` report as the tree stood when the session opened.
+
+    Called from ``pytest_sessionstart``, and *when* is the whole point. Tests
+    re-record their fingerprints as they finish, so the same query asked at
+    summary time describes a tree that no longer exists — measured, a
+    ``--since --fresh`` run printed "ran the 233 tests your tree reaches"
+    directly above "branch reaches 185": one paragraph, one run, two trees.
+
+    This is the controller's only chance to ask, because xdist owns
+    ``pytest_collection`` and this conftest's implementation never runs there.
+    """
+
+    if config.getoption("since", default=None) is None:
+        return None
+    return _since_on_the_controller(config)
+
+
 def _since_on_the_controller(config):
     """The ``SinceReport`` for a run whose collection happened somewhere else.
 
@@ -1739,9 +1765,10 @@ def _since_on_the_controller(config):
     "unaffected and did not run" count. The gap the run had already closed was
     reported as still open, and the flag looked like it had done nothing.
 
-    Recomputed here rather than forwarded: the query is read-only and the workers
+    Recomputed rather than forwarded: the query is read-only and the workers
     have no channel to hand a number back on. It costs a couple of seconds, and
-    ``--since`` is the pre-merge step, not the inner loop.
+    ``--since`` is the pre-merge step, not the inner loop. Called through
+    :func:`since_before_the_run`, because *when* it runs changes the answer.
 
     The partition has to be recomputed the same way too, through the same
     function the workers applied — the counts in the printed sentence are the
