@@ -512,6 +512,106 @@ def test_the_honest_distrust_command_is_the_one_that_rebuilds():
     assert "`rm .testmondata && pytest`" not in document
 
 
+# --------------------------------------------------------------------------- #
+# What the run says when it finishes — the other half of why sweeps happen
+# --------------------------------------------------------------------------- #
+
+
+def test_the_closing_line_states_a_result_rather_than_a_deficit():
+    """ "3941 of 3941 not run" reads as an unfinished job, and gets finished.
+
+    The old line stated a deficit, and an agent reading it concludes it has been
+    handed an incomplete result and that closing the gap is its responsibility.
+    Four invitations to sweep used to fit in the five lines a bare `pytest`
+    prints. This is the load-bearing one: the number is the same, the claim is
+    the opposite.
+    """
+
+    from tests.conftest import unaffected_summary
+
+    nothing = "\n".join(unaffected_summary(0, 3941, 3941, 222.0, since=None))
+    assert "result, not a gap" in nothing
+    assert "3941" in nothing
+    assert "not run" not in nothing, "the sentence must not be about what was skipped"
+
+    something = "\n".join(unaffected_summary(20, 3520, 3540, 222.0, since=None))
+    assert "20" in something
+    assert "3520" in something
+    assert "by construction" in something
+    assert "not a sample" in something
+    # The cost of re-confirming them is named, because that is the trade being
+    # described and it is the thing an agent cannot see.
+    assert "222" in something
+
+
+def test_the_closing_line_still_reports_what_since_pulled_back_in():
+    from tests.conftest import unaffected_summary
+
+    widened = "\n".join(unaffected_summary(65, 3480, 3545, 222.0, since=("main", 65)))
+    assert "--since main" in widened
+    assert "pytest --since" not in widened, "no point suggesting the flag that is on"
+    assert "pytest --since" in "\n".join(unaffected_summary(1, 3540, 3541, 222.0, since=None))
+
+
+def test_editing_the_harness_is_named_in_the_header():
+    """A rational doubt, answered before it turns into a sweep.
+
+    Editing ``tests/conftest.py`` or ``tests/testmon_policy.py`` makes an agent
+    doubt the thing that just told it 3941 tests were fine. Selection
+    fingerprints those files like anything else, so the honest answer is that
+    every test which recorded them is already in this run — and saying it costs
+    one line.
+    """
+
+    from tests.conftest import harness_self_edit_notice
+
+    assert harness_self_edit_notice(frozenset()) == ""
+    assert harness_self_edit_notice(frozenset({"arrayscope/render/lod.py"})) == ""
+    notice = harness_self_edit_notice(frozenset({"tests/conftest.py"}))
+    assert "tests/conftest.py" in notice
+    assert "pytest --since" in notice
+    assert harness_self_edit_notice(frozenset({"tests/testmon_policy.py"}))
+
+
+def test_a_bypass_permitted_by_price_still_says_why():
+    """`Bypassed selection ()` — empty parentheses — was what a cheap run printed.
+
+    The whole point of that line is to keep a bypass visible, and a blank reason
+    makes it look like a formatting bug rather than a statement.
+    """
+
+    from tests.conftest import bypass_reason
+
+    assert bypass_reason("explicitly forced") == "explicitly forced"
+    assert bypass_reason("") == "cheap enough that retyping the command would cost more"
+
+
+def test_the_broken_here_block_names_the_next_command():
+    """A red an agent cannot explain is the moment it reaches for a sweep."""
+
+    from tests.conftest import broken_here_lines
+
+    printed = "\n".join(broken_here_lines(["tests/render/test_effects.py::test_x"]))
+    assert "pytest tests/render/test_effects.py::test_x" in printed
+    assert "accept-reds" in printed
+    assert broken_here_lines([]) == []
+
+
+def test_the_help_group_states_the_policy_rather_than_pointing_at_it():
+    """`pytest --help` prints this group under testmon's own, for free.
+
+    It used to be a bare pointer at a document, which is worth exactly as much
+    as the reader's willingness to go and read it — and the reader here has, by
+    construction, just typed something that document told them not to.
+    """
+
+    from tests.conftest import SELECTION_GROUP
+
+    assert "pytest --since" in SELECTION_GROUP
+    assert "refused" in SELECTION_GROUP
+    assert "docs/testing/test-selection.md" in SELECTION_GROUP
+
+
 def test_no_document_names_a_flag_that_does_not_exist():
     """`--no-testmon-force` was printed twice in the reference and is not a flag.
 

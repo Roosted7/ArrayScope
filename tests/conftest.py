@@ -66,13 +66,22 @@ _SERIAL_BELOW_SECONDS = 2.5
 SERIAL_FLAG = "--serial-force-please-i-really-consider-it-needed"
 
 
+#: The one line ``pytest --help`` prints above these options, directly under
+#: testmon's own group. It used to be a bare pointer at a document, which is
+#: worth what the reader's willingness to go and read it is worth -- and the
+#: reader here has, by construction, just typed something that document told
+#: them not to. So it states the policy instead, in one breath.
+SELECTION_GROUP = (
+    "arrayscope test selection — `pytest` runs what your tree affects; "
+    "`pytest --since` before merging. Wide `--no-testmon` / `--testmon-noselect` / "
+    "`-n 0` runs are refused by price. Reference: docs/testing/test-selection.md"
+)
+
+
 def pytest_addoption(parser):
-    # One group, so the pointer to the reference is printed once for all of
-    # these rather than repeated in every option's help.
-    group = parser.getgroup(
-        "arrayscope selection",
-        "arrayscope test selection — docs/testing/test-selection.md",
-    )
+    # One group, so the policy line is printed once for all of these rather than
+    # repeated in every option's help.
+    group = parser.getgroup("arrayscope selection", SELECTION_GROUP)
     group.addoption(
         "--since",
         metavar="REF",
@@ -1162,7 +1171,59 @@ def pytest_report_header(config):
         lines.append(
             f"test selection: on ({decision.reason}) — {affected} of {mapped} mapped tests affected"
         )
+    notice = harness_self_edit_notice(_harness_files_changed(config))
+    if notice:
+        lines.append(notice)
     return lines
+
+
+#: Editing either of these makes selection's own answer suspect, which is a
+#: rational doubt and deserves an answer rather than a shrug.
+_HARNESS_FILES = ("tests/conftest.py", "tests/testmon_policy.py")
+
+
+def _harness_files_changed(config) -> frozenset[str]:
+    """Which of :data:`_HARNESS_FILES` differ from what the map recorded.
+
+    Asked of exactly two paths rather than of the tree, because the general
+    question hashes every file of interest and this one is on the header path of
+    every run. It cannot come from ``unstable_files``: that is the set of *test*
+    files the affected tests live in, and ``tests/conftest.py`` holds no tests,
+    so editing the harness never appears there however much it changes.
+    """
+
+    data = getattr(config, "testmon_data", None)
+    if data is None:
+        return frozenset()
+    try:
+        fshas = {}
+        for name in _HARNESS_FILES:
+            module = data.source_tree.get_file(name)
+            if module is not None:
+                fshas[name] = module.fs_fsha
+        return frozenset(data.db.fetch_unknown_files(fshas, data.exec_id))
+    except Exception:  # a header line is not worth failing a run over
+        return frozenset()
+
+
+def harness_self_edit_notice(affected_files) -> str:
+    """One line for the run that changed the thing doing the selecting.
+
+    Editing ``tests/conftest.py`` makes an agent doubt the harness that just
+    told it 3941 tests were fine — and that doubt is *correct* in shape, wrong
+    only in remedy. Selection fingerprints these files like anything else, so
+    every test that recorded them is already in this run; saying so is what
+    keeps the doubt from becoming a sweep.
+    """
+
+    touched = sorted(name for name in (affected_files or ()) if name in _HARNESS_FILES)
+    if not touched:
+        return ""
+    return (
+        f"test selection: you changed the harness itself ({', '.join(touched)}). Selection "
+        "fingerprints it like anything else, so every test that recorded it is in the affected "
+        "set above. Branch-sized proof: pytest --since"
+    )
 
 
 #: Below this, an exhaustive run cost nothing worth naming an alternative for.
@@ -1382,11 +1443,22 @@ def _report_gate_run_cost(terminalreporter, config) -> None:
         return
     elapsed = monotonic() - started
     terminalreporter.write_line(
-        f"Bypassed selection ({_bypass_permitted(config)}) and ran {elapsed:.0f} s.",
+        f"Bypassed selection ({bypass_reason(_bypass_permitted(config))}) and ran {elapsed:.0f} s.",
         bold=True,
         yellow=True,
     )
     terminalreporter.write_line(BYPASS_BANNER, bold=True, red=True)
+
+
+def bypass_reason(permitted_because: str) -> str:
+    """The parenthesised half of the closing line, never empty.
+
+    A run permitted by *price* has no permission string, so the line read
+    ``Bypassed selection ()`` — which looks like a formatting bug rather than a
+    statement, and the whole point of the line is to keep the bypass visible.
+    """
+
+    return permitted_because or "cheap enough that retyping the command would cost more"
 
 
 def pytest_terminal_summary(terminalreporter, config):
@@ -1432,12 +1504,11 @@ def pytest_terminal_summary(terminalreporter, config):
     if testmon_policy.rerun_known_red_tests(config):
         skipped -= len(inherited)
     skipped = max(0, skipped)
-    widened = f" +{reached} --since {since[0]}" if since is not None and reached else ""
-    hint = "" if since is not None else " Pre-merge: `--since`."
-    terminalreporter.write_line(
-        f"test selection: {skipped}/{mapped} mapped unaffected, not run{widened}.{hint}",
-        bold=True,
-    )
+    sweep = sum(_recorded_test_seconds(config).values())
+    for line in unaffected_summary(
+        tests_executed(terminalreporter), skipped, mapped, sweep, since=since
+    ):
+        terminalreporter.write_line(line, bold=True)
     if inherited and not testmon_policy.rerun_known_red_tests(config):
         terminalreporter.write_line(
             f"test selection: {len(inherited)} inherited reds not re-run; "
@@ -1445,19 +1516,88 @@ def pytest_terminal_summary(terminalreporter, config):
             bold=True,
             yellow=True,
         )
-    if new_reds:
-        # Printed whether or not they ran this time. They are never deselected,
-        # so normally they are in the failure list above — but a run scoped with
-        # -k or a path can still miss them, and then this is the only place the
-        # regression is named.
-        terminalreporter.write_line(
-            f"BROKEN HERE ({len(new_reds)}): these were passing in this checkout and are "
-            "not; they run on every selected run until they pass again.",
-            bold=True,
-            red=True,
+    for line in broken_here_lines(new_reds):
+        terminalreporter.write_line(line, bold=True, red=True)
+
+
+def tests_executed(terminalreporter) -> int:
+    """How many tests this session actually ran, from the reporter's own tally.
+
+    Not from collected items: under xdist the controller never collects, and not
+    from the map either, which describes the tests that *exist*. The tally is
+    what the "N passed" line is built from, so the two cannot disagree.
+    """
+
+    stats = getattr(terminalreporter, "stats", None) or {}
+    return sum(len(stats.get(key, ()) or ()) for key in ("passed", "failed", "error"))
+
+
+def unaffected_summary(ran, skipped, mapped, sweep_seconds, since) -> list[str]:
+    """The closing sentence about the gap between this run and the suite.
+
+    This is the highest-leverage string in the file, and it used to say the
+    wrong thing about the right number::
+
+        test selection: 3941/3941 mapped unaffected, not run. Pre-merge: `--since`.
+
+    That states a **deficit**. An agent reading "3941 of 3941 not run" concludes
+    it has been handed an incomplete result and that finishing the job is its
+    responsibility -- which is how a selected run ends in a sweep. The number is
+    unchanged here; the claim is inverted. Nothing was withheld: the tests that
+    did not run could only have re-confirmed fingerprints that still hold, and
+    saying what that would have cost is what makes the trade visible.
+
+    Kept as a pure function because the sentence is the feature. It is the only
+    thing between a green selected run and somebody deciding to "make sure".
+    """
+
+    lines = []
+    if ran:
+        tests = "test" if ran == 1 else "tests"
+        lines.append(
+            f"test selection: ran the {ran} {tests} your tree reaches. The other {skipped} of "
+            f"{mapped} are unaffected by construction — their recorded"
         )
-        for nodeid in sorted(new_reds):
-            terminalreporter.write_line(f"    {nodeid}", red=True)
+        lines.append(
+            f"  fingerprints still hold, so running them could only re-confirm them "
+            f"(~{sweep_seconds:.0f} s). This is the complete affected set, not a sample."
+        )
+    else:
+        lines.append(
+            "test selection: nothing to run — no line your working tree changed is executed "
+            f"by any of the {mapped} recorded tests."
+        )
+        lines.append("  That is a result, not a gap.")
+    if since is not None and since[1]:
+        lines.append(f"  Widened by +{since[1]} --since {since[0]}.")
+    elif since is None:
+        lines.append("  Branch-sized question, before merging:  pytest --since")
+    return lines
+
+
+def broken_here_lines(new_reds) -> list[str]:
+    """Name the tests this checkout broke, and the two commands that follow.
+
+    The heading was already good; what was missing was the next command. A red
+    an agent cannot explain is exactly the moment it reaches for a sweep, and a
+    sweep answers neither question -- "is it still broken" is one node id, and
+    "is it even mine" is a ledger question, not a test-running one.
+    """
+
+    reds = sorted(new_reds or ())
+    if not reds:
+        return []
+    lines = [
+        f"BROKEN HERE ({len(reds)}): these were passing in this checkout and are not; "
+        "they run on every selected run until they pass again.",
+    ]
+    lines.extend(f"    {nodeid}" for nodeid in reds)
+    lines.append(f"    Re-check just this one:  pytest {reds[0]}")
+    lines.append(
+        "    Not yours (stale worktree, stacked branch)?  "
+        "python tools/test_selection.py accept-reds"
+    )
+    return lines
 
 
 def _since_on_the_controller(config):
@@ -1552,9 +1692,17 @@ def _report_function_coverage(terminalreporter, config):
             f"coverage: baseline recorded for this checkout ({roots}/).",
             bold=True,
         )
-    elif drift.moved:
+    elif drift.moved and tests_executed(terminalreporter):
+        # Only when something ran. A drift line under `no tests ran in 0.38s`
+        # reads as damage this run did, and nothing this run did could have
+        # caused it -- it is drift against a baseline the checkout inherited,
+        # and it was the second of four invitations to sweep that a bare
+        # `pytest` used to print in five lines.
         points = reach.percent - (100.0 * drift.baseline_covered / max(1, reach.total))
-        line = f"coverage: +{len(drift.gained)} -{len(drift.lost)} functions ({points:+.1f} pts)"
+        line = (
+            f"coverage: +{len(drift.gained)} -{len(drift.lost)} functions ({points:+.1f} pts) "
+            "vs the baseline this checkout inherited"
+        )
         if drift.lost:
             line += " — `tools/test_selection.py coverage` names the lost ones"
         terminalreporter.write_line(f"{line}.", bold=True, yellow=bool(drift.lost))

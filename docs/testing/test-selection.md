@@ -31,15 +31,24 @@ runs*, never *which ring a claim needs*.
    the same tests *and updates the map*. That one is refused only when it
    would repair nothing. See [Why `--no-testmon` is
    refused](#why---no-testmon-is-refused).
-5. **Never `-p no:randomly`.** pytest-randomly is not installed here, so the
-   flag does nothing — and the run **aborts** if you pass it. It is worse than
-   inert: it reads as "the ordering is pinned", so a flake it never had a
-   chance of preventing gets blamed on something else. It also only ever
-   arrives from another repository's habit, which is worth stopping to notice.
-6. **Suspect the map? Report it.** Do not route around it silently.
+5. **No `-p no:...` here.** Three spellings arrive from other repositories'
+   habits and all three abort:
+   - `-p no:randomly` — pytest-randomly is not installed, so the flag does
+     nothing. It is worse than inert: it reads as "the ordering is pinned", so a
+     flake it never had a chance of preventing gets blamed on something else.
+   - `-p no:cacheprovider` — **crashes the run**, every time. testmon reads
+     `config.option['lf']`, which only exists while the cache plugin is
+     registered, so blocking it exits 3 with an INTERNALERROR that looks like
+     this repository is broken. Here the cached state is the *feature*:
+     `.testmondata` is what makes `pytest` narrow.
+   - `-p no:pytest-testmon` — turns selection and recording off with nothing to
+     say so.
+6. **`-n 0` is for one test, not for the suite.** A wide serial run is refused;
+   see [Why a wide `-n 0` is refused](#why-a-wide--n-0-is-refused).
+7. **Suspect the map? Report it.** Do not route around it silently.
 
-Rules 4 and 5 are enforced by the run rather than by anyone having read this —
-both abort, and `pytest --help` carries the per-flag detail.
+Rules 4, 5 and 6 are enforced by the run rather than by anyone having read this —
+all abort, and `pytest --help` carries the per-flag detail.
 Reasoning: [Why not just sweep?](#why-not-just-sweep) and [Why `--no-testmon` is
 refused](#why---no-testmon-is-refused).
 
@@ -76,11 +85,25 @@ what it did in two places:
 ```
 test selection: on (default) — 20 of 3540 mapped tests affected
 ...
-test selection: 3520 of 3540 mapped tests unaffected, not run. Pre-merge: `--since`.
+test selection: ran the 20 tests your tree reaches. The other 3520 of 3540 are
+  unaffected by construction — their recorded fingerprints still hold, so running
+  them could only re-confirm them (~222 s). This is the complete affected set,
+  not a sample.
+  Branch-sized question, before merging:  pytest --since
 ```
 
-Read the second line before writing "suite green" anywhere. A selected run that
-passes says the affected tests pass — a strictly smaller claim.
+and when nothing is affected at all:
+
+```
+test selection: nothing to run — no line your working tree changed is executed
+  by any of the 3540 recorded tests.
+  That is a result, not a gap.
+```
+
+Read the closing line before writing "suite green" anywhere. A selected run that
+passes says the affected tests pass — a strictly smaller claim, and a different
+one from "the suite is green". What it is *not* is an unfinished job: the tests
+that did not run could only have re-confirmed fingerprints that still hold.
 
 | Goal | Command |
 |---|---|
@@ -171,6 +194,13 @@ exhaustive, so no stale map can quietly truncate them:
 | `--cov` / `--cov-report` | a coverage number over a subset of the suite is a false number |
 | `CI` is set | every CI job is a gate; see below for the one exception |
 | pytest-testmon not installed | nothing to select with |
+| pytest-testmon installed but not registered (`-p no:pytest-testmon`) | the plugin, not the package, is what would have done the work |
+
+That last row is the invariant behind all of them: **a run may only print
+`test selection: on` if it can prove it** — the plugin registered, it built its
+configuration, and the map could be read. Everything else is a bypass and gets
+priced like one. Every degradation path in this layer fails *open*, so the
+absence of proof is reported rather than assumed away.
 
 An explicit `--testmon`, `--testmon-noselect`, `--testmon-nocollect` or
 `--testmon-forceselect` always wins and is passed through untouched.
@@ -829,6 +859,86 @@ Test files the map has never seen count as work, never as absence: unknown means
 The effect on a small change: `pytest tests/kernel` after a one-function edit is
 **0.9 s**, against 2.4 s for the same command with eight workers and no
 selection.
+
+An **explicit** `-n N` used to walk straight past the half-cores cap, because
+that cap lives in `pytest_xdist_auto_num_workers` and only `-n auto` consults
+it. It is now clamped, and the run says so:
+
+```
+worker sizing: -n 16 capped to 8 (half the logical cores). Concurrent GL context
+creation past that intermittently segfaults the driver and starves the
+timing-sensitive UI tests.
+```
+
+### Why a wide `-n 0` is refused
+
+`-n 0` is right for one test and wrong for the suite, and nothing used to say
+so. What it costs depends entirely on what it is paired with: bare on a clean
+tree it is 0.37 s; after an edit it is the selected set run honestly, ~8×
+slower; paired with any bypass it is the whole suite in one process.
+
+Three things make that last shape worse than merely slow:
+
+1. **There is no per-test timeout.** `pytest-timeout` is not installed; the
+   settlement watchdogs are deadlock guards inside individual helpers. A test
+   that never settles hangs the process indefinitely at 100% CPU. Under `-n auto`
+   that costs one worker and the other seven keep printing, so it reads as
+   "slow"; serially the terminal simply stops. `faulthandler_timeout = 300` now
+   turns that into a dumped traceback naming the test — a floor, not a fix.
+2. **A segfault takes the run, not a worker.** xdist reports a crashed node and
+   carries on; `-n 0` has nothing to carry on with.
+3. **Serial is a different regime with its own reds** — ~25 of them standing. A
+   wide `-n 0` run is not a de-noised version of the parallel run; it is a
+   second, less-tested one, and most of what it produces is not yours.
+
+So an explicitly typed `-n 0` is priced, against **what the run will execute**:
+node ids sum to their own recorded seconds, a still-selecting run is priced at
+its affected set within scope, and only a run that has stopped selecting is
+priced at the whole scope. `pytest -n 0 tests/ui` after a one-line edit runs
+three tests, and refusing it because `tests/ui` *could* cost 1164 s would be the
+"unknown is large" mistake pointed the other way.
+
+The threshold is **60 s**, and it is calibrated rather than chosen — every
+documented serial command sits well below it and every harmful shape well above,
+with nothing in the 3.8× gap between:
+
+| Serial by design | recorded | | Refused shapes | recorded |
+|---|---|---|---|---|
+| ring 0 fast loop (`tests/kernel tests/render tests/presentation`) | 5.6 s | | `tests/app` | 105.9 s |
+| ring 1 presentation contract (3 files) | 16.4 s | | `tests/ui` | 1164.8 s |
+| ring 2 artifacts (`tests/ui/test_qt_smoke_artifacts.py`) | 27.5 s | | whole suite | 1320.0 s |
+| CI's serial step | 29.7 s | | | |
+
+Never refused, at any price:
+
+* `CI` is set — its serial steps are the artifact gate;
+* the run is **not** the offscreen regime (`ARRAYSCOPE_GPU_TESTS`,
+  `ARRAYSCOPE_STRESS`, `ARRAYSCOPE_STRICT_UI`, or a non-offscreen
+  `QT_QPA_PLATFORM`). Rings 3–4 *require* serial and their price is unknowable
+  from a map that has never held their environment key;
+* every path argument is under `tests/gpu_interaction`, `tests/stress`, or
+  `tests/ui/test_qt_smoke_artifacts.py`;
+* `--pdb` or `--trace` — pdb genuinely cannot work under xdist. Deliberately
+  **not** `-s`: "I want to see prints" is a reflex, not a reason to spend ten
+  minutes;
+* `--collect-only`, which executes nothing;
+* `--serial-force-please-i-really-consider-it-needed`.
+
+Note the direction on unknown cost is the **opposite** of the bypass gate's.
+Rings 3 and 4 have zero recorded seconds by construction, so "unknown is large"
+would refuse the two rings [ground rule 1](README.md) depends on. Scope is the
+backstop instead: an unpriceable serial run is refused only when it names the
+whole suite, which is the fresh-clone `pytest -n 0`.
+
+The override is separate from the bypass one on purpose. "I need the tracer out
+of the way" and "I need this in one process" are unrelated claims, and a single
+flag granting both would hand each exemption to somebody who only meant the
+other.
+
+One stale scare is worth retiring here: `-n 0` no longer reads the developer's
+real `~/.config`. `tests/conftest.py` points `XDG_CONFIG_HOME` at a private
+directory for serial runs too, so the QSettings half of the old `-n 0` trap is
+closed.
 
 ## Debugging selection itself
 

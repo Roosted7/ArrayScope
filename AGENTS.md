@@ -152,8 +152,11 @@ QT_QPA_PLATFORM=offscreen pytest -q tests/display tests/window
 QT_QPA_PLATFORM=offscreen pytest -q tests/ui tests/app
 ```
 
-Add `-n 0` to any command to run serially when debugging (clean tracebacks, working `-s`/`pdb`):
-`pytest -q -n 0 tests/ui/test_foo.py::test_bar`.
+Add `-n 0` to a **node id** to run that one test serially when debugging (clean
+tracebacks, working `-s`/`pdb`): `pytest -q -n 0 tests/ui/test_foo.py::test_bar`.
+A wide `-n 0` is refused — serial is not a safer mode here, it is a different
+regime with its own standing failures, no per-test timeout and no worker to
+survive a segfault. Rings 2–4 are serial by design and never refused.
 
 Also run:
 
@@ -166,5 +169,12 @@ git diff --check
 For rendering/UI changes, perform the relevant manual checks from `docs/testing/manual-regression.md` and record the backend, OS/session type, dataset shape/dtype, and diagnostics trace.
 
 ## Handoff
+
+Quote the selection, not a sweep. `python tools/test_selection.py` gives the
+blast radius ("touches 84 tests across `ui`, `window`, `display`") and
+`pytest --since` is the branch-sized gate. A local full sweep is **not** a
+stronger claim than `--since`: CI sweeps every push, and a sweep records
+nothing, so it leaves the map no better than it found it. "I ran everything" is
+a statement about your patience, not about the change.
 
 State what changed, tests and manual checks run (naming the ring for any rendering/scheduling claim), remaining risks, and any follow-up. Follow-ups go to `docs/queue.md` (or the owning dossier); reverted experiments get a `docs/graveyard.md` row; exploratory material goes to `docs/ideas.md`. Update queue rows in place — never append status logs to planning docs.
