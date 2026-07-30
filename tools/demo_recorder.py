@@ -807,13 +807,21 @@ class Recorder:
         event["activate_frame"] = self.frame_index - 1
         self._finish_action(event)
 
-    def type_into(self, line_edit, text: str, on_text=None, per_char_s=0.12) -> None:
+    def type_into(
+        self,
+        line_edit,
+        text: str,
+        on_text=None,
+        per_char_s=0.12,
+        *,
+        label: str | None = None,
+    ) -> None:
         """Click into a line edit and type ``text`` one character at a time.
         ``on_text`` (if given) is called with the full text once at the end —
         wire it to the window handler the edit would notify."""
         event = self._start_action(
             "type",
-            f"type {text!r} into {self._widget_label(line_edit)}",
+            label or f"type {text!r} into {self._widget_label(line_edit)}",
             target=self._widget_target(line_edit, (0.5, 0.5)),
         )
         self.click(
@@ -831,6 +839,38 @@ class Recorder:
         if on_text is not None:
             on_text(text)
         event["activate_frame"] = self.frame_index
+        self.settle()
+        self._finish_action(event)
+
+    def scrub_text_values(
+        self,
+        line_edit,
+        values,
+        *,
+        on_text,
+        per_value_s: float,
+        label: str,
+    ) -> None:
+        """Animate successive real edit values under one manifested action."""
+        self.click(
+            line_edit,
+            invoke=line_edit.setFocus,
+            settle_after=False,
+            label=f"focus {self._widget_label(line_edit)}",
+        )
+        event = self._start_action(
+            "scrub",
+            label,
+            target=self._widget_target(line_edit, (0.5, 0.5)),
+        )
+        event["press_frame"] = self.frame_index
+        event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
+        for value in values:
+            text = str(value)
+            line_edit.setText(text)
+            on_text(text)
+            self.hold(per_value_s)
+        event["activate_frame"] = max(event["start_frame"], self.frame_index - 1)
         self.settle()
         self._finish_action(event)
 
@@ -853,13 +893,32 @@ def s_showcase(rec: Recorder):
 
     rec.caption("Scrub through any dimension")
     chip = win.dimension_strip.chip(2)
-    rec.move_to(chip.slice_edit, seconds=0.8)
-    for index in list(range(24, 43, 2)) + list(range(42, 9, -3)) + list(range(10, 25, 2)):
-        chip.slice_edit.setText(str(index))
-        win._on_slice_text_changed(2, str(index))
-        rec.hold(0.09)
-    rec.settle()
+    rec.scrub_text_values(
+        chip.slice_edit,
+        list(range(24, 43, 2)) + list(range(42, 9, -3)) + list(range(10, 25, 2)),
+        on_text=lambda text: win._on_slice_text_changed(2, text),
+        per_value_s=0.09,
+        label="scrub axis 2 slices",
+    )
     rec.hold(0.6)
+
+    rec.caption("Crop a displayed axis with an explicit range")
+    axis0_edit = win.dimension_strip.chip(0).slice_edit
+    rec.type_into(
+        axis0_edit,
+        "16:112",
+        on_text=lambda text: win._on_slice_text_changed(0, text),
+        label="crop axis 0 to 16:112",
+    )
+    rec.hold_until_settled(1.5, tail_s=0.8)
+    rec.caption("Return to the full axis with ':'")
+    rec.type_into(
+        axis0_edit,
+        ":",
+        on_text=lambda text: win._on_slice_text_changed(0, text),
+        label="restore full axis 0",
+    )
+    rec.hold_until_settled(1.5, tail_s=0.6)
 
     rec.caption("Re-map the image axes with one click")
     rec.click(win.dimension_strip.chip(2).y_button)
@@ -873,6 +932,11 @@ def s_showcase(rec: Recorder):
     rec.hold(0.4)
     rec.pan_image(18, 10, seconds=1.2)
     rec.hold(0.4)
+    one_to_one_widget = rec.toolbar_action_widget(
+        win.display_toolbar, win.display_toolbar.one_to_one_action
+    )
+    rec.click(one_to_one_widget, label="show image at true 1:1")
+    rec.hold_until_settled(1.5, tail_s=0.8)
     fit_widget = rec.toolbar_action_widget(win.display_toolbar, win.display_toolbar.fit_action)
     rec.click(fit_widget)
     rec.hold_until_settled(2.0, tail_s=1.6)

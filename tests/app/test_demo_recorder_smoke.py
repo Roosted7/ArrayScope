@@ -105,6 +105,14 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         assert not [
             event for event in actions if event["kind"] == "click" and event["target"] is None
         ], "ROI transitions must not imply a click at an unrelated cursor position"
+    if name == "showcase":
+        labels = {event["label"] for event in actions}
+        assert {
+            "scrub axis 2 slices",
+            "crop axis 0 to 16:112",
+            "restore full axis 0",
+            "show image at true 1:1",
+        } <= labels
 
 
 def test_caption_wrapping_is_bounded_to_two_readable_lines(qt_app):
