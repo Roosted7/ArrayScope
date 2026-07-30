@@ -1014,10 +1014,30 @@ class LevelStatsService:
         if not self._frame_session_is_current(session):
             return
         round_source = str(getattr(session, "round_level_evidence_source", "") or "")
-        if round_source == "preview-cohort":
+        if _preview_cohort_owns_cpu_round_levels(self, session):
+            # A CPU bake cannot change the round value without re-baking every
+            # tile it already painted, so the cohort's value is final for the
+            # round there. A shader backend re-windows in the shader, so the
+            # cohort is only its FIRST value: this sweep stays the sole
+            # producer of refined evidence, and the shader guards below keep it
+            # out of the fill it would otherwise compete with. Blocking it for
+            # every preview-backed round left shader sessions windowed on
+            # 512-sample-per-tile estimates permanently (the r8 phasing and
+            # single-slice evidence gates caught exactly that).
             if self._montage_level_tracker().cached_histogram_data(session.level_key) is None:
                 self._schedule_montage_histogram_aggregate(session)
             return
+        # A shader round that falls through still has to BOOTSTRAP the sweep it
+        # is falling through to: the shader guard below refuses to start until
+        # `first_pass_histogram_published`, and that flag is set by this
+        # aggregate. Without this the sweep returns early forever and a crop
+        # rebind waits on levels that can never arrive (measured: the
+        # `test_resident_crop_rebind` gradient scrub stalls out at 20 s).
+        if (
+            round_source == "preview-cohort"
+            and self._montage_level_tracker().cached_histogram_data(session.level_key) is None
+        ):
+            self._schedule_montage_histogram_aggregate(session)
         if round_source == "preview-cohort-pending":
             if bool(session.scheduling_policy.verdict.coverage_open):
                 return

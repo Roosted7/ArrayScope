@@ -26,7 +26,10 @@ def test_wgpu_complex_first_pass_levels_precede_physical_draw_and_refinement(qtb
 
     from pyqtgraph.Qt import QtCore
 
-    from arrayscope.display.model.montage_levels import LevelEvidenceQuality
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        MontageLevelTracker,
+    )
     from arrayscope.display.shader_mapping import TexturePlaneKind
     from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
     from arrayscope.gpu.command_protocol import SetDisplayMapping
@@ -46,6 +49,7 @@ def test_wgpu_complex_first_pass_levels_precede_physical_draw_and_refinement(qtb
 
     original_prepared = LevelStatsService._update_montage_level_bounds_from_prepared
     original_rendered = LevelStatsService._update_montage_level_bounds_from_rendered
+    original_install_cohort = MontageLevelTracker.install_cohort
     original_present = WgpuImageView2D.setTiledPresentation
     original_submit_wgpu = WgpuImageView2D._submit_wgpu
     original_submit_speculative = Kernel.submit_speculative_batch
@@ -99,6 +103,30 @@ def test_wgpu_complex_first_pass_levels_precede_physical_draw_and_refinement(qtb
             int(rendered.tile.source_index),
             before,
         )
+        return result
+
+    def install_cohort(tracker, key, tile_stats, *, expected_indices):
+        """Observe the round-cohort merge site.
+
+        A preview-backed round installs its whole rough population in ONE
+        tracker revision rather than merging source by source, so the per-source
+        hooks above see nothing during the first pass.  This is the same
+        evidence at the same phase boundary, published atomically.
+        """
+
+        rows = tuple(tile_stats)
+        result = original_install_cohort(tracker, key, rows, expected_indices=expected_indices)
+        summary = tracker.summary_for(key)
+        quality = int(getattr(summary, "evidence_quality", 0) or 0)
+        phase = (
+            "rough sample merged"
+            if quality <= int(LevelEvidenceQuality.ROUGH_TARGET)
+            else "refined sample merged"
+        )
+        bounds = tuple(getattr(summary, "bounds", ()) or ())
+        for row in rows:
+            evidence_attempts[quality] += 1
+            events.append((phase, int(row.source_index), quality, bounds))
         return result
 
     def submit_wgpu(view, commands):
@@ -207,6 +235,7 @@ def test_wgpu_complex_first_pass_levels_precede_physical_draw_and_refinement(qtb
     monkeypatch.setattr(
         LevelStatsService, "_update_montage_level_bounds_from_rendered", update_rendered
     )
+    monkeypatch.setattr(MontageLevelTracker, "install_cohort", install_cohort)
     monkeypatch.setattr(WgpuImageView2D, "_submit_wgpu", submit_wgpu)
     monkeypatch.setattr(WgpuImageView2D, "setTiledPresentation", present)
     monkeypatch.setattr(Kernel, "submit_speculative_batch", submit_speculative)

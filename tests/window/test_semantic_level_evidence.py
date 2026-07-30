@@ -182,6 +182,11 @@ def test_semantic_owner_covers_full_population_without_admitting_offscreen_tiles
 def test_preview_cohort_atomically_owns_round_levels_without_source_sweep(capabilities):
     data = np.arange(8 * 10 * 20, dtype=np.float32).reshape(8, 10, 20)
     session = _session(data)
+    # A shader frame windows in the shader, so it must be told so: the sweep's
+    # settlement guards are the reason it stays out of the fill on that backend,
+    # and a session claiming WGPU capabilities while reporting a CPU bake would
+    # exercise neither owner's real rule.
+    session.shader_display = bool(capabilities.shader_windowing)
     service, kernel = _service(session, capabilities=capabilities)
     rendered = tuple(
         SimpleNamespace(
@@ -234,6 +239,41 @@ def test_preview_cohort_atomically_owns_round_levels_without_source_sweep(capabi
 
     service._schedule_semantic_level_evidence(session)
     assert not any(task["scope"] == "montage:semantic-level-evidence" for task in kernel.tasks)
+
+    # The cohort is final for the round only where changing it would mean
+    # re-baking pixels already painted.  A shader backend re-windows what it has
+    # already drawn, so the cohort is its FIRST value and the refined sweep must
+    # still close the round once nothing visible is waiting; blocking it there
+    # left shader sessions on 512-sample-per-tile estimates forever.
+    session.display_committed = True
+    session.first_pass_histogram_published = True
+    session.required_target_settled = lambda: True
+    _close_coverage_phase(session)
+
+    service._schedule_semantic_level_evidence(session)
+    refined_sweeps = [
+        task for task in kernel.tasks if task["scope"] == "montage:semantic-level-evidence"
+    ]
+    if capabilities.shader_windowing:
+        assert refined_sweeps, "a settled shader round has no refined-evidence producer"
+        assert session.semantic_level_evidence_target.pixel_limit == 8192
+        # And it really refines: the first batch replaces the cohort's rough
+        # rows for the sources it covers.  Converging the whole population is
+        # the background trickle's job, covered by
+        # ``test_wgpu_uses_background_batches_but_converges_to_the_same_population``
+        # and end to end by the r8 phasing and single-slice evidence gates.
+        kernel.run_next()
+        covered = tuple(session.semantic_level_evidence_progress.covered_sources)
+        assert covered
+        assert all(
+            tracker.has_source_quality(session.level_key, source, LevelEvidenceQuality.REFINED)
+            for source in covered
+        )
+    else:
+        assert not refined_sweeps
+        assert tracker.summary_for(session.level_key).evidence_quality == (
+            LevelEvidenceQuality.ROUGH_TARGET
+        )
 
 
 def test_admitted_preview_claim_prevents_source_sweep_race():
