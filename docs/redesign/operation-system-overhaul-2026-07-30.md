@@ -151,11 +151,37 @@ editor pane. Dialog tests consolidate onto the base (net fewer tests).
   `applied_axes` → blocking/expands/chunkable mapping, recipe field,
   multi-axis form widget; generalize the dimension-set slot to a named
   axis selection.
-- **R6 — Rank-increase enablement (gap A)**: mandatory-on-rank-change
-  `output_axes`, sibling-window presentation for ndim growth over a
-  derived source, view-recipe rank migration
-  (`view_state_from_mapping` constructs at saved rank before
-  `for_shape` can migrate), smoke + `fixed_and_mapped` coverage.
+- **R6 — Rank-increase enablement (gap A)**: **LANDED.** Gap A was never
+  one gap: the engine was already right (R2), and what remained was a
+  *presentation* rule plus two serialization defects. The rule: a
+  rank-increasing operation applied from the UI routes its result to a
+  compare-linked sibling window whose document is the origin's stack plus
+  the new step, handed to the constructor — which is the only moment the
+  per-dimension widget arrays are sized. No rank-growing step ever enters
+  a live window's own stack, and the origin is untouched. `_commit_operation`
+  turned out to be the single choke point all three add surfaces already
+  funnelled through, so the routing has exactly one site; it predicts the
+  output rank with `evaluate_shape` *before* mutating anything, declared
+  shapes first and the exact input only for an op that needs discovering,
+  and treats a failed prediction as "unknown" so no failure mode is
+  swallowed. The reload handoff at `file_reload.py:118-130` generalized to
+  `window/rank_handoff.py` for the same rank arriving any other way
+  (re-enabled inherited step, loaded recipe), keyed on the widget arrays'
+  *construction* capacity rather than the current rank — so a document that
+  shrank and grew back stays in place. Two seams were live bugs
+  independently of any of this: `view_state_from_mapping` built the state at
+  the target rank before `for_shape` could migrate it (a `ValueError` in
+  **both** directions, not just growth), and `recipe_from_mapping` walked
+  `output_shape` directly, which is precisely what a discovered-shape op
+  cannot answer. The proof op is `split_axis` — one axis into blocks plus a
+  new interleave axis — and it ships **exact** region algebra rather than
+  the sanctioned `expands_request` fallback, because the two requests the
+  interactive engine actually makes (scrub the new axis, scrub the block
+  axis) collapse to a stride and a run. Surprise worth keeping: linking the
+  sibling with the full compare facet set was *wrong* — synced dims dragged
+  the new axis back to whatever the origin's axis of the same number sat on,
+  i.e. it broke the one thing the sibling exists for. Only `levels` starts
+  enabled; axis-indexed facets are not meaningful across a rank change.
 - **R7 — Warm worker exchange protocol** (proposal first): long-lived
   env worker, multi-array envelope, progress/cancel transport; deletes
   the env-slot limitation and the probe/conda tax.

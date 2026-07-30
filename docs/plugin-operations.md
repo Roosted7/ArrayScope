@@ -243,6 +243,41 @@ parameter it never handles, whose `apply` crashes, or whose discovered contract 
 the output fails CI here without a hand-written per-op test, and the failure
 message names the offending op id.
 
+## An operation that adds a dimension
+
+A plugin op may return more axes than it was given. The engine already supports
+it end to end — the region planner, the stage cache and the slab evaluator
+evaluate a rank-increasing op the same way they evaluate any other, and
+characterization fits `fixed_and_mapped` rules for it — so the only things to
+get right are the axis contract and where the result is shown.
+
+**The axis contract.** Across a rank change, `output_axes(axes)` is effectively
+mandatory: a document whose axis metadata length does not match its shape is a
+construction error. Implement it, or accept the deliberately timid floor
+`arrayscope.core.axis_info` synthesizes (survivors kept positionally on a rank
+drop, plain defaults minted for a rank increase). Alongside it,
+`output_axis_sources(input_shape)` returns one entry per **output** axis naming
+the **input** axis it derives from, or `None` for an axis the op created; it is
+the only sanctioned way for `expanded_output_axes` to translate your input-space
+`expands_request_axes` into the output-space region the planner walks backwards.
+`PluginOperation` derives both from its characterized shape rule, so a plugin op
+whose shape is *discovered* gets them for free. The built-in `split_axis`
+(`arrayscope.operations.pipeline.SplitAxis`) is the hand-written reference: both
+of its output axes derive from one input axis, and it maps regions exactly
+rather than declaring the input axis expanded.
+
+**Where the result is shown.** A live window's per-dimension widget arrays are
+allocated once, at the rank the window was constructed at, and every sync loop
+indexes them positionally. A rank *decrease* survives that (surplus widgets
+hide); a rank *increase* cannot. So a rank-increasing operation applied from the
+UI opens a **compare-linked sibling window** over the same base array whose
+document is the origin's stack plus the new step, and announces it with a toast.
+No rank-growing step ever enters a live window's own stack. When one arrives
+some other way — a re-enabled inherited step, a loaded recipe — the document
+moves to a fresh window at the new rank (`arrayscope.window.rank_handoff` states
+exactly what that carries and what it drops) rather than raising `IndexError` in
+a widget loop.
+
 ## Recipes round-trip
 
 A recipe references a plugin op by its namespaced id plus its axis/parameters,

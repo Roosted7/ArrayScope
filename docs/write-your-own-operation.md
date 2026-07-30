@@ -297,6 +297,48 @@ the real input. It should return something NumPy can view as an array, and it
 must not depend on hidden mutable state that makes shape or dtype change between
 equivalent calls.
 
+## Write an operation that adds a dimension
+
+An operation may return an array with **more** axes than it was given — a
+sliding window over a time axis, an unpacked interleave, a per-coil expansion.
+Nothing about the engine forbids it: the region planner, the stage cache and the
+slab evaluator evaluate a rank-increasing operation the same way they evaluate
+any other. Two things are different for you.
+
+**Say where the new axes came from.** For a rank change, implement
+`output_axes(axes)` so the result carries axis metadata of the right length; a
+document whose axis metadata does not match its shape is a construction error,
+not a display glitch. If you also implement `output_axis_sources(input_shape)`
+— one entry per *output* axis naming the *input* axis it derives from, or `None`
+for an axis you created — the planner can translate your per-axis capability
+declarations across the rank change instead of failing closed. A user operation
+whose shape is discovered gets both of these fitted from the discovered shape
+rule, so this only concerns hand-written operations. The built-in **Split axis
+into two…** is a worked example of all of it.
+
+**Expect a new window.** ArrayScope's per-dimension controls — the Y/X/P
+buttons, the slice spinboxes, the dimension chips — are built once, for the rank
+the window was opened at, and cannot grow. So when you apply a rank-increasing
+operation, the result opens in a **sibling window** and a toast says so
+(“*<operation> adds a dimension — opened in a new window*”). The sibling shows
+the same base array through your window's whole stack plus the new step; every
+step is an ordinary entry in its operations dock, so you can edit, reorder or
+disable any of them there. The window you applied from is left untouched — no
+rank-growing step ever enters a live window's own stack. The sibling shares this
+window's levels (the split preserves the value population) but deliberately not
+its dimension positions, since its axes are no longer the same axes; the Sync
+toggles turn the rest on if you want them.
+
+If a rank-increasing step reaches a live window some other way — you re-enable
+an inherited one, or load a recipe containing one — the same rule applies: the
+document moves to a fresh window at the new rank and the old one closes. That
+carries the base array, the stack, the title and the file identity; it does not
+carry the view state, display settings, ROIs, or the dock layout, because every
+one of those is indexed by axis.
+
+Rank *decrease* needs none of this and stays in place, down to and including a
+1-D line plot. Only a 0-D result is refused.
+
 ## Save and restore it in a recipe
 
 After adding the operation to a view, use **File ▸ Save Operation Recipe**.
