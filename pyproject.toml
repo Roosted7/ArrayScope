@@ -93,6 +93,16 @@ codecs = [
 sigpy = [
     "sigpy>=0.1.26",
 ]
+# Optional pyFFTW backend for the centered FFT op
+# (arrayscope/operations/fft_backend.py, selectable from Performance settings).
+# Optional in the same sense as the codecs above: without pyfftw,
+# ``available_fft_backends()`` simply does not offer it and a stored ``pyfftw``
+# setting resolves back to the NumPy backend, so nothing breaks. This extra is
+# only needed to actually run FFTs through it -- and to exercise its test paths,
+# which ``importorskip`` when it is missing.
+fftw = [
+    "pyfftw>=0.13.0",
+]
 installer = [
     "pyinstaller>=6.10.0",
 ]
@@ -110,7 +120,50 @@ dev = [
     "tomli>=2.0.0; python_version < '3.11'",
     "twine>=4.0.0",
     "scalene>=2.2.0",
+    # Sampling profiler; driven as a subprocess by
+    # arrayscope/tools/profile_montage_workflow.py's py-spy modes.
+    "py-spy>=0.4.0",
+    # Pinned exactly, not floored, and deliberately: the `.githooks/pre-commit`
+    # gate and the CI `Lint (ruff + dead code)` job must reach the same verdict
+    # on the same tree, and ruff's rule set and formatter output move between
+    # releases -- under a floor a newer local ruff rejects what CI accepts, or
+    # the reverse, and the hook stops being a proxy for the job. CI installs
+    # `ruff==0.15.22` in .github/workflows/ci.yml; bump both together or not at
+    # all. (The conda channel used to supply a different version than PyPI,
+    # which is how this drift was found.)
+    "ruff==0.15.22",
 ]
+
+# PEP 735 group, and the reason it exists next to the `dev` extra above: `uv
+# sync` with no arguments must install the whole maintained developer
+# environment in one command, and uv can default-enable a *group* but not an
+# extra. So this group is the maintained set -- the `dev` extra plus every
+# optional runtime tail -- expressed as self-references, which keeps the extras
+# the single place a version floor is written. The extras are not decoration:
+# the codec, sigpy and pyfftw tests `importorskip` their dependency, so dropping
+# one from this list silently converts real coverage into skips.
+#
+# The `dev` *extra* stays because `.github/workflows/ci.yml` installs
+# `-e ".[dev,wgpu]"` with pip, which knows nothing about dependency groups.
+# `installer` is deliberately absent: PyInstaller is a release-machine concern,
+# installed by .github/workflows/installers.yml from its own extra.
+[dependency-groups]
+dev = [
+    "arrayscope[dev,wgpu,accel,codecs,sigpy,fftw]",
+]
+
+[tool.uv]
+# So a bare `uv sync` builds the maintained environment; see the group above.
+default-groups = ["dev"]
+# Never fetch an interpreter. The environment builds on the CPython the machine
+# already provides -- `.python-version` names 3.14, the version the retired
+# environment.yml pinned (as conda-forge `python-jit>=3.14`; a stock CPython 3.14
+# exposes `sys._jit` too, so nothing was lost with the channel build). A silent
+# multi-hundred-megabyte download into ~/.local/share/uv/python is not something
+# a `cd` into a worktree should be able to do. `requires-python` above stays
+# >=3.10 because that is what the *package* supports and what CI matrixes.
+python-downloads = "never"
+
 [tool.pytest.ini_options]
 # Run in parallel by default across all cores (pytest-xdist).
 #   -n auto          one worker process per CPU; each worker is a separate
