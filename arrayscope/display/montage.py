@@ -14,6 +14,46 @@ from arrayscope.display.geometry import MontageGeometry
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.shader_mapping import ShaderMapping, TexturePlaneKind
 
+# The three tile sets a camera defines, and the one halo between them.
+#
+# ``tiles_intersecting`` is handed a rect that ``montage_rect_for_viewport``
+# has already snapped outward to whole-tile bounds, so ``margin_tiles=0``
+# already means "every tile with any overlap".  The margins below are rings
+# *beyond* that drawn set, counted in whole tiles.
+#
+# These were six copies of the literal ``2`` and four of the literal ``1``,
+# spread over five modules, and two unrelated sets were both called ``near``
+# (margin 2 in the session, margin 1 in the planner) while they filled the
+# same downstream fields.  A radius is a policy, and a policy that is spelled
+# as a bare integer at its point of use cannot be reasoned about or changed.
+# Where a consumer genuinely wants a different ring it now says which one and
+# why; silence is no longer a way to pick a number.
+
+#: What the frame owes the screen.  Not a halo: every tile here must be
+#: presented, so widening it widens first-pixel latency directly.
+VISIBLE_MARGIN_TILES = 0
+
+#: What we ask to be *produced*.  One ring past the drawn set, so a pan of a
+#: single tile step does not have to start production from cold.  Every tile
+#: added here costs an evaluation, a reduction and an upload, which is why it
+#: is the narrowest ring that covers one pan step and no wider.
+COVERAGE_MARGIN_TILES = 1
+
+#: What we *keep and warm* -- the retention halo.  This is the ring that
+#: decides scheduling order (``TilePriorityBand.NEAR``), which in-flight work
+#: survives a viewport move, and which resident payload an eviction predicate
+#: should give up last.  It costs no production, only bookkeeping, which is
+#: why it can afford to be wider than coverage.
+#:
+#: Two rings, not one, because the halo has to survive the very move it exists
+#: to absorb: a pan that crosses one tile boundary consumes a one-ring halo
+#: exactly, leaving the next pan step as cold as if there had been no halo at
+#: all.  At two rings the newly drawn tiles come from ring 1 and ring 2 is
+#: still ahead of them.  Widening further is not free of *warm-up* work even
+#: though it is free of production, and the ring grows as the perimeter of the
+#: viewport, so each extra ring costs more than the last.
+RETENTION_HALO_TILES = 2
+
 
 @dataclass(frozen=True)
 class MontageTile:
@@ -429,6 +469,27 @@ def montage_rect_for_viewport(
         min(1, full_height),
     )
     return _expand_rect_to_tile_bounds(plan, rect)
+
+
+def viewport_tiles(
+    plan: MontagePlan, *, view_range, viewport_shape, margin_tiles: int
+) -> tuple[MontageTile, ...]:
+    """The one derivation of "which tiles does this camera cover, plus N rings".
+
+    Every consumer of a viewport tile set goes through here.  The margin alone
+    was never the whole policy: this snaps the camera rect outward to whole-tile
+    bounds and clips it to the montage first, and a caller that skipped that
+    step got a different set for the same camera and the same margin -- on a
+    272-tile montage zoomed to a few tiles, 6 tiles instead of 15 at margin 0.
+    Two definitions of one set is how a retention halo ends up protecting tiles
+    nobody is about to look at, so there is only one derivation.
+    """
+
+    rect = montage_rect_for_viewport(plan, view_range=view_range, viewport_shape=viewport_shape)
+    return plan.tiles_intersecting(
+        ((rect[0], rect[2]), (rect[1], rect[3])),
+        margin_tiles=max(0, int(margin_tiles)),
+    )
 
 
 def _expand_rect_to_tile_bounds(plan: MontagePlan, rect) -> tuple[int, int, int, int]:

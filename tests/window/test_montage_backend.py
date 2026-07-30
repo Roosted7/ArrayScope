@@ -5711,7 +5711,11 @@ def test_resize_retarget_requests_presentation_through_gate(qt_app):
 
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.backend_contract import ImageViewBackendCapabilities
-    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.display.montage import (
+        RETENTION_HALO_TILES,
+        VISIBLE_MARGIN_TILES,
+        make_montage_plan,
+    )
     from arrayscope.operations.pipeline import ArrayDocument
     from arrayscope.window.frame_controller import FrameControllerMixin
     from arrayscope.window.montage_viewport import MontageViewportPlan
@@ -5729,9 +5733,11 @@ def test_resize_retarget_requests_presentation_through_gate(qt_app):
 
         def __init__(self):
             self.retargeted = False
+            self.retarget_kwargs = {}
 
-        def retarget_viewport(self, **_kwargs):
+        def retarget_viewport(self, **kwargs):
             self.retargeted = True
+            self.retarget_kwargs = dict(kwargs)
             return (), True
 
         def mark_ladder_swaps_for_viewport(self, **_kwargs):
@@ -5795,6 +5801,15 @@ def test_resize_retarget_requests_presentation_through_gate(qt_app):
     assert win._frame_session.retargeted is True
     assert win.commits == 0
     assert win.presentation_requests == 1
+    # A resize is a live drag: it must not widen the PRODUCTION request, so
+    # coverage stays at the drawn set. It must still carry the retention halo,
+    # which costs no production and is what ``retarget_tile_priority`` turns
+    # into the NEAR band every ordering consumer reads. This used to pass 0 for
+    # both -- a VisPy zoom-cost reduction (19d36f45) whose two companions left
+    # with VisPy -- so every window resize blanked the halo until some later
+    # camera move rebuilt it.
+    assert win._frame_session.retarget_kwargs["coverage_margin_tiles"] == VISIBLE_MARGIN_TILES
+    assert win._frame_session.retarget_kwargs["near_margin_tiles"] == RETENTION_HALO_TILES
 
 
 def test_nonpersistent_tile_layer_viewport_update_preserves_level_target(qt_app):
@@ -6039,6 +6054,7 @@ def test_loading_only_tiled_commit_does_not_mutate_committed_semantic_geometry(q
 
 
 def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates():
+    from arrayscope.display.montage import RETENTION_HALO_TILES
     from arrayscope.window.frame_effects import (
         persistent_gpu_tile_residency_backend,
         persistent_tile_residency_backend,
@@ -6088,9 +6104,18 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
         is False
     )
     assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").enabled is True
+    # Coverage is a production request, so a backend that cannot hold a tile
+    # past the viewport is not asked to pay for one. Retention is bookkeeping
+    # and is unconditional -- and this branch is also what a FAILED capability
+    # probe returns, so leaving the halo out of it made the halo vanish during
+    # teardown rather than on some deliberately halo-less backend.
     assert (
         montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").coverage_margin_tiles
         == 0
+    )
+    assert (
+        montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").near_margin_tiles
+        == RETENTION_HALO_TILES
     )
     assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").enabled is True
 

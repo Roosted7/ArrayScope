@@ -8,7 +8,14 @@ import numpy as np
 
 from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
 from arrayscope.display.model.tile_priority import TilePriorityContext, prioritize_tiles
-from arrayscope.display.montage import montage_rect_for_viewport, optimal_montage_columns
+from arrayscope.display.montage import (
+    COVERAGE_MARGIN_TILES,
+    RETENTION_HALO_TILES,
+    VISIBLE_MARGIN_TILES,
+    montage_rect_for_viewport,
+    optimal_montage_columns,
+    viewport_tiles,
+)
 from arrayscope.display.viewport import view_ranges_near
 
 MIN_VIEW_SPAN = 1e-9
@@ -108,15 +115,19 @@ class MontageViewportPlan:
     persistent_tile_residency: bool
     priority_focus: tuple[float, float] | None = None
 
-    def candidate_tiles(self, *, margin_tiles: int = 0, prioritize: bool = False):
+    def candidate_tiles(
+        self, *, margin_tiles: int = VISIBLE_MARGIN_TILES, prioritize: bool = False
+    ):
         rect = montage_rect_for_viewport(
             self.plan,
             view_range=self.view_range,
             viewport_shape=self.viewport_shape,
         )
-        tiles = self.plan.tiles_intersecting(
-            ((rect[0], rect[2]), (rect[1], rect[3])),
-            margin_tiles=max(0, int(margin_tiles)),
+        tiles = viewport_tiles(
+            self.plan,
+            view_range=self.view_range,
+            viewport_shape=self.viewport_shape,
+            margin_tiles=margin_tiles,
         )
         if prioritize:
             return prioritize_tiles(
@@ -713,18 +724,34 @@ def montage_viewport_retarget_policy(
     """Return viewport-retarget behaviour for the current presentation surface.
 
     Montage retargeting updates the tiled presentation when only camera/view
-    coverage changes. Persistent residency backends additionally keep
-    near-viewport warm coverage.
+    coverage changes. Persistent residency backends additionally ask for a
+    ring of *produced* coverage past the drawn set.
+
+    The retention halo is not conditional on that capability. Coverage is a
+    production request and a backend that cannot hold a tile past the viewport
+    has nothing to gain from paying for one; retention is bookkeeping --
+    scheduling order, which in-flight work survives a move, which payload an
+    eviction predicate gives up last -- and it is worth having on any backend.
+    It also matters that the fallback below is what a *failed capability probe*
+    returns (``image_view_backend_capabilities`` answers with a bare default
+    when the view is None or exposes nothing), so leaving the halo out of it
+    made the halo silently vanish during teardown and in partial harnesses
+    rather than in some deliberately halo-less backend. Both shipped backends
+    declare ``persistent_tile_residency``; nothing reaches the fallback on
+    purpose.
     """
 
     if bool(getattr(capabilities, "persistent_tile_residency", False)):
         return MontageViewportRetargetPolicy(
             enabled=True,
-            coverage_margin_tiles=1,
-            near_margin_tiles=2,
+            coverage_margin_tiles=COVERAGE_MARGIN_TILES,
+            near_margin_tiles=RETENTION_HALO_TILES,
             update_delay_ms=90,
         )
-    return MontageViewportRetargetPolicy(enabled=True)
+    return MontageViewportRetargetPolicy(
+        enabled=True,
+        near_margin_tiles=RETENTION_HALO_TILES,
+    )
 
 
 def _normalized_view_range(view_range) -> tuple[tuple[float, float], tuple[float, float]]:

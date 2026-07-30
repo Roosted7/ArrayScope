@@ -110,3 +110,80 @@ def test_montage_tile_status_at_global_point_distinguishes_tile_and_gap():
         == montage.MontageTileState.SKIPPED
     )
     assert montage.tile_status_at_global_point(plan, states, 2, 1) is None
+
+
+def _field_montage_plan():
+    """The 272-tile field montage, at a camera covering only a few tiles.
+
+    The size matters. On a montage small enough to fit the viewport, every
+    ring covers every tile and a halo assertion passes no matter what the
+    radii are -- ``margin=0`` and ``margin=3`` both answer "all of them". The
+    tests below therefore assert their own regime before asserting anything
+    about the halo.
+    """
+
+    from arrayscope.core.view_state import ViewState
+
+    state = ViewState.from_shape((64, 64, 272)).with_montage_axis(
+        2, columns=17, indices=tuple(range(272)), text="0:272"
+    )
+    plan = montage.make_montage_plan(
+        state, axis=2, indices=tuple(range(272)), tile_shape=(64, 64), columns=17
+    )
+    # A window onto roughly two tiles near the middle of the grid.
+    tile = plan.tiles[136]
+    cx = float(tile.x0) + float(tile.width) * 0.5
+    cy = float(tile.y0) + float(tile.height) * 0.5
+    view_range = ((cx - 64.0, cx + 64.0), (cy - 64.0, cy + 64.0))
+    return plan, view_range, (800, 800)
+
+
+def _ring(plan, view_range, viewport_shape, margin):
+    return {
+        int(tile.montage_index)
+        for tile in montage.viewport_tiles(
+            plan, view_range=view_range, viewport_shape=viewport_shape, margin_tiles=margin
+        )
+    }
+
+
+def test_viewport_rings_are_strictly_nested_and_a_genuine_subset():
+    plan, view_range, viewport_shape = _field_montage_plan()
+
+    visible = _ring(plan, view_range, viewport_shape, montage.VISIBLE_MARGIN_TILES)
+    coverage = _ring(plan, view_range, viewport_shape, montage.COVERAGE_MARGIN_TILES)
+    retention = _ring(plan, view_range, viewport_shape, montage.RETENTION_HALO_TILES)
+    everything = {int(tile.montage_index) for tile in plan.tiles}
+
+    # Regime first: if the retention halo covered the montage this test could
+    # not fail, and neither could any other halo test written at this size.
+    assert 0 < len(visible) < len(coverage) < len(retention) < len(everything)
+    assert visible < coverage < retention < everything
+
+
+def test_retention_halo_survives_the_pan_step_that_coverage_only_absorbs():
+    """Why retention is two rings and coverage is one.
+
+    A pan of one tile step turns the old ring 1 into the new drawn set. A
+    one-ring halo is therefore spent exactly by the move it exists to absorb:
+    after it, the newly adjacent tiles are as cold as if there had been no
+    halo. At two rings the old ring 2 is still ahead of the new viewport.
+    """
+
+    plan, view_range, viewport_shape = _field_montage_plan()
+    (x0, x1), y = view_range
+    stride = plan.tile_shape[1] + plan.gap
+    panned = ((x0 + stride, x1 + stride), y)
+
+    before_coverage = _ring(plan, view_range, viewport_shape, montage.COVERAGE_MARGIN_TILES)
+    before_retention = _ring(plan, view_range, viewport_shape, montage.RETENTION_HALO_TILES)
+    after_visible = _ring(plan, panned, viewport_shape, montage.VISIBLE_MARGIN_TILES)
+    after_coverage = _ring(plan, panned, viewport_shape, montage.COVERAGE_MARGIN_TILES)
+
+    assert after_visible, "the pan must land on tiles, or this proves nothing"
+    # One ring covers what the pan draws...
+    assert after_visible <= before_coverage
+    # ...but leaves the next step's coverage already outside what was protected.
+    assert not (after_coverage <= before_coverage)
+    # Two rings still lead the pan.
+    assert after_coverage <= before_retention

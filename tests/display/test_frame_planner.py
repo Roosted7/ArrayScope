@@ -315,3 +315,58 @@ def test_unhashable_semantic_key_still_plans_without_reuse():
 
     assert plan.layout is DisplayLayout.MONTAGE
     assert plan.planned_region_ids == tuple(range(6))
+
+
+def test_montage_near_regions_are_the_one_retention_halo():
+    """The planner and the frame session must name the same set.
+
+    Both fill the same two downstream fields -- ``near_tiles`` on the
+    presentation delta and ``near_tile_numbers`` on the LOD admission scope --
+    and which of them answered depended on the code path. They disagreed
+    twice over: margin 1 against margin 2, and the raw camera rect against the
+    rect snapped outward to whole-tile bounds. On the 272-tile field montage
+    that was 15 tiles called near where 45 were being protected.
+    """
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import (
+        RETENTION_HALO_TILES,
+        make_montage_plan,
+        viewport_tiles,
+    )
+
+    state = ViewState.from_shape((64, 64, 272)).with_montage_axis(
+        2, columns=17, indices=tuple(range(272)), text="0:272"
+    )
+    montage_plan = make_montage_plan(
+        state, axis=2, indices=tuple(range(272)), tile_shape=(64, 64), columns=17
+    )
+    tile = montage_plan.tiles[136]
+    cx = float(tile.x0) + float(tile.width) * 0.5
+    cy = float(tile.y0) + float(tile.height) * 0.5
+    view_range = ((cx - 64.0, cx + 64.0), (cy - 64.0, cy + 64.0))
+    viewport_shape = (800, 800)
+
+    frame_plan = FramePlanner(internal_tile_shape=(1024, 1024)).plan(
+        target=_target("halo", view_range),
+        view_state=state,
+        display_shape=montage_plan.display_shape,
+        backend_capabilities=PYQTGRAPH_CAPABILITIES,
+        viewport_shape=viewport_shape,
+        view_range=view_range,
+        montage_plan=montage_plan,
+    )
+
+    halo = {
+        int(t.montage_index)
+        for t in viewport_tiles(
+            montage_plan,
+            view_range=view_range,
+            viewport_shape=viewport_shape,
+            margin_tiles=RETENTION_HALO_TILES,
+        )
+    }
+    # Regime: a halo covering the whole montage would make the equality below
+    # true for any radius and any rect convention.
+    assert 0 < len(halo) < len(montage_plan.tiles)
+    assert set(frame_plan.near_region_ids) == halo

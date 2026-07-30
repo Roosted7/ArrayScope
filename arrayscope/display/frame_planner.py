@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.display.backend_contract import ImageViewBackendCapabilities
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
-from arrayscope.display.montage import MontageTileState, make_montage_plan
+from arrayscope.display.montage import (
+    RETENTION_HALO_TILES,
+    VISIBLE_MARGIN_TILES,
+    MontageTileState,
+    make_montage_plan,
+    viewport_tiles,
+)
 from arrayscope.display.scene import DisplayLayout
 
 DEFAULT_INTERNAL_TILE_SHAPE = (1024, 1024)
@@ -419,13 +425,34 @@ class FramePlanner:
         )
         active = {
             int(tile.montage_index)
-            for tile in montage_plan.tiles_intersecting(view_range, margin_tiles=0)
+            for tile in montage_plan.tiles_intersecting(
+                view_range, margin_tiles=VISIBLE_MARGIN_TILES
+            )
         }
         if view_range is None:
             active = {int(tile.montage_index) for tile in montage_plan.tiles}
+        # ``near`` is the retention halo, and the session computes the same
+        # halo for the same camera.  They used to disagree twice over: the
+        # planner took margin 1 where the session took 2, and it handed
+        # ``tiles_intersecting`` the raw camera rect where the session first
+        # snaps it outward to whole-tile bounds.  Both sets then flowed into
+        # the same two downstream fields -- ``TilePresentationDelta.near_tiles``
+        # (filled from the planner on the retarget-only presentation path and
+        # from the session on every commit) and
+        # ``LodAdmissionScope.near_tile_numbers`` (planner first, session as
+        # the fallback) -- so what "near" denoted depended on which path had
+        # most recently produced it.  Measured on a 272-tile montage zoomed to
+        # a few tiles: the planner called 15 tiles near where the session
+        # protected 45.  A retention preference that means two things protects
+        # neither, so both sides now derive it the same way.
         near = {
             int(tile.montage_index)
-            for tile in montage_plan.tiles_intersecting(view_range, margin_tiles=1)
+            for tile in viewport_tiles(
+                montage_plan,
+                view_range=view_range,
+                viewport_shape=viewport_shape,
+                margin_tiles=RETENTION_HALO_TILES,
+            )
         }
         if view_range is None:
             near = active

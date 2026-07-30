@@ -16,7 +16,11 @@ from arrayscope.core.cache_status import CacheStatus, CacheStatusSnapshot
 from arrayscope.core.gui_callback_budget import GuiCallbackBudget
 from arrayscope.core.trace import TRACE, emit_trace
 from arrayscope.display.backend_contract import image_view_backend_capabilities
-from arrayscope.display.montage import MontageTileState, montage_rect_for_viewport
+from arrayscope.display.montage import (
+    RETENTION_HALO_TILES,
+    MontageTileState,
+    montage_rect_for_viewport,
+)
 from arrayscope.display.overlays import MontageTileOverlay
 from arrayscope.display.planning import normalize_bounds
 from arrayscope.display.pyramid import LodPageCache
@@ -249,10 +253,17 @@ class FrameRuntimeMixin:
         coverage.update(
             int(tile) for tile in tuple(getattr(session, "active_tile_requests", ()) or ())
         )
+        # Planner first, session as the fallback.  These two are now the same
+        # retention halo -- see ``RETENTION_HALO_TILES`` -- so which one answers
+        # no longer changes what ``near`` denotes here.
         near = tuple(getattr(frame_plan, "near_region_ids", ()) or ())
         if not near:
             near = (
-                tuple(getattr(session, "_near_tile_numbers", lambda **_kwargs: ())(margin_tiles=2))
+                tuple(
+                    getattr(session, "_near_tile_numbers", lambda **_kwargs: ())(
+                        margin_tiles=RETENTION_HALO_TILES
+                    )
+                )
                 if hasattr(session, "_near_tile_numbers")
                 else ()
             )

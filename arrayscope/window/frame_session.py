@@ -50,11 +50,14 @@ from arrayscope.display.model.tile_priority import (
     prioritize_tile_numbers,
 )
 from arrayscope.display.montage import (
+    COVERAGE_MARGIN_TILES,
+    RETENTION_HALO_TILES,
+    VISIBLE_MARGIN_TILES,
     MontagePlan,
     MontageTile,
     MontageTileState,
     RenderedTile,
-    montage_rect_for_viewport,
+    viewport_tiles,
 )
 from arrayscope.display.pyramid import MaterializedLodPage
 from arrayscope.display.shader_mapping import (
@@ -212,14 +215,12 @@ def _viewport_tiles(
     viewport_shape: tuple[int, int],
     margin_tiles: int,
 ) -> tuple[MontageTile, ...]:
-    rect = montage_rect_for_viewport(
+    # One derivation, shared with the frame planner -- see ``viewport_tiles``.
+    return viewport_tiles(
         plan,
         view_range=view_range,
         viewport_shape=viewport_shape,
-    )
-    return plan.tiles_intersecting(
-        ((rect[0], rect[2]), (rect[1], rect[3])),
-        margin_tiles=max(0, int(margin_tiles)),
+        margin_tiles=margin_tiles,
     )
 
 
@@ -1614,7 +1615,8 @@ class FrameSession:
         if not (span_x > 0.0 and span_y > 0.0):
             return None
         active = frozenset(
-            int(tile.montage_index) for tile in plan.tiles_intersecting(view_range, margin_tiles=0)
+            int(tile.montage_index)
+            for tile in plan.tiles_intersecting(view_range, margin_tiles=VISIBLE_MARGIN_TILES)
         )
         # Round the span generously: pan drift is ~1e-12, a real zoom step is
         # >0.1%, and adjacent LOD levels are 2x apart.
@@ -1626,8 +1628,8 @@ class FrameSession:
         view_range,
         viewport_shape: tuple[int, int],
         plan=None,
-        coverage_margin_tiles: int = 1,
-        near_margin_tiles: int = 2,
+        coverage_margin_tiles: int = COVERAGE_MARGIN_TILES,
+        near_margin_tiles: int = RETENTION_HALO_TILES,
         priority_focus: tuple[float, float] | None = None,
         settled_payloads_are_known: bool = False,
     ) -> tuple[tuple[MontageTile, ...], bool]:
@@ -1654,7 +1656,7 @@ class FrameSession:
             self.plan,
             view_range=view_range,
             viewport_shape=self.viewport_shape,
-            margin_tiles=0,
+            margin_tiles=VISIBLE_MARGIN_TILES,
         )
         coverage = _viewport_tiles(
             self.plan,
@@ -2192,7 +2194,7 @@ class FrameSession:
         *,
         view_range,
         viewport_shape: tuple[int, int],
-        margin_tiles: int = 1,
+        margin_tiles: int = COVERAGE_MARGIN_TILES,
     ) -> tuple[MontageTile, ...]:
         additions, _changed = self.retarget_viewport(
             view_range=view_range,
@@ -4435,7 +4437,7 @@ class FrameSession:
         timing_admission_done = perf_counter()
         near = tuple(
             tile
-            for tile in self._near_tile_numbers(margin_tiles=2)
+            for tile in self._near_tile_numbers(margin_tiles=RETENTION_HALO_TILES)
             if int(tile) not in self.skipped_tiles
         )
         # Residency is keyed by the complete texture-content identity carried
@@ -4645,7 +4647,7 @@ class FrameSession:
         self.payload_revision += 1
         near = tuple(
             tile
-            for tile in self._near_tile_numbers(margin_tiles=2)
+            for tile in self._near_tile_numbers(margin_tiles=RETENTION_HALO_TILES)
             if int(tile) not in self.skipped_tiles
         )
         near_source_ids = {
@@ -5283,7 +5285,7 @@ class FrameSession:
                     self.plan,
                     view_range=range_for_priority,
                     viewport_shape=self.viewport_shape,
-                    margin_tiles=2,
+                    margin_tiles=RETENTION_HALO_TILES,
                 )
             )
         if focus is not None:
@@ -5356,7 +5358,7 @@ class FrameSession:
             active_tiles = tuple(int(tile.montage_index) for tile in self.visible_tiles)
         if near_tiles is None:
             try:
-                near_tiles = self._near_tile_numbers(margin_tiles=2)
+                near_tiles = self._near_tile_numbers(margin_tiles=RETENTION_HALO_TILES)
             except Exception:
                 near_tiles = ()
         return TilePriorityContext.from_tiles(
