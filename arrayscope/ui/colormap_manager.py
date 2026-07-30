@@ -231,14 +231,6 @@ class ColormapManagerDialog(UserLibraryManagerDialog):
             return False
         return not text or text in item.text(0).casefold()
 
-    # Compatibility names for callers that speak colormaps rather than the
-    # shared vocabulary.
-    def select_map(self, name: str) -> bool:
-        return self.select_key(name)
-
-    def selected_map_name(self):
-        return self.selected_key()
-
     # ------------------------------------------------------------------
     # Editor state
     # ------------------------------------------------------------------

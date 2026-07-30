@@ -574,14 +574,6 @@ class UserLibraryManagerDialog(QtWidgets.QDialog):
             self.library_is_hidden(str(key)),
         )
 
-    def clear_revert_snapshot(self) -> None:
-        self._revert_snapshot = None
-
-    def revert_target(self):
-        """``(key, payload, was_hidden)`` of the pending undo, or ``None``."""
-
-        return self._revert_snapshot
-
     def _revert(self):
         if self._revert_snapshot is None:
             return
