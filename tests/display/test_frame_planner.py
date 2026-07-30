@@ -197,10 +197,13 @@ def test_sub_tile_nudge_reuses_the_whole_region_tuple():
     inside a tile resolves to the identical active/near sets. That case must
     not walk the montage at all: the previous regions tuple is the answer.
 
-    The nudge starts at 0.5 rather than 0.0 deliberately -- a camera edge
-    sitting exactly on a tile boundary is the one position where a half-pixel
-    move does change the snapped sets. That is a property of the rect
-    convention, not of this cache, and it has its own test below.
+    The nudge starts at 0.5 rather than 0.0 for historical reasons only: a
+    camera edge exactly on a tile boundary used to be the one position where
+    half a pixel of motion changed the sets, so this test drove around it. The
+    boundary is closed now and 0.0 would do just as well --
+    ``test_a_camera_edge_on_a_tile_boundary_answers_the_same_as_half_a_pixel_past_it``
+    is what asserts that, and this test stays off the boundary so that the two
+    keep testing different things.
     """
 
     state = _field_state()
