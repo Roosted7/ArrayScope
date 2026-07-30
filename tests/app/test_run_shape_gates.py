@@ -112,6 +112,72 @@ def test_the_self_punishing_disables_are_left_alone():
         assert pointless_plugin_disables([flag], present) == [], flag
 
 
+def _addopts() -> str:
+    import tomllib
+
+    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+    return config["tool"]["pytest"]["ini_options"]["addopts"]
+
+
+def test_the_plugins_addopts_disables_are_ones_nothing_here_uses():
+    """A `-p no:X` this repository *adds* has to meet its own rule.
+
+    ``_refuse_pointless_flags`` aborts a run for a disable that could not have
+    had an effect, on the grounds that it makes a command look like it
+    stabilised something when it did nothing. Putting four of them in
+    ``addopts`` is only consistent with that if each is genuinely effective and
+    genuinely unused — so this asserts the second half from the tree rather
+    than from a comment, and the entry retires itself the day that stops being
+    true.
+    """
+
+    addopts = _addopts()
+    for plugin in ("anyio", "pastebin", "junitxml", "doctest"):
+        assert f"-p no:{plugin}" in addopts, plugin
+
+    # By AST, not by text: a file that *names* a module in a string (this one
+    # does, twice) is not a file that imports it.
+    import ast
+
+    for directory in ("arrayscope", "tests", "tools", "experiments"):
+        for path in (REPO_ROOT / directory).rglob("*.py"):
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+            except SyntaxError:  # a fixture of deliberately broken source
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = {alias.name.split(".", 1)[0] for alias in node.names}
+                elif isinstance(node, ast.ImportFrom):
+                    names = {(node.module or "").split(".", 1)[0]}
+                else:
+                    continue
+                assert "anyio" not in names, f"{path} imports anyio; drop -p no:anyio"
+
+    workflows = (REPO_ROOT / ".github" / "workflows").glob("*.yml")
+    for workflow in workflows:
+        text = workflow.read_text(encoding="utf-8")
+        for flag in ("--junitxml", "--junit-xml", "--pastebin", "--doctest"):
+            assert flag not in text, f"{workflow.name} uses {flag}; drop the matching -p no:"
+
+
+def test_the_two_disables_that_would_break_a_documented_command_are_not_in_addopts():
+    """The pruning must never grow to include either of these.
+
+    ``debugging`` owns ``--pdb``, and ``pytest -n 0 --pdb file.py::test`` is one
+    of the three commands ``_serial_permitted`` exempts by name — disabling it
+    would make a documented debugging session impossible while looking like a
+    speed setting. ``cacheprovider`` is the INTERNALERROR above, and putting it
+    in ``addopts`` would make the crash the default rather than something
+    somebody typed.
+    """
+
+    addopts = _addopts()
+    assert "no:debugging" not in addopts
+    assert "no:cacheprovider" not in addopts
+
+
 # --------------------------------------------------------------------------- #
 # The bypass gate's own reading of its inputs
 # --------------------------------------------------------------------------- #

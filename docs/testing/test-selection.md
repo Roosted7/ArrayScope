@@ -46,6 +46,13 @@ runs*, never *which ring a claim needs*.
      `.testmondata` is what makes `pytest` narrow.
    - `-p no:pytest-testmon` — turns selection and recording off with nothing to
      say so.
+
+   `addopts` does carry four of its own — `no:anyio`, `no:pastebin`,
+   `no:junitxml`, `no:doctest` — which is the same rule applied rather than an
+   exception to it: each is measured effective (−0.058 s per run together) and
+   nothing in this tree uses any of them, pinned by
+   `tests/app/test_run_shape_gates.py`. `debugging` is deliberately absent,
+   because `pytest -n 0 --pdb file.py::test` is a documented command.
 6. **`-n 0` is for one test, not for the suite.** A wide serial run is refused;
    see [Why a wide `-n 0` is refused](#why-a-wide--n-0-is-refused).
 7. **Suspect the map? Report it.** Do not route around it silently.

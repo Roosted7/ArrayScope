@@ -122,7 +122,20 @@ dev = [
 # To debug serially (clean tracebacks, working -s / pdb), append `-n 0`.
 # Per-worker filesystem isolation (QSettings + artifacts) lives in
 # tests/conftest.py; see docs/testing/strategy.md for the rationale.
-addopts = "-n auto --dist loadfile"
+#   -p no:...        four plugins nothing here uses, whose import is pure
+#                    latency on every single run. Measured together, paired and
+#                    order-balanced: 0.679/0.685 s -> 0.623 s on a no-op run,
+#                    -0.058 s, of which anyio (which drags asyncio in with it)
+#                    is the largest single share. Nothing under arrayscope/,
+#                    tests/ or tools/ imports anyio or uses doctest, and no CI
+#                    workflow passes --junitxml or --pastebin.
+#                    `debugging` is deliberately NOT here: `pytest -n 0 --pdb
+#                    file.py::test` is a documented serial-gate exemption
+#                    (tests/conftest.py::_serial_permitted). Neither is
+#                    `cacheprovider`, which crashes the run -- testmon
+#                    subscripts config.option["lf"]. See rule 5 of
+#                    docs/testing/test-selection.md.
+addopts = "-n auto --dist loadfile -p no:anyio -p no:pastebin -p no:junitxml -p no:doctest"
 # Resolve a bare `pytest` to the suite. Besides being the obvious default, this
 # is what makes tests/conftest.py an *initial* conftest, so its worker-sizing
 # and selection hooks are registered before xdist fixes the pool size.
