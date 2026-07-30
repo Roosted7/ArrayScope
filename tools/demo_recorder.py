@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import json
 import os
 import shutil
 import subprocess
@@ -212,9 +213,18 @@ class Recorder:
     them (smoke runs use a high speed factor to stay cheap in CI).
     """
 
-    def __init__(self, app, frames_dir: Path, *, fps: int = RECORD_FPS, speed: float = 1.0):
+    def __init__(
+        self,
+        app,
+        frames_dir: Path,
+        *,
+        scenario_name: str,
+        fps: int = RECORD_FPS,
+        speed: float = 1.0,
+    ):
         self.app = app
         self.frames_dir = frames_dir
+        self.scenario_name = scenario_name
         self.fps = int(fps)
         self.speed = float(speed)
         self.win = None
@@ -224,6 +234,8 @@ class Recorder:
         self._ripples = []  # list[(frame_index_born, QPointF)]
         self._caption = ""
         self._caption_born_frame = 0
+        self._events: list[dict] = []
+        self._open_caption_event: dict | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -346,8 +358,79 @@ class Recorder:
         self.hold(tail_s)
 
     def caption(self, text: str) -> None:
+        if self._open_caption_event is not None:
+            self._open_caption_event["end_frame"] = self.frame_index
         self._caption = text
         self._caption_born_frame = self.frame_index
+        event = {
+            "kind": "caption",
+            "text": text,
+            "start_frame": self.frame_index,
+            "end_frame": None,
+        }
+        self._events.append(event)
+        self._open_caption_event = event
+
+    def _widget_target(self, widget, rel) -> dict | None:
+        if widget is None:
+            return None
+        top_left = widget.mapTo(self.win, widget.rect().topLeft())
+        rect = widget.rect()
+        point = self.widget_point(widget, rel)
+        return {
+            "widget_type": type(widget).__name__,
+            "object_name": widget.objectName(),
+            "rect": [top_left.x(), top_left.y(), rect.width(), rect.height()],
+            "point": [point.x(), point.y()],
+        }
+
+    @staticmethod
+    def _widget_label(widget) -> str:
+        if widget is None:
+            return ""
+        for attr in ("accessibleName", "text", "title"):
+            value = getattr(widget, attr, None)
+            if callable(value):
+                value = value()
+            if value:
+                return str(value).replace("&", "")
+        return widget.objectName() or type(widget).__name__
+
+    def _start_action(self, kind: str, label: str, *, target: dict | None = None) -> dict:
+        event = {
+            "kind": kind,
+            "label": label,
+            "caption": self._caption,
+            "start_frame": self.frame_index,
+            "press_frame": None,
+            "activate_frame": None,
+            "end_frame": None,
+            "target": target,
+            "cursor_at_press": None,
+        }
+        self._events.append(event)
+        return event
+
+    def _finish_action(self, event: dict) -> None:
+        event["end_frame"] = self.frame_index
+
+    def write_manifest(self) -> Path:
+        if self._open_caption_event is not None:
+            self._open_caption_event["end_frame"] = self.frame_index
+            self._open_caption_event = None
+        size = self.win.size() if self.win is not None else None
+        manifest = {
+            "schema_version": 1,
+            "scenario": self.scenario_name,
+            "record_fps": self.fps,
+            "speed": self.speed,
+            "frame_count": self.frame_index,
+            "window_size": [size.width(), size.height()] if size is not None else None,
+            "events": self._events,
+        }
+        path = self.frames_dir / "manifest.json"
+        path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        return path
 
     # -- cursor targeting --------------------------------------------------
 
@@ -396,13 +479,28 @@ class Recorder:
             self.capture()
 
     def click(
-        self, widget=None, rel=(0.5, 0.5), invoke=None, move_s=0.6, settle_after=True
+        self,
+        widget=None,
+        rel=(0.5, 0.5),
+        invoke=None,
+        move_s=0.6,
+        settle_after=True,
+        label=None,
     ) -> None:
         """Move to ``widget`` (optional), show a press with a click ripple,
         then trigger the real behavior — ``invoke`` when given, otherwise the
         widget's own ``click()``/``trigger()``."""
+        event = self._start_action(
+            "click",
+            label or self._widget_label(widget) or "scripted transition",
+            target=self._widget_target(widget, rel),
+        )
         if widget is not None:
             self.move_to(self.widget_point(widget, rel), seconds=move_s)
+        event["press_frame"] = self.frame_index
+        event["cursor_at_press"] = (
+            [self.cursor.x(), self.cursor.y()] if self.cursor is not None else None
+        )
         self._ripples.append((self.frame_index, self.cursor))
         self.cursor_pressed = True
         self.hold(0.1)
@@ -415,10 +513,12 @@ class Recorder:
                 widget.trigger()
             else:
                 raise TypeError(f"no way to activate {widget!r}")
+        event["activate_frame"] = self.frame_index
         self.cursor_pressed = False
         if settle_after:
             self.settle()
         self.hold(0.25)
+        self._finish_action(event)
 
     def toolbar_action_widget(self, toolbar, action):
         widget = toolbar.widgetForAction(action)
@@ -432,6 +532,7 @@ class Recorder:
         from pyqtgraph.Qt import QtCore, QtGui
 
         view = self.win.img_view
+        action_event = self._start_action("hover", "hover image values")
         # Piecewise-linear sweep through the given image points.
         segments = max(1, len(points) - 1)
         per_segment = max(2, self._frames_for(seconds) // segments)
@@ -442,22 +543,25 @@ class Recorder:
                 y = a[1] + (b[1] - a[1]) * t
                 scene_pos = view.getView().mapViewToScene(QtCore.QPointF(x, y))
                 local = QtCore.QPointF(view.graphicsView.mapFromScene(scene_pos))
-                event = QtGui.QMouseEvent(
+                mouse_event = QtGui.QMouseEvent(
                     QtCore.QEvent.Type.MouseMove,
                     local,
                     QtCore.Qt.MouseButton.NoButton,
                     QtCore.Qt.MouseButton.NoButton,
                     QtCore.Qt.KeyboardModifier.NoModifier,
                 )
-                view.eventFilter(view.graphicsView.viewport(), event)
+                view.eventFilter(view.graphicsView.viewport(), mouse_event)
                 self.cursor = QtCore.QPointF(
                     view.graphicsView.viewport().mapTo(self.win, local.toPoint())
                 )
                 self.capture()
+        action_event["activate_frame"] = self.frame_index - 1
+        self._finish_action(action_event)
 
     def zoom_image(self, factor: float, center_xy, seconds=1.2) -> None:
         """Smoothly zoom the viewport by ``factor`` around an image point,
         with the cursor parked on that point (wheel-zoom look)."""
+        event = self._start_action("zoom", f"zoom image {factor:.2f}×")
         vb = self.win.img_view.getView()
         steps = self._frames_for(seconds)
         per_step = factor ** (1.0 / steps)
@@ -465,15 +569,20 @@ class Recorder:
             vb.scaleBy((1.0 / per_step, 1.0 / per_step), center_xy)
             self.cursor = self.image_point(*center_xy)
             self.capture()
+        event["activate_frame"] = self.frame_index - 1
+        self._finish_action(event)
 
     def pan_image(self, dx: float, dy: float, seconds=1.2) -> None:
         """Drag-pan the viewport by an image-space offset with a pressed
         cursor riding the image."""
         from pyqtgraph.Qt import QtCore
 
+        event = self._start_action("drag", "pan image")
         vb = self.win.img_view.getView()
         anchor = QtCore.QPointF(self.cursor)
         self.cursor_pressed = True
+        event["press_frame"] = self.frame_index
+        event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
         self._ripples.append((self.frame_index, anchor))
         steps = self._frames_for(seconds)
         for i in range(steps):
@@ -481,19 +590,35 @@ class Recorder:
             vb.translateBy((-dx * t, -dy * t))
             self.capture()
         self.cursor_pressed = False
+        event["activate_frame"] = self.frame_index - 1
+        self._finish_action(event)
 
     def type_into(self, line_edit, text: str, on_text=None, per_char_s=0.12) -> None:
         """Click into a line edit and type ``text`` one character at a time.
         ``on_text`` (if given) is called with the full text once at the end —
         wire it to the window handler the edit would notify."""
-        self.click(line_edit, invoke=lambda: line_edit.setFocus(), settle_after=False)
+        event = self._start_action(
+            "type",
+            f"type {text!r} into {self._widget_label(line_edit)}",
+            target=self._widget_target(line_edit, (0.5, 0.5)),
+        )
+        self.click(
+            line_edit,
+            invoke=lambda: line_edit.setFocus(),
+            settle_after=False,
+            label=f"focus {self._widget_label(line_edit)}",
+        )
+        event["press_frame"] = self.frame_index
+        event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
         line_edit.selectAll()
         for i in range(len(text)):
             line_edit.setText(text[: i + 1])
             self.hold(per_char_s)
         if on_text is not None:
             on_text(text)
+        event["activate_frame"] = self.frame_index
         self.settle()
+        self._finish_action(event)
 
 
 # --------------------------------------------------------------------------
@@ -697,10 +822,11 @@ def run_child(name: str, frames_root: Path, *, fps: int, speed: float) -> None:
         shutil.rmtree(frames_dir)
     frames_dir.mkdir(parents=True, exist_ok=True)
 
-    rec = Recorder(app, frames_dir, fps=fps, speed=speed)
+    rec = Recorder(app, frames_dir, scenario_name=name, fps=fps, speed=speed)
     try:
         SCENARIOS[name]["fn"](rec)
     finally:
+        rec.write_manifest()
         rec.close()
         settings.clear()
         settings.sync()
@@ -866,6 +992,17 @@ def main() -> int:
     )
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--keep-frames", action="store_true")
+    parser.add_argument(
+        "--no-inspect",
+        action="store_true",
+        help="skip final-format storyboards/report after encoding",
+    )
+    parser.add_argument(
+        "--inspection-out",
+        type=Path,
+        default=REPO_ROOT / "tests" / "artifacts" / "demo-inspection",
+        help="inspection artifact directory",
+    )
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
 
@@ -921,6 +1058,13 @@ def main() -> int:
     for name in recorded:
         if not formats:
             continue
+        manifest = args.frames / name / "manifest.json"
+        if not manifest.exists():
+            failures.append((name, f"recording produced no manifest at {manifest}"))
+            print(f"[FAIL] manifest {name}")
+            continue
+        args.out.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(manifest, args.out / f"{name}.timeline.json")
         try:
             outputs = encode(name, args.frames / name, args.out, formats, args.fps)
         except RuntimeError as exc:
@@ -934,12 +1078,52 @@ def main() -> int:
         if not args.keep_frames:
             shutil.rmtree(args.frames / name, ignore_errors=True)
 
+    inspection_failure = ""
+    if formats and not failures and not args.no_inspect:
+        inspect_cmd = [
+            sys.executable,
+            str(REPO_ROOT / "tools" / "demo_inspector.py"),
+            "--media-root",
+            str(args.out),
+            "--out",
+            str(args.inspection_out),
+            "--expected-formats",
+            ",".join(
+                format_name for format_name in ("mp4", "avif", "gif") if format_name in formats
+            ),
+            "--strict",
+        ]
+        if args.only:
+            inspect_cmd.extend(["--only", args.only])
+        try:
+            inspected = subprocess.run(
+                inspect_cmd,
+                capture_output=True,
+                text=True,
+                timeout=900,
+                cwd=str(REPO_ROOT),
+                check=False,
+            )
+            inspection_log = (inspected.stdout + inspected.stderr).strip()
+            if inspected.returncode != 0:
+                inspection_failure = inspection_log or "demo inspector returned non-zero"
+                print("[FAIL] inspect final media")
+            else:
+                print("[ok] inspect final media")
+                if inspection_log:
+                    print(inspection_log)
+        except subprocess.TimeoutExpired as exc:
+            inspection_failure = f"demo inspection watchdog expired: {exc}"
+            print("[FAIL] inspect final media")
+
     print(
         f"\n{len(names) - len(failures)}/{len(names)} scenarios succeeded in {time.monotonic() - started:.0f}s"
     )
     for name, log in failures:
         print(f"\n--- {name} ---\n{log[-2000:]}")
-    return 1 if failures else 0
+    if inspection_failure:
+        print(f"\n--- final-media inspection ---\n{inspection_failure[-4000:]}")
+    return 1 if failures or inspection_failure else 0
 
 
 if __name__ == "__main__":

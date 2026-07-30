@@ -38,17 +38,19 @@ tools/env python tools/demo_recorder.py
 
 Useful flags: `--list`, `--only <substring>`, `--formats gif,avif,mp4`,
 `--keep-frames` (keep the PNG frame dumps under `tests/artifacts/demos/`),
-`--smoke` (fast tiny run, no encoding). Requires `ffmpeg` (and optionally
-`gifsicle`) on `PATH`.
+`--smoke` (fast tiny run, no encoding), and `--no-inspect` (skip the normally
+automatic final-format inspection). Requires `ffmpeg` (and optionally
+`gifsicle`) on `PATH`. A successful full recording writes each scenario's
+timeline next to its media and runs the strict inspector before returning.
 
 Commit the refreshed files in this directory together with the change that
 made them stale.
 
 ## Inspecting what viewers actually receive
 
-Encoding success is not a visual acceptance gate. After regenerating media,
-decode the final MP4, AVIF, and GIF files into agent-readable contact sheets
-and a local review gallery:
+Encoding success is not a visual acceptance gate. The recorder runs this step
+automatically after encoding. To re-inspect existing MP4, AVIF, and GIF files
+without recording them again:
 
 ```bash
 PATH=~/miniconda3/bin:$PATH direnv exec . \
@@ -59,17 +61,24 @@ The report is written under `tests/artifacts/demo-inspection/` (gitignored):
 
 - `*-storyboard.png` is a timestamped, evenly sampled contact sheet of each
   final encoded file. Image-capable agents can open these PNGs directly.
+- `*-events.png` shows the frame before, during, and after every recorded
+  action, so a short click, popup, or state change cannot fall between uniform
+  samples.
 - `report.json` records dimensions, duration, frame rate, file size, README
-  display scale, companion-format parity, and absolute artifact paths.
+  display scale, companion-format parity, action timelines, cursor/target
+  validation, and absolute artifact paths.
 - `index.html` plays every final format beside its storyboard for human
   review.
 
 Use `--only <substring>` for one scenario and increase `--samples` when an
 interaction needs closer inspection. `--strict` fails when a companion format
-is missing or when encoded durations/aspect ratios disagree. Those structural
-checks complement, but do not replace, reviewing cursor alignment, click/menu
-visibility, captions, readable scale, and whether each promised feature is
-actually visible. The dated
+is missing, encoded durations/aspect ratios disagree, or a manifested click
+misses (or lacks) its visible target. A newly recorded scenario writes
+`<scenario>.timeline.json` beside the final media; older media without a
+timeline remains inspectable through uniform samples and is reported as such.
+These structural checks complement, but do not replace, reviewing cursor
+alignment, click/menu visibility, captions, readable scale, and whether each
+promised feature is actually visible. The dated
 [walkthrough audit](../reviews/2026-07-30-readme-walkthrough-audit.md) records
 the baseline findings, README feature coverage, and bounded acceptance order.
 

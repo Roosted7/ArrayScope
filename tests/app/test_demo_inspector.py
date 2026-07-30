@@ -74,6 +74,43 @@ def _inspect(media_root: Path, out: Path, *extra: str):
 
 
 def test_inspector_decodes_final_media_to_storyboard_json_and_html(tiny_video, tmp_path):
+    (tiny_video.parent / "tiny.timeline.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "scenario": "tiny",
+                "record_fps": 8,
+                "speed": 1.0,
+                "frame_count": 8,
+                "window_size": [320, 180],
+                "events": [
+                    {
+                        "kind": "caption",
+                        "text": "Inspect the action",
+                        "start_frame": 0,
+                        "end_frame": 8,
+                    },
+                    {
+                        "kind": "click",
+                        "label": "Visible target",
+                        "start_frame": 1,
+                        "press_frame": 2,
+                        "activate_frame": 3,
+                        "end_frame": 5,
+                        "target": {
+                            "widget_type": "QPushButton",
+                            "object_name": "target",
+                            "rect": [100, 50, 80, 30],
+                            "point": [140, 65],
+                        },
+                        "cursor_at_press": [140, 65],
+                    },
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     out = tmp_path / "inspection"
     proc = _inspect(tiny_video.parent, out)
 
@@ -89,11 +126,13 @@ def test_inspector_decodes_final_media_to_storyboard_json_and_html(tiny_video, t
     assert facts["fps"] == pytest.approx(8.0)
     board = out / "tiny-mp4-storyboard.png"
     assert board.exists()
+    assert (out / "tiny-events.png").exists()
     with Image.open(board) as image:
         assert image.width > 2 * 160
         assert image.height > 2 * 90
     html = (out / "index.html").read_text(encoding="utf-8")
     assert "tiny" in html
+    assert "Action-centered evidence" in html
     assert tiny_video.resolve().as_uri() in html
 
 
@@ -121,3 +160,37 @@ def test_strict_inspection_fails_when_a_companion_format_is_missing(tiny_video, 
 
     assert proc.returncode == 1
     assert "[error] tiny: missing expected formats: gif" in proc.stdout
+
+
+def test_strict_inspection_rejects_a_click_without_a_visible_target(tiny_video, tmp_path):
+    (tiny_video.parent / "tiny.timeline.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "scenario": "tiny",
+                "record_fps": 8,
+                "speed": 1.0,
+                "frame_count": 8,
+                "window_size": [320, 180],
+                "events": [
+                    {
+                        "kind": "click",
+                        "label": "disconnected action",
+                        "start_frame": 1,
+                        "press_frame": 2,
+                        "activate_frame": 3,
+                        "end_frame": 5,
+                        "target": None,
+                        "cursor_at_press": [140, 65],
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = _inspect(tiny_video.parent, tmp_path / "inspection", "--strict")
+
+    assert proc.returncode == 1
+    assert "[error] tiny: click 'disconnected action' has no visible target" in proc.stdout

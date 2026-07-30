@@ -243,6 +243,82 @@ def render_storyboard(
     sheet.save(output, "PNG", optimize=True)
 
 
+def _event_frame_triplet(event: dict) -> list[tuple[str, int]]:
+    start = int(event["start_frame"])
+    press = event.get("press_frame")
+    activate = event.get("activate_frame")
+    end = max(start, int(event["end_frame"]) - 1)
+    focus = int(press if press is not None else start)
+    changed = int(activate if activate is not None else end)
+    return [("before", max(0, focus - 1)), ("act", focus), ("after", max(changed, end))]
+
+
+def render_event_sheet(
+    media: Path,
+    facts: MediaFacts,
+    timeline: dict,
+    output: Path,
+    *,
+    thumb_width: int,
+) -> int:
+    actions = [event for event in timeline["events"] if event["kind"] != "caption"]
+    if not actions:
+        return 0
+    columns = 3
+    label_h = 48
+    gap = 8
+    thumb_height = max(1, round(facts.height * thumb_width / facts.width))
+    sheet = Image.new(
+        "RGB",
+        (
+            columns * thumb_width + (columns + 1) * gap,
+            len(actions) * (thumb_height + label_h) + (len(actions) + 1) * gap,
+        ),
+        (242, 242, 242),
+    )
+    draw = ImageDraw.Draw(sheet)
+    font = ImageFont.load_default(size=15)
+    source_fps = float(timeline["record_fps"])
+    with tempfile.TemporaryDirectory(prefix="arrayscope-demo-events-") as temp:
+        temp_root = Path(temp)
+        for row, event in enumerate(actions):
+            for column, (stage, source_frame) in enumerate(_event_frame_triplet(event)):
+                at_s = source_frame / source_fps
+                media_frame = (
+                    min(facts.frames - 1, round(at_s * facts.fps)) if facts.frames else None
+                )
+                frame_path = temp_root / f"{row:03d}-{column}.png"
+                _extract_frame(
+                    media,
+                    facts.stream_index,
+                    at_s,
+                    frame_path,
+                    frame_index=media_frame,
+                )
+                with Image.open(frame_path) as decoded:
+                    frame = decoded.convert("RGB")
+                    frame.thumbnail((thumb_width, thumb_height), Image.Resampling.LANCZOS)
+                    tile = Image.new("RGB", (thumb_width, thumb_height), (0, 0, 0))
+                    tile.paste(
+                        frame,
+                        ((thumb_width - frame.width) // 2, (thumb_height - frame.height) // 2),
+                    )
+                x = gap + column * thumb_width
+                y = gap + row * (thumb_height + label_h)
+                sheet.paste(tile, (x, y))
+                label = f"{event['kind']} · {event.get('label', '')}"
+                draw.text((x + 7, y + thumb_height + 4), label[:58], fill=(20, 20, 20), font=font)
+                draw.text(
+                    (x + 7, y + thumb_height + 24),
+                    f"{stage} · frame {source_frame} · {at_s:.2f}s",
+                    fill=(60, 60, 60),
+                    font=font,
+                )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output, "PNG", optimize=True)
+    return len(actions)
+
+
 def parity_findings(
     grouped: dict[str, list[MediaFacts]], expected_formats: tuple[str, ...]
 ) -> list[Finding]:
@@ -284,10 +360,74 @@ def parity_findings(
     return findings
 
 
+def timeline_findings(scenario: str, timeline: dict, media: MediaFacts) -> list[Finding]:
+    findings: list[Finding] = []
+    frame_count = int(timeline.get("frame_count") or 0)
+    fps = float(timeline.get("record_fps") or 0)
+    window_size = timeline.get("window_size")
+    if frame_count < 1 or fps <= 0 or not window_size:
+        return [Finding("error", scenario, "timeline lacks frame count, fps, or window size")]
+    expected_duration = frame_count / fps
+    if abs(expected_duration - media.duration_s) > max(0.12, 1.5 / fps):
+        findings.append(
+            Finding(
+                "error",
+                scenario,
+                f"timeline duration {expected_duration:.3f}s does not match "
+                f"{media.format} duration {media.duration_s:.3f}s",
+            )
+        )
+    width, height = (float(value) for value in window_size)
+    for index, event in enumerate(timeline.get("events", ())):
+        start = event.get("start_frame")
+        end = event.get("end_frame")
+        if start is None or end is None or not (0 <= int(start) < int(end) <= frame_count):
+            findings.append(Finding("error", scenario, f"event {index} has an invalid frame range"))
+            continue
+        if event.get("kind") != "click":
+            continue
+        target = event.get("target")
+        cursor = event.get("cursor_at_press")
+        if target is None:
+            findings.append(
+                Finding(
+                    "error",
+                    scenario,
+                    f"click {event.get('label', index)!r} has no visible target",
+                )
+            )
+            continue
+        x, y, target_width, target_height = (float(value) for value in target["rect"])
+        if x < 0 or y < 0 or x + target_width > width or y + target_height > height:
+            findings.append(
+                Finding(
+                    "error",
+                    scenario,
+                    f"click {event.get('label', index)!r} target lies outside the window",
+                )
+            )
+        if cursor is None:
+            findings.append(
+                Finding("error", scenario, f"click {event.get('label', index)!r} has no cursor")
+            )
+        else:
+            cursor_x, cursor_y = (float(value) for value in cursor)
+            if not (x <= cursor_x <= x + target_width and y <= cursor_y <= y + target_height):
+                findings.append(
+                    Finding(
+                        "error",
+                        scenario,
+                        f"click {event.get('label', index)!r} cursor misses its target",
+                    )
+                )
+    return findings
+
+
 def _write_html(
     output: Path,
     grouped: dict[str, list[MediaFacts]],
     storyboards: dict[str, str],
+    event_sheets: dict[str, str],
     findings: list[Finding],
 ) -> None:
     sections: list[str] = []
@@ -312,7 +452,17 @@ def _write_html(
                 f'<img src="{html.escape(storyboard)}" alt="{html.escape(scenario)} storyboard"></a>'
                 "</article>"
             )
-        sections.append(f"<section><h2>{html.escape(scenario)}</h2>{''.join(cards)}</section>")
+        event_sheet = event_sheets.get(scenario)
+        event_html = (
+            f"<h3>Action-centered evidence</h3>"
+            f'<a href="{html.escape(event_sheet)}"><img src="{html.escape(event_sheet)}" '
+            f'alt="{html.escape(scenario)} action-centered storyboard"></a>'
+            if event_sheet
+            else "<p>No timeline manifest was available for action-centered evidence.</p>"
+        )
+        sections.append(
+            f"<section><h2>{html.escape(scenario)}</h2>{event_html}{''.join(cards)}</section>"
+        )
     finding_items = (
         "".join(
             f'<li class="{item.severity}"><strong>{html.escape(item.scenario)}</strong>: '
@@ -368,6 +518,8 @@ def inspect(
         grouped.setdefault(item.scenario, []).append(item)
     findings = parity_findings(grouped, expected_formats)
     storyboards: dict[str, str] = {}
+    timelines: dict[str, dict] = {}
+    event_sheets: dict[str, str] = {}
     for item in facts:
         media_path = Path(item.path)
         board_name = f"{item.scenario}-{item.format}-storyboard.png"
@@ -380,18 +532,43 @@ def inspect(
             thumb_width=thumb_width,
         )
         storyboards[item.path] = board_name
+    for scenario, items in sorted(grouped.items()):
+        timeline_path = media_root / f"{scenario}.timeline.json"
+        if not timeline_path.exists():
+            findings.append(Finding("note", scenario, "no event timeline; uniform samples only"))
+            continue
+        timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+        timelines[scenario] = timeline
+        preferred = next(
+            (item for item in items if item.format == "mp4"),
+            items[0],
+        )
+        findings.extend(timeline_findings(scenario, timeline, preferred))
+        sheet_name = f"{scenario}-events.png"
+        render_event_sheet(
+            Path(preferred.path),
+            preferred,
+            timeline,
+            output / sheet_name,
+            thumb_width=thumb_width,
+        )
+        event_sheets[scenario] = sheet_name
     report = {
         "media_root": str(media_root.resolve()),
         "expected_formats": list(expected_formats),
         "media": [asdict(item) for item in facts],
         "findings": [asdict(item) for item in findings],
+        "timelines": timelines,
+        "event_sheets": {
+            scenario: str((output / name).resolve()) for scenario, name in event_sheets.items()
+        },
         "storyboards": {
             str(Path(path).resolve()): str((output / name).resolve())
             for path, name in storyboards.items()
         },
     }
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    _write_html(output / "index.html", grouped, storyboards, findings)
+    _write_html(output / "index.html", grouped, storyboards, event_sheets, findings)
     return report, findings
 
 
