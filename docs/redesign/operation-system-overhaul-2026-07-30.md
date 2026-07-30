@@ -182,16 +182,57 @@ editor pane. Dialog tests consolidate onto the base (net fewer tests).
   the new axis back to whatever the origin's axis of the same number sat on,
   i.e. it broke the one thing the sibling exists for. Only `levels` starts
   enabled; axis-indexed facets are not meaningful across a rank change.
-- **R7 — Warm worker exchange protocol** (proposal first): long-lived
-  env worker, multi-array envelope, progress/cancel transport; deletes
-  the env-slot limitation and the probe/conda tax.
-- **R8 — Proof packs + sources entry-point group**: skimage/scipy
-  filter pack (exercises R3), minimal torch `apply_model` op
-  (exercises R3+R2 exact-input + R7), `arrayscope.sources` entry-point
-  group over `ArraySource`.
+- **R7 — Warm worker exchange protocol** — PROPOSED 2026-07-31, not
+  implemented: [proposal](../proposals/warm-worker-exchange-protocol.md).
+  Written against the post-R2/R3 tree, so it claims only what one-shot
+  single-array workers still cannot give: env-runtime input slots,
+  import/model warmth across applies *and* probes, and a
+  progress/multi-output transport. The command runtime stays one-shot.
+- **R8 — Proof packs + sources entry-point group** — NOT STARTED; queued
+  behind R7 (the torch pack wants the warm worker; the
+  `arrayscope.sources` entry-point group is independent and can land any
+  time).
 
-R1+R2 are independent and land first; R3+R4 follow; R5/R6 build on
-R2+R3; R7/R8 close.
+R1+R2 landed first; R3+R4 followed; R5/R6 built on R2+R3; R7/R8 remain.
+
+## Close-out (2026-07-31)
+
+R1–R6 are merged on this branch, each gated by review, `--since`, and —
+for every new UI surface — inspected dark/light gallery evidence. ADRs
+0062 (always-addressable definitions) and 0063 (one library protocol,
+one manager grammar) record the two philosophy changes; both numbers
+were still free on main at integration time.
+
+**Named residue, deliberately not silent:**
+
+- The operation manager has no form control for `requires_axes` /
+  `axis_arity` / `maps_over_slabs`; authoring an axis-set user op means
+  editing the wrapper JSON, which the docs state honestly. The clean fix
+  (a three-state axis-selection control in the manager editor) is small
+  and self-contained once wanted.
+- Renaming operations' "Common" to "Favorites" needs a registry-key
+  rename plus a layout `common_ids` read-old/write-new shim; the
+  *affordance* already converged (same checkbox, same editor position),
+  only the word differs (R4 report has the exact diff).
+- A file-backed window that loads a rank-increasing view recipe hands
+  off with a stated message instead of silently mis-restoring; a real
+  fix means moving step loading before `_build_window_ui` (delicate
+  restore-path refactor, R6 report).
+- Ops-side dirty-snapshot autosave (colormaps have it; ops still write
+  per-signal) — mechanism convergence deferred with reasons in ADR 0063.
+- `CompareCursorGroup.broadcast` reads base-array space for derived
+  documents (pre-existing, shows `n/a` via its own guard).
+- Two sibling axis-space sites carry `KNOWN AXIS-SPACE CONFLATION`
+  comments (`chunked_stage`, `render_prefetch`) — both gate cost/prefetch
+  decisions only; neither can show wrong pixels.
+
+**Test-surface outcome:** the two manager dialog test files rose +143
+lines net, but the rise is entirely surface that did not exist to test
+(colormap Problems/override, six parameter kinds, repaired add-row
+buttons, export/import); everything genuinely duplicated moved into one
+shared file exercised once for both dialogs, and parity itself is now a
+test (button order, icon vocabulary, marker words, duplicate naming —
+drift fails).
 
 ## Test-surface intent
 
