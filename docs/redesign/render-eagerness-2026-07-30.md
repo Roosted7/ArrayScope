@@ -102,6 +102,29 @@ it. Note the asymmetry: `_prune_resident_items` (`tiles.py:2586`) pops
 `index=0`, i.e. it evicts oldest-first, which is correct. The two policies
 disagree, and the hot one is the wrong one.
 
+> **Fixed.** `_hijack_direct_reuse_state` now takes the pool head, preferring
+> a state whose tile is not in the delta's near set, with an explicit fallback
+> to the coldest protected state so a hijack can never fail into a fresh
+> `ImageItem` allocation. Two things learned while measuring it, both of which
+> narrow where this defect can be observed at all:
+>
+> 1. **The hijack is unreachable once every tile has a `_states` entry.**
+>    `_hide_tile` keeps that entry, so a montage that has been presented whole
+>    even once — a fit-to-view first frame — never hijacks again. An A/B built
+>    on "present the montage, then zoom in and pan" measures exactly flat.
+> 2. **On a balanced translation pan the pool is exactly one departure cohort
+>    deep.** Entering count equals leaving count, so the pool is drained and
+>    refilled every step and head and tail name the same column; every victim
+>    policy destroys the same set. Pure pan measures flat too, in both
+>    directions and into the montage edge.
+>
+> The policy only bites where the pool holds more than one cohort when a fresh
+> tile arrives — a **zoom-in**, which retires many tiles and admits none. Panning
+> away and back after a zoom-in (24×24 montage, 10×10 view, zoom to 4×4, six
+> steps out and six back, twice) rebuilds **64 → 32 tiles, −50%**, with the whole
+> saving on the return legs: 4 tiles rebuilt per step becomes 0. Interleaved
+> in-process, order-balanced, `image_replacements` from `TileLayerUpdateStats`.
+
 ### 2.4 Secondary: a re-entering tile is hidden for one commit
 
 `resolve_items` is restricted to `requested_upserts` whenever the delta
@@ -122,6 +145,10 @@ exist the whole time.
   anything else**. Also, the `continue` branch at `tiles.py:2592` removes a
   still-visible state from the reuse pool without evicting it, silently
   dropping its warm-reuse claim.
+  **Both fixed**: near tiles are now evicted after strangers, and an
+  unevictable candidate is skipped in place rather than popped. The budget is
+  unchanged as a hard ceiling — a near tile still goes the moment it is the
+  last candidate, which is covered by its own test.
 - Falling out of `_prune_rgb_source_cache` costs a returning tile the full
   `_set_tile_data_from_current_source` path (`tiles.py:2449`); `update_levels`
   skips non-visible states (`tiles.py:1936`), so a tile that returns after a
@@ -316,6 +343,6 @@ adjudication belongs to [queue row 12](../queue.md).
 | Principle | Compute side | Render side today |
 |---|---|---|
 | Do work only when demanded | yes | GPU pages: yes. Everything above them: no. |
-| Keep a valid result | yes | PyQtGraph keeps pixels, then hands them to a LIFO victim policy (§2.3). WGPU keeps pages, then drops the payload that references them (§3.2). |
+| Keep a valid result | yes | PyQtGraph keeps pixels, and no longer hands them to a LIFO victim policy (§2.3, fixed). WGPU keeps pages, then drops the payload that references them (§3.2). |
 | Cost proportional to the change | yes | Five whole-montage passes per camera nudge (§4). |
-| Protect what is about to be needed | n/a | Three inconsistent halo definitions, none of which reaches an eviction predicate (§1). |
+| Protect what is about to be needed | n/a | Three inconsistent halo definitions (§1). One of them now reaches both PyQtGraph eviction predicates (§2.3, §2.5); the wgpu side and the unification are untouched. |

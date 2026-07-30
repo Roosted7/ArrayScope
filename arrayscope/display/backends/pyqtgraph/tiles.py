@@ -1330,6 +1330,7 @@ class MontageTileLayer:
         # gets its own floor so each commit makes real progress while staying
         # within roughly one frame of UI-thread work.
         level_rewindow_deadline_ms = cold_deadline_ms
+        near_tiles = _delta_near_tiles(tile_delta)
         cold_start = perf_counter()
         cold_tiles_committed = 0
         update_start = perf_counter()
@@ -1576,7 +1577,7 @@ class MontageTileLayer:
 
             created_item = False
             if item_state is None:
-                item_state = self._pop_direct_reuse_pool() if self._direct_reuse_pool else None
+                item_state = self._hijack_direct_reuse_state(protected_tiles=near_tiles)
                 if item_state is None:
                     item = ImageItem(axisOrder="row-major")
                     item_state = TileLayerItemState(
@@ -1725,6 +1726,7 @@ class MontageTileLayer:
         storage_evictions += self._prune_resident_items(
             budget_bytes=int(tile_residency_budget_bytes or 0),
             active_tiles=active,
+            near_tiles=near_tiles,
         )
         resident_items = self._resident_count()
         resident_bytes = int(self._resident_bytes)
@@ -2004,6 +2006,7 @@ class MontageTileLayer:
         updated_tiles: list[int] = []
         storage_evictions = 0
         near_source_ids = dict(getattr(tile_delta, "near_tile_source_ids", {}) or {})
+        near_tiles = _delta_near_tiles(tile_delta)
         for tile_number in tuple(sorted(int(tile) for tile in payloads)):
             if int(tile_number) in self._states and self._states[int(tile_number)].visible:
                 items_skipped += 1
@@ -2057,7 +2060,7 @@ class MontageTileLayer:
                     rgb_already_windowed=payload_rgb_already_windowed,
                 )
             if item_state is None:
-                item_state = self._pop_direct_reuse_pool() if self._direct_reuse_pool else None
+                item_state = self._hijack_direct_reuse_state(protected_tiles=near_tiles)
                 created_item = False
                 if item_state is None:
                     item_state = TileLayerItemState(
@@ -2154,6 +2157,7 @@ class MontageTileLayer:
         storage_evictions += self._prune_resident_items(
             budget_bytes=int(tile_residency_budget_bytes or 0),
             active_tiles={int(tile) for tile, state in self._states.items() if state.visible},
+            near_tiles=near_tiles,
         )
         resident_items = self._resident_count()
         physically_presented = self._physically_presented_tiles()
@@ -2552,10 +2556,49 @@ class MontageTileLayer:
         self._direct_reuse_pool.append(state)
         self._direct_reuse_pool_ids.add(state_id)
 
-    def _pop_direct_reuse_pool(self, index: int = -1) -> TileLayerItemState:
+    def _pop_direct_reuse_pool(self, index: int) -> TileLayerItemState:
+        # No default. The default used to be -1, and "pop the newest" is the
+        # exact policy this file is being fixed for; both remaining callers
+        # choose their index from a ranking, and an omitted argument now fails
+        # loudly rather than silently reinstating LIFO.
         state = self._direct_reuse_pool.pop(index)
         self._direct_reuse_pool_ids.discard(id(state))
         return state
+
+    def _hijack_direct_reuse_state(
+        self, *, protected_tiles: frozenset[int] = frozenset()
+    ) -> TileLayerItemState | None:
+        """Take the pooled state least likely to be wanted next.
+
+        The pool is append-ordered and a state can only re-enter it by first
+        leaving it, so a state's position is exactly *how long it has been
+        continuously hidden*.  The tail is therefore the tile that just left
+        the viewport — the single most likely tile to be asked for again — and
+        popping the tail (which this used to do, via a default `index=-1`)
+        destroyed the warmest state in preference to the coldest one on every
+        ordinary pan, with no data change and no memory pressure behind it.
+        Head-first is what `_prune_resident_items` has always done; the two
+        policies now agree instead of pointing in opposite directions.
+
+        Position, not `resident_serial`: `_hide_tile` re-stamps every already
+        pooled state on every commit, in `_states` order, so the serial of a
+        pooled state records when it was first presented rather than when it
+        was last visible.
+
+        `protected_tiles` is the delta's near halo — tiles the planner has
+        already named as about to be needed.  It is a *preference*, not a pin.
+        When every pooled state is near, one of them is still taken: refusing
+        would leave the caller allocating a fresh `ImageItem` per entering
+        tile, which costs strictly more than the warm state it would save.
+        """
+
+        pool = self._direct_reuse_pool
+        if not pool:
+            return None
+        for index, state in enumerate(pool):
+            if int(state.tile_number) not in protected_tiles:
+                return self._pop_direct_reuse_pool(index)
+        return self._pop_direct_reuse_pool(0)
 
     def _discard_direct_reuse_pool(self) -> None:
         for state in tuple(self._direct_reuse_pool):
@@ -2583,17 +2626,58 @@ class MontageTileLayer:
             self._resident_bytes += int(new) - int(old)
             state.resident_nbytes = int(new)
 
-    def _prune_resident_items(self, *, budget_bytes: int, active_tiles: set[int]) -> int:
+    def _prune_resident_items(
+        self,
+        *,
+        budget_bytes: int,
+        active_tiles: set[int],
+        near_tiles: frozenset[int] = frozenset(),
+    ) -> int:
+        """Evict pooled states until resident bytes fit the budget.
+
+        The budget is a hard ceiling and stays one: `near_tiles` only reorders
+        the victims.  A near tile is still evicted the moment it is the only
+        thing left to evict, so a halo can never make the budget
+        unenforceable.  What it buys is that `active_tiles` — the margin-0
+        visible set — is no longer the *only* protected set, which had the
+        halo, the band the planner just warmed, evicted ahead of every
+        stranger in the montage.
+
+        Candidates that cannot be evicted now stay in the pool.  The old
+        `continue` popped them and dropped them on the floor: it freed no
+        bytes and silently retired a still-valid warm-reuse claim, which
+        nothing ever restored.
+        """
+
         if int(budget_bytes or 0) <= 0:
             return 0
         evicted = 0
-        while int(self._resident_bytes) > int(budget_bytes) and self._direct_reuse_pool:
-            state = self._pop_direct_reuse_pool(0)
-            if bool(state.visible) or int(state.tile_number) in active_tiles:
-                continue
-            self._evict_resident_state(state)
+        while int(self._resident_bytes) > int(budget_bytes):
+            index = self._prune_victim_index(active_tiles=active_tiles, near_tiles=near_tiles)
+            if index is None:
+                break
+            self._evict_resident_state(self._pop_direct_reuse_pool(index))
             evicted += 1
         return evicted
+
+    def _prune_victim_index(
+        self, *, active_tiles: set[int], near_tiles: frozenset[int]
+    ) -> int | None:
+        """Pool index of the next state to evict, or None when none may go.
+
+        Oldest-first within each band, for the reason spelled out in
+        `_hijack_direct_reuse_state`: pool position is time-since-visible.
+        """
+
+        fallback: int | None = None
+        for index, state in enumerate(self._direct_reuse_pool):
+            if bool(state.visible) or int(state.tile_number) in active_tiles:
+                continue
+            if int(state.tile_number) not in near_tiles:
+                return index
+            if fallback is None:
+                fallback = index
+        return fallback
 
     def _evict_resident_state(self, state: TileLayerItemState) -> None:
         self._unregister_source_state(state)
@@ -2961,6 +3045,24 @@ def _page_binding_source_token(payload: DisplayTilePayload) -> object | None:
             strict=True,
         )
     )
+
+
+def _delta_near_tiles(tile_delta) -> frozenset[int]:
+    """The halo the delta already carries, as tile numbers.
+
+    Both spellings are unioned deliberately: `near_tiles` is the planner's
+    full band, while `near_tile_source_ids` is the subset that currently has a
+    display payload.  Until now only the latter reached this file, and only to
+    feed the `near_resident_items` counter.  Nothing here decides *what* the
+    halo is — that is the session's margin, and unifying its three
+    inconsistent definitions is separate work.
+    """
+
+    if tile_delta is None:
+        return frozenset()
+    near = {int(tile) for tile in tuple(getattr(tile_delta, "near_tiles", ()) or ())}
+    near.update(int(tile) for tile in dict(getattr(tile_delta, "near_tile_source_ids", {}) or {}))
+    return frozenset(near)
 
 
 def _direct_tile_order(
