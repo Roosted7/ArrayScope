@@ -688,8 +688,58 @@ def test_testmon_still_exposes_what_the_policy_reaches_into():
         "testmon no longer carries per-test coverage on the report; "
         "tests/testmon_policy.py injects declared child-process dependencies there"
     )
-    assert "deselected_tests" in inspect.getsource(TestmonSelect), (
+    select_source = inspect.getsource(TestmonSelect)
+    assert "deselected_tests" in select_source, (
         "tests/conftest.py reports the unaffected count from this attribute"
+    )
+    assert "deselected_files" in select_source, (
+        "testmon_policy.apply_known_red_policy and apply_since_baseline rewrite this "
+        "file-level list; losing it means a red this checkout broke stops being "
+        "collected at all, and --since stops widening"
+    )
+    data_source = inspect.getsource(TestmonData)
+    assert "sync_db_fs_tests" in data_source, (
+        "testmon_policy.protect_map_outside_the_scope wraps this to stop a scoped "
+        "run deleting the map entries it never looked at — the erosion defect"
+    )
+    assert "stable_files" in data_source, (
+        "apply_known_red_policy reads it to decide which files may be skipped wholesale"
+    )
+
+
+def test_the_option_keys_testmon_subscripts_all_still_exist():
+    """The tripwire that would have documented the cacheprovider crash.
+
+    ``testmon/configure.py`` reads ``vars(config.option)`` with **subscripts,
+    not ``.get``**. Every key it indexes is therefore a hard dependency on some
+    other plugin having registered that option — and ``lf`` belongs to pytest's
+    cache plugin, which is why ``-p no:cacheprovider`` kills the run with a
+    ``KeyError`` inside ``pytest_configure``, before a single test.
+
+    Pinned in both directions. A key disappearing from testmon is a behaviour
+    change we want to know about; a *new* subscript is a new plugin this suite
+    silently cannot run without, and finding that out from an INTERNALERROR in
+    somebody's terminal is how this was found the first time.
+    """
+
+    import re
+
+    from testmon import configure
+
+    subscripted = set(re.findall(r'options\[["\']([^"\']+)["\']\]', inspect.getsource(configure)))
+    expected = {
+        "no-testmon",
+        "testmon_nocollect",
+        "testmon_noselect",
+        "testmon_forceselect",
+        "keyword",
+        "markexpr",
+        "lf",  # _pytest.cacheprovider — see tests/conftest.py _HARMFUL_PLUGIN_DISABLES
+    }
+    assert subscripted == expected, (
+        "testmon's hard option dependencies moved. Anything added here is a plugin "
+        "that can no longer be disabled without crashing the run, and belongs in "
+        "tests/conftest.py _HARMFUL_PLUGIN_DISABLES with a sentence explaining it"
     )
 
 

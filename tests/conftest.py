@@ -1442,23 +1442,33 @@ def _report_gate_run_cost(terminalreporter, config) -> None:
     if started is None:
         return
     elapsed = monotonic() - started
+    reason = bypass_reason(
+        _bypass_permitted(config), records=bool(vars(config.option).get("testmon_noselect"))
+    )
     terminalreporter.write_line(
-        f"Bypassed selection ({bypass_reason(_bypass_permitted(config))}) and ran {elapsed:.0f} s.",
+        f"Bypassed selection ({reason}) and ran {elapsed:.0f} s.",
         bold=True,
         yellow=True,
     )
     terminalreporter.write_line(BYPASS_BANNER, bold=True, red=True)
 
 
-def bypass_reason(permitted_because: str) -> str:
+def bypass_reason(permitted_because: str, *, records: bool = False) -> str:
     """The parenthesised half of the closing line, never empty.
 
-    A run permitted by *price* has no permission string, so the line read
-    ``Bypassed selection ()`` — which looks like a formatting bug rather than a
-    statement, and the whole point of the line is to keep the bypass visible.
+    A run allowed by a *rule* rather than by a permission had no string to put
+    there, so the line read ``Bypassed selection ()`` — which looks like a
+    formatting bug rather than the statement it is meant to be, and the whole
+    point of the line is to keep the bypass visible. The two rules say different
+    things: a cheap ``--no-testmon`` was not worth the argument, and a
+    ``--testmon-noselect`` sweep bought a repaired map with its four minutes.
     """
 
-    return permitted_because or "cheap enough that retyping the command would cost more"
+    if permitted_because:
+        return permitted_because
+    if records:
+        return "it re-records the map, so the time bought something"
+    return "cheap enough that retyping the command would cost more"
 
 
 def pytest_terminal_summary(terminalreporter, config):
@@ -1480,6 +1490,8 @@ def pytest_terminal_summary(terminalreporter, config):
         if busy:
             terminalreporter.write_line(busy, bold=True, yellow=True)
 
+    # Before the coverage report, which re-reads the sidecar this may write.
+    _report_map_erosion(terminalreporter, config)
     _report_function_coverage(terminalreporter, config)
     _report_gate_run_cost(terminalreporter, config)
 
@@ -1632,6 +1644,87 @@ def _since_on_the_controller(config):
     return None if reached is None else (ref, len(reached))
 
 
+#: A map that loses more than this share of its recorded tests between runs has
+#: almost certainly eroded rather than shrunk honestly. Deliberately loose: a
+#: normal shrink is one deleted test file, and the defect this watches for took
+#: 1261 of 3941 in a single scoped run.
+_MAP_EROSION_FRACTION = 0.05
+
+
+def map_high_water(mapped, recorded, authoritative) -> int:
+    """The mark to keep for this environment, given what this run saw.
+
+    Strictly rising, except after a run that re-recorded the whole suite without
+    selecting. That run's count *is* the truth — there is no scope for it to
+    have missed anything — so it is the one thing allowed to lower the mark, and
+    it is what stops an honest deletion from warning forever.
+    """
+
+    if authoritative and mapped:
+        return int(mapped)
+    return max(int(mapped or 0), int(recorded or 0))
+
+
+def map_erosion_warning(mapped, high_water) -> str:
+    """Say it out loud when the map has quietly lost a chunk of itself.
+
+    This is the only thing that would catch the fail-open degradations in
+    ``testmon_policy`` — ``protect_map_outside_the_scope`` silently returning 0
+    after a testmon upgrade, say. That is not hypothetical: the same defect
+    class eroded ``main``'s map to 2680 of 3941 tests, which then read as a
+    15-point phantom coverage regression, because the map's size is the
+    denominator of that figure.
+
+    Nothing else notices. The map does not complain, the header still says
+    ``test selection: on``, and every report — ``pytest``, ``pytest --since``,
+    ``tools/test_selection.py`` — agrees that the missing tests are unaffected.
+    """
+
+    if not high_water or not mapped:
+        return ""
+    lost = int(high_water) - int(mapped)
+    if lost <= int(high_water) * _MAP_EROSION_FRACTION:
+        return ""
+    return (
+        f"test selection: the map lost {lost} of {high_water} recorded tests since this "
+        "checkout's high-water mark. That is the erosion signature "
+        "(docs/testing/test-selection.md). Repair: pytest --testmon-noselect"
+    )
+
+
+def _report_map_erosion(terminalreporter, config) -> None:
+    """Keep, and check, the map's high-water mark in the coverage sidecar."""
+
+    if _XDIST_WORKER:
+        return
+    data = getattr(config, "testmon_data", None)
+    environment = getattr(data, "environment", None)
+    mapped = len(getattr(data, "all_tests", ()) or ())
+    if not environment or not mapped:
+        return
+
+    map_path = testmon_policy.map_path(config.rootdir)
+    sidecar = coverage_map.read_sidecar(map_path)
+    sizes = coverage_map.map_sizes(sidecar)
+    recorded = sizes.get(environment, 0)
+
+    warning = map_erosion_warning(mapped, recorded)
+    if warning:
+        terminalreporter.write_line(warning, bold=True, red=True)
+
+    authoritative = bool(vars(config.option).get("testmon_noselect")) and (
+        testmon_policy.collected_the_whole_suite(config)
+    )
+    mark = map_high_water(mapped, recorded, authoritative)
+    if mark != recorded:
+        coverage_map.write_sidecar(
+            map_path,
+            structure=coverage_map.cached_structure(sidecar),
+            baselines=coverage_map.baselines(sidecar),
+            map_sizes={**sizes, environment: mark},
+        )
+
+
 def _report_function_coverage(terminalreporter, config):
     """Say what the map now knows about executed functions — only when it moved.
 
@@ -1715,11 +1808,15 @@ def _report_function_coverage(terminalreporter, config):
         _report_new_code_coverage(terminalreporter, config, environment, map_path, structure, since)
 
     if structure.parsed or environment not in coverage_map.baselines(sidecar):
+        # ``map_sizes`` is passed through rather than recomputed: the erosion
+        # canary ran first and may already have moved the mark, and a write that
+        # dropped the key would quietly retire the canary.
         coverage_map.write_sidecar(
             map_path,
             structure=structure.payload(),
             baselines=baselines,
             revisions=structure.retained(),
+            map_sizes=coverage_map.map_sizes(sidecar),
         )
 
 

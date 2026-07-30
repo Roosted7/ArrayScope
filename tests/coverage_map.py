@@ -1034,13 +1034,19 @@ def read_sidecar(map_path) -> dict:
 
 
 def write_sidecar(
-    map_path, *, structure: dict, baselines: dict, revisions: dict | None = None
+    map_path,
+    *,
+    structure: dict,
+    baselines: dict,
+    revisions: dict | None = None,
+    map_sizes: dict | None = None,
 ) -> None:
     payload = {
         "version": _VERSION,
         "structure": structure,
         "baselines": baselines,
         "revisions": revisions or {},
+        "map_sizes": dict(map_sizes or {}),
     }
     # A lost sidecar costs one re-parse and one baseline, never a wrong result.
     # ``revisions`` is optional for the same reason: a sidecar written before it
@@ -1062,6 +1068,23 @@ def retained_revisions(payload: dict) -> dict:
 def baselines(payload: dict) -> dict:
     recorded = payload.get("baselines")
     return dict(recorded) if isinstance(recorded, dict) else {}
+
+
+def map_sizes(payload: dict) -> dict:
+    """Per-environment high-water mark of the map's recorded test count.
+
+    Kept beside the coverage baseline because it answers the same shape of
+    question — "has this checkout's ground moved under it?" — and because the
+    number it guards is the denominator of the coverage figure itself: an eroded
+    map once read as a 15-point phantom regression.
+    """
+
+    recorded = payload.get("map_sizes")
+    return (
+        {str(key): int(value) for key, value in recorded.items()}
+        if isinstance(recorded, dict)
+        else {}
+    )
 
 
 def baseline_from(reach: Reach) -> dict:

@@ -234,8 +234,12 @@ limit: if the condition misses it, the path is too slow or the test must be
 made smaller while preserving the behavior. This is the counterpart to the
 "deterministic work counters, not elapsed time" rule elsewhere in this doc.
 
-**Debugging serially.** Append `-n 0` to any command to disable parallelism and get clean tracebacks
-and working `-s`/`pdb`: `pytest -q -n 0 tests/ui/test_foo.py::test_bar`.
+**Debugging serially.** Append `-n 0` to a **node id** to disable parallelism for that one test and
+get clean tracebacks and working `-s`/`pdb`: `pytest -q -n 0 tests/ui/test_foo.py::test_bar`. A wide
+`-n 0` is refused — serial is a different regime with its own standing failures, no per-test timeout
+and no worker to survive a segfault; see
+[test-selection.md](test-selection.md#why-a-wide--n-0-is-refused). The serial rings above
+(2, 3 and 4) are never refused.
 
 ## Test hygiene
 

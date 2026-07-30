@@ -584,6 +584,9 @@ def test_a_bypass_permitted_by_price_still_says_why():
 
     assert bypass_reason("explicitly forced") == "explicitly forced"
     assert bypass_reason("") == "cheap enough that retyping the command would cost more"
+    # A four-minute `--testmon-noselect` sweep is allowed by a different rule and
+    # must not be described as cheap.
+    assert "re-records the map" in bypass_reason("", records=True)
 
 
 def test_the_broken_here_block_names_the_next_command():
@@ -637,3 +640,50 @@ def test_no_document_names_a_flag_that_does_not_exist():
         "these lines name a flag pytest does not accept (abbreviation is off); "
         f"write the full --no-testmon-force-please-i-really-consider-it-needed: {offenders}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The canary: the map losing a chunk of itself must not be silent
+# --------------------------------------------------------------------------- #
+
+
+def test_a_map_that_lost_a_chunk_of_itself_says_so():
+    """The one signal that would catch a fail-open degradation in this layer.
+
+    ``protect_map_outside_the_scope`` silently returning 0 after a testmon
+    upgrade is not hypothetical: the same defect class eroded `main`'s map to
+    2680 of 3941 tests, and because the map's size is the denominator of the
+    free coverage figure, it read as a 15-point regression that did not exist.
+    Nothing else notices — the header still says `test selection: on`, and every
+    report agrees the missing tests are unaffected.
+    """
+
+    from tests.conftest import map_erosion_warning
+
+    assert map_erosion_warning(2680, 3941)
+    assert "1261" in map_erosion_warning(2680, 3941)
+    assert "--testmon-noselect" in map_erosion_warning(2680, 3941)
+    # A handful of deleted tests is not the signature, and a warning that cries
+    # wolf on ordinary work is a warning nobody reads.
+    assert map_erosion_warning(3900, 3941) == ""
+    assert map_erosion_warning(3941, 3941) == ""
+    assert map_erosion_warning(4200, 3941) == ""
+    # Nothing to compare against yet.
+    assert map_erosion_warning(3941, 0) == ""
+
+
+def test_the_high_water_mark_only_falls_for_a_run_that_can_prove_it():
+    """Strictly rising, with one exception, or an honest deletion warns forever.
+
+    A whole-suite ``--testmon-noselect`` re-records everything with no scope to
+    have missed anything, so its count *is* the truth. Every other run is a
+    partial view and may only push the mark up.
+    """
+
+    from tests.conftest import map_high_water
+
+    assert map_high_water(3941, 0, False) == 3941
+    assert map_high_water(3960, 3941, False) == 3960
+    assert map_high_water(2680, 3941, False) == 3941, "a scoped run cannot lower the mark"
+    assert map_high_water(3800, 3941, True) == 3800, "an exhaustive re-record is authoritative"
+    assert map_high_water(0, 3941, True) == 3941, "an empty read proves nothing"

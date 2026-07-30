@@ -518,6 +518,36 @@ why it publishes the number of tests the map holds: **this is what had eroded
 `main`'s map to 2680 of 3941 tests**, and a coverage number over two thirds of the
 suite would have read as a 15-point regression that did not exist.
 
+### The erosion canary
+
+That defect was fixed, and the fix is one `except AttributeError: return 0` away
+from silently coming back — a testmon upgrade that renames `sync_db_fs_tests` or
+`stable_files` would degrade `protect_map_outside_the_scope` to a no-op with
+nothing to show for it. Every degradation path in this layer fails *open*, and
+the map does not complain when it shrinks.
+
+So the sidecar keeps a **high-water mark** of the map's recorded test count, per
+environment, and a run that comes in more than 5% under it says so:
+
+```
+test selection: the map lost 1261 of 3941 recorded tests since this checkout's
+high-water mark. That is the erosion signature. Repair: pytest --testmon-noselect
+```
+
+The mark only rises, with one exception: a whole-suite `--testmon-noselect` run
+re-records everything with no scope to have missed anything, so its count *is*
+the truth and is allowed to lower it. That is what keeps an honest deletion from
+warning forever.
+
+Two guards sit under it. `tests/app/test_test_selection.py` asserts that the
+testmon attributes this policy rewrites still exist — including
+`TestmonSelect.deselected_files`, `TestmonData.sync_db_fs_tests` and
+`stable_files` — and that the set of option keys testmon *subscripts* is exactly
+what we expect. That second one is the tripwire that would have documented the
+`-p no:cacheprovider` crash before anybody found it the hard way: `lf` is
+registered by pytest's cache plugin, and testmon indexes it rather than
+`.get`-ing it.
+
 ### A new worktree seeds itself
 
 A fresh worktree has no map, so its first run would be a full traced suite —
