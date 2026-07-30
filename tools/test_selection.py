@@ -31,6 +31,12 @@ Usage:
 Both read the map for one environment — offscreen by default, matching ring 1.
 Pass `--environment` (or set the same variables the ring uses, e.g.
 `ARRAYSCOPE_GPU_TESTS=1`) to read another.
+
+Running tests is `pytest`, and the flag worth knowing is the one people reach
+for wrongly: `--no-testmon` with a file, directory or node id is **refused**,
+because naming a target has already chosen what runs and the flag then only
+adds "record nothing". `pytest --testmon-noselect <paths>` runs exactly those
+tests and records them. See `docs/testing/test-selection.md`.
 """
 
 from __future__ import annotations
@@ -456,7 +462,16 @@ def command_accept_reds(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        epilog=(
+            "Running tests is pytest: `pytest` for the loop, `pytest --since` before "
+            "merging, `pytest --testmon-noselect <paths>` to force-run named tests and "
+            "record them. `pytest --no-testmon <path>` is refused -- see "
+            "docs/testing/test-selection.md."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--environment", help="read another regime's slice of the map")
     subparsers = parser.add_subparsers(dest="command")
 

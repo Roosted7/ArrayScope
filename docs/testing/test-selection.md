@@ -17,16 +17,22 @@ runs*, never *which ring a claim needs*.
    somebody else was iterating in. Still selected, still fast.
 3. **`pytest --rerun-reds` when the red you are fixing is one you inherited.**
    Selection does not re-run those, so even a node id reports it deselected.
-4. **`--no-testmon` is not the gate.** Use it to take the tracer out of the
-   picture; use `--testmon-noselect` when you want everything *and* a repaired
-   map. Neither is a routine sweep — CI sweeps every push.
-5. **Never `-p no:randomly`.** pytest-randomly is not installed here; the flag
-   does nothing. The run says so if you pass it.
+4. **`--no-testmon` runs only a short list of node ids.** Everything else —
+   a bare sweep, a directory, a file, or node ids costing over 5 s — is
+   **refused** (exit 4), and the answer is `--testmon-noselect`, which runs
+   the same tests *and updates the map*. See [Why `--no-testmon` is
+   refused](#why---no-testmon-is-refused).
+5. **Never `-p no:randomly`.** pytest-randomly is not installed here, so the
+   flag does nothing — and the run **aborts** if you pass it. It is worse than
+   inert: it reads as "the ordering is pinned", so a flake it never had a
+   chance of preventing gets blamed on something else. It also only ever
+   arrives from another repository's habit, which is worth stopping to notice.
 6. **Suspect the map? Report it.** Do not route around it silently.
 
-Rules 4 and 5 are enforced by the run, which warns instead of relying on anyone
-having read this; `pytest --help` carries the per-flag detail. Reasoning for
-rule 4: [Why not just sweep?](#why-not-just-sweep).
+Rules 4 and 5 are enforced by the run rather than by anyone having read this —
+both abort, and `pytest --help` carries the per-flag detail.
+Reasoning: [Why not just sweep?](#why-not-just-sweep) and [Why `--no-testmon` is
+refused](#why---no-testmon-is-refused).
 
 ## The problem it solves
 
@@ -77,10 +83,12 @@ passes says the affected tests pass — a strictly smaller claim.
 | Re-run the inherited reds too | `pytest --rerun-reds` |
 | Rebuild the map from scratch | `rm .testmondata && pytest` |
 | Re-record without deselecting | `pytest --testmon-noselect` |
+| Run a whole file or directory regardless of selection | `pytest --testmon-noselect <paths>` |
+| Run specific tests regardless of selection | `pytest <node ids>` — a `file.py::test` argument already defeats deselection, so adding `--testmon-noselect` is a no-op and the run says so |
 | Which functions the suite executes | `python tools/test_selection.py coverage` |
 | New code on this branch that no test runs | `python tools/test_selection.py coverage --since` |
 | The coverage baseline is not yours | `python tools/test_selection.py accept-coverage` |
-| Regenerate artifacts, or settle a map you suspect | `pytest --no-testmon` (not a routine sweep — see below) |
+| Regenerate artifacts, or settle a map you suspect | `pytest --no-testmon-force` (a plain `--no-testmon` sweep is refused — see below) |
 | Artifacts, CI | already exhaustive — see below |
 
 Scoping still works and still narrows further: `pytest tests/ui` runs the
@@ -122,9 +130,9 @@ therefore invisible, and none of them are fixed by running `pytest` again:
    unchanged: whoever touches a display/render/kernel/window lane still runs
    those rings themselves.
 
-Item 3 has no local escape hatch at all: `--no-testmon` runs the whole
-*offscreen* suite, and rings 3–4 are not in it either way, so nothing on this
-page substitutes for running them — see [the ring rules](README.md).
+Item 3 has no local escape hatch at all: even a forced untraced sweep runs the
+whole *offscreen* suite, and rings 3–4 are not in it either way, so nothing on
+this page substitutes for running them — see [the ring rules](README.md).
 
 ## Where selection turns itself off
 
@@ -136,7 +144,6 @@ exhaustive, so no stale map can quietly truncate them:
 | `--no-testmon` | explicit |
 | `--cov` / `--cov-report` | a coverage number over a subset of the suite is a false number |
 | `CI` is set | every CI job is a gate; see below for the one exception |
-| `ARRAYSCOPE_TESTMON=0` | manual override, e.g. while bisecting |
 | pytest-testmon not installed | nothing to select with |
 
 An explicit `--testmon`, `--testmon-noselect`, `--testmon-nocollect` or
@@ -147,12 +154,12 @@ An explicit `--testmon`, `--testmon-noselect`, `--testmon-nocollect` or
 Selection is off by default in CI because Actions sets `CI`, so no map — stale,
 absent, or restored from another branch — can narrow a gate.
 
-One job opts back in with `ARRAYSCOPE_TESTMON=1`: **Affected GUI tests (fast
+One job opts back in with an explicit `--testmon`: **Affected GUI tests (fast
 signal)**, which caches `.testmondata` between runs and runs only what the diff
 affects. That is safe there and nowhere else, because everything it runs is also
 run exhaustively by the `coverage` job in the same workflow — an under-selecting
 map costs a late signal, never a missed regression. It also sets
-`ARRAYSCOPE_TESTMON_RERUN_FAILING=1`, since a cached map recorded from a failing
+`--rerun-reds`, since a cached map recorded from a failing
 run would otherwise keep reporting that job green while the test stayed broken.
 
 Note what this does *not* do: it does not shorten the workflow. The `coverage`
@@ -195,6 +202,40 @@ Nor is a local sweep the thing standing between a mistake and `main`:
 That leaves narrow, real uses. And if you do suspect the map, **report it**: a
 wrong map is worth fixing once for everybody, and quietly sweeping past it is how
 it stays wrong.
+
+### Why `--no-testmon` is refused
+
+The runner exits 4 with a `UsageError` unless the run is **a list of specific
+node ids costing under 5 s**:
+
+```
+pytest --no-testmon                                   # refused: sweeps the whole suite
+pytest --no-testmon tests/ui                          # refused: names a directory
+pytest --no-testmon tests/ui/test_thing.py            # refused: names a file
+pytest --no-testmon tests/ui/test_thing.py::test_one  # runs (and still warns)
+```
+
+The permission is written as a narrow allow rather than a list of bans because
+there is exactly one question `--no-testmon` answers that nothing else can —
+*is the tracer itself causing this?* — and that question is asked of named
+tests and answered in seconds. Every wider shape is someone reaching past
+selection, and pays twice: once in wall clock, and again because the run
+records nothing, so the map still does not know how those tests did.
+`--testmon-noselect` runs any of them, is equally immune to selection, and
+**updates the map**. Measured on one file: 0.32 s against 1.83 s.
+
+Refused rather than warned about because **the wrong shapes are fastest exactly
+when they are wrong.** One narrowed sweep costs seconds and reads as a clean
+pass, so nothing pushes back, and the habit it forms is later aimed at the
+whole suite. It is also what a deselected test invites — the moment someone is
+least inclined to read a yellow line. Added 2026-07-30 after that sequence
+played out twice in two sessions, the second time burning ~6 minutes of sweeps
+that recorded nothing, despite the docs and an after-the-fact runtime hint.
+
+Every untraced run still prints `WARNING: --no-testmon records nothing...` —
+before the run in the header, and again in the summary — including a permitted
+one and one forced through with **`--no-testmon-force`**. Force is what
+regenerating `tests/artifacts/` or settling a distrusted map uses.
 
 ### Why keep `--no-testmon` at all, then?
 
@@ -333,7 +374,7 @@ records its own tree's fingerprints over the other's and vacuums what the other
 still references, so both would end up seeing everything as changed — with
 SQLite serializing their runs on top of that.
 
-Set `ARRAYSCOPE_TESTMON_SEED=0` to opt out and record from scratch.
+Pass `--no-seed-map` to opt out and record from scratch.
 
 ## Tests that were already red, and tests you just broke
 
@@ -392,7 +433,7 @@ you are actually fixing one, since the fix can land outside the truncated
 dependency set of the run that failed:
 
 ```bash
-ARRAYSCOPE_TESTMON_RERUN_FAILING=1 pytest
+pytest --rerun-reds
 ```
 
 ## `--since`: what this whole branch changed
@@ -647,5 +688,6 @@ selection.
 * **"Nothing is mapped"** — the environment key of your shell differs from the
   one the suite writes. Check `QT_QPA_PLATFORM` and the `ARRAYSCOPE_*` ring
   variables, or pass `--environment`.
-* **Suspect selection itself** — `ARRAYSCOPE_TESTMON=0 pytest ...` removes it
+* **Suspect selection itself** — report it (rule 6); there is deliberately no
+  environment variable that turns it off
   from the picture without editing anything.

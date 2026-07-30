@@ -14,9 +14,20 @@
 # the staged subset: CI lints the tree, and a hook that passed on a partial
 # view would be the kind of gate that cannot fail. Both take ~15 ms.
 #
+# The third check is the dead-code guard, for the same reason ruff is here: it
+# is a whole-tree question that only has an answer once the tree is written,
+# and it is deliberately NOT a pytest test -- running the same scan under
+# pytest costs ~3.7 s on every suite run to re-answer what this hook already
+# refused to let past. `tests/app/test_dead_code.py` keeps only the synthetic
+# proof that its rules can fail. ~2.1 s here, and it is the one gate that
+# catches a deletion's *cascade*, where removing a caller strands the helper
+# below it.
+#
 # Bypass with `git commit --no-verify` when you mean to; enable with
 #   git config core.hooksPath .githooks
 set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
 
 if ! command -v ruff >/dev/null 2>&1; then
 	# Not found is a hard failure, never a skip. A hook that waves the commit
@@ -38,6 +49,18 @@ fi
 
 if ! ruff format --check .; then
 	echo "pre-commit: ruff format check failed. Fix with: ruff format ." >&2
+	status=1
+fi
+
+if ! command -v python >/dev/null 2>&1; then
+	# Same rule as ruff above: missing tool is a failure, never a skip.
+	echo "pre-commit: python is not on PATH, so the dead-code gate cannot run." >&2
+	exit 1
+fi
+
+if ! python "$root/tools/dead_code.py"; then
+	echo "pre-commit: dead-code guard failed — production code nothing reaches." >&2
+	echo "  Delete it with its assertions, or restore a real caller." >&2
 	status=1
 fi
 

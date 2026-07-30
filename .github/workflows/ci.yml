@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint (ruff)
+    name: Lint (ruff + dead code)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -23,6 +23,10 @@ jobs:
         run: ruff check --output-format github .
       - name: Ruff format check
         run: ruff format --check .
+      # Pure stdlib AST, nothing to install: the same gate .githooks/pre-commit
+      # runs, repeated here as late confirmation for the branches CI does see.
+      - name: Dead code
+        run: python tools/dead_code.py
 
   python-compat:
     name: Python compatibility ${{ matrix.python-version }}
@@ -58,24 +62,16 @@ jobs:
   # Change-driven selection (docs/testing/test-selection.md) turns itself off
   # whenever `CI` is set, which Actions always sets. Every job below therefore
   # runs the whole suite it names, and no map — stale, absent, or restored from
-  # another branch — can narrow a gate. The one job that opts back in is
-  # `affected-gui-tests`, and it is allowed to because it is a strict subset of
-  # the exhaustive `coverage` job running beside it.
+  # another branch — can narrow a gate. The one job that opts back in does so
+  # with an explicit `--testmon`, which wins over the `CI` refusal, and it is
+  # allowed to because it is a strict subset of the exhaustive `coverage` job
+  # running beside it.
   affected-gui-tests:
     name: Affected GUI tests (fast signal)
     runs-on: ubuntu-latest
     env:
       QT_QPA_PLATFORM: offscreen
       PYQTGRAPH_QT_LIB: PySide6
-      # Opt back in to selection. Safe here and only here: everything this job
-      # runs is also run exhaustively by the `coverage` job in the same
-      # workflow, so a map that under-selects costs a late signal, never a
-      # missed regression.
-      ARRAYSCOPE_TESTMON: "1"
-      # Locally a known-red test is not re-run until something it uses changes;
-      # here it must be, or a cached map recorded from a failing run would keep
-      # reporting the same job green while the test stayed broken.
-      ARRAYSCOPE_TESTMON_RERUN_FAILING: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -108,7 +104,10 @@ jobs:
       - name: Run affected GUI and integration tests
         # First run on a new dependency set records the map instead of using
         # one; every later run is proportional to the diff.
-        run: pytest -q tests/display tests/window tests/ui tests/app
+        # `--testmon` is explicit, so it overrides the CI-sets-everything rule.
+        # --rerun-reds: a cached map recorded from a failing run would otherwise
+        # keep reporting this job green while the test stayed broken.
+        run: pytest -q --testmon --rerun-reds tests/display tests/window tests/ui tests/app
 
   coverage:
     name: Coverage Python 3.12

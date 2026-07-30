@@ -60,6 +60,10 @@ CI runs the same two commands, but only on pushed branches, and work here happen
 
 The ignore list is deliberate (e.g. `E402` because `prefer_pyside6()` must run before Qt imports, `PLC0415` because lazy imports are load-bearing, `PLW0108` because Qt signal-connect lambdas swallow emitted arguments by design) — do not "fix" code to satisfy an ignored rule.
 
+The same hook runs the dead-code gate, `python tools/dead_code.py` (~2.1 s). It refuses production code no shipped path reaches, in two classes: **unreachable**, which nothing names at all, and **test-only**, whose only callers are under `tests/` — the class no coverage number can see, because the function still executes and so still reads as covered. Add `--list` to see what is already excused. It is a lint and not a pytest test on purpose: the suite would pay ~3.7 s per run to re-answer what the hook already refused, so `tests/app/test_dead_code.py` keeps only the synthetic proof that the rules can fail. Rules, allowlist, and the unadjudicated backlog live in `tests/dead_code.py`; the backlog is [queue](docs/queue.md) row 12 and its ceiling may only fall.
+
+When it fires, the answer is to delete the definition with its assertions or restore a real caller — never to widen the rule. A genuine entry point (a test seam, a CPU-mirror oracle, a benchmark entry) goes in `_ALLOWLIST` with a one-line reason.
+
 ## Architecture rules
 
 - `ViewState` and document objects own semantic state; widgets mirror state and emit intent.

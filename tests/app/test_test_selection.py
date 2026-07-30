@@ -155,20 +155,22 @@ def test_selection_is_off_in_ci(monkeypatch):
     assert not testmon_policy.decide(_config()).active
 
 
-def test_ci_can_opt_one_job_back_in(monkeypatch):
-    """The override must configure testmon, not merely permit it.
+def test_ci_can_opt_one_job_back_in_with_an_explicit_flag(monkeypatch):
+    """`--testmon` beats the CI refusal; no environment variable does.
 
-    ``explicit`` means "the developer set the testmon options by hand, do not
-    touch them". Marking the environment override explicit would leave the
-    options unset and silently run the whole suite instead — a job that looks
-    selective and is not.
+    The variable that used to do this was removed on 2026-07-30 as a duplicate.
+    A second spelling of "bypass selection" is exactly what escapes a refusal
+    built around the first, and the flag already says it.
     """
 
     monkeypatch.setenv("CI", "true")
-    monkeypatch.setenv("ARRAYSCOPE_TESTMON", "1")
-    decision = testmon_policy.decide(_config())
+    assert not testmon_policy.decide(_config()).active
+
+    config = _config()
+    vars(config.option)["testmon"] = True
+    decision = testmon_policy.decide(config)
     assert decision.active
-    assert not decision.explicit
+    assert decision.explicit
 
 
 def test_no_testmon_wins_over_the_default():
@@ -361,14 +363,13 @@ def _config_with_known_red():
     return config, plugin
 
 
-def test_an_inherited_red_is_not_re_run(monkeypatch):
+def test_an_inherited_red_is_not_re_run():
     """A red that was already failing here tells you nothing new.
 
     Re-running all of them measured 124 s on an otherwise clean tree — the
     whole inner loop, spent re-confirming what everybody already knew.
     """
 
-    monkeypatch.delenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", raising=False)
     config, plugin = _config_with_known_red()
 
     assert testmon_policy.apply_known_red_policy(config, new_reds=set()) == 1
@@ -376,7 +377,7 @@ def test_an_inherited_red_is_not_re_run(monkeypatch):
     assert "tests/b/test_b.py" in plugin.deselected_files
 
 
-def test_a_red_this_checkout_broke_always_runs(monkeypatch):
+def test_a_red_this_checkout_broke_always_runs():
     """The hazard this exists for: the map cannot vouch for a red it recorded.
 
     Break T, then edit something unrelated. T's dependencies are unchanged
@@ -385,7 +386,6 @@ def test_a_red_this_checkout_broke_always_runs(monkeypatch):
     regression minutes after introducing it.
     """
 
-    monkeypatch.delenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", raising=False)
     config, plugin = _config_with_known_red()
 
     assert testmon_policy.apply_known_red_policy(config, new_reds={_RED}) == 0
@@ -395,15 +395,15 @@ def test_a_red_this_checkout_broke_always_runs(monkeypatch):
     )
 
 
-def test_the_flag_re_runs_the_inherited_ones_too(monkeypatch):
-    monkeypatch.setenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", "1")
+def test_the_flag_re_runs_the_inherited_ones_too():
     config, plugin = _config_with_known_red()
+    config.getoption = lambda name, default=None: True if name == "rerun_reds" else default
 
     assert testmon_policy.apply_known_red_policy(config, new_reds=set()) == 0
     assert _RED not in plugin.deselected_tests
 
 
-def test_an_exhaustive_run_is_left_untouched(monkeypatch):
+def test_an_exhaustive_run_is_left_untouched():
     """Under --testmon-noselect the lists only decide order, so do not touch them.
 
     testmon runs its "deselected" group last rather than dropping it, so
@@ -412,7 +412,6 @@ def test_an_exhaustive_run_is_left_untouched(monkeypatch):
     roughly one spurious failure per run.
     """
 
-    monkeypatch.delenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", raising=False)
     config, plugin = _config_with_known_red()
     config.testmon_config = SimpleNamespace(select=False, collect=True)
     before = list(plugin.deselected_tests)
@@ -421,10 +420,9 @@ def test_an_exhaustive_run_is_left_untouched(monkeypatch):
     assert plugin.deselected_tests == before
 
 
-def test_a_red_test_whose_dependencies_changed_still_runs(monkeypatch):
+def test_a_red_test_whose_dependencies_changed_still_runs():
     """Skipping known reds must never reach a test the change actually touches."""
 
-    monkeypatch.delenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", raising=False)
     plugin = _FakeTestmonSelect(deselected_tests=[], deselected_files=[])
     config = SimpleNamespace(
         pluginmanager=_FakePluginManager(plugin),
@@ -639,8 +637,7 @@ def test_seeding_never_overwrites_an_existing_map(tmp_path, monkeypatch):
 
 def test_seeding_can_be_turned_off(tmp_path, monkeypatch):
     monkeypatch.setenv("TESTMON_DATAFILE", "themap")
-    monkeypatch.setenv("ARRAYSCOPE_TESTMON_SEED", "0")
-    assert testmon_policy.seed_map(tmp_path) is None
+    assert testmon_policy.seed_map(tmp_path, seeding=False) is None
     assert not (tmp_path / "themap").exists()
 
 
@@ -659,10 +656,6 @@ def test_seeding_copies_rather_than_links(tmp_path, monkeypatch):
     donor = donor_checkout / "themap"
     donor.write_bytes(b"donor-map")
     monkeypatch.setenv("TESTMON_DATAFILE", "themap")
-    # Seeding is what this asserts, so the opt-out must not be inherited from the
-    # shell. Without this the test fails under `ARRAYSCOPE_TESTMON_SEED=0`, which
-    # is exactly what you set while recording a map from scratch.
-    monkeypatch.delenv("ARRAYSCOPE_TESTMON_SEED", raising=False)
     monkeypatch.setattr(
         testmon_policy,
         "_best_donor_map",
@@ -1029,7 +1022,6 @@ def test_seeding_carries_the_coverage_sidecar_across(tmp_path, monkeypatch):
         donor, structure={"a.py": {"fsha": "x"}}, baselines={"offscreen": {"covered": 7}}
     )
     monkeypatch.setenv("TESTMON_DATAFILE", "themap")
-    monkeypatch.delenv("ARRAYSCOPE_TESTMON_SEED", raising=False)
     monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: donor)
 
     assert testmon_policy.seed_map(worktree) == str(donor)
@@ -1047,7 +1039,6 @@ def test_seeding_without_a_donor_sidecar_is_not_an_error(tmp_path, monkeypatch):
     donor = donor_checkout / "themap"
     donor.write_bytes(b"donor-map")
     monkeypatch.setenv("TESTMON_DATAFILE", "themap")
-    monkeypatch.delenv("ARRAYSCOPE_TESTMON_SEED", raising=False)
     monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: donor)
 
     assert testmon_policy.seed_map(worktree) == str(donor)
@@ -1057,41 +1048,99 @@ def test_seeding_without_a_donor_sidecar_is_not_an_error(tmp_path, monkeypatch):
 # --- Reaching the inherited reds without leaving selection ------------------
 
 
-def test_rerun_reds_is_reachable_as_a_flag_and_as_the_variable(monkeypatch):
-    """The flag exists because the variable was not findable when it mattered.
+def test_rerun_reds_is_a_flag_and_nothing_else():
+    """One spelling. The environment variable that shadowed it is gone.
 
-    Fixing an inherited red is the one everyday task selection actively works
-    against — it does not re-run those, so even a targeted node id reports
-    "deselected" — and the escape everybody reached for instead was
-    ``--no-testmon``, trading a few-second loop for the whole suite.
+    It was kept on the claim that an xdist worker is "handed no command line of
+    its own". Measured false on 2026-07-30: a worker reads ``rerun_reds=True``
+    straight from the controller's command line, so the variable was a pure
+    duplicate — and a second spelling of a selection bypass is exactly what
+    slips past a refusal built around the first.
     """
-
-    monkeypatch.delenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", raising=False)
 
     assert testmon_policy.rerun_known_red_tests() is False
     assert testmon_policy.rerun_known_red_tests(_option_config(rerun_reds=False)) is False
     assert testmon_policy.rerun_known_red_tests(_option_config(rerun_reds=True)) is True
 
-    # The variable still answers on its own, for scripts, CI steps, and any
-    # xdist worker handed no command line of its own.
-    monkeypatch.setenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", "1")
-    assert testmon_policy.rerun_known_red_tests() is True
-    assert testmon_policy.rerun_known_red_tests(_option_config(rerun_reds=False)) is True
 
-
-def test_a_config_without_the_option_falls_back_to_the_variable(monkeypatch):
+def test_a_config_without_the_option_reads_as_off():
     """`tools/test_selection.py` builds configs that never registered it."""
-
-    monkeypatch.delenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", raising=False)
 
     class _NoOptions:
         def getoption(self, name, default=None):
             raise ValueError(f"no option named {name!r}")
 
     assert testmon_policy.rerun_known_red_tests(_NoOptions()) is False
-    monkeypatch.setenv("ARRAYSCOPE_TESTMON_RERUN_FAILING", "yes")
-    assert testmon_policy.rerun_known_red_tests(_NoOptions()) is True
 
 
 def _option_config(**options):
     return SimpleNamespace(getoption=lambda name, default=None: options.get(name, default))
+
+
+def test_a_dead_plugin_disable_is_detected_and_a_real_one_is_not():
+    """`-p no:randomly` aborts the run; the rule cannot go stale.
+
+    It is refused rather than noted afterwards because of who types it: nothing
+    in this repository suggests the flag, so it arrives from another codebase's
+    habit — and whoever brought it has not read rule 5, which makes a line
+    printed *after* the run the wrong moment. It is also worse than inert: it
+    reads as "the ordering is pinned", so a flake it never had a chance of
+    preventing gets blamed elsewhere.
+    """
+
+    from tests.conftest import pointless_plugin_disables
+
+    absent = lambda name: False  # noqa: E731 - one-expression stub reads better inline
+    present = lambda name: True  # noqa: E731
+
+    assert pointless_plugin_disables(["no:randomly"], absent) == [
+        ("no:randomly", "pytest-randomly is not installed")
+    ]
+    # Installing the plugin retires the entry by itself — no list to prune.
+    assert pointless_plugin_disables(["no:randomly"], present) == []
+    # Untouched: plugins with no entry, and enabling rather than disabling.
+    assert pointless_plugin_disables(["no:cacheprovider"], absent) == []
+    assert pointless_plugin_disables(["randomly"], absent) == []
+    assert pointless_plugin_disables([], absent) == []
+
+
+def test_a_selection_bypass_is_refused_on_cost_not_on_spelling():
+    """The gate measures time, because time is what it exists to protect.
+
+    `--no-testmon` and `--testmon-noselect` are the same act — running tests
+    the change provably cannot reach — so the rule is written about the cost
+    rather than about either flag. A run that still selects is never refused
+    however long it takes: the map already narrowed it to what the change
+    touches, so that time is earned.
+    """
+
+    from tests.conftest import unselected_run_refusal
+
+    # Cheap enough that retyping the command would cost more than the run.
+    assert unselected_run_refusal(4.0, "") == ""
+    # Expensive, and nothing legitimises it.
+    assert "skips selection" in unselected_run_refusal(222.0, "")
+    # Legitimate exhaustive contexts are never refused, at any price.
+    assert unselected_run_refusal(222.0, "CI, where every job is a gate") == ""
+    assert unselected_run_refusal(222.0, "explicitly forced") == ""
+
+
+def test_a_bypass_is_priced_from_the_map_before_anything_runs():
+    """Pricing has to precede collection — the only moment refusing saves time."""
+
+    from tests.conftest import unselected_run_seconds
+
+    recorded = {
+        "tests/ui/test_a.py::test_one": 10.0,
+        "tests/ui/test_a.py::test_two": 5.0,
+        "tests/core/test_b.py::test_three": 1.0,
+    }
+    under = lambda name, scope: any(name.startswith(entry) for entry in scope)  # noqa: E731
+
+    # No scope: the whole recorded suite.
+    assert unselected_run_seconds(recorded, (), under) == 16.0
+    # Scoped: only the tests whose file sits under it.
+    assert unselected_run_seconds(recorded, ("tests/ui",), under) == 15.0
+    assert unselected_run_seconds(recorded, ("tests/core",), under) == 1.0
+    # An empty map cannot price anything, and must not invent a refusal.
+    assert unselected_run_seconds({}, (), under) == 0.0

@@ -56,7 +56,8 @@ from __future__ import annotations
 
 import contextlib
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -157,14 +158,10 @@ def decide(config) -> Decision:
     if any(options.get(name) for name in _EXPLICIT_OPTIONS):
         return Decision(True, "requested on the command line", explicit=True)
 
-    override = os.environ.get("ARRAYSCOPE_TESTMON", "").strip().lower()
-    if override in {"0", "off", "no", "false"}:
-        return Decision(False, "ARRAYSCOPE_TESTMON is off")
-    if override in {"1", "on", "yes", "true"}:
-        # Not ``explicit``: that flag means "the developer set the testmon
-        # options themselves, leave them alone". This override still needs the
-        # options configured for it — it only overrules the refusals below.
-        return Decision(True, "ARRAYSCOPE_TESTMON is on")
+    # There is deliberately no environment override here. It duplicated the
+    # command-line flags in both directions -- off is ``--no-testmon``, on is
+    # ``--testmon`` -- and a second spelling of "bypass selection" is exactly
+    # the kind of thing that escapes a refusal built around the first.
 
     # A coverage report describes the tests that ran. Selecting a subset and
     # publishing its coverage as the project's would be a false number, so the
@@ -214,6 +211,11 @@ class MapPeek:
     forced_tests: frozenset[str] = frozenset()
     forced_files: frozenset[str] = frozenset()
     forced_seconds: float = 0.0
+    #: Recorded wall time per test node id. Used to price a run *before* it
+    #: starts — the only way to refuse an expensive one while it can still be
+    #: retyped. Absent or never-recorded tests are simply missing, so a sum
+    #: over this is a lower bound, which is the safe direction for a refusal.
+    test_seconds: Mapping[str, float] = field(default_factory=dict)
     #: Files whose content differs from what the map recorded. Only filled in
     #: when ``with_changed_files`` was asked for; note this is "different from
     #: the map", not "different from git HEAD" — an old map makes an untouched
@@ -247,12 +249,13 @@ def rerun_known_red_tests(config=None) -> bool:
 
     ``--rerun-reds`` re-runs the inherited ones as well — the right choice while
     you are fixing one of them, since the fix can land outside the truncated
-    dependency set of the run that failed. It is a flag rather than only an
-    environment variable because that is the case where somebody who cannot find
-    it reaches for ``--no-testmon`` instead and trades a few-second loop for the
-    whole suite. ``ARRAYSCOPE_TESTMON_RERUN_FAILING=1`` still works and is the
-    form to use from a script or a CI step, and it is what an xdist worker reads
-    when it is handed no command line of its own.
+    dependency set of the run that failed.
+
+    The flag is the only spelling. An ``ARRAYSCOPE_TESTMON_RERUN_FAILING``
+    variable used to shadow it, justified by workers being "handed no command
+    line of their own"; that was measured false on 2026-07-30 — an xdist worker
+    reads ``rerun_reds=True`` from the controller's own command line — so the
+    variable was a duplicate and is gone. Scripts and CI steps pass the flag.
     """
 
     if config is not None:
@@ -263,12 +266,7 @@ def rerun_known_red_tests(config=None) -> bool:
             # Not a pytest run, or the option was never registered — the
             # environment variable is the answer for both.
             pass
-    return os.environ.get("ARRAYSCOPE_TESTMON_RERUN_FAILING", "").strip().lower() in {
-        "1",
-        "on",
-        "yes",
-        "true",
-    }
+    return False
 
 
 def known_red_tests(config) -> set[str]:
@@ -415,7 +413,7 @@ def protect_map_outside_the_scope(config) -> int:
     return len(outside)
 
 
-def seed_map(rootdir: os.PathLike[str] | str) -> str | None:
+def seed_map(rootdir: os.PathLike[str] | str, *, seeding: bool = True) -> str | None:
     """Copy a sibling checkout's map in when this one has none. Returns the donor.
 
     A fresh worktree would otherwise pay a full traced run (~4 min) before
@@ -435,7 +433,7 @@ def seed_map(rootdir: os.PathLike[str] | str) -> str | None:
     and SQLite would serialize concurrent runs on top of that.
     """
 
-    if os.environ.get("ARRAYSCOPE_TESTMON_SEED", "").strip().lower() in {"0", "off", "no", "false"}:
+    if not seeding:
         return None
     destination = map_path(rootdir)
     if destination.exists():
@@ -604,6 +602,11 @@ def peek(
         affected_tests=affected,
         affected_files=frozenset(data.unstable_files or ()),
         affected_seconds=seconds,
+        test_seconds={
+            name: (report or {}).get("duration") or 0.0
+            for name, report in all_tests.items()
+            if (report or {}).get("duration")
+        },
         forced_tests=forced,
         forced_files=frozenset(name.split("::", 1)[0] for name in forced),
         forced_seconds=forced_seconds,

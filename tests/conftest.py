@@ -87,8 +87,29 @@ def pytest_addoption(parser):
         default=False,
         help=(
             "Also re-run the reds this checkout inherited; selection skips them by "
-            "default. Use it while fixing one. Same as "
-            "ARRAYSCOPE_TESTMON_RERUN_FAILING=1."
+            "default. Use it while fixing one. This is the only spelling -- xdist "
+            "workers read it from the controller's command line."
+        ),
+    )
+    group.addoption(
+        "--no-seed-map",
+        action="store_true",
+        default=False,
+        help=(
+            "Do not copy a sibling checkout's map into a fresh worktree. Seeding is "
+            "safe (fingerprints are content-addressed, so anything that differs is "
+            "re-run) and saves a full traced run; this exists to test that."
+        ),
+    )
+    group.addoption(
+        "--no-testmon-force-please-i-really-consider-it-needed",
+        action="store_true",
+        default=False,
+        help=(
+            "Override the refusal of a selection-bypassing run. Long on purpose: "
+            "needing it means selection has a blind spot, which is a defect to "
+            "report against tests/testmon_policy.py, not a workflow. Implies "
+            "--no-testmon."
         ),
     )
 
@@ -211,9 +232,148 @@ def _ensure_map_seeded(config):
     if getattr(config, "arrayscope_selection_seed", "unset") != "unset" or _XDIST_WORKER:
         return
     try:
-        config.arrayscope_selection_seed = testmon_policy.seed_map(config.rootdir)
+        config.arrayscope_selection_seed = testmon_policy.seed_map(
+            config.rootdir, seeding=not config.getoption("no_seed_map", False)
+        )
     except Exception:  # an unseeded run is slow, never wrong
         config.arrayscope_selection_seed = None
+
+
+#: A run that bypasses selection may cost at most this. Above it, retyping the
+#: command is cheaper than the run, so there is always time to be told to.
+_UNSELECTED_ABORT_SECONDS = 5.0
+
+#: Deliberately unpleasant. It is typed by someone claiming the harness left
+#: them no choice, and that claim should cost something and be visible in a
+#: shell history. See :func:`unselected_run_refusal`.
+BYPASS_FLAG = "--no-testmon-force-please-i-really-consider-it-needed"
+
+#: Printed after any run that actually bypassed selection.
+BYPASS_BANNER = "!!! IF THIS WAS NEEDED, REPORT AND FIX THE TEST HARNESS !!!"
+
+
+def unselected_run_refusal(seconds, permitted_because) -> str:
+    """Why a selection-bypassing run is refused, or ``""`` to allow it.
+
+    The rule is about **time**, not about which flag spelled it. ``pytest
+    --no-testmon`` and ``pytest --testmon-noselect`` are the same act -- running tests the change provably cannot reach -- and
+    the cost is the thing worth refusing, so it is the thing measured. A run
+    that still selects is never touched here however long it takes: the map has
+    already narrowed it to what the change touches, so that time is earned.
+
+    ``seconds`` is priced from the map before collection, which is the only
+    moment a refusal can still save the time it is refusing. It is summed
+    *recorded test time*, not predicted wall clock -- the suite runs eight ways
+    parallel, so wall clock is a fraction of it. The comparison that matters is
+    against a selected run of the same tree, which is measured the same way.
+
+    A bypass that was genuinely necessary is a **defect report**, not a
+    workflow. If selection cannot see something, the fix belongs in
+    ``testmon_policy`` (as the declared child-process class already is), not in
+    a flag each person remembers separately -- hence the banner every bypassed
+    run ends with.
+    """
+
+    if permitted_because:
+        return ""
+    if seconds <= _UNSELECTED_ABORT_SECONDS:
+        return ""
+    return (
+        f"it skips selection and would run ~{seconds:.0f} s of recorded test time "
+        f"the change cannot reach"
+    )
+
+
+def unselected_run_seconds(test_seconds, scope, under) -> float:
+    """Recorded cost of the tests a bypassing run would execute."""
+
+    if not scope:
+        return sum((test_seconds or {}).values())
+    return sum(
+        duration
+        for name, duration in (test_seconds or {}).items()
+        if under(name.split("::", 1)[0], scope)
+    )
+
+
+def _bypass_permitted(config) -> str:
+    """Why an unselected run is legitimate here, or ``""``."""
+
+    options = vars(config.option)
+    if options.get(BYPASS_FLAG.lstrip("-").replace("-", "_")):
+        return "explicitly forced"
+    if os.environ.get("CI"):
+        return "CI, where every job is a gate"
+    if options.get("cov") or options.get("cov_report"):
+        return "coverage, which is false over a subset"
+    if not testmon_policy.testmon_installed():
+        return "pytest-testmon is not installed"
+    return ""
+
+
+def _bypasses_selection(config) -> bool:
+    options = vars(config.option)
+    if options.get("testmon_noselect"):
+        return True
+    return not testmon_policy.decide(config).active
+
+
+def _refuse_unselected_run(config) -> None:
+    if vars(config.option).get(BYPASS_FLAG.lstrip("-").replace("-", "_")):
+        # The override implies the thing it overrides, so the one long flag is
+        # the whole command -- and so the run still counts as a bypass, and
+        # still ends with the banner.
+        setattr(config.option, "no-testmon", True)
+        return
+    if not _bypasses_selection(config):
+        return
+    permitted = _bypass_permitted(config)
+    scope = testmon_policy.collected_scope(config)
+    testpaths = tuple(config.getini("testpaths") or ())
+    if set(scope) == set(testpaths):
+        scope = ()
+    seconds = unselected_run_seconds(_recorded_test_seconds(config), scope, testmon_policy.under)
+    reason = unselected_run_refusal(seconds, permitted)
+    if not reason:
+        return
+    named = " ".join(str(argument) for argument in (config.args or ())) or ""
+    raise pytest.UsageError(
+        "\n".join(
+            (
+                f"Refused: {reason}.",
+                "",
+                f"    pytest {named}".rstrip(),
+                "",
+                "runs the same thing, selected, in a fraction of the time. Selection",
+                "is not a shortcut -- it is the honest set, from recorded evidence.",
+                "",
+                "  Everything this branch changed, before merging:  pytest --since",
+                "  A red this checkout inherited:                   pytest --rerun-reds",
+                "  A map you distrust:                              rm .testmondata && pytest",
+                "",
+                "If you are certain the harness has left you no option, the override is",
+                f"    {BYPASS_FLAG}",
+                "and it is that long on purpose. Needing it means selection has a blind",
+                "spot worth fixing in tests/testmon_policy.py, so report it.",
+                "",
+                "Read docs/testing/test-selection.md.",
+            )
+        )
+    )
+
+
+def _recorded_test_seconds(config) -> dict:
+    """Per-node-id durations from the map, or ``{}`` if it cannot be read."""
+
+    try:
+        peek = testmon_policy.peek(
+            config.rootdir,
+            testmon_policy.resolve_environment(config.getini("environment_expression")),
+            tuple(config.getini("testmon_ignore_dependencies")),
+        )
+    except Exception:  # a broken map must never be the reason a run cannot start
+        return {}
+    return dict(peek.test_seconds) if peek is not None else {}
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -227,6 +387,8 @@ def pytest_configure(config):
     it lazily further down instead.)
     """
 
+    _refuse_pointless_flags(config)
+    _refuse_unselected_run(config)
     decision = testmon_policy.decide(config)
     config.arrayscope_selection = decision
     if decision.active:
@@ -434,70 +596,91 @@ _POINTLESS_PLUGIN_DISABLES = {
 }
 
 
-def _report_pointless_flags(terminalreporter, config) -> None:
-    """Say so when a run carried a flag that could not have had an effect.
+def pointless_plugin_disables(plugins, installed) -> list[tuple[str, str]]:
+    """``(flag, why)`` for each ``-p no:X`` that could not have had an effect.
 
-    Cheaper than a documentation rule nobody reads at the moment they type it,
-    and it cannot go stale: if the plugin is ever really added, the check stops
-    firing by itself.
+    ``installed`` answers "is ``pytest_X`` importable?", injected so the rule
+    can be tested without depending on what this environment happens to have.
+    A plugin that really does get added makes its entry stop firing by itself.
     """
 
-    from importlib.util import find_spec
-
-    for plugin in tuple(getattr(config.option, "plugins", ()) or ()):
+    found = []
+    for plugin in tuple(plugins or ()):
         name = str(plugin)
         if not name.startswith("no:"):
             continue
         disabled = name[3:]
         why = _POINTLESS_PLUGIN_DISABLES.get(disabled)
-        if why is None:
+        if why is None or installed(disabled):
             continue
-        if find_spec(f"pytest_{disabled}") is not None:
-            continue
-        terminalreporter.write_line(f"-p {name}: no effect ({why}).", bold=True, yellow=True)
+        found.append((name, why))
+    return found
+
+
+def _refuse_pointless_flags(config) -> None:
+    """Abort on a flag that cannot do anything, rather than noting it after.
+
+    This used to print a line in the terminal summary. Escalated to an abort on
+    2026-07-30 for a reason specific to who types it: ``-p no:randomly`` is not
+    a thing a person reaches for here, because there is nothing in this repo
+    that suggests it. It arrives from another codebase's habit, which in
+    practice means an agent pattern-matching a command it has seen elsewhere --
+    and an agent that types it has demonstrably not read rule 5, so a line it
+    would read *afterwards* is aimed at the wrong moment.
+
+    The flag is also worse than inert. It reads as "I stabilised the ordering",
+    so a run carrying it looks more controlled than it is, and a flake it did
+    nothing to prevent gets attributed to something else.
+    """
+
+    from importlib.util import find_spec
+
+    pointless = pointless_plugin_disables(
+        getattr(config.option, "plugins", ()),
+        lambda name: find_spec(f"pytest_{name}") is not None,
+    )
+    if not pointless:
+        return
+    raise pytest.UsageError(
+        "\n".join(
+            [
+                *(f"-p {flag} does nothing here: {why}." for flag, why in pointless),
+                "",
+                "Drop it. It is not merely inert -- it makes a run look like the",
+                "ordering was pinned when it was not, so a flake it never had a",
+                "chance of preventing gets blamed on something else.",
+                "",
+                "Read docs/testing/test-selection.md before the next command: if this",
+                "flag came from another repository's habit rather than from this one,",
+                "the rest of that habit is probably wrong here too.",
+            ]
+        )
+    )
 
 
 def _report_gate_run_cost(terminalreporter, config) -> None:
-    """Name the focused answers after a wide ``--no-testmon`` sweep.
+    """Close every selection-bypassing run with what it cost and a defect ask.
 
-    ``--no-testmon`` has legitimate narrow uses — regenerating the canonical
-    artifacts, or settling a run you suspect the map got wrong. It is not the
-    pre-merge gate, and this fires when it was used as one.
-
-    What an exhaustive *offscreen* run adds over selection is narrower than it
-    looks: the map-erosion hole that once made it the only trustworthy answer is
-    closed (:func:`protect_map_outside_the_scope`), the child-process class is
-    declared and guarded, and rings 3–4 are not in it either way. CI sets
-    ``CI``, which turns selection off, so every push is already swept
-    exhaustively by a machine. ``--since`` is the branch-sized question a person
-    should be asking before merging, and it costs a fraction of this.
-
-    The trap this exists for is specific and hard to see from inside: while
-    fixing an inherited red, a targeted ``pytest path::test`` answers
-    "deselected", because selection deliberately does not re-run reds this
-    checkout did not break — and ``--no-testmon`` is the first thing that
-    visibly works. It costs ~222 s against a few-second loop, every iteration.
-    Whoever just paid that is the only person who can be told at the moment it
-    is useful.
-
-    Deliberately not fired for the other exhaustive runs (CI, ``--cov``): those
-    chose nothing and have no faster alternative.
+    Fires for the ones that got through — the explicitly forced override, CI,
+    and a coverage run — because the point is not to scold the flag but to keep
+    the bypass *visible*. A bypass that was genuinely necessary means selection
+    could not see something, which is a defect in ``testmon_policy`` and worth
+    a report; a bypass that was habit is worth noticing at the moment its price
+    is on screen.
     """
 
-    if not vars(config.option).get("no-testmon"):
+    if not _bypasses_selection(config):
         return
     started = getattr(config, "arrayscope_started", None)
     if started is None:
         return
     elapsed = monotonic() - started
-    if elapsed < _GATE_NUDGE_SECONDS:
-        return
     terminalreporter.write_line(
-        f"--no-testmon: swept {elapsed:.0f} s, recorded nothing. Pre-merge is "
-        "`--since`; see `pytest --help`.",
+        f"Bypassed selection ({_bypass_permitted(config)}) and ran {elapsed:.0f} s.",
         bold=True,
         yellow=True,
     )
+    terminalreporter.write_line(BYPASS_BANNER, bold=True, red=True)
 
 
 def pytest_terminal_summary(terminalreporter, config):
@@ -520,7 +703,6 @@ def pytest_terminal_summary(terminalreporter, config):
             terminalreporter.write_line(busy, bold=True, yellow=True)
 
     _report_function_coverage(terminalreporter, config)
-    _report_pointless_flags(terminalreporter, config)
     _report_gate_run_cost(terminalreporter, config)
 
     if not _selection_is_narrowing(config):
