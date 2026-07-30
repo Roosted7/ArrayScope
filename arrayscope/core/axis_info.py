@@ -82,6 +82,46 @@ def axis_metadata_summary(axis_info) -> str:
     return "\n".join(parts)
 
 
+def renumber_default_axes(axes) -> AxisInfoTuple:
+    """Re-place the positional id/label of axes that never carried a custom one.
+
+    ``axis-N`` / ``Dim N`` encode a *position*. Carrying them through a rank
+    change makes them both stale and, worse, duplicated: minting a new axis at
+    position 0 while a surviving input axis still calls itself ``Dim 0``
+    produced ``['Dim 0', 'Dim 0', 'Dim 1']``. Renumbering the defaults leaves
+    the result identical to what :func:`default_axes` would mint for the new
+    rank. A label the user (or a loader) actually chose is never touched, and a
+    rank-preserving call is a no-op, so this only ever moves a name that was
+    already only a placeholder for a position.
+    """
+
+    axes = tuple(axes)
+    result = []
+    for index, axis in enumerate(axes):
+        replacements = {}
+        position = _default_position(axis)
+        if position >= 0 and not has_custom_label(axis, position):
+            replacements["label"] = default_label(index)
+        if axis.id == f"axis-{position}":
+            replacements["id"] = f"axis-{index}"
+        result.append(replace(axis, **replacements) if replacements else axis)
+    return tuple(result)
+
+
+def _default_position(axis) -> int:
+    """The position ``axis``'s defaulted id/label would have been minted at."""
+
+    label = str(axis.label)
+    if label.startswith("Dim "):
+        suffix = label[4:]
+        if suffix.isdigit():
+            return int(suffix)
+    identifier = str(axis.id)
+    if identifier.startswith("axis-") and identifier[5:].isdigit():
+        return int(identifier[5:])
+    return -1
+
+
 def axes_for_shape(axes, shape) -> AxisInfoTuple:
     shape = tuple(int(size) for size in shape)
     if axes is None:
@@ -205,7 +245,63 @@ def output_axes_for_operation(axes, operation) -> AxisInfoTuple:
                 axes[axis], size=2, coordinate="real-imag", unit=None, spacing=None, origin=None
             ),
         )
-    return tuple(axes)
+    return _synthesized_output_axes(axes, operation)
+
+
+def _synthesized_output_axes(axes, operation) -> AxisInfoTuple:
+    """Axis metadata for an operation this table does not name.
+
+    Returning the input metadata unchanged is right only while the rank is
+    unchanged. When it is not, ``ArrayDocument.__init__`` used to raise "axis
+    metadata length must match shape length" -- so an unrecognized
+    rank-changing operation was a hard failure at document construction, which
+    is precisely the class of operation ADR 0060 exists to allow. An operation
+    that knows better still says so through its own ``output_axes`` hook; this
+    is only the floor beneath it.
+
+    The floor is deliberately timid. A rank drop keeps the positionally
+    matching survivors -- the same rule the named reductions above use, derived
+    from the shapes instead of from a name. A rank increase keeps the input
+    axes in place and appends fresh ones. If either pairing disagrees with the
+    output sizes the alignment is unknowable, and minting plain defaults beats
+    pinning a physical spacing or unit onto an axis it does not describe.
+    """
+
+    axes = tuple(axes)
+    output_shape = getattr(operation, "output_shape", None)
+    if not callable(output_shape):
+        return axes
+    try:
+        shape = tuple(int(size) for size in output_shape(tuple(axis.size for axis in axes)))
+    except Exception:
+        # Shape resolution is the caller's job to report; metadata synthesis
+        # must not turn it into a different error at a different layer.
+        return axes
+    if len(shape) == len(axes):
+        return axes
+    if len(shape) < len(axes):
+        survivors = []
+        cursor = 0
+        for size in shape:
+            while cursor < len(axes) and axes[cursor].size != size:
+                cursor += 1
+            if cursor >= len(axes):
+                break
+            survivors.append(axes[cursor])
+            cursor += 1
+        if len(survivors) == len(shape):
+            return tuple(survivors)
+        return default_axes(shape)
+    if tuple(axis.size for axis in axes) == shape[: len(axes)]:
+        return (
+            *axes,
+            *(
+                AxisInfo(id=f"axis-{position}", label=default_label(position), size=size)
+                for position, size in enumerate(shape)
+                if position >= len(axes)
+            ),
+        )
+    return default_axes(shape)
 
 
 def _cropped_axis(axis_info, start, stop) -> AxisInfo:

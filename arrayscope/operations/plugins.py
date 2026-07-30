@@ -364,7 +364,7 @@ class PluginOperation:
     def output_axes(self, axes):
         from dataclasses import replace
 
-        from arrayscope.core.axis_info import AxisInfo
+        from arrayscope.core.axis_info import AxisInfo, renumber_default_axes
 
         input_shape = tuple(axis.size for axis in axes)
         dtype = self._dtype_hint or np.dtype("float32")
@@ -386,7 +386,13 @@ class PluginOperation:
                 output.append(replace(source, size=size))
             else:
                 output.append(replace(source, size=size, spacing=None, origin=None))
-        return tuple(output)
+        # A default label and a default id are both *positional*, so carrying
+        # them through a rank change duplicates them: a stack-at-axis-0 op
+        # produced ['Dim 0', 'Dim 0', 'Dim 1'] because the new axis 0 and the
+        # surviving input axis 0 both claimed position 0. Renumbering the
+        # defaulted ones (and only those) restores uniqueness without touching
+        # a label or coordinate the user actually chose.
+        return renumber_default_axes(tuple(output))
 
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
         ndim = len(tuple(input_shape))
