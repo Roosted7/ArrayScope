@@ -1,4 +1,6 @@
+import json
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -7,6 +9,10 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from arrayscope.display import colormap_library as library
+
+# Captured before the autouse isolation fixture replaces it, for the one test
+# whose subject *is* where the library resolves its directory to.
+_REAL_DIRECTORY_RESOLVER = library.user_colormap_directory
 
 
 @pytest.fixture(autouse=True)
@@ -175,69 +181,118 @@ def test_import_auto_detects_cyclic(tmp_path):
     assert info.kind == library.CYCLIC
 
 
-@pytest.fixture
-def _isolated_listeners():
-    """Run each listener test against an empty, restored global registry."""
-    saved = list(library._listeners)
-    library._listeners.clear()
-    try:
-        yield
-    finally:
-        library._listeners[:] = saved
+# ---------------------------------------------------------------------------
+# Storage location, problems channel, unavailable built-ins (ADR 0063)
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.usefixtures("_isolated_listeners")
-def test_remove_library_listener_stops_notifications():
-    calls = []
+def test_storage_is_scoped_to_this_install_and_migrates_the_legacy_directory(tmp_path, monkeypatch):
+    # The colormap library used to store in the per-*user* AppDataLocation, so a
+    # scoped ``-n <name>`` run shared one library with every other scope while
+    # its operations, settings and sessions were correctly separate. It now
+    # lives beside the config, and the old files are copied across once.
+    from arrayscope.app import user_dirs
 
-    def listener():
-        calls.append(1)
+    legacy = tmp_path / "legacy" / "colormaps"
+    legacy.mkdir(parents=True)
+    (legacy / "old.json").write_text(
+        json.dumps({"name": "old", "kind": "sequential", "stops": [[0, [0, 0, 0]], [1, [9, 9, 9]]]})
+    )
+    monkeypatch.setattr(user_dirs, "user_config_directory", lambda: tmp_path / "scoped")
+    monkeypatch.setattr(library, "legacy_user_colormap_directory", lambda: str(legacy))
+    monkeypatch.setattr(library, "_migrated_legacy_directory", False)
+    # The autouse isolation fixture replaces the resolver; this test is *about*
+    # the resolver, so put the real one back for the duration.
+    monkeypatch.setattr(library, "user_colormap_directory", _REAL_DIRECTORY_RESOLVER)
 
-    library.add_library_listener(listener)
+    directory = library.user_colormap_directory()
+    assert directory == str(tmp_path / "scoped" / "colormaps")
+    assert os.path.exists(os.path.join(directory, "old.json"))
     library.refresh_user_colormaps()
-    assert calls == [1]
+    assert "old" in {info.name for info in library.user_colormaps()}
 
-    library.remove_library_listener(listener)
+    # One-way and once: an edit in the new location is never clobbered by a
+    # second resolution of the directory.
+    library.save_user_colormap("old", library.SEQUENTIAL, ((0.0, (1, 1, 1)), (1.0, (2, 2, 2))))
+    monkeypatch.setattr(library, "_migrated_legacy_directory", False)
+    library.user_colormap_directory()
     library.refresh_user_colormaps()
-    assert calls == [1]  # no further notification after removal
+    assert library.find_colormap("old").stops[-1][1] == (2, 2, 2)
 
 
-@pytest.mark.usefixtures("_isolated_listeners")
-def test_remove_library_listener_is_idempotent():
-    def listener():
-        pass
-
-    # Removing before it is ever registered is a no-op...
-    library.remove_library_listener(listener)
-    library.add_library_listener(listener)
-    library.remove_library_listener(listener)
-    # ...and removing a second time must not raise.
-    library.remove_library_listener(listener)
-    assert listener not in library._listeners
-
-
-@pytest.mark.usefixtures("_isolated_listeners")
-def test_notify_prunes_listener_bound_to_deleted_widget():
-    # A window that closed without unregistering leaves a listener bound to a
-    # deleted C++ object; invoking it raises RuntimeError. The registry must
-    # self-heal (drop it) so a colormap mutation neither crashes nor keeps
-    # calling the dead wrapper on every future mutation.
-    class _DeletedWidgetListener:
-        def __call__(self):
-            raise RuntimeError("Internal C++ object (ArrayScopeWindow) already deleted.")
-
-    dead = _DeletedWidgetListener()
-    live_calls = []
-
-    def live_listener():
-        live_calls.append(1)
-
-    library.add_library_listener(dead)
-    library.add_library_listener(live_listener)
-
-    library.refresh_user_colormaps()  # must not raise
-    assert dead not in library._listeners  # pruned on first failure
-    assert live_calls == [1]  # a sibling listener still ran
-
+def test_an_unreadable_colormap_file_is_recorded_not_swallowed():
+    directory = library.user_colormap_directory()
+    os.makedirs(directory, exist_ok=True)
+    library.save_user_colormap(
+        "good", library.SEQUENTIAL, ((0.0, (0, 0, 0)), (1.0, (255, 255, 255)))
+    )
+    (Path(directory) / "garbled.json").write_text('{"name": "garbled", "stops": ')
+    (Path(directory) / "one-stop.json").write_text(
+        json.dumps({"name": "one-stop", "stops": [[0.0, [1, 2, 3]]]})
+    )
     library.refresh_user_colormaps()
-    assert live_calls == [1, 1]  # and keeps running once the corpse is gone
+
+    # The good map still loads: one broken file never takes the library down.
+    assert "good" in {info.name for info in library.user_colormaps()}
+    problems = {
+        os.path.basename(problem.path): problem for problem in library.user_colormap_problems()
+    }
+    assert set(problems) == {"garbled.json", "one-stop.json"}
+    # Unparseable: no payload to drive a form from. Parseable but rejected: the
+    # payload survives, keyed by the file path either way (ADR 0062).
+    assert problems["garbled.json"].payload is None
+    assert problems["one-stop.json"].payload["name"] == "one-stop"
+    assert problems["one-stop.json"].item_id == "one-stop"
+
+    # Stored means addressable: the repair primitives reach it by path.
+    assert library.update_user_colormap_file(
+        problems["one-stop.json"].path,
+        {"name": "one-stop", "kind": "sequential", "stops": [[0.0, [1, 2, 3]], [1.0, [9, 9, 9]]]},
+    )
+    assert "one-stop" in {info.name for info in library.user_colormaps()}
+    assert library.remove_user_colormap_file(problems["garbled.json"].path)
+    assert library.user_colormap_problems() == []
+
+
+def test_the_layout_and_hidden_files_are_never_mistaken_for_colormaps():
+    library.set_builtin_hidden("turbo", True)
+    library.apply_library_layout(["Perceptual"], {}, {})
+    library.refresh_user_colormaps()
+    assert library.user_colormap_problems() == []
+
+
+def test_repair_primitives_refuse_paths_outside_the_library(tmp_path):
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text("{}")
+    assert not library.remove_user_colormap_file(str(outside))
+    assert not library.update_user_colormap_file(str(outside), {"name": "x"})
+    assert outside.exists()
+
+
+def test_a_missing_optional_builtin_is_unavailable_not_absent(monkeypatch):
+    # It used to be dropped from the listing entirely, so a curated name simply
+    # vanished with no explanation anywhere.
+    monkeypatch.setattr(library, "_crameri_stops_cache", {})
+    monkeypatch.setattr(library, "_resolve_builtin_stops", lambda spec: None if spec else spec)
+
+    listed = {info.name for info in library.list_colormaps()}
+    assert "Batlow" not in listed  # pickers never offer a map they cannot draw
+    manager_view = {info.name: info for info in library.list_colormaps(include_unavailable=True)}
+    assert "cmcrameri" in manager_view["Batlow"].unavailable_reason
+    # And it stays selectable in the manager, which is what makes it explainable.
+    assert library.find_colormap("Batlow").unavailable_reason
+
+
+def test_group_rename_moves_every_member_but_never_favorites():
+    assert library.rename_group("Perceptual", "Mine")
+    groups = dict(library.grouped_colormaps())
+    assert "Mine" in groups
+    assert "turbo" in {info.name for info in groups["Mine"]}
+    assert not library.rename_group(library.FAVORITES_GROUP, "Starred")
+
+
+def test_reset_layout_restores_the_curated_arrangement():
+    library.apply_library_layout(["User"], {"turbo": "User"}, {"turbo": 0})
+    assert library.effective_group(library.find_colormap("turbo")) == "User"
+    library.reset_layout()
+    assert library.effective_group(library.find_colormap("turbo")) == "Perceptual"

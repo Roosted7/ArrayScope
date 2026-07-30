@@ -6,14 +6,20 @@ phase/complex display, everything else for scalar channels. Using a
 non-cyclic map as a phase LUT produces a hard seam at ±π, which is exactly
 the breakage this module exists to prevent.
 
-User-defined maps persist as small JSON files in the application data
-directory and can be imported from common native formats (MATLAB ``.mat``,
-``.csv``/``.txt`` tables, ``.npy`` arrays, or this JSON schema).
+User-defined maps persist as small JSON files *next to this install's config*
+(see :func:`user_colormap_directory`) and can be imported from common native
+formats (MATLAB ``.mat``, ``.csv``/``.txt`` tables, ``.npy`` arrays, or this
+JSON schema).
+
+Storage, layout, hidden built-ins, listeners and the problems channel are the
+shared :mod:`arrayscope.app.user_library` protocol -- the same one
+:mod:`arrayscope.operations.library` answers (ADR 0063). A map file this module
+cannot read is *recorded*, never swallowed: it shows up in
+:func:`user_colormap_problems` and stays addressable in the manager (ADR 0062).
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
@@ -21,7 +27,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from arrayscope.app import user_dirs, user_library
+
 _LOGGER = logging.getLogger(__name__)
+
+LAYOUT_FORMAT = "arrayscope-colormap-layout"
+COLORMAP_FORMAT = "arrayscope-colormap"
 
 SEQUENTIAL = "sequential"
 DIVERGING = "diverging"
@@ -42,6 +53,12 @@ class ColormapInfo:
     stops: tuple[tuple[float, tuple[int, int, int]], ...] | None = None
     group: str = "Other"
     hidden: bool = False
+    # Non-empty when the definition exists but cannot be resolved right now --
+    # a cmcrameri built-in whose package is not installed, say. Such a map used
+    # to be dropped from the listing entirely, which made a curated name simply
+    # vanish with no explanation; operations have said "(unavailable)" out loud
+    # since ADR 0060 and colormaps now use the same word (ADR 0063).
+    unavailable_reason: str = ""
 
 
 _LIPARI_STOPS = (
@@ -185,16 +202,39 @@ def _resolve_builtin_stops(spec_stops):
     return stops
 
 
-def _builtin_spec_available(spec_stops) -> bool:
+def _builtin_unavailable_reason(spec_stops) -> str:
     if spec_stops is None or isinstance(spec_stops, tuple):
-        return True
-    return _resolve_builtin_stops(spec_stops) is not None
+        return ""
+    if _resolve_builtin_stops(spec_stops) is not None:
+        return ""
+    return (
+        f"Scientific colour map “{str(spec_stops).partition(':')[2]}” needs the "
+        "cmcrameri package, which is not installed."
+    )
 
 
 GROUP_ORDER = (FAVORITES_GROUP, "Perceptual", "Scientific", "CET", "Classic", "User")
 
 _user_cache: dict[str, ColormapInfo] | None = None
-_listeners: list = []
+_user_problems: list[user_library.LibraryProblem] = []
+_listeners = user_library.ListenerRegistry("colormap library")
+# Resolved through a lambda, never captured: tests monkeypatch
+# ``user_colormap_directory`` on this module.
+_layout = user_library.LayoutStore(
+    lambda: user_colormap_directory(),
+    format_name=LAYOUT_FORMAT,
+    group_key="map_groups",
+    order_key="map_order",
+    listeners=_listeners,
+)
+_hidden = user_library.HiddenSet(
+    lambda: user_colormap_directory(),
+    file_name="hidden-builtins.json",
+    listeners=_listeners,
+)
+# Library bookkeeping that shares the directory with the colormap files; never a
+# colormap, and never a "problem" when it does not parse as one.
+_RESERVED_FILES = ("layout.json", "hidden-builtins.json")
 
 
 # ---------------------------------------------------------------------------
@@ -206,10 +246,18 @@ def builtin_colormaps() -> tuple[ColormapInfo, ...]:
     hidden = hidden_builtins()
     result = []
     for name, kind, group, spec_stops in _BUILTIN_SPECS:
-        if not _builtin_spec_available(spec_stops):
-            continue
         stops = spec_stops if isinstance(spec_stops, tuple) else None
-        result.append(ColormapInfo(name, kind, "builtin", stops, group, name in hidden))
+        result.append(
+            ColormapInfo(
+                name,
+                kind,
+                "builtin",
+                stops,
+                group,
+                name in hidden,
+                _builtin_unavailable_reason(spec_stops),
+            )
+        )
     return tuple(result)
 
 
@@ -225,7 +273,7 @@ def user_colormaps() -> tuple[ColormapInfo, ...]:
 
 
 def list_colormaps(
-    kind: str | None = None, *, include_hidden: bool = False
+    kind: str | None = None, *, include_hidden: bool = False, include_unavailable: bool = False
 ) -> tuple[ColormapInfo, ...]:
     """User maps first (they shadow built-ins by name), then built-ins."""
     seen = set()
@@ -236,50 +284,20 @@ def list_colormaps(
         seen.add(info.name)
         if info.hidden and not include_hidden:
             continue
+        if info.unavailable_reason and not include_unavailable:
+            continue
         if kind is None or info.kind == kind:
             result.append(info)
     return tuple(result)
 
 
-def _layout_file() -> str:
-    return os.path.join(user_colormap_directory(), "layout.json")
-
-
-_layout_cache: dict | None = None
-
-
-def _load_layout() -> dict:
-    global _layout_cache
-    if _layout_cache is None:
-        try:
-            with open(_layout_file()) as handle:
-                payload = json.load(handle)
-            _layout_cache = {
-                "group_order": [str(g) for g in payload.get("group_order", [])],
-                "map_groups": {str(k): str(v) for k, v in payload.get("map_groups", {}).items()},
-                "map_order": {str(k): int(v) for k, v in payload.get("map_order", {}).items()},
-            }
-        except Exception:
-            _layout_cache = {"group_order": [], "map_groups": {}, "map_order": {}}
-    return _layout_cache
-
-
-def _save_layout(layout: dict) -> None:
-    global _layout_cache
-    os.makedirs(user_colormap_directory(), exist_ok=True)
-    with open(_layout_file(), "w") as handle:
-        json.dump(layout, handle, indent=2)
-    _layout_cache = None
-    _notify()
-
-
 def effective_group(info: ColormapInfo) -> str:
-    return _load_layout()["map_groups"].get(info.name, info.group)
+    return _layout.group_of(info.name, info.group)
 
 
 def apply_library_layout(group_order, map_groups, map_order) -> None:
-    """Persist a user arrangement (from the designer's drag & drop)."""
-    _save_layout(
+    """Persist a user arrangement (from the manager's drag & drop)."""
+    _layout.save(
         {
             "group_order": [str(g) for g in group_order],
             "map_groups": {str(k): str(v) for k, v in map_groups.items()},
@@ -288,44 +306,47 @@ def apply_library_layout(group_order, map_groups, map_order) -> None:
     )
 
 
-def rename_group(old: str, new: str) -> None:
+def rename_group(old: str, new: str) -> bool:
     """Rename a group: reassign every member map and the order entry."""
-    old, new = str(old), str(new).strip()
-    if old in (new, FAVORITES_GROUP) or not new:
-        return
-    layout = dict(_load_layout())
-    map_groups = dict(layout["map_groups"])
-    for info in list_colormaps(include_hidden=True):
-        if effective_group(info) == old:
-            map_groups[info.name] = new
-    group_order = [new if g == old else g for g in layout["group_order"]]
-    _save_layout(
-        {"group_order": group_order, "map_groups": map_groups, "map_order": layout["map_order"]}
-    )
+    if str(old) == FAVORITES_GROUP:
+        # Favorites is the unnamed section pickers render ungrouped at the top;
+        # renaming it would make it an ordinary group and lose that meaning.
+        return False
+    members = [
+        info.name
+        for info in list_colormaps(include_hidden=True, include_unavailable=True)
+        if effective_group(info) == str(old)
+    ]
+    return _layout.rename_group(old, new, members)
 
 
-def grouped_colormaps(family: str | None = None, *, include_hidden: bool = False):
+def reset_layout() -> None:
+    """Discard the persisted arrangement (revert to the curated defaults)."""
+
+    _layout.remove()
+
+
+def grouped_colormaps(
+    family: str | None = None, *, include_hidden: bool = False, include_unavailable: bool = False
+):
     """Ordered [(group, [infos])], honoring the persisted user layout."""
     kinds = None if family is None else kinds_for_family(family)
-    layout = _load_layout()
     by_group: dict[str, list[ColormapInfo]] = {}
     default_positions = {name: index for index, (name, *_rest) in enumerate(_BUILTIN_SPECS)}
-    for info in list_colormaps(include_hidden=include_hidden):
+    for info in list_colormaps(
+        include_hidden=include_hidden, include_unavailable=include_unavailable
+    ):
         if kinds is not None and info.kind not in kinds:
             continue
         by_group.setdefault(effective_group(info), []).append(info)
     for infos in by_group.values():
         infos.sort(
             key=lambda info: (
-                layout["map_order"].get(
-                    info.name, 10_000 + default_positions.get(info.name, 20_000)
-                ),
+                _layout.position_of(info.name, 10_000 + default_positions.get(info.name, 20_000)),
                 info.name.lower(),
             )
         )
-    ordered = [group for group in layout["group_order"] if group in by_group]
-    ordered += [group for group in GROUP_ORDER if group in by_group and group not in ordered]
-    ordered += [group for group in sorted(by_group) if group not in ordered]
+    ordered = _layout.ordered_groups(by_group, GROUP_ORDER)
     return [(group, by_group[group]) for group in ordered]
 
 
@@ -340,7 +361,7 @@ def colormaps_for_family(family: str) -> tuple[ColormapInfo, ...]:
 
 
 def find_colormap(name: str) -> ColormapInfo | None:
-    for info in list_colormaps(include_hidden=True):
+    for info in list_colormaps(include_hidden=True, include_unavailable=True):
         if info.name == str(name):
             return info
     return None
@@ -478,39 +499,33 @@ def colormap_stops(name: str, points: int = 9) -> tuple[tuple[float, tuple[int, 
 
 
 def add_library_listener(callback) -> None:
-    if callable(callback) and callback not in _listeners:
-        _listeners.append(callback)
+    _listeners.add(callback)
 
 
 def remove_library_listener(callback) -> None:
-    """Unregister a listener added with :func:`add_library_listener`.
+    """Unregister a listener added with :func:`add_library_listener` (idempotent).
 
-    Idempotent: unregistering a callback that is not (or is no longer)
-    registered is a no-op. Widget-bound listeners MUST call this on teardown
-    (see the main window's ``closeEvent``); the registry is process-global, so
+    Widget-bound listeners MUST call this on teardown (see the main window's
+    ``closeEvent`` and the manager dialog's); the registry is process-global, so
     a listener that outlives its widget is a leak that turns the next library
     mutation into a call on a dead Qt object.
     """
-    with contextlib.suppress(ValueError):
-        _listeners.remove(callback)
+    _listeners.remove(callback)
 
 
 def _notify() -> None:
-    for callback in tuple(_listeners):
-        try:
-            callback()
-        except RuntimeError:
-            # Listener bound to a Qt widget whose C++ object is gone (a window
-            # closed without unregistering). Drop it so the registry
-            # self-heals instead of retrying the dead wrapper every mutation.
-            remove_library_listener(callback)
-        except Exception:
-            # No repr of the callback in the message: repr of a dead Qt
-            # wrapper raises RuntimeError itself.
-            _LOGGER.exception("colormap library listener failed")
+    _listeners.notify()
 
 
-def user_colormap_directory() -> str:
+def legacy_user_colormap_directory() -> str:
+    """Where user colormaps lived before they became install-scoped.
+
+    ``AppDataLocation`` is per-*user*, not per-install, so a scoped ``-n <name>``
+    run shared one colormap library with every other scope while its operations,
+    settings and sessions were correctly separate. Kept only so the one-time
+    migration in :func:`user_colormap_directory` can find the old files.
+    """
+
     try:
         from pyqtgraph.Qt import QtCore
 
@@ -524,27 +539,66 @@ def user_colormap_directory() -> str:
     return os.path.join(base, "colormaps")
 
 
+_migrated_legacy_directory = False
+
+
+def user_colormap_directory() -> str:
+    """Directory holding user colormap JSON (tests monkeypatch this).
+
+    Beside this install's config, exactly where user operations live, so a
+    scoped run keeps its own library. The first call per process copies an old
+    unscoped library across when the new location is still empty.
+    """
+
+    global _migrated_legacy_directory
+    directory = str(user_dirs.user_config_directory() / "colormaps")
+    if not _migrated_legacy_directory:
+        _migrated_legacy_directory = True
+        try:
+            user_library.migrate_directory(legacy_user_colormap_directory(), directory)
+        except Exception:
+            _LOGGER.warning("could not migrate the legacy colormap directory", exc_info=True)
+    return directory
+
+
+def user_colormap_problems() -> list[user_library.LibraryProblem]:
+    """One record per colormap file this module could not read.
+
+    A parse error used to be swallowed by a bare ``continue``, so a map the user
+    had saved simply stopped existing with no message anywhere. ADR 0062's
+    invariant -- every stored definition stays listable, editable and deletable
+    -- applies to colormaps too (ADR 0063).
+    """
+
+    _load_user_cache()
+    return list(_user_problems)
+
+
 def _load_user_cache() -> dict[str, ColormapInfo]:
-    global _user_cache
+    global _user_cache, _user_problems
     if _user_cache is None:
         _user_cache = {}
+        problems: list[user_library.LibraryProblem] = []
         directory = user_colormap_directory()
         if os.path.isdir(directory):
             for file_name in sorted(os.listdir(directory)):
-                if not file_name.endswith(".json"):
+                if not file_name.endswith(".json") or file_name in _RESERVED_FILES:
                     continue
+                path = os.path.join(directory, file_name)
                 try:
-                    info = _info_from_json_file(os.path.join(directory, file_name))
+                    info = _info_from_json_file(path)
                     _user_cache[info.name] = info
-                except Exception:
-                    continue
+                except Exception as exc:
+                    _LOGGER.warning("skipping colormap %s: %s", path, exc)
+                    problems.append(user_library.problem_record(path, str(exc), id_field="name"))
+        _user_problems = problems
     return _user_cache
 
 
 def refresh_user_colormaps() -> None:
-    global _user_cache, _layout_cache
+    global _user_cache
     _user_cache = None
-    _layout_cache = None
+    _layout.invalidate()
     _load_user_cache()
     _notify()
 
@@ -561,19 +615,22 @@ def save_user_colormap(name: str, kind: str, stops) -> ColormapInfo:
     builtin_group = builtin_group_for(name)
     group = "User" if builtin_group is None else builtin_group
     info = ColormapInfo(name, str(kind), "user", normalized, group)
-    directory = user_colormap_directory()
-    os.makedirs(directory, exist_ok=True)
-    with open(os.path.join(directory, f"{_safe_file_name(name)}.json"), "w") as handle:
-        json.dump(_info_to_payload(info), handle, indent=2)
+    user_library.write_json_atomically(user_colormap_path(name), _info_to_payload(info))
     _load_user_cache()[name] = info
     _notify()
     return info
 
 
+def user_colormap_path(name: str) -> str:
+    """Where the user map called ``name`` is (or would be) stored."""
+
+    return os.path.join(user_colormap_directory(), f"{_safe_file_name(str(name))}.json")
+
+
 def delete_user_colormap(name: str) -> bool:
     cache = _load_user_cache()
     info = cache.pop(str(name), None)
-    path = os.path.join(user_colormap_directory(), f"{_safe_file_name(str(name))}.json")
+    path = user_colormap_path(name)
     removed = False
     if os.path.exists(path):
         os.remove(path)
@@ -581,6 +638,46 @@ def delete_user_colormap(name: str) -> bool:
     if info is not None or removed:
         _notify()
     return info is not None or removed
+
+
+def remove_user_colormap_file(path: str) -> bool:
+    """Delete one stored colormap by *file path*, however broken it is.
+
+    The path-keyed sibling of :func:`delete_user_colormap`: a file the loader
+    could not read has no usable name, so this is the only delete that reaches
+    the map the library is complaining about. Refuses paths outside the colormap
+    directory, and refuses the library's own bookkeeping files.
+    """
+
+    path = os.path.abspath(path)
+    directory = os.path.abspath(user_colormap_directory())
+    if os.path.dirname(path) != directory or not os.path.isfile(path):
+        return False
+    if os.path.basename(path) in _RESERVED_FILES:
+        return False
+    os.remove(path)
+    refresh_user_colormaps()
+    return True
+
+
+def update_user_colormap_file(path: str, payload: dict) -> bool:
+    """Replace one stored colormap's whole payload by *file path*, then rescan.
+
+    A whole replacement rather than a merge, for the reason ADR 0062 gives for
+    operations: a repair surface owns the entire document, and merging into a
+    payload the loader could not understand preserves exactly the keys the user
+    is trying to remove.
+    """
+
+    path = os.path.abspath(path)
+    directory = os.path.abspath(user_colormap_directory())
+    if os.path.dirname(path) != directory or not os.path.isfile(path):
+        return False
+    if not isinstance(payload, dict):
+        raise TypeError("colormap payload must be a JSON object")
+    user_library.write_json_atomically(path, payload)
+    refresh_user_colormaps()
+    return True
 
 
 def export_colormap(name: str, path: str) -> None:
@@ -678,28 +775,12 @@ def _stops_from_table(table: np.ndarray):
 # ---------------------------------------------------------------------------
 
 
-def _hidden_file() -> str:
-    return os.path.join(user_colormap_directory(), "hidden-builtins.json")
-
-
 def hidden_builtins() -> frozenset[str]:
-    try:
-        with open(_hidden_file()) as handle:
-            return frozenset(str(name) for name in json.load(handle))
-    except Exception:
-        return frozenset()
+    return _hidden.values()
 
 
 def set_builtin_hidden(name: str, hidden: bool) -> None:
-    names = set(hidden_builtins())
-    if bool(hidden):
-        names.add(str(name))
-    else:
-        names.discard(str(name))
-    os.makedirs(user_colormap_directory(), exist_ok=True)
-    with open(_hidden_file(), "w") as handle:
-        json.dump(sorted(names), handle)
-    _notify()
+    _hidden.set(name, hidden)
 
 
 def overrides_builtin(name: str) -> bool:
@@ -786,7 +867,7 @@ def _colormap_from_stops(stops):
 
 def _info_to_payload(info: ColormapInfo) -> dict:
     return {
-        "format": "arrayscope-colormap",
+        "format": COLORMAP_FORMAT,
         "version": 1,
         "name": info.name,
         "kind": info.kind,

@@ -70,7 +70,6 @@ The operation manager UI (a separate chunk) builds on this module: it renders
 from __future__ import annotations
 
 import ast
-import contextlib
 import importlib.util
 import inspect
 import json
@@ -79,9 +78,8 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
 
-from arrayscope.app import user_dirs
+from arrayscope.app import user_dirs, user_library
 from arrayscope.operations import command_runtime, environments, registry
 from arrayscope.operations.cancellation import cancellable
 from arrayscope.operations.input_slots import OperationInputSlot
@@ -140,39 +138,35 @@ _USER_MODULE_NAMESPACE = "arrayscope_user_ops"
 # ---------------------------------------------------------------------------
 
 
-class OperationProblem(NamedTuple):
-    """One stored wrapper the loader could not register, and enough to repair it.
-
-    **Keyed by ``path``, deliberately.**  The obvious key is the operation id,
-    and it is the wrong one: the id lives *inside* the payload, so every
-    failure class that stops the payload parsing (malformed JSON, a non-object
-    document) has no id at all, and the classes that reject the id itself (a
-    non-``user:`` namespace, a shadowed built-in) have one that cannot be
-    looked up.  :func:`_wrapper_path_for_id` returns ``None`` for exactly those
-    files, so an id-keyed remove or edit fails on the very definitions that
-    need it most.  The file path is the one identity every stored definition
-    always has.
-
-    ``payload`` is the raw JSON document when it parsed as an object, so a
-    repair surface can drive its ordinary form from the stored fields instead
-    of asking the user to hand-edit JSON.  It is ``None`` only when the file is
-    not parseable JSON or is not a JSON object -- the cases where hand-editing
-    text is the *only* honest repair.  ``operation_id`` is whatever the payload
-    claims, unvalidated, for display.
-    """
-
-    path: str
-    message: str
-    payload: dict | None
-    operation_id: str | None
+# One stored wrapper the loader could not register, and enough to repair it:
+# ``(path, message, payload, item_id)``, keyed by *path* for the reasons ADR
+# 0062 spells out and :class:`arrayscope.app.user_library.LibraryProblem`
+# restates.  The colormap library answers in the same shape (ADR 0063), so a
+# repair surface is written once; the alias keeps the operations-side name.
+OperationProblem = user_library.LibraryProblem
 
 
 # ---------------------------------------------------------------------------
 # Module state
 # ---------------------------------------------------------------------------
 
-_layout_cache: dict | None = None
-_listeners: list = []
+_listeners = user_library.ListenerRegistry("operation library")
+# The directory is resolved through a lambda rather than captured: tests (and
+# the UI gallery) monkeypatch ``user_operations_directory`` on this module, and
+# a captured function object would not see that.
+_layout = user_library.LayoutStore(
+    lambda: user_operations_directory(),
+    format_name=LAYOUT_FORMAT,
+    group_key="op_groups",
+    order_key="op_order",
+    optional_lists=("common_ids", "more_groups"),
+    listeners=_listeners,
+)
+_hidden = user_library.HiddenSet(
+    lambda: user_operations_directory(),
+    file_name="hidden-operations.json",
+    listeners=_listeners,
+)
 
 # Whether the on-disk user ops have been scanned + registered this session.
 _user_loaded = False
@@ -220,119 +214,42 @@ def resolve_execution_environment(environment_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Listeners (mirrors colormap_library, incl. dead-Qt-listener self-healing)
+# Listeners / layout / hidden set (shared with the colormap library, ADR 0063)
 # ---------------------------------------------------------------------------
 
 
 def add_library_listener(callback) -> None:
-    if callable(callback) and callback not in _listeners:
-        _listeners.append(callback)
+    _listeners.add(callback)
 
 
 def remove_library_listener(callback) -> None:
-    """Unregister a listener added with :func:`add_library_listener` (idempotent).
+    """Unregister a listener added with :func:`add_library_listener` (idempotent)."""
 
-    Widget-bound listeners MUST call this on teardown: the registry is
-    process-global, so a listener that outlives its widget turns the next
-    mutation into a call on a dead Qt object.
-    """
-
-    with contextlib.suppress(ValueError):
-        _listeners.remove(callback)
+    _listeners.remove(callback)
 
 
 def _notify() -> None:
-    for callback in tuple(_listeners):
-        try:
-            callback()
-        except RuntimeError:
-            # Listener bound to a Qt widget whose C++ object is gone (window
-            # closed without unregistering). Drop it so the registry self-heals
-            # instead of retrying the dead wrapper on every mutation.
-            remove_library_listener(callback)
-        except Exception:
-            # No repr of the callback: repr of a dead Qt wrapper raises
-            # RuntimeError itself.
-            _LOGGER.exception("operation library listener failed")
-
-
-# ---------------------------------------------------------------------------
-# Layout persistence
-# ---------------------------------------------------------------------------
-
-
-def _layout_file() -> str:
-    return os.path.join(user_operations_directory(), "layout.json")
-
-
-def _load_layout() -> dict:
-    global _layout_cache
-    if _layout_cache is None:
-        try:
-            with open(_layout_file()) as handle:
-                payload = json.load(handle)
-            _layout_cache = {
-                "group_order": [str(g) for g in payload.get("group_order", [])],
-                "op_groups": {str(k): str(v) for k, v in payload.get("op_groups", {}).items()},
-                "op_order": {str(k): int(v) for k, v in payload.get("op_order", {}).items()},
-                "common_ids": [str(i) for i in payload["common_ids"]]
-                if "common_ids" in payload
-                else None,
-                "more_groups": [str(g) for g in payload["more_groups"]]
-                if "more_groups" in payload
-                else None,
-            }
-        except Exception:
-            _layout_cache = {
-                "group_order": [],
-                "op_groups": {},
-                "op_order": {},
-                "common_ids": None,
-                "more_groups": None,
-            }
-    return _layout_cache
-
-
-def _save_layout(layout: dict) -> None:
-    global _layout_cache
-    os.makedirs(user_operations_directory(), exist_ok=True)
-    payload: dict = {
-        "format": LAYOUT_FORMAT,
-        "version": 1,
-        "group_order": [str(g) for g in layout.get("group_order", [])],
-        "op_groups": {str(k): str(v) for k, v in layout.get("op_groups", {}).items()},
-        "op_order": {str(k): int(v) for k, v in layout.get("op_order", {}).items()},
-    }
-    # Only persist the presentation overrides that were actually set, so an
-    # unset override keeps tracking the code default rather than freezing today's.
-    if layout.get("common_ids") is not None:
-        payload["common_ids"] = [str(i) for i in layout["common_ids"]]
-    if layout.get("more_groups") is not None:
-        payload["more_groups"] = [str(g) for g in layout["more_groups"]]
-    with open(_layout_file(), "w") as handle:
-        json.dump(payload, handle, indent=2)
-    _layout_cache = None
-    _notify()
+    _listeners.notify()
 
 
 def effective_common_ids() -> tuple[str, ...]:
     """Ids a UI surface pins to the top -- layout override, else the code default."""
 
-    override = _load_layout()["common_ids"]
+    override = _layout.load()["common_ids"]
     return tuple(override) if override is not None else tuple(COMMON_OPERATION_IDS)
 
 
 def effective_more_groups() -> tuple[str, ...]:
     """Fold-out "More" groups -- layout override, else the code default."""
 
-    override = _load_layout()["more_groups"]
+    override = _layout.load()["more_groups"]
     return tuple(override) if override is not None else DEFAULT_MORE_GROUPS
 
 
 def effective_group(entry: OperationEntry) -> str:
     """Group ``entry`` lands in -- the layout override, else its declared group."""
 
-    return _load_layout()["op_groups"].get(entry.id, entry.group)
+    return _layout.group_of(entry.id, entry.group)
 
 
 def apply_library_layout(
@@ -344,8 +261,8 @@ def apply_library_layout(
 ) -> None:
     """Persist a user arrangement.  Any argument left ``None`` keeps its current value."""
 
-    current = _load_layout()
-    _save_layout(
+    current = _layout.load()
+    _layout.save(
         {
             "group_order": current["group_order"] if group_order is None else group_order,
             "op_groups": current["op_groups"] if op_groups is None else op_groups,
@@ -356,15 +273,22 @@ def apply_library_layout(
     )
 
 
+def rename_group(old: str, new: str) -> bool:
+    """Rename a group: reassign every member operation and the order entry.
+
+    The colormap library has offered inline group rename since it shipped and
+    the operation manager could not rename a group at all; ADR 0063 makes it one
+    behavior over one store.
+    """
+
+    members = [entry.id for entry in _all_entries() if effective_group(entry) == str(old)]
+    return _layout.rename_group(old, new, members)
+
+
 def reset_layout() -> None:
     """Discard the persisted layout (revert to code defaults)."""
 
-    global _layout_cache
-    path = _layout_file()
-    if os.path.exists(path):
-        os.remove(path)
-    _layout_cache = None
-    _notify()
+    _layout.remove()
 
 
 # ---------------------------------------------------------------------------
@@ -372,28 +296,12 @@ def reset_layout() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _hidden_file() -> str:
-    return os.path.join(user_operations_directory(), "hidden-operations.json")
-
-
 def hidden_operations() -> frozenset[str]:
-    try:
-        with open(_hidden_file()) as handle:
-            return frozenset(str(op_id) for op_id in json.load(handle))
-    except Exception:
-        return frozenset()
+    return _hidden.values()
 
 
 def set_operation_hidden(operation_id: str, hidden: bool) -> None:
-    ids = set(hidden_operations())
-    if bool(hidden):
-        ids.add(str(operation_id))
-    else:
-        ids.discard(str(operation_id))
-    os.makedirs(user_operations_directory(), exist_ok=True)
-    with open(_hidden_file(), "w") as handle:
-        json.dump(sorted(ids), handle)
-    _notify()
+    _hidden.set(operation_id, hidden)
 
 
 def reset_operation(operation_id: str) -> bool:
@@ -428,7 +336,6 @@ def grouped_operations(*, include_hidden: bool = False):
     order.  The persisted layout overrides any of these.
     """
 
-    layout = _load_layout()
     entries = _all_entries()
     hidden = hidden_operations()
     default_positions = {entry.id: index for index, entry in enumerate(entries)}
@@ -442,16 +349,12 @@ def grouped_operations(*, include_hidden: bool = False):
     for group_entries in by_group.values():
         group_entries.sort(
             key=lambda entry: (
-                layout["op_order"].get(entry.id, default_positions.get(entry.id, 10_000)),
+                _layout.position_of(entry.id, default_positions.get(entry.id, 10_000)),
                 entry.label.lower(),
             )
         )
 
-    ordered = [group for group in layout["group_order"] if group in by_group]
-    ordered += [
-        group for group in DEFAULT_GROUP_ORDER if group in by_group and group not in ordered
-    ]
-    ordered += [group for group in sorted(by_group) if group not in ordered]
+    ordered = _layout.ordered_groups(by_group, DEFAULT_GROUP_ORDER)
     return [(group, by_group[group]) for group in ordered]
 
 
@@ -483,27 +386,9 @@ def _load_user_operations() -> None:
                 registry.register_user_operation(spec)
             except Exception as exc:  # a broken user op must not break the app
                 _LOGGER.warning("skipping user operation %s: %s", path, exc)
-                problems.append(_problem_record(path, str(exc)))
+                problems.append(user_library.problem_record(path, str(exc)))
     _user_problems = problems
     _user_loaded = True
-
-
-def _problem_record(path: str, message: str) -> OperationProblem:
-    """Attach whatever of the stored payload survives, for the repair surface."""
-
-    payload: dict | None = None
-    operation_id: str | None = None
-    try:
-        with open(path) as handle:
-            raw = json.load(handle)
-    except Exception:
-        raw = None
-    if isinstance(raw, dict):
-        payload = dict(raw)
-        claimed = raw.get("id")
-        if isinstance(claimed, str) and claimed:
-            operation_id = claimed
-    return OperationProblem(path, message, payload, operation_id)
 
 
 def _ensure_user_operations() -> None:
@@ -1515,10 +1400,7 @@ def _write_wrapper(path: str, payload: dict) -> None:
     which is the failure class this module is supposed to be shrinking.
     """
 
-    temporary = f"{path}.tmp"
-    with open(temporary, "w") as handle:
-        json.dump(payload, handle, indent=2)
-    os.replace(temporary, path)
+    user_library.write_json_atomically(path, payload)
 
 
 def import_custom_operation(
@@ -1700,6 +1582,84 @@ def update_user_operation_file(path: str, payload: dict) -> bool:
     _write_wrapper(path, payload)
     refresh_user_operations()
     return True
+
+
+def write_user_operation_wrapper(path: str, payload: dict) -> bool:
+    """Create *or* replace one wrapper by path, then rescan.
+
+    :func:`update_user_operation_file` deliberately refuses a path that is not
+    already a file -- a repair surface edits what is stored.  Undoing a removal
+    is the one case that has to put a document back where nothing is, so it gets
+    its own primitive rather than loosening that guard.
+    """
+
+    path = os.path.abspath(path)
+    directory = os.path.abspath(user_operations_directory())
+    if os.path.dirname(path) != directory:
+        return False
+    if not isinstance(payload, dict):
+        raise TypeError("wrapper payload must be a JSON object")
+    os.makedirs(directory, exist_ok=True)
+    _write_wrapper(path, payload)
+    refresh_user_operations()
+    return True
+
+
+def import_operation_definition(payload: dict) -> str:
+    """Store an exported definition document as a new user operation.
+
+    The counterpart of
+    :func:`arrayscope.operations.operation_definitions.export_operation_definition`,
+    which has existed since ADR 0060 with nothing that could read its output
+    back.  Three things are decided here rather than left to the loader:
+
+    - the id is *always* re-minted into a free ``user:`` slug, so importing the
+      same definition twice yields two operations rather than one silent
+      overwrite of whatever already had that id;
+    - a ``source`` block naming an implementation this install resolves through
+      the registry (``native``/``pack``/``entry-point``) is dropped and replaced
+      by a stub, because a user wrapper's ``source`` means "a Python file on
+      disk" and keeping the foreign one manufactures exactly the brick ADR 0062
+      set out to stop;
+    - a command definition arrives *quarantined* (ADR 0060's review boundary):
+      an imported command template is arbitrary code the importing user has not
+      read, so it is unavailable until reviewed in the manager.
+    """
+
+    if not isinstance(payload, dict):
+        raise TypeError("an operation definition must be a JSON object")
+    wrapper = {
+        key: value
+        for key, value in payload.items()
+        # Export-only annotations: they describe the exporting install, not the
+        # definition, and a stale one would be read back as fact.
+        if key not in {"tier", "unavailable_reason", "id", "review"}
+    }
+    directory = user_operations_directory()
+    os.makedirs(directory, exist_ok=True)
+    label = str(payload.get("label") or "Imported operation")
+    slug = _unique_slug(directory, _safe_slug(label))
+    operation_id = f"user:{slug}"
+    runtime = str(wrapper.get("runtime") or SUPPORTED_RUNTIME)
+    source = wrapper.get("source")
+    if not isinstance(source, dict) or str(source.get("mode") or "") not in {"import", "link"}:
+        wrapper.pop("source", None)
+    wrapper.update(
+        {
+            "format": WRAPPER_FORMAT,
+            "version": int(payload.get("version") or 1),
+            "id": operation_id,
+            "label": _unique_copy_label(label, copy_suffix=False),
+            "group": str(wrapper.get("group") or "User"),
+        }
+    )
+    _write_wrapper(os.path.join(directory, f"{slug}.json"), wrapper)
+    refresh_user_operations()
+    if "source" not in wrapper and runtime == SUPPORTED_RUNTIME:
+        ensure_user_operation_source(operation_id)
+    if runtime == "command":
+        quarantine_imported_command(operation_id)
+    return operation_id
 
 
 def ensure_user_operation_source(operation_id: str) -> bool:

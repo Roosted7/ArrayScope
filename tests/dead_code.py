@@ -175,7 +175,6 @@ _PENDING_ADJUDICATION = (
     ),
     ("arrayscope/display/backends/pyqtgraph/tiles.py", "_assemble_page_backed_payload"),
     ("arrayscope/display/colormap_library.py", "colormaps_for_family"),
-    ("arrayscope/display/colormap_library.py", "refresh_user_colormaps"),
     ("arrayscope/display/histogram_controller.py", "adaptive_histogram_for_view"),
     ("arrayscope/display/lod.py", "inner_uv_for_gutter"),
     ("arrayscope/display/model/montage_levels.py", "_finite_bounds"),
@@ -230,7 +229,7 @@ _PENDING_ADJUDICATION = (
 
 #: Ceiling, never a target. Lower it as entries are resolved; raising it needs a
 #: reason in the same commit.
-_PENDING_CEILING = 65
+_PENDING_CEILING = 64
 
 
 #: ``arrayscope/tools/`` is the tracing/benchmark/oracle harness (docs/areas.md

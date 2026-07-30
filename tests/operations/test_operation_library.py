@@ -274,8 +274,12 @@ def test_hidden_operations_excluded_and_reset_unhides():
 
 
 def test_listeners_notified_on_every_mutation(tmp_path):
+    # *Which* mutations announce themselves is this library's own wiring; the
+    # registry mechanics (idempotent removal, dead-Qt pruning) are tested once,
+    # against the shared implementation, in tests/app/test_user_library.py.
     calls = []
-    library.add_library_listener(lambda: calls.append(1))
+    listener = lambda: calls.append(1)  # noqa: E731 - the identity is the point
+    library.add_library_listener(listener)
     try:
         library.set_operation_hidden("mean", True)
         library.apply_library_layout(group_order=["Reduce"])
@@ -285,19 +289,8 @@ def test_listeners_notified_on_every_mutation(tmp_path):
         library.remove_user_operation(op_id)
         library.refresh_user_operations()
     finally:
-        library.remove_library_listener(lambda: None)  # idempotent no-op
+        library.remove_library_listener(listener)
     assert len(calls) >= 6
-
-    library._listeners.clear()
-
-
-def test_dead_qt_listener_is_self_healed():
-    def boom():
-        raise RuntimeError("underlying C++ object deleted")
-
-    library.add_library_listener(boom)
-    library.set_operation_hidden("mean", True)  # triggers _notify -> drops boom
-    assert boom not in library._listeners
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +471,7 @@ def test_broken_code_file_is_skipped_and_recorded(tmp_path):
     # path-keyed API -- "skipped" must never mean "unaddressable".
     problem = next(p for p in problems if "broken.json" in p.path)
     assert problem.payload["id"] == "user:broken"
-    assert problem.operation_id == "user:broken"
+    assert problem.item_id == "user:broken"
 
     # Repairing the source file the wrapper points at resolves the problem.
     (ops_dir / "broken.py").write_text("def oops(data):\n    return data\n")
@@ -500,7 +493,7 @@ def test_unparseable_wrapper_is_still_editable_and_removable_by_path(tmp_path):
     assert len(problems) == 1
     problem = problems[0]
     assert problem.payload is None
-    assert problem.operation_id is None
+    assert problem.item_id is None
     assert library._wrapper_path_for_id("user:garbled") is None
 
     # Editable by path: writing a valid payload resolves the row outright.
