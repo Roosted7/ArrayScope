@@ -289,3 +289,154 @@ def test_the_map_is_seeded_before_anything_is_priced_against_it():
     assert body.index("_ensure_map_seeded(config)") < body.index("_refuse_unselected_run(config)")
     seeding = inspect.getsource(conftest._ensure_map_seeded)
     assert "decision" not in seeding, "seeding must not depend on selection being active"
+
+
+# --------------------------------------------------------------------------- #
+# `-n 0`: serial is for one thing at a time
+# --------------------------------------------------------------------------- #
+
+
+def test_only_a_typed_dash_n_zero_trips_the_serial_gate():
+    """The harness sizes itself to zero constantly; that must never be caught.
+
+    ``pytest_xdist_auto_num_workers`` returns 0 for any selection under 2.5 s or
+    in one file, and xdist writes that straight into
+    ``config.option.numprocesses`` before ``pytest_configure`` — so by the time
+    any gate can look, the option cannot tell a person's ``-n 0`` from the
+    harness's own. The command line can, and that is the only place it can be
+    read from.
+    """
+
+    from tests.conftest import explicit_worker_count
+
+    assert explicit_worker_count(["-n", "0", "tests/ui"]) == 0
+    assert explicit_worker_count(["-n0"]) == 0
+    assert explicit_worker_count(["--numprocesses=0"]) == 0
+    assert explicit_worker_count(["--numprocesses", "0"]) == 0
+    assert explicit_worker_count(["-n", "16"]) == 16
+    # `auto` is the harness deciding, not a person, and so is an empty command
+    # line -- `addopts` carries `-n auto` for every run in this repository.
+    assert explicit_worker_count(["-n", "auto"]) is None
+    assert explicit_worker_count(["-q", "tests/ui"]) is None
+    assert explicit_worker_count([]) is None
+
+
+def test_a_wide_serial_run_is_refused_and_a_named_one_is_not():
+    """Priced on what the run will execute, with 60 s in an empty 3.8x gap.
+
+    The threshold is calibrated rather than chosen: the most expensive command
+    any ring documents as serial is the ring-2 artifact file at 27.5 s, and the
+    cheapest shape that has ever hurt anybody is `tests/app` at 105.9 s
+    (`tests/ui` is 1164.8 s, the whole suite 1320 s). Nothing lives in between.
+    """
+
+    from tests.conftest import serial_run_refusal
+
+    assert "one process" in serial_run_refusal(1165.0, True, whole_suite=True, permitted_because="")
+    assert serial_run_refusal(27.5, True, whole_suite=False, permitted_because="") == ""
+    assert serial_run_refusal(5.6, True, whole_suite=False, permitted_because="") == ""
+
+
+def test_an_unpriceable_serial_run_is_refused_only_for_the_whole_suite():
+    """The safe direction is inverted here, and getting it wrong breaks ring 4.
+
+    Rings 3 and 4 have **zero** recorded seconds by construction: the map is
+    keyed by regime, and it has never held `wayland+gpu` or `offscreen+stress`.
+    They are also precisely the runs that must be serial. So "unknown cost =
+    assume large", which is right for a bypass, would refuse the two rings
+    ground rule 1 depends on. Scope is the backstop instead: an unpriceable run
+    is refused only when it names the whole suite, which is the fresh-clone
+    `pytest -n 0` — 1320 s of first-run tracing in one process.
+    """
+
+    from tests.conftest import serial_run_refusal
+
+    assert serial_run_refusal(0.0, False, whole_suite=True, permitted_because="")
+    assert serial_run_refusal(0.0, False, whole_suite=False, permitted_because="") == ""
+    assert serial_run_refusal(0.0, True, whole_suite=True, permitted_because="") == ""
+
+
+def test_everything_that_legitimately_needs_serial_is_permitted(monkeypatch):
+    """Every documented serial use, checked against the gate that could break it.
+
+    Listed from `docs/testing/README.md` rings 0-4 plus the debugging shapes.
+    `-s` is deliberately absent: "I want to see prints" is a reflex, not a
+    reason to spend ten minutes.
+    """
+
+    from tests.conftest import _serial_permitted
+
+    monkeypatch.delenv("CI", raising=False)
+    for name in ("ARRAYSCOPE_GPU_TESTS", "ARRAYSCOPE_STRESS", "ARRAYSCOPE_STRICT_UI"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+
+    def config(arguments=(), **options):
+        return SimpleNamespace(
+            option=SimpleNamespace(**options),
+            args=list(arguments),
+            rootdir=str(REPO_ROOT),
+            invocation_params=SimpleNamespace(dir=str(REPO_ROOT)),
+            getini=lambda name: ["tests"] if name == "testpaths" else None,
+        )
+
+    assert _serial_permitted(config(["tests/ui"])) == "", "a wide serial run has no exemption"
+
+    assert "debugger" in _serial_permitted(config(["tests/ui"], usepdb=True))
+    assert "debugger" in _serial_permitted(config(["tests/ui"], trace=True))
+    assert _serial_permitted(config(["tests/ui"], capture="no")) == "", "-s is not a reason"
+    assert "collect" in _serial_permitted(config(["tests/ui"], collectonly=True))
+
+    assert "serial by design" in _serial_permitted(config(["tests/gpu_interaction"]))
+    assert "serial by design" in _serial_permitted(config(["tests/stress"]))
+    assert "serial by design" in _serial_permitted(config(["tests/ui/test_qt_smoke_artifacts.py"]))
+    # One ring target plus one ordinary directory is an ordinary wide run.
+    assert _serial_permitted(config(["tests/stress", "tests/ui"])) == ""
+
+    monkeypatch.setenv("ARRAYSCOPE_GPU_TESTS", "1")
+    assert "offscreen" in _serial_permitted(config(["tests/ui"]))
+    monkeypatch.delenv("ARRAYSCOPE_GPU_TESTS")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "wayland")
+    assert "offscreen" in _serial_permitted(config(["tests/ui"]))
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+
+    monkeypatch.setenv("CI", "1")
+    assert "CI" in _serial_permitted(config(["tests/ui"]))
+    monkeypatch.delenv("CI")
+
+    from tests.conftest import SERIAL_FLAG
+
+    forced = {SERIAL_FLAG.lstrip("-").replace("-", "_"): True}
+    assert _serial_permitted(config(["tests/ui"], **forced)) == "explicitly forced"
+
+
+def test_forcing_one_gate_does_not_force_the_other():
+    """Two overrides on purpose: they are claims about different things.
+
+    "I need the tracer out of the way" and "I need this in one process" are
+    unrelated, and one flag that granted both would make each exemption
+    reachable by somebody who only meant the other.
+    """
+
+    from tests.conftest import BYPASS_FLAG, SERIAL_FLAG
+
+    assert BYPASS_FLAG != SERIAL_FLAG
+    assert SERIAL_FLAG == "--serial-force-please-i-really-consider-it-needed"
+
+
+def test_an_oversized_worker_count_is_capped_rather_than_refused():
+    """`-n 16` silently defeated the GL-stability cap; the intent is still benign.
+
+    ``pytest_xdist_auto_num_workers`` owns every worker-count decision and is
+    only consulted for `-n auto`, so an explicit count walked straight past the
+    half-cores cap that keeps concurrent GL context creation from segfaulting
+    the driver. "More parallel" is not a mistake worth refusing, so it is
+    clamped and said out loud.
+    """
+
+    from tests.conftest import worker_ceiling
+
+    assert worker_ceiling(16) == 8
+    assert worker_ceiling(4) == 2
+    assert worker_ceiling(2) == 2, "a 2-core CI runner must keep its parallelism"
+    assert worker_ceiling(1) == 2

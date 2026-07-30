@@ -61,6 +61,10 @@ _collected: set[str] = set()
 # it would run, so a small selection runs in-process instead.
 _SERIAL_BELOW_SECONDS = 2.5
 
+#: Deliberately unpleasant, and deliberately *not* the bypass override. See the
+#: help text on the option, and :func:`serial_run_refusal`.
+SERIAL_FLAG = "--serial-force-please-i-really-consider-it-needed"
+
 
 def pytest_addoption(parser):
     # One group, so the pointer to the reference is printed once for all of
@@ -112,6 +116,28 @@ def pytest_addoption(parser):
             "--no-testmon."
         ),
     )
+    group.addoption(
+        SERIAL_FLAG,
+        action="store_true",
+        default=False,
+        help=(
+            "Override the refusal of a wide `-n 0` run. Separate from the bypass "
+            "override on purpose: 'I need the tracer out of the way' and 'I need "
+            "this in one process' are unrelated claims, and one flag granting "
+            "both would hand each exemption to somebody who only meant the other."
+        ),
+    )
+
+
+def worker_ceiling(cpus: int) -> int:
+    """Half the logical cores, floored at two. The GL-context stability cap.
+
+    Extracted so the ``-n auto`` path and the clamp on an explicit ``-n N``
+    cannot drift apart: the cap only ever applied to the former, which is how
+    an explicit ``-n 16`` came to defeat it silently.
+    """
+
+    return max(2, cpus // 2)
 
 
 def pytest_xdist_auto_num_workers(config):
@@ -136,8 +162,7 @@ def pytest_xdist_auto_num_workers(config):
     unknown means "assume it runs", never "assume it doesn't".
     """
 
-    cpus = os.cpu_count() or 2
-    ceiling = max(2, cpus // 2)
+    ceiling = worker_ceiling(os.cpu_count() or 2)
 
     workload = _selection_workload(config)
     if workload is None:
@@ -503,6 +528,248 @@ def _recorded_test_seconds(config) -> dict:
     return dict(peek.test_seconds) if peek is not None else {}
 
 
+# --------------------------------------------------------------------------- #
+# `-n 0`: the other way to run far more than selection would
+# --------------------------------------------------------------------------- #
+
+#: A serial run may cost at most this in recorded test time. Calibrated, not
+#: chosen: the most expensive command any ring documents as serial is the
+#: ring-2 artifact file at 27.5 s, and the cheapest shape that has ever hurt
+#: anybody is ``tests/app`` at 105.9 s (``tests/ui`` is 1164.8 s, the suite
+#: 1320 s). 60 s sits in the middle of that empty 3.8x gap, so the threshold is
+#: not a judgement call about any real command.
+_SERIAL_ABORT_SECONDS = 60.0
+
+#: Targets whose whole point is a serial run, never refused at any price. Note
+#: their *recorded* price is 0 by construction — the map is keyed by regime and
+#: has never held ``wayland+gpu`` or ``offscreen+stress`` — which is exactly why
+#: they are named rather than priced.
+_SERIAL_RINGS = (
+    "tests/gpu_interaction",  # ring 4, real display
+    "tests/stress",  # ring 3
+    "tests/ui/test_qt_smoke_artifacts.py",  # ring 2: writes canonical tests/artifacts/
+)
+
+
+def explicit_worker_count(argv):
+    """The ``-n`` a person actually typed, or ``None``.
+
+    Read from the command line rather than from ``config.option.numprocesses``,
+    and that is the whole design. ``pytest_xdist_auto_num_workers`` returns 0
+    for any selection in one file or under 2.5 s, and xdist writes that straight
+    into the option before ``pytest_configure`` — so by the time a gate can
+    look, the option cannot tell the harness's own in-process decision from a
+    person's. A gate that could not tell them apart would refuse exactly the
+    runs the harness makes cheap.
+
+    ``auto`` and ``logical`` read as "not a person": ``addopts`` carries
+    ``-n auto`` for every run here. Last spelling wins, as argparse would.
+    """
+
+    arguments = [str(argument) for argument in (argv or ())]
+    found = None
+    for index, argument in enumerate(arguments):
+        if argument in ("-n", "--numprocesses"):
+            value = arguments[index + 1] if index + 1 < len(arguments) else ""
+        elif argument.startswith("--numprocesses="):
+            value = argument.split("=", 1)[1]
+        elif argument.startswith("-n") and len(argument) > 2:
+            value = argument[2:]
+        else:
+            continue
+        try:
+            found = int(value)
+        except ValueError:
+            found = None
+    return found
+
+
+def serial_run_refusal(seconds, priceable, *, whole_suite, permitted_because) -> str:
+    """Why an explicitly typed ``-n 0`` is refused, or ``""`` to allow it.
+
+    Three things make a *wide* serial run worse than merely slow, and none of
+    them apply to the narrow ones:
+
+    * **There is no per-test timeout.** Under xdist a test that never settles
+      hangs one worker and the other seven keep printing; serially it is the
+      whole run, indefinitely, at 100% CPU. (``faulthandler_timeout`` now turns
+      that into a dumped traceback naming the test, which is a floor, not a fix.)
+    * **A segfault takes the run, not a worker.** xdist reports a crashed node
+      and carries on; ``-n 0`` has nothing to carry on with.
+    * **Serial is a different regime with its own reds**, ~25 of them standing.
+      A wide ``-n 0`` run is not a de-noised version of the parallel run; it is
+      a second, less-tested one, and most of what it produces is not yours.
+
+    Note the direction on unknown cost is the **opposite** of
+    :func:`unpriceable_bypass_refusal`, deliberately. Rings 3 and 4 have zero
+    recorded seconds by construction and are precisely the runs that must be
+    serial, so "unknown = large" would refuse the two rings ground rule 1
+    depends on. Scope is the backstop instead: an unpriceable serial run is
+    refused only when it names the whole suite, which is the fresh-clone
+    ``pytest -n 0`` — 1320 s of first-run tracing in one process.
+    """
+
+    if permitted_because:
+        return ""
+    if seconds > _SERIAL_ABORT_SECONDS:
+        return f"`-n 0` would run ~{seconds:.0f} s of recorded test time in one process"
+    if not priceable and whole_suite:
+        return (
+            "`-n 0` names the whole suite and this environment has nothing recorded, "
+            "so this is a first traced run of everything, in one process"
+        )
+    return ""
+
+
+def _non_offscreen_regime() -> str:
+    """Why this run is not the regime the map priced, or ``""``."""
+
+    for name in ("ARRAYSCOPE_GPU_TESTS", "ARRAYSCOPE_STRESS", "ARRAYSCOPE_STRICT_UI"):
+        if os.environ.get(name):
+            return f"{name} is set, so this is not the offscreen regime the map priced"
+    platform = os.environ.get("QT_QPA_PLATFORM", "offscreen")
+    if platform != "offscreen":
+        return f"QT_QPA_PLATFORM={platform} is not the offscreen regime the map priced"
+    return ""
+
+
+def _serial_permitted(config) -> str:
+    """Why an explicit ``-n 0`` is legitimate here, or ``""``.
+
+    Every documented serial use in ``docs/testing/README.md`` has to survive
+    this, or the gate breaks the ring rules it is supposed to leave alone.
+    ``-s`` is deliberately absent: "I want to see prints" is the reflex, not a
+    reason to spend ten minutes.
+    """
+
+    options = vars(config.option)
+    if options.get(SERIAL_FLAG.lstrip("-").replace("-", "_")):
+        return "explicitly forced"
+    if os.environ.get("CI"):
+        return "CI, whose serial steps are the artifact gate"
+    regime = _non_offscreen_regime()
+    if regime:
+        return regime
+    if options.get("usepdb") or options.get("trace"):
+        return "a debugger, which xdist cannot host"
+    if options.get("collectonly"):
+        return "collect-only, which executes nothing"
+    scope = _run_scope(config)
+    if scope and all(testmon_policy.under(path, _SERIAL_RINGS) for path in scope):
+        return "a ring that is serial by design"
+    return ""
+
+
+def _serial_run_seconds(config) -> tuple[float, bool]:
+    """``(recorded seconds, priceable)`` for what an explicit ``-n 0`` will run.
+
+    Priced over what the run will *execute*, not over its scope. The middle
+    branch is the one that matters: ``pytest -n 0 tests/ui`` after a one-line
+    edit runs three tests, and refusing it because ``tests/ui`` *could* cost
+    1164 s would be the "unknown = large" mistake pointed the other way.
+    """
+
+    peek = _map_peek(config)
+    priceable = peek is not None and not peek.empty
+    recorded = dict(peek.test_seconds) if peek is not None else {}
+
+    named = [str(argument) for argument in (config.args or ()) if ".py::" in str(argument)]
+    if named:
+        # Named tests are never the disaster, whatever the map remembers of them.
+        return sum(recorded.get(name, 0.0) for name in named), priceable
+
+    scope = _run_scope(config)
+    if priceable and testmon_policy.decide(config).active and testmon_policy.selects(config):
+        return (
+            sum(
+                recorded.get(name, 0.0)
+                for name in peek.affected_tests
+                if testmon_policy.under(name.split("::", 1)[0], scope)
+            ),
+            priceable,
+        )
+    return unselected_run_seconds(recorded, scope, testmon_policy.under), priceable
+
+
+def _refuse_serial_run(config) -> None:
+    # Never on a worker: it is in-process by definition, its command line is
+    # rebuilt from the controller's paths, and the controller already answered
+    # this question for the whole run.
+    if _XDIST_WORKER:
+        return
+    if explicit_worker_count(getattr(config.invocation_params, "args", ())) != 0:
+        return
+    seconds, priceable = _serial_run_seconds(config)
+    reason = serial_run_refusal(
+        seconds,
+        priceable,
+        whole_suite=not _run_scope(config),
+        permitted_because=_serial_permitted(config),
+    )
+    if not reason:
+        return
+    named = " ".join(str(argument) for argument in (config.args or ())) or ""
+    raise pytest.UsageError(
+        "\n".join(
+            (
+                f"Refused: {reason}.",
+                "",
+                f"    pytest {named}".rstrip(),
+                "",
+                "runs the same tests eight ways parallel. Serial is not a safer mode",
+                "here -- it is a different regime with its own ~25 standing failures, no",
+                "per-test timeout, and no worker to survive a segfault, so a wide `-n 0`",
+                "run mostly produces reds that are not yours.",
+                "",
+                "  Serial is for one thing at a time:",
+                "    pytest -n 0 tests/ui/test_thing.py::test_one     debug one test",
+                "    pytest -n 0 --pdb tests/ui/test_thing.py::test_x drop into pdb",
+                "    pytest --rerun-reds                              re-check an inherited red",
+                "",
+                "  These rings are serial by design and are never refused:",
+                "    ARRAYSCOPE_GPU_TESTS=1 ... pytest tests/gpu_interaction -n 0   (ring 4)",
+                "    ARRAYSCOPE_STRESS=1 pytest tests/stress -n 0                   (ring 3)",
+                "    pytest tests/ui/test_qt_smoke_artifacts.py -n 0                (ring 2)",
+                "",
+                "If you are certain you need a wide serial run, the override is",
+                f"    {SERIAL_FLAG}",
+                "and it is that long on purpose.",
+                "",
+                "Read docs/testing/test-selection.md.",
+            )
+        )
+    )
+
+
+def _cap_explicit_workers(config) -> None:
+    """Clamp an explicit ``-n N`` to the GL-stability ceiling, and say so.
+
+    ``pytest_xdist_auto_num_workers`` owns every worker-count decision and is
+    consulted only for ``-n auto``, so an explicit ``-n 16`` walked straight
+    past the half-cores cap that keeps concurrent GL context creation from
+    segfaulting the driver. Clamped rather than refused, because "more parallel"
+    is a benign intent — unlike ``-n 0``, which is a claim about the regime.
+
+    Both ``numprocesses`` and ``tx`` are rewritten: xdist fixes ``tx`` in
+    ``pytest_cmdline_main``, which has already run by now, and ``tx`` is what
+    the node manager actually builds the pool from.
+    """
+
+    if _XDIST_WORKER:
+        return
+    requested = explicit_worker_count(getattr(config.invocation_params, "args", ()))
+    ceiling = worker_ceiling(os.cpu_count() or 2)
+    if requested is None or requested <= ceiling:
+        return
+    config.option.numprocesses = ceiling
+    config.option.tx = ["popen"] * ceiling
+    config.arrayscope_worker_cap = (
+        f"worker sizing: -n {requested} capped to {ceiling} (half the logical cores). "
+        "Concurrent GL context creation past that intermittently segfaults the driver "
+        "and starves the timing-sensitive UI tests."
+    )
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config):
     """Turn change-selection on by default, before testmon reads its options.
@@ -525,6 +792,8 @@ def pytest_configure(config):
     # zero and let it straight through.
     _ensure_map_seeded(config)
     _refuse_unselected_run(config)
+    _refuse_serial_run(config)
+    _cap_explicit_workers(config)
     decision = testmon_policy.decide(config)
     config.arrayscope_selection = decision
     if decision.active:
@@ -700,6 +969,9 @@ def pytest_report_header(config):
         busy = load_report.opening_line(start)
         if busy:
             lines.append(busy)
+    capped = getattr(config, "arrayscope_worker_cap", None)
+    if capped:
+        lines.append(capped)
 
     decision = getattr(config, "arrayscope_selection", None)
     if decision is None:

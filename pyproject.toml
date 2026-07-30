@@ -127,6 +127,16 @@ addopts = "-n auto --dist loadfile"
 # is what makes tests/conftest.py an *initial* conftest, so its worker-sizing
 # and selection hooks are registered before xdist fixes the pool size.
 testpaths = ["tests"]
+# Dump every thread's stack after this many seconds in one test, and abort.
+# There is no per-test timeout in this suite -- pytest-timeout is not installed
+# and the settlement watchdogs are deadlock guards inside individual helpers, so
+# a test that never settles hangs the process indefinitely at 100% CPU. Under
+# `-n auto` that costs one worker and the other seven keep printing, which reads
+# as "slow"; serially the terminal simply stops, forever. This converts that
+# into a traceback naming the hung test. It is a floor, not a per-test budget:
+# the slowest recorded test here is far under a minute, so 300 s can only fire
+# on something genuinely stuck. Built into pytest; no new dependency.
+faulthandler_timeout = 300
 # One recorded map per behavioral regime. The same test executes different code
 # offscreen and on a real compositor, under strict UI, and under the stress
 # rings, so their dependencies must not be merged into one set of fingerprints:
