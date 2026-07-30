@@ -125,14 +125,34 @@ disagree, and the hot one is the wrong one.
 > saving on the return legs: 4 tiles rebuilt per step becomes 0. Interleaved
 > in-process, order-balanced, `image_replacements` from `TileLayerUpdateStats`.
 
-### 2.4 Secondary: a re-entering tile is hidden for one commit
+### 2.4 Secondary: a re-entering tile is hidden for one commit — **fixed**
 
 `resolve_items` is restricted to `requested_upserts` whenever the delta
 carries any upsert (`tiles.py:1254`). A tile that just re-entered the viewport
-but is not itself an upsert therefore has no `drawable_payloads` entry and is
-hidden at `tiles.py:1422` — then re-shown on a later commit once
-`rearm_for_scope` (`tile_lifecycle.py:1624`) re-dirties it. Retained pixels
-exist the whole time.
+but is not itself an upsert therefore had no `drawable_payloads` entry and was
+hidden — then re-shown on a later commit once `rearm_for_scope`
+(`tile_lifecycle.py:1624`) re-dirtied it. Retained pixels existed the whole
+time.
+
+`_reshow_retained_active_tiles` now presents such a tile in the commit that
+admits it back into `active`. It is a presentation step, not production: the
+R2 subsection *"Skipping production is not skipping presentation"* is the rule
+being served. A candidate qualifies only when the retained state is what the
+commit would have drawn anyway — `acknowledged_identity_satisfies_target`
+(the stale-pixel guard, unchanged: an outrun state still waits for its
+upsert), `_direct_tile_binding_stale`/`_direct_tile_geometry_changed` both
+negative, levels matching, and an item that actually holds an image. Measured
+on a 4×4-tile window over an 8×8 montage, panning one column out and back
+while one overlapping tile re-publishes (interleaved in-process, order
+balanced, 12 trials × 6 pan-backs per arm): **2 → 1 commits to put pixels
+under every visible tile, and 4 → 0 tile-commits hidden.**
+
+Three regimes are deliberately left on the old path, all conservative (hide,
+wait for the upsert) rather than wrong: `force_refresh` deltas, states whose
+levels moved while they were out of view (`update_levels` skips non-visible
+states, so their pixels are windowed to the old levels and this commit carries
+no upsert to re-window them), and page-backed payloads, whose drawn source id
+comes from the assembled payload rather than the one in `tile_payloads`.
 
 ### 2.5 Budget paths (correct in shape, blind to the halo)
 

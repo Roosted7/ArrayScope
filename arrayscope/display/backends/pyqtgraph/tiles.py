@@ -1303,6 +1303,7 @@ class MontageTileLayer:
                     int(resident_items) - len(physically_presented),
                 ),
             )
+        states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
         active = {
             int(tile)
             for tile in requested_active
@@ -1313,11 +1314,42 @@ class MontageTileLayer:
                 target_identities.get(int(tile)),
             )
         }
+        reshown_tiles: set[int] = set()
+        if (
+            tile_delta is not None
+            and requested_upserts
+            and not bool(getattr(tile_delta, "force_refresh", False))
+        ):
+            # A tile that re-entered the viewport without being one of this
+            # delta's upserts has no `drawable_payloads` entry (the resolve
+            # restriction above), so it reaches neither `_direct_tile_order`
+            # nor the hide-everything-not-active sweep as anything but a
+            # hidden tile — even though its `_states` entry, its ImageItem and
+            # its pixels survived the whole excursion.  It used to come back
+            # only on a later commit that admitted it as an upsert, after
+            # `rearm_for_scope` re-dirtied it: a hole that blinks on a pan
+            # back plus a round trip through admission.  Residency satisfies
+            # R2; it does not satisfy the lifecycle's physical first-pixel
+            # obligation, so present it here.  Display only, zero production.
+            reshown_tiles = self._reshow_retained_active_tiles(
+                requested_active
+                - active
+                - requested_upserts
+                - {int(tile) for tile in tuple(getattr(tile_delta, "removals", ()) or ())},
+                layout=layout,
+                tile_payloads=tile_payloads,
+                target_identities=target_identities,
+                tile_states=states,
+                tile_source_ids=tile_source_ids,
+                levels=levels,
+                rgb_already_windowed=bool(rgb_already_windowed),
+                transposed=bool(transposed),
+            )
+            active |= reshown_tiles
         for tile in requested_active - active:
             state = self._states.get(int(tile))
             if state is not None and bool(getattr(state, "visible", False)):
                 self._hide_tile(int(tile))
-        states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
         dirty_set = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
         cold_deadline_ms = (
             None if tile_delta is None else getattr(tile_delta, "cold_deadline_ms", None)
@@ -1340,7 +1372,10 @@ class MontageTileLayer:
         items_skipped = 0
         rgb_window_tiles = 0
         image_replacements = 0
-        existing_items_shown = 0
+        # A re-shown retained tile is a physical change to the frame with no
+        # upload behind it — exactly what this counter means everywhere else,
+        # and what keeps such a commit from reading as a no-op.
+        existing_items_shown = len(reshown_tiles)
         relocated_tiles = 0
         level_updates = 0
         storage_evictions = 0
@@ -2301,6 +2336,92 @@ class MontageTileLayer:
         self._touch_resident_state(state)
         return state
 
+    def _reshow_retained_active_tiles(
+        self,
+        candidates,
+        *,
+        layout: dict[int, object],
+        tile_payloads: Mapping[int, DisplayTilePayload],
+        target_identities: Mapping[int, object],
+        tile_states: tuple[object, ...],
+        tile_source_ids: dict[int, object] | None,
+        levels: tuple[float, float],
+        rgb_already_windowed: bool,
+        transposed: bool,
+    ) -> set[int]:
+        """Present retained tiles that re-entered the viewport, as-is.
+
+        A candidate qualifies only when the state the layer is still holding
+        for that tile *is* what this commit would have drawn: its acknowledged
+        identity satisfies the current target (the stale-pixel guard — a state
+        the target has outrun stays hidden and waits for its upsert), it holds
+        this tile's current binding and geometry, its pixels are windowed to
+        this commit's levels, and its item actually has an image.  Failing any
+        of those, the old behaviour — stay hidden, come back as an upsert —
+        is the correct one and is what happens.
+
+        Dropping the warm-residency claim is not optional bookkeeping: a state
+        can sit in `_direct_reuse_pool` while still assigned to its own tile,
+        and leaving it there lets a later tile in this same transaction pop and
+        move the very same ImageItem, which would leave two tiles with
+        lifecycle acknowledgement for one physical item.
+        """
+
+        reshown: set[int] = set()
+        for tile_number in sorted(int(tile) for tile in candidates):
+            state = self._states.get(tile_number)
+            if state is None or bool(getattr(state, "visible", False)):
+                continue
+            if not acknowledged_identity_satisfies_target(
+                state.acknowledged_identity,
+                target_identities.get(tile_number),
+            ):
+                continue
+            if getattr(state.item, "image", None) is None:
+                continue
+            # `update_levels` skips non-visible states, so a state hidden
+            # across a level change holds pixels windowed to the old levels
+            # and this commit has no upsert to re-window it with.  Showing it
+            # would be showing the wrong image; leave it to admission.
+            if not levels_match(state.levels, levels):
+                continue
+            payload = tile_payloads.get(tile_number)
+            if not isinstance(payload, DisplayTilePayload):
+                continue
+            image = getattr(payload, "image", None)
+            if image is None or np.asarray(image).ndim < 2:
+                continue
+            state_value = "loaded"
+            if tile_states and tile_number < len(tile_states):
+                state_value = str(
+                    getattr(tile_states[tile_number], "value", tile_states[tile_number])
+                )
+            if state_value == "skipped":
+                continue
+            if _direct_tile_geometry_changed(
+                state, layout, tile_number, payload, transposed=transposed
+            ):
+                continue
+            if _direct_tile_binding_stale(
+                state,
+                layout,
+                tile_number,
+                payload,
+                tile_states=tile_states,
+                tile_source_ids=tile_source_ids,
+                rgb_already_windowed=_payload_rgb_already_windowed(
+                    payload, rgb_already_windowed, levels=levels
+                ),
+                transposed=transposed,
+            ):
+                continue
+            self._remove_from_direct_reuse_pool(state)
+            self._set_item_visible(state, True)
+            self._set_state_visible(state, True)
+            self._touch_resident_state(state)
+            reshown.add(tile_number)
+        return reshown
+
     def _hide_tile(self, tile_number: int) -> None:
         state = self._states.get(int(tile_number))
         if state is None:
@@ -3128,6 +3249,7 @@ def _direct_tile_binding_stale(
     tile_states: tuple[object, ...],
     tile_source_ids: dict[int, object] | None,
     rgb_already_windowed: bool,
+    transposed: bool = False,
 ) -> bool:
     tile_number = int(tile_number)
     state_value = "loaded"
@@ -3141,6 +3263,8 @@ def _direct_tile_binding_stale(
     tile_data = np.asarray(payload.image)
     if tile_data.ndim < 2:
         return False
+    if transposed:
+        tile_data = np.swapaxes(tile_data, 0, 1)
     width, height, crop_w, crop_h, _scale_x, _scale_y = _payload_direct_dims(
         region, tile_data, payload
     )
@@ -3152,6 +3276,11 @@ def _direct_tile_binding_stale(
         else payload.source_id
     )
     source_id = _direct_payload_source_id(base_source_id, payload)
+    if transposed:
+        # The commit path keys residency on the transposed display view, not
+        # on the canonical source; comparing against the unwrapped id would
+        # call a matching state stale on every axis-swapped display.
+        source_id = ("axes-transposed", source_id)
     histogram_id = ("tile-source", source_id) if payload.histogram_data is not None else None
     return not _direct_state_matches(
         state,
@@ -3228,10 +3357,14 @@ def _direct_tile_geometry_changed(
     layout: dict[int, object],
     tile_number: int,
     payload: DisplayTilePayload,
+    *,
+    transposed: bool = False,
 ) -> bool:
     data = np.asarray(payload.image)
     if data.ndim < 2:
         return False
+    if transposed:
+        data = np.swapaxes(data, 0, 1)
     region = layout.get(int(tile_number))
     if region is None:
         return False

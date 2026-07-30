@@ -22,16 +22,29 @@ class _Owner:
         pass
 
 
-def _make_layer():
+def _make_layer(set_image_item_data=lambda *_args, **_kwargs: None):
     from arrayscope.display.backends.pyqtgraph.tiles import MontageTileLayer
 
     return MontageTileLayer(
         _Owner(),
-        set_image_item_data=lambda *_args, **_kwargs: None,
+        set_image_item_data=set_image_item_data,
         record_upload_timing=lambda *_args, **_kwargs: None,
         histogram_levels_for_display=lambda levels: levels,
         is_rgb_image=lambda _image: False,
     )
+
+
+def _real_image_upload(item, data, levels, **_kwargs):
+    """Actually put pixels on the item, as the production setter does.
+
+    Re-showing a retained tile is a claim that its pixels are on screen, so
+    the layer refuses to make it for an item that has no image. A stubbed
+    upload leaves every item imageless and would turn that guard into the
+    thing under test.
+    """
+
+    item.setImage(np.asarray(data), autoLevels=False, levels=levels)
+    return True
 
 
 def test_identity_rejected_upserts_are_reported_not_silent(qt_app):
@@ -229,3 +242,200 @@ def test_atomic_identity_rejection_preserves_complete_predecessor(qt_app):
     assert rejected.identity_rejected_tiles == (0,)
     assert layer._states[0].acknowledged_identity == predecessor.tile_identity
     assert layer._states[0].visible is True
+
+
+def _row_geometry(tiles: int, tile: int = 4):
+    return DisplayGeometry(
+        view_state=None,
+        display_shape=(tile, tile * tiles),
+        montage=MontageGeometry(
+            indices=tuple(range(tiles)),
+            tile_shape=(tile, tile),
+            columns=tiles,
+            rows=1,
+            gap=0,
+        ),
+    )
+
+
+def _row_identity(tile_number: int, semantic_generation=("gen", 0)):
+    from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
+    from arrayscope.display.shader_mapping import TexturePlaneKind
+
+    return TileIdentity(
+        document_generation=("doc", 0),
+        operation_key=(),
+        source_index=int(tile_number),
+        image_axes=(0, 1),
+        axis_flips=(False, False),
+        channel="real",
+        complex_mapping=("scalar", "real", "mapped"),
+        texture_kind=TexturePlaneKind.SCALAR_R32F,
+        semantic_generation=semantic_generation,
+        lod=TileLodIdentity(level=0, factor=1),
+    )
+
+
+def _row_payload(tile_number: int, *, tile: int = 4, semantic_generation=("gen", 0)):
+    return DisplayTilePayload(
+        int(tile_number),
+        int(tile_number),
+        np.full((tile, tile), float(tile_number), dtype=np.float32),
+        None,
+        ("tile", int(tile_number)),
+        tile_identity=_row_identity(tile_number, semantic_generation),
+    )
+
+
+def _commit(layer, geometry, *, active, upserts, payloads, targets, levels=(0.0, 1.0)):
+    delta = SimpleNamespace(
+        upserts=dict(upserts),
+        active_tiles=tuple(int(tile) for tile in active),
+        planned_tiles=tuple(int(tile) for tile in active),
+        target_identities=dict(targets),
+        removals=(),
+        near_tile_source_ids={},
+        cold_deadline_ms=None,
+        atomic_handoff=False,
+        force_refresh=False,
+    )
+    return layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=levels,
+        rgb_already_windowed=False,
+        dirty_tiles=tuple(int(tile) for tile in upserts),
+        tile_payloads={int(tile): payloads[int(tile)] for tile in active},
+        tile_delta=delta,
+    )
+
+
+def test_reentering_retained_tile_is_shown_in_the_commit_that_admits_it(qt_app):
+    """The pan-back hole (render-eagerness map 2026-07-30, §2.4).
+
+    ``resolve_items`` is restricted to the admitted upserts whenever a delta
+    carries any, so a tile that re-entered the viewport without being an
+    upsert had no drawable payload and fell through to the hide sweep — while
+    its ``_states`` entry, its ImageItem and its pixels had survived the whole
+    excursion. It came back only on a later commit that admitted it as an
+    upsert, after ``rearm_for_scope`` re-dirtied it: a hole that blinks on a
+    pan back, plus an avoidable round trip through admission.
+
+    The regime is load-bearing and both halves must be present in the SAME
+    commit, or the defect cannot occur and the test cannot fail:
+      (a) the delta carries at least one upsert (tile 1 refines), and
+      (b) tile 0 re-enters ``active`` as a NON-upsert holding a retained,
+          identity-satisfying state.
+    """
+
+    geometry = _row_geometry(3)
+    payloads = {tile: _row_payload(tile) for tile in range(3)}
+    targets = {tile: payloads[tile].tile_identity for tile in range(3)}
+    layer = _make_layer(_real_image_upload)
+
+    first = _commit(
+        layer,
+        geometry,
+        active=(0, 1),
+        upserts={0: payloads[0], 1: payloads[1]},
+        payloads=payloads,
+        targets=targets,
+    )
+    assert first.presented_tiles == (0, 1)
+
+    # Pan right: tile 0 leaves the viewport. Its state is retained, hidden,
+    # and pooled -- pixels, ImageItem and scene membership all survive.
+    panned = _commit(
+        layer,
+        geometry,
+        active=(1, 2),
+        upserts={2: payloads[2]},
+        payloads=payloads,
+        targets=targets,
+    )
+    assert panned.presented_tiles == (1, 2)
+    retained = layer._states[0]
+    assert retained.visible is False
+    assert retained.item.image is not None
+    assert retained.acknowledged_identity == targets[0]
+
+    # Pan back: tile 0 re-enters as a non-upsert while tile 1 is upserted.
+    back = _commit(
+        layer,
+        geometry,
+        active=(0, 1),
+        upserts={1: payloads[1]},
+        payloads=payloads,
+        targets=targets,
+    )
+
+    assert back.committed_upserts == (1,), "regime (a): the delta must carry an upsert"
+    assert 0 not in back.committed_upserts, "regime (b): tile 0 must not be an upsert"
+    # The physical claim: pixels on screen in THIS commit, not merely a
+    # surviving `_states` entry.
+    assert back.presented_tiles == (0, 1)
+    assert layer._states[0] is retained
+    assert retained.item.isVisible() is True
+    assert retained.visible is True
+    layer.assert_presented_index_matches_scan()
+
+    # The warm-residency claim is dropped the moment the tile is presented:
+    # leaving it pooled lets a later tile in the same transaction pop and move
+    # the very same ImageItem, acknowledging two tiles for one physical item.
+    assert all(state is not retained for state in layer._direct_reuse_pool)
+    assert id(retained) not in layer._direct_reuse_pool_ids
+    assert layer._states[0].item is not layer._states[1].item
+
+
+def test_reentering_tile_with_stale_retained_identity_stays_hidden(qt_app):
+    """The stale-pixel guard is not weakened by the re-show above.
+
+    Same regime, one difference: while tile 0 was out of view the target
+    moved on. Its retained pixels no longer satisfy the current target, so
+    re-showing them would put stale pixels on screen. It must stay hidden and
+    wait for an upsert.
+    """
+
+    geometry = _row_geometry(3)
+    payloads = {tile: _row_payload(tile) for tile in range(3)}
+    targets = {tile: payloads[tile].tile_identity for tile in range(3)}
+    layer = _make_layer(_real_image_upload)
+
+    _commit(
+        layer,
+        geometry,
+        active=(0, 1),
+        upserts={0: payloads[0], 1: payloads[1]},
+        payloads=payloads,
+        targets=targets,
+    )
+    _commit(
+        layer,
+        geometry,
+        active=(1, 2),
+        upserts={2: payloads[2]},
+        payloads=payloads,
+        targets=targets,
+    )
+    assert layer._states[0].visible is False
+
+    outrun = dict(targets)
+    outrun[0] = _row_identity(0, semantic_generation=("gen", 1))
+    back = _commit(
+        layer,
+        geometry,
+        active=(0, 1),
+        upserts={1: payloads[1]},
+        payloads=payloads,
+        targets=outrun,
+    )
+
+    assert back.committed_upserts == (1,)
+    assert back.presented_tiles == (1,)
+    assert layer._states[0].visible is False
+    assert layer._states[0].item.isVisible() is False
+    # A payload the target has outrun is not a rejected upsert: the presenter
+    # is not looping on it.
+    assert back.identity_rejected_tiles == ()
+    layer.assert_presented_index_matches_scan()
