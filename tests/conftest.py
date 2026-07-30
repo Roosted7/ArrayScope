@@ -1136,6 +1136,9 @@ def _report_nothing_to_run(config, peek) -> int:
     # The reading the gates already took, so the coverage and erosion reports
     # below read the same object testmon's own configure would have handed them.
     config.testmon_data = peek.data
+    # This run never reaches testmon's configure, so predicates that ask
+    # ``testmon_config`` whether the run narrowed need the answer another way.
+    config.arrayscope_fast_path = True
 
     writer = create_terminal_writer(config)
     reporter = _FastPathReporter(writer)
@@ -1155,6 +1158,10 @@ def _report_nothing_to_run(config, peek) -> int:
         writer.line(busy, bold=True, yellow=True)
     _report_map_erosion(reporter, config)
     _report_function_coverage(reporter, config)
+    # The cadence nudge must survive the fast path: a settled tree answered
+    # from the map is the run shape a quiet fortnight is made of, so skipping
+    # it here would hide the nudge from exactly the checkout that needs it.
+    _report_sweep_cadence(reporter, config)
     for line in unaffected_summary(0, peek.mapped_tests, peek.mapped_tests, 0.0, since=None):
         writer.line(line, bold=True)
     inherited = peek.forced_tests
@@ -2229,8 +2236,12 @@ def _report_sweep_cadence(terminalreporter, config) -> None:
         remember(swept=True)
         return
     # Only the inner loop nags. --since is already the wider question, and a
-    # bypassed run has its own closing paragraph.
-    if config.getoption("since", None) is not None or not _selection_is_narrowing(config):
+    # bypassed run has its own closing paragraph. The fast path counts as
+    # narrowing by definition — it exists because selection narrowed the run to
+    # nothing — but it exits before testmon configures, so the
+    # ``testmon_config`` this predicate reads never comes to exist there.
+    narrowing = _selection_is_narrowing(config) or getattr(config, "arrayscope_fast_path", False)
+    if config.getoption("since", None) is not None or not narrowing:
         return
     if not record:
         # A new checkout must not open with a nag, so its first bare run starts

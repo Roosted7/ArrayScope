@@ -307,3 +307,25 @@ def test_the_header_line_is_the_one_the_full_path_uses():
         "test selection: on (default) — 0 of 4028 mapped tests affected"
     )
     assert "records the map" in harness.selection_header_line("default", 0, 0)
+
+
+def test_the_cadence_nudge_still_fires_on_a_run_that_ran_nothing(
+    tmp_path, monkeypatch, capsys, as_the_controller
+):
+    """A settled tree answered from the map is the run shape a quiet fortnight
+    is made of — a checkout living entirely on the fast path is exactly the one
+    whose blind spots age out unnoticed, so the nudge must survive the path or
+    it exists only for the runs that least need it."""
+
+    config, peek = _printing_config(tmp_path)
+    monkeypatch.setattr(testmon_policy, "decide", lambda config: config.arrayscope_selection)
+    coverage_map.write_sidecar(
+        testmon_policy.map_path(tmp_path),
+        structure={},
+        baselines={},
+        sweep={"sha": "0" * 40, "at": "2026-05-01T00:00:00+00:00", "swept": True},
+    )
+
+    harness._report_nothing_to_run(config, peek)
+    printed = capsys.readouterr().out
+    assert "swept exhaustively" in printed, "the fast path dropped the cadence nudge"
