@@ -103,7 +103,11 @@ def test_a_distinct_source_patches_even_when_a_numeric_id_is_forged():
         previous, (population, forged), payloads, upserts=(2,), removals=()
     )
 
-    assert patched is not None and patched is not previous, (
+    assert patched is not None, (
+        "the delta was refused outright, so the proof was never consulted and "
+        "this test cannot say what a forged id would have done"
+    )
+    assert patched is not previous, (
         "a forged numeric id was accepted as proof; a real content change "
         "would be skipped and the histogram would be stale"
     )
@@ -132,7 +136,11 @@ def test_a_dead_weak_reference_forces_the_slice_to_be_rewritten():
         previous, (population, with_dead_proof), payloads, upserts=(3,), removals=()
     )
 
-    assert patched is not None and patched is not previous, (
+    assert patched is not None, (
+        "the delta was refused outright, so the dead reference was never "
+        "consulted and this test cannot say how it was treated"
+    )
+    assert patched is not previous, (
         "an unprovable slice was left untouched; a freed previous source is "
         "the absence of evidence, not evidence of sameness"
     )

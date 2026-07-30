@@ -357,9 +357,8 @@ def test_a_closure_that_raises_still_closes_its_in_flight_window():
     task = mailbox.plan(1, ("id", 1))
     task.submitted()
 
-    with pytest.raises(ValueError):
-        with task:
-            raise ValueError("assembly failed")
+    with pytest.raises(ValueError), task:
+        raise ValueError("assembly failed")
 
     counters = mailbox.counters()
     assert counters.in_flight == 0

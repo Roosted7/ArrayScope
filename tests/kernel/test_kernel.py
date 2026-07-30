@@ -1033,7 +1033,8 @@ def test_speculative_preparation_yields_the_pool_to_pending_visible_work():
     # second worker asking for work while visible work is in flight must be
     # given nothing rather than the preparation.
     producer = backend.take()
-    assert producer is not None and producer.spec.key == "produce"
+    assert producer is not None
+    assert producer.spec.key == "produce"
     assert backend.take() is None
 
     # Once the visible work finishes the preparation is released, not dropped.
@@ -1071,8 +1072,10 @@ def test_a_visible_preparation_lane_would_have_taken_the_worker():
     )
 
     producer = backend.take()
-    assert producer is not None and producer.spec.key == "produce"
+    assert producer is not None
+    assert producer.spec.key == "produce"
     # The hole: a free worker is handed the preparation while the producer is
     # still running, and nothing can take that thread back.
     preparation = backend.take()
-    assert preparation is not None and preparation.spec.key == "prepare"
+    assert preparation is not None
+    assert preparation.spec.key == "prepare"

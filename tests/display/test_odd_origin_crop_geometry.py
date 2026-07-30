@@ -23,8 +23,8 @@ import pytest
 from arrayscope.display.lod import LodInfo, reduced_extent
 from arrayscope.display.model.frame import DisplayTilePayload
 from arrayscope.display.wgpu_imageview2d import _wgpu_payload_lod_geometry
-from arrayscope.render.effects import _reduced_axis_length
 from arrayscope.operations.regions import AxisRegion, AxisRegionKind
+from arrayscope.render.effects import _reduced_axis_length
 
 FACTORS = (1, 2, 4, 8)
 ORIGINS = (0, 1, 2, 3, 5, 7, 8, 33, 100)
@@ -85,7 +85,7 @@ def test_an_unanchored_axis_keeps_the_plain_ceiling():
             )
 
 
-@pytest.mark.parametrize("origin", (1, 3, 5, 7))
+@pytest.mark.parametrize("origin", [1, 3, 5, 7])
 def test_wgpu_accepts_an_anchored_odd_origin_crop(origin):
     """The exact shape the profiler stranded on is now admitted."""
 
@@ -120,7 +120,7 @@ def test_wgpu_admits_a_per_axis_phase_in_both_orientations():
         )
 
 
-@pytest.mark.parametrize("wrong", (-1, 1))
+@pytest.mark.parametrize("wrong", [-1, 1])
 def test_wgpu_still_rejects_a_geometry_that_is_off_by_one(wrong):
     """The check stays strict: exactly one extent is admissible per phase."""
 

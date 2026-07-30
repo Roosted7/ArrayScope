@@ -31,12 +31,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from pyqtgraph.Qt import QtCore
 
+from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.imageview2d import ImageView2D
 from arrayscope.display.lod import LodInfo
-from arrayscope.core.view_state import ChannelMode
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
     TilePresentationDelta,
