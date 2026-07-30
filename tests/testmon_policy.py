@@ -135,7 +135,26 @@ class Decision:
     explicit: bool = False
 
 
-def testmon_installed() -> bool:
+def testmon_installed(config=None) -> bool:  # noqa: PT028 - not a test, it only reads like one
+    """Whether testmon is here *for this run*, not merely importable.
+
+    With a ``config`` the question is answered by the pluginmanager, because
+    that is the object that would have done the work. ``find_spec`` answers
+    "the package is installed", which is a different question and was
+    measurably the wrong one: ``-p no:pytest-testmon`` leaves the package
+    perfectly importable while blocking the entry point, so selection reported
+    itself active, deselected nothing, recorded nothing, and the header printed
+    ``test selection: on ... this run records the map`` — false in both halves,
+    with no gate anywhere. Reading registration turns that into an ordinary
+    inactive decision, which the bypass gate then prices like any other.
+
+    Without a ``config`` the package answer is the only one available, and it is
+    the right one for the callers outside a pytest run (``tools/test_selection.py``).
+    """
+
+    if config is not None:
+        with contextlib.suppress(AttributeError):
+            return bool(config.pluginmanager.hasplugin("pytest-testmon"))
     from importlib.util import find_spec
 
     return find_spec("testmon") is not None
@@ -151,6 +170,8 @@ def decide(config) -> Decision:
 
     if not testmon_installed():
         return Decision(False, "pytest-testmon is not installed")
+    if not testmon_installed(config):
+        return Decision(False, "pytest-testmon is installed but not registered for this run")
 
     options = vars(config.option)
     if options.get("no-testmon"):

@@ -296,6 +296,68 @@ def unselected_run_seconds(test_seconds, scope, under) -> float:
     )
 
 
+def node_ids_only(arguments) -> bool:
+    """Whether every argument names one test, so the run cannot be wide.
+
+    The exemption that keeps :func:`unpriceable_bypass_refusal` from being a
+    wall: ``pytest --no-testmon file.py::test`` runs what it names and nothing
+    else, whatever the map holds, so it needs no price to be safe. A bare run
+    names nothing, which is the *widest* shape rather than the narrowest — hence
+    the emptiness check.
+    """
+
+    named = tuple(str(argument) for argument in (arguments or ()))
+    return bool(named) and all(".py::" in argument for argument in named)
+
+
+def unpriceable_bypass_refusal(mapped_tests, permitted_because, *, node_ids_only) -> str:
+    """Why an *unpriceable* bypass is refused, or ``""`` to allow it.
+
+    The price rule below reads an unreadable map as 0 s, and 0 s opens the gate.
+    Four separate routes land there, and every one of them was a working bypass
+    on 2026-07-30: a fresh clone, a worktree that has not recorded yet,
+    ``TESTMON_DATAFILE`` pointing at a path that does not exist (measured —
+    price 0, allowed), and a map recorded under a different environment key.
+    Each makes the gate a no-op at exactly the moment there is no evidence to
+    defend it with.
+
+    So for a bypass, and only for a bypass, unknown cost is assumed large. The
+    direction is deliberately the opposite of the one the serial gate takes
+    (see :func:`serial_run_refusal`), because the two are protecting against
+    different mistakes: here an unpriceable run is the whole untraced suite,
+    there it is a ring that has never been recorded and must be serial.
+    """
+
+    if permitted_because or node_ids_only:
+        return ""
+    if mapped_tests:
+        return ""
+    return (
+        "the map holds nothing for this environment, so a run that skips selection "
+        "cannot be priced -- and for a bypass, unknown cost is assumed large"
+    )
+
+
+def selection_materialised(config) -> bool:
+    """Whether the plugin that was supposed to select actually turned up.
+
+    Every degradation path in this layer fails **open** — an unreadable map, a
+    renamed testmon attribute, a blocked entry point — and each one leaves the
+    header printing ``test selection: on`` over a run that selected nothing. The
+    invariant that closes the class is that a run may only *claim* selection if
+    it can prove it: the plugin is registered, and it built the configuration
+    object it was supposed to build. Anything else is a bypass, and is priced
+    like one.
+    """
+
+    try:
+        if not config.pluginmanager.hasplugin("pytest-testmon"):
+            return False
+    except AttributeError:
+        return False
+    return bool(getattr(config, "testmon_config", None))
+
+
 def _bypass_permitted(config) -> str:
     """Why an unselected run is legitimate here, or ``""``."""
 
@@ -334,14 +396,52 @@ def _refuse_unselected_run(config) -> None:
     if not _bypasses_selection(config):
         return
     permitted = _bypass_permitted(config)
-    scope = testmon_policy.collected_scope(config)
-    testpaths = tuple(config.getini("testpaths") or ())
-    if set(scope) == set(testpaths):
-        scope = ()
+    peek = _map_peek(config)
+    named_only = node_ids_only(config.args)
+    unpriceable = unpriceable_bypass_refusal(
+        None if peek is None else peek.mapped_tests, permitted, node_ids_only=named_only
+    )
+    if unpriceable:
+        _refuse(config, unpriceable, _RECORD_ONE_FIRST)
+        return
+    scope = _run_scope(config)
     seconds = unselected_run_seconds(_recorded_test_seconds(config), scope, testmon_policy.under)
     reason = unselected_run_refusal(seconds, permitted)
-    if not reason:
-        return
+    if reason:
+        _refuse(config, reason, _RUN_IT_SELECTED)
+
+
+#: What to say instead, when the run was refused on price: the same tests are
+#: available, selected, for a fraction of the cost.
+_RUN_IT_SELECTED = (
+    "runs the same thing, selected, in a fraction of the time. Selection",
+    "is not a shortcut -- it is the honest set, from recorded evidence.",
+    "",
+    "  Everything this branch changed, before merging:  pytest --since",
+    "  A red this checkout inherited:                   pytest --rerun-reds",
+    "  A map you distrust:                              rm .testmondata && pytest --no-seed-map",
+)
+
+#: What to say instead, when there was no map to price against. Naming the
+#: reasons matters more than usual here: three of the four are environmental,
+#: and an agent that reads "no map" as "the harness is broken" reaches for a
+#: wider command, which is the failure this whole gate exists to stop.
+_RECORD_ONE_FIRST = (
+    "records one first, and costs about what this run would have. Every command",
+    "after it is priced against real evidence instead of against silence.",
+    "",
+    "  A map reads as empty when:",
+    "    nothing has been recorded in this checkout yet (a fresh clone or worktree)",
+    "    TESTMON_DATAFILE points somewhere that does not exist",
+    "    the environment key differs -- QT_QPA_PLATFORM, or an ARRAYSCOPE_* ring",
+    "      variable, keys the map by regime and a ring you never ran holds nothing",
+    "",
+    "  Naming the tests you actually want is never refused, map or no map:",
+    "    pytest --no-testmon tests/ui/test_thing.py::test_one",
+)
+
+
+def _refuse(config, reason: str, instead: tuple[str, ...]) -> None:
     named = " ".join(str(argument) for argument in (config.args or ())) or ""
     raise pytest.UsageError(
         "\n".join(
@@ -350,12 +450,7 @@ def _refuse_unselected_run(config) -> None:
                 "",
                 f"    pytest {named}".rstrip(),
                 "",
-                "runs the same thing, selected, in a fraction of the time. Selection",
-                "is not a shortcut -- it is the honest set, from recorded evidence.",
-                "",
-                "  Everything this branch changed, before merging:  pytest --since",
-                "  A red this checkout inherited:                   pytest --rerun-reds",
-                "  A map you distrust:                              rm .testmondata && pytest",
+                *instead,
                 "",
                 "If you are certain the harness has left you no option, the override is",
                 f"    {BYPASS_FLAG}",
@@ -368,9 +463,27 @@ def _refuse_unselected_run(config) -> None:
     )
 
 
-def _recorded_test_seconds(config) -> dict:
-    """Per-node-id durations from the map, or ``{}`` if it cannot be read."""
+def _run_scope(config) -> tuple[str, ...]:
+    """This run's path scope, with "the whole suite" spelled as ``()``."""
 
+    scope = testmon_policy.collected_scope(config)
+    testpaths = tuple(config.getini("testpaths") or ())
+    return () if set(scope) == set(testpaths) else scope
+
+
+def _map_peek(config):
+    """One cached read of the map for every gate. ``None`` if it is unusable.
+
+    Cached on the config because three gates now price the same run — the
+    bypass gate, the fail-closed rule above it, and the serial gate — and each
+    ``peek`` opens the SQLite map and runs testmon's whole stability
+    determination. Sharing the read is also what keeps them from disagreeing
+    about what a run costs.
+    """
+
+    cached = getattr(config, "arrayscope_map_peek", "unset")
+    if cached != "unset":
+        return cached
     try:
         peek = testmon_policy.peek(
             config.rootdir,
@@ -378,7 +491,15 @@ def _recorded_test_seconds(config) -> dict:
             tuple(config.getini("testmon_ignore_dependencies")),
         )
     except Exception:  # a broken map must never be the reason a run cannot start
-        return {}
+        peek = None
+    config.arrayscope_map_peek = peek
+    return peek
+
+
+def _recorded_test_seconds(config) -> dict:
+    """Per-node-id durations from the map, or ``{}`` if it cannot be read."""
+
+    peek = _map_peek(config)
     return dict(peek.test_seconds) if peek is not None else {}
 
 
@@ -397,11 +518,16 @@ def pytest_configure(config):
     # to the punch is a crash nobody gets a sentence about.
     _refuse_harmful_plugin_disables(config)
     _refuse_pointless_flags(config)
+    # Seed *before* pricing, and for every run rather than only a selected one.
+    # Seeding is a file copy from a sibling checkout, and a bypass run is
+    # precisely the run that most needs a real map to be priced against: gating
+    # it on ``decision.active`` meant a fresh worktree priced every bypass at
+    # zero and let it straight through.
+    _ensure_map_seeded(config)
     _refuse_unselected_run(config)
     decision = testmon_policy.decide(config)
     config.arrayscope_selection = decision
     if decision.active:
-        _ensure_map_seeded(config)
         # Before testmon's own configure, which is where it resolves the
         # affected set through the module global this patches.
         testmon_policy.install_forgiveness(config.rootdir)
@@ -580,6 +706,15 @@ def pytest_report_header(config):
         return lines or None
     if not decision.active:
         lines.append(f"test selection: off ({decision.reason}) — running everything")
+        return lines
+    if not selection_materialised(config):
+        # A run may only claim selection if it can prove it. Everything that
+        # degrades in this layer degrades open, so the absence of proof is
+        # reported rather than assumed away.
+        lines.append(
+            "test selection: claimed on, but pytest-testmon did not materialise — "
+            "this run selects nothing and records nothing. Report it."
+        )
         return lines
 
     since = config.getoption("since", None)
