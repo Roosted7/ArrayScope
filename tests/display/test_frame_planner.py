@@ -202,23 +202,56 @@ def test_field_montage_pan_reuses_the_region_skeleton_it_did_not_change():
 def test_sub_tile_nudge_reuses_the_whole_region_tuple():
     """A camera move too small to change the snapped tile sets costs nothing.
 
-    ``tiles_intersecting`` snaps outward to whole tiles, so a half-pixel drag
-    step resolves to the identical active/near sets. That case must not walk
-    the montage at all: the previous regions tuple is the answer.
+    The rect is snapped outward to whole tiles, so a half-pixel drag step
+    inside a tile resolves to the identical active/near sets. That case must
+    not walk the montage at all: the previous regions tuple is the answer.
+
+    The nudge starts at 0.5 rather than 0.0 deliberately -- a camera edge
+    sitting exactly on a tile boundary is the one position where a half-pixel
+    move does change the snapped sets. That is a property of the rect
+    convention, not of this cache, and it has its own test below.
     """
 
     state = _field_state()
     planner = FramePlanner()
     span = 4 * FIELD_STRIDE
 
-    first = _field_plan(planner, state, ((0.0, span), (0.0, span)), viewport="a")
-    nudged = _field_plan(planner, state, ((0.5, span + 0.5), (0.5, span + 0.5)), viewport="b")
+    first = _field_plan(planner, state, ((0.5, span + 0.5), (0.5, span + 0.5)), viewport="a")
+    nudged = _field_plan(planner, state, ((1.0, span + 1.0), (1.0, span + 1.0)), viewport="b")
 
     assert first.active_region_ids == nudged.active_region_ids
+    assert first.near_region_ids == nudged.near_region_ids
     assert first.regions is nudged.regions
     assert first.scene_region_signature is nudged.scene_region_signature
     assert planner.montage_region_set_hits == 1
     assert planner.montage_region_set_misses == 1
+
+
+def test_a_camera_edge_on_a_tile_boundary_widens_the_halo_by_a_whole_ring():
+    """Pins an open defect in the rect convention, so it cannot go quiet.
+
+    ``montage_rect_for_viewport`` snaps the camera rect outward to whole-tile
+    bounds. An edge sitting exactly on a boundary snaps to that boundary; half
+    a pixel past it snaps to the next one. On the field montage that is a rect
+    of 84 against 101 -- a full extra stride on each side -- for a camera move
+    of half a pixel, which widens the retention halo from 49 tiles to 64 and
+    misses every cache keyed on the tile sets.
+
+    A drag passes through such a position on every tile it crosses, so this is
+    not a corner case. It is asserted rather than fixed because the repair is
+    a rect-convention change shared with ``FrameSession.visible_tiles``, which
+    is a separate adjudication (see ``docs/redesign/retention-halo-2026-07-30.md``
+    §4). When that lands, this test is the one that should start failing.
+    """
+
+    state = _field_state()
+    span = 4 * FIELD_STRIDE
+
+    on_boundary = _field_plan(FramePlanner(), state, ((0.0, span), (0.0, span)))
+    just_past = _field_plan(FramePlanner(), state, ((0.5, span + 0.5), (0.5, span + 0.5)))
+
+    assert on_boundary.active_region_ids == just_past.active_region_ids
+    assert len(on_boundary.near_region_ids) < len(just_past.near_region_ids)
 
 
 def test_pan_rebuilds_only_the_regions_whose_flags_changed():
