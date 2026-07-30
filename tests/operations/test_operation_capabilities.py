@@ -40,6 +40,7 @@ from arrayscope.operations.pipeline import (
     Scale,
     Smooth,
     SoftThreshold,
+    SplitAxis,
     SplitComplexAxis,
     Squeeze,
     StandardDeviation,
@@ -95,6 +96,9 @@ def test_every_registered_operation_declares_dtype_and_capabilities():
         "fftshift": FFTShift(axis=1),
         "combine_real_imag": CombineRealImagAxis(axis=2),
         "split_complex": SplitComplexAxis(axis=2),
+        # Rank-increasing: axis 2 has size 6 in the shared shape, so factor 3
+        # divides it and the default shape needs no override below.
+        "split_axis": SplitAxis(axis=2, factor=3),
     }
 
     for entry in operation_entries():

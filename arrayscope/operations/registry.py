@@ -51,6 +51,7 @@ from arrayscope.operations.pipeline import (
     Scale,
     Smooth,
     SoftThreshold,
+    SplitAxis,
     SplitComplexAxis,
     Squeeze,
     StandardDeviation,
@@ -874,6 +875,34 @@ OPERATION_REGISTRY = {
         group="Complex",
         description="Split a size-1 complex axis into a size-2 real/imag axis.",
         icon="call_split",
+    ),
+    # The toolbox's only rank-INCREASING built-in: applying it from the UI
+    # routes the result to a compare-linked sibling window (bundle R6), because
+    # a live window's per-dimension widgets are fixed at construction.
+    "split_axis": OperationEntry(
+        id="split_axis",
+        label="Split axis into two...",
+        operation_type=SplitAxis,
+        parameters=(
+            OperationParameter(
+                "factor",
+                "Factor",
+                default=2,
+                minimum=1,
+                step=1,
+                description=(
+                    "Length of the NEW inner axis. The selected axis must divide by it; "
+                    "for an interleaved acquisition this is the number of interleaves."
+                ),
+            ),
+        ),
+        changes_shape=True,
+        group="Reshape",
+        description=(
+            "Split one axis into an outer axis of blocks and a new inner axis of "
+            "`factor` interleaved samples (adds a dimension)."
+        ),
+        icon="unfold_more",
     ),
 }
 

@@ -60,6 +60,13 @@ _EXPECTATIONS: dict[str, dict] = {
         "shape": (6, 1, 10),
         "axis": 1,
     },
+    # split_axis: the one rank-INCREASING built-in. Its axis must divide by the
+    # factor, so the shape/axis pair is pinned rather than left to the default
+    # (which only happens to satisfy it).
+    "split_axis": {
+        "shape": (6, 8, 10),
+        "axis": 1,
+    },
 }
 
 

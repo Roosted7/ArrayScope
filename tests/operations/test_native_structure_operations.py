@@ -17,10 +17,16 @@ from arrayscope.operations.pipeline import (
     Resample,
     Roll,
     Smooth,
+    SplitAxis,
     Squeeze,
     Transpose,
 )
-from arrayscope.operations.regions import region_from_index_spec
+from arrayscope.operations.regions import (
+    AxisRegionKind,
+    apply_region,
+    axis_region_kind,
+    region_from_index_spec,
+)
 
 
 @pytest.fixture
@@ -238,6 +244,108 @@ def test_axis_metadata_tracks_pad_resample_difference_transpose_and_squeeze():
     assert tuple(axis.size for axis in document.current_axes) == document.shape
     assert document.current_axes[0].spacing == pytest.approx(7.5)
     assert document.current_axes[1].origin == pytest.approx(7.0)
+
+
+def test_split_axis_is_a_c_order_reshape_that_adds_one_axis(complex_data):
+    operation = SplitAxis(axis=1, factor=3)
+
+    result = operation.apply(complex_data)
+
+    assert result.shape == operation.output_shape(complex_data.shape) == (4, 2, 3, 5)
+    np.testing.assert_array_equal(result, complex_data.reshape(4, 2, 3, 5))
+    assert operation.output_dtype(complex_data.dtype) == complex_data.dtype
+    # Both new axes derive from the input axis; neither is "created", so the
+    # planner can translate every capability axis across the rank change.
+    assert operation.output_axis_sources(complex_data.shape) == (0, 1, 1, 2)
+
+
+def test_split_axis_refuses_a_factor_that_does_not_divide_the_axis(complex_data):
+    with pytest.raises(ValueError, match="not divisible"):
+        SplitAxis(axis=1, factor=4).output_shape(complex_data.shape)
+    with pytest.raises(ValueError, match="at least 1"):
+        SplitAxis(axis=1, factor=0).output_shape(complex_data.shape)
+
+
+def test_split_axis_ships_exact_region_algebra_not_a_whole_axis_expansion():
+    """The split maps regions exactly, so it never asks for the axis in full.
+
+    The two requests the interactive engine actually makes collapse to a
+    stride and a run -- that is the reason this is expressible at all, and the
+    reason ``expands_request_axes`` stays empty.
+    """
+
+    operation = SplitAxis(axis=1, factor=4)
+    input_shape = (3, 8, 5)
+    output_shape = operation.output_shape(input_shape)
+    assert output_shape == (3, 2, 4, 5)
+
+    capabilities = operation.capabilities(input_shape, np.float32)
+    assert capabilities.kind == OperationKind.RESHAPE
+    assert capabilities.blocking_axes == (1,)
+    assert capabilities.expands_request_axes == ()
+    assert 1 not in capabilities.chunkable_axes
+
+    # Scrubbing the NEW step axis: every 4th input sample, a plain stride.
+    step_scrub = region_from_index_spec(output_shape, (slice(None), slice(None), 2, slice(None)))
+    stride = operation.required_input_region(input_shape, step_scrub).axes[1]
+    assert axis_region_kind(stride.kind) == AxisRegionKind.SLICE
+    assert stride.value == (2, 10, 4)
+
+    # Scrubbing the block axis: one contiguous run of `factor` samples.
+    block_scrub = region_from_index_spec(output_shape, (slice(None), 1, slice(None), slice(None)))
+    run = operation.required_input_region(input_shape, block_scrub).axes[1]
+    assert axis_region_kind(run.kind) == AxisRegionKind.SLICE
+    assert run.value == (4, 8, 1)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        (slice(None), slice(None), 2, slice(None)),
+        (slice(None), slice(None), 2, 3),
+        (1, slice(None), slice(None), slice(None)),
+        (slice(None), 1, slice(None), slice(None)),
+        (slice(None), 1, 2, slice(None)),
+        (slice(None), slice(0, 2), slice(1, 3), slice(None)),
+        (slice(None), (0, 1), (3, 1), slice(None)),
+        (2, 0, 0, 4),
+    ],
+)
+def test_split_axis_region_paths_match_the_whole_array_result(spec):
+    data = np.arange(3 * 8 * 5, dtype=np.float32).reshape(3, 8, 5)
+    operation = SplitAxis(axis=1, factor=4)
+    output_shape = operation.output_shape(data.shape)
+
+    output_region = region_from_index_spec(output_shape, spec)
+    input_region = operation.required_input_region(data.shape, output_region)
+    region_result = operation.apply_to_region(
+        apply_region(data, input_region),
+        input_region=input_region,
+        output_region=output_region,
+    )
+
+    np.testing.assert_array_equal(
+        np.asarray(region_result), apply_region(operation.apply(data), output_region)
+    )
+
+
+def test_split_axis_states_its_own_axis_metadata_without_duplicate_names():
+    data = np.zeros((4, 6, 5), dtype=np.float32)
+    axes = (
+        AxisInfo("x", "X", 4, unit="mm", spacing=2.0, origin=10.0),
+        AxisInfo("t", "Time", 6, unit="s", spacing=0.5, origin=0.0),
+        AxisInfo("axis-2", "Dim 2", 5),
+    )
+    document = ArrayDocument(data, operations=(SplitAxis(axis=1, factor=3),), axes=axes)
+
+    assert document.shape == (4, 2, 3, 5)
+    assert tuple(axis.size for axis in document.current_axes) == document.shape
+    labels = tuple(axis.label for axis in document.current_axes)
+    assert labels == ("X", "Time", "Time step", "Dim 3")
+    assert len({axis.id for axis in document.current_axes}) == 4
+    # Consecutive blocks are `factor` input samples apart; a step is one.
+    assert document.current_axes[1].spacing == pytest.approx(1.5)
+    assert document.current_axes[2].spacing == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize(

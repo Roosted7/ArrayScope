@@ -8,7 +8,12 @@ from uuid import uuid4
 
 import numpy as np
 
-from arrayscope.core.axis_info import axes_for_shape, output_axes_for_operations
+from arrayscope.core.axis_info import (
+    AxisInfo,
+    axes_for_shape,
+    output_axes_for_operations,
+    renumber_default_axes,
+)
 from arrayscope.core.axis_utils import normalize_axis_selection, validate_axis
 from arrayscope.operations import _numba_native_ops, _numba_reductions, dim_ops
 from arrayscope.operations.cancellation import (
@@ -1602,6 +1607,138 @@ class SplitComplexAxis:
 
 
 @dataclass(frozen=True)
+class SplitAxis:
+    """Split one axis of length ``N`` into ``(N // factor, factor)``.
+
+    The named axis keeps its position and counts *blocks*; a NEW axis appears
+    immediately after it whose index selects the sample within a block. That is
+    a plain C-order reshape, which is exactly the layout an interleaved
+    acquisition already has: ``factor`` interleaves written round-robin along
+    one axis become a dedicated interleave axis you can put on a chip and scrub.
+
+    This is the toolbox's only rank-INCREASING built-in and therefore the
+    end-to-end proof of the rank-increase path (ADR 0060, bundle R6): applying
+    it from the UI is what opens the compare-linked sibling window.
+
+    **Region algebra (exact, not expanded).** Both output axes derive from the
+    one input axis, and the input index of block ``b``, step ``s`` is
+    ``b * factor + s``. Every block's indices occupy one half-open interval no
+    other block enters, so enumerating the requested cross product in
+    (block, step) order yields an already-ascending index list -- which is what
+    an ``AxisRegion`` can carry. The two cases the interactive engine actually
+    asks for collapse to a stride and a run: scrubbing the new step axis
+    (blocks ALL, step POINT) becomes ``s::factor``, and scrubbing the block axis
+    (block POINT, steps ALL) becomes ``b*factor : (b+1)*factor``. So this ships
+    an exact mapping rather than declaring ``expands_request_axes`` on the input
+    axis, and ``apply_to_region`` only has to reshape what it was handed.
+    """
+
+    axis: int
+    factor: int
+
+    def apply(self, data):
+        axis = _validate_axis(data.shape, self.axis)
+        blocks, factor = _split_axis_lengths(data.shape[axis], self.factor)
+        shape = tuple(int(size) for size in data.shape)
+        return np.reshape(data, (*shape[:axis], blocks, factor, *shape[axis + 1 :]))
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axis = _validate_axis(shape, self.axis)
+        blocks, factor = _split_axis_lengths(shape[axis], self.factor)
+        return (*shape[:axis], blocks, factor, *shape[axis + 1 :])
+
+    def output_dtype(self, input_dtype):
+        return _same_dtype(input_dtype)
+
+    def output_axes(self, axes):
+        """Axis metadata for the split, stated by the operation itself.
+
+        ``output_axes`` is de-facto mandatory for a rank change (without it
+        ``axes_for_shape`` raises "axis metadata length must match shape
+        length"), and the synthesized floor in :mod:`arrayscope.core.axis_info`
+        would only mint placeholders here. The block axis inherits the source
+        axis with its sample spacing multiplied by ``factor`` -- consecutive
+        blocks really are ``factor`` input samples apart -- and the step axis
+        keeps the original per-sample spacing.
+
+        The trailing axes are renumbered afterwards for the same reason
+        ``PluginOperation`` renumbers: ``Dim N`` encodes a *position*, so
+        carrying it across an insertion produces two axes claiming the same
+        name. A label anyone actually chose is never touched.
+        """
+
+        axes = tuple(axes)
+        axis = _validate_axis(tuple(item.size for item in axes), self.axis)
+        source = axes[axis]
+        blocks, factor = _split_axis_lengths(source.size, self.factor)
+        block_axis = replace(
+            source,
+            size=blocks,
+            spacing=None if source.spacing is None else source.spacing * factor,
+        )
+        step_axis = AxisInfo(
+            id=f"{source.id}-step",
+            label=f"{source.label} step",
+            size=factor,
+            unit=source.unit,
+            coordinate=source.coordinate,
+            spacing=source.spacing,
+        )
+        return renumber_default_axes((*axes[:axis], block_axis, step_axis, *axes[axis + 1 :]))
+
+    def output_axis_sources(self, input_shape):
+        axis = _validate_axis(input_shape, self.axis)
+        _split_axis_lengths(input_shape[axis], self.factor)
+        # Neither output axis is "created": both derive from the input axis.
+        return (*range(axis), axis, axis, *range(axis + 1, len(tuple(input_shape))))
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axis = _validate_axis(input_shape, self.axis)
+        _split_axis_lengths(input_shape[axis], self.factor)
+        # Input-axis space (see OperationCapabilities). The reshape moves
+        # samples along `axis`, so it may not be chunked there -- but it never
+        # needs the axis WHOLE, hence no expands_request_axes.
+        return _capabilities(
+            OperationKind.RESHAPE,
+            ndim=len(tuple(input_shape)),
+            blocking_axes=(axis,),
+            real_linear=True,
+        )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        axis = _validate_axis(input_shape, self.axis)
+        blocks, factor = _split_axis_lengths(input_shape[axis], self.factor)
+        axes = list(output_region.axes)
+        block_region = axes[axis]
+        step_region = axes[axis + 1]
+        del axes[axis + 1]
+        axes[axis] = _split_input_axis_region(block_region, step_region, blocks, factor)
+        return RegionSpec(tuple(axes))
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del evaluation_context
+        axis = _validate_axis(input_region.axes, self.axis)
+        block_region = output_region.axes[axis]
+        step_region = output_region.axes[axis + 1]
+        slab_axis = axis_in_region_result(input_region, axis)
+        shape = tuple(int(size) for size in np.shape(data))
+        step_count = _region_axis_count(step_region, self.factor)
+        block_count = shape[slab_axis] // step_count
+        reshaped = np.reshape(
+            data, (*shape[:slab_axis], block_count, step_count, *shape[slab_axis + 1 :])
+        )
+        # A POINT axis is absent from a region result, so drop the ones the
+        # request pinned -- innermost first, so the outer index stays valid.
+        if axis_region_kind(step_region.kind) == AxisRegionKind.POINT:
+            reshaped = np.take(reshaped, 0, axis=slab_axis + 1)
+        if axis_region_kind(block_region.kind) == AxisRegionKind.POINT:
+            reshaped = np.take(reshaped, 0, axis=slab_axis)
+        return reshaped
+
+
+@dataclass(frozen=True)
 class OperationStep:
     operation: ArrayOperation
     enabled: bool = True
@@ -1867,6 +2004,47 @@ def _axis_region_from_indices(indices) -> AxisRegion:
         stop = int(indices[-1] + step)
         return AxisRegion(AxisRegionKind.SLICE, (start, None if stop < 0 else stop, step))
     return AxisRegion(AxisRegionKind.INDICES, tuple(int(index) for index in indices))
+
+
+def _split_axis_lengths(size, factor) -> tuple[int, int]:
+    size = int(size)
+    factor = int(factor)
+    if factor < 1:
+        raise ValueError("split factor must be at least 1")
+    if size % factor:
+        raise ValueError(f"axis of length {size} is not divisible by split factor {factor}")
+    return size // factor, factor
+
+
+def _region_axis_count(axis_region: AxisRegion, size: int) -> int:
+    kind = axis_region_kind(axis_region.kind)
+    if kind == AxisRegionKind.POINT:
+        return 1
+    if kind == AxisRegionKind.ALL:
+        return int(size)
+    return int(np.size(_axis_region_indices(axis_region, int(size))))
+
+
+def _split_input_axis_region(
+    block_region: AxisRegion, step_region: AxisRegion, blocks: int, factor: int
+) -> AxisRegion:
+    """The input-axis region feeding a requested (block, step) output region.
+
+    Input index ``b * factor + s``. Iterating blocks outermost yields ascending
+    indices because block ``b`` owns exactly ``[b*factor, (b+1)*factor)``, so
+    the list needs no sort -- and ``_axis_region_from_indices`` collapses the
+    common strides and runs back to a ``SLICE``.
+    """
+
+    if (
+        axis_region_kind(block_region.kind) == AxisRegionKind.ALL
+        and axis_region_kind(step_region.kind) == AxisRegionKind.ALL
+    ):
+        return AxisRegion(AxisRegionKind.ALL)
+    block_indices = np.atleast_1d(_axis_region_indices(block_region, int(blocks)))
+    step_indices = np.atleast_1d(_axis_region_indices(step_region, int(factor)))
+    indices = (block_indices[:, None] * int(factor) + step_indices[None, :]).reshape(-1)
+    return _axis_region_from_indices(indices)
 
 
 def _crop_axis_region(axis_region: AxisRegion, start: int, stop: int) -> AxisRegion:
