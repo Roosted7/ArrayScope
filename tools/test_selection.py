@@ -135,20 +135,23 @@ def command_impact(args) -> int:
     print(f"map          {testmon_policy.map_path(REPO_ROOT)}  ({peek.mapped_tests} tests)")
     print()
     if peek.changed_files:
-        print(f"differs from the map ({len(peek.changed_files)}), whole-file:")
+        # Deliberately not called "changed" or "stale": this number has no
+        # consequence, and naming it like dirt is what makes people try to
+        # scrub it. It is computed here and nowhere else -- selection reads
+        # `unstable_test_names`, never this -- so a file can sit on the list
+        # forever with nothing wrong. It moves for a comment, an import order,
+        # or a function no test enters, because the hash is whole-file while
+        # selection is block-level.
+        #
+        # Clearing it would mean force-running every test that depends on these
+        # files, which for tests/conftest.py is the whole suite: a full
+        # re-record, bought for no behavioural change at all.
+        print(f"whole-file hashes not yet re-recorded ({len(peek.changed_files)}):")
         for name in sorted(peek.changed_files):
             print(f"    {name}")
-        if not peek.affected_tests:
-            # Two different granularities, and reading one as the other is why
-            # "8 files changed, 0 tests to run" looks broken. testmon
-            # fingerprints the lines a test *executed*; a whole-file hash also
-            # moves for a comment, an import order, or a function no test
-            # enters. Nothing is stuck: there is genuinely nothing to re-run.
-            print()
-            print(
-                "    ...but no test executed a block that changed, so there is nothing\n"
-                "    to run. File hashes are whole-file; selection is block-level."
-            )
+        print()
+        print("    Cosmetic. Selection is block-level and never reads this list; a")
+        print("    file stays here until some test that touches it happens to re-run.")
         print()
     if not peek.affected_tests:
         print("affected: nothing — the recorded tests all still hold for this tree.")
