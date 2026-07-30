@@ -204,6 +204,28 @@ Until one of those lands, warming the halo from prefetch makes panning worse.
   gap §1 of the eagerness map named, and it belongs to the PyQtGraph victim
   selection and WGPU payload retention work.
 
+### A latent flake this work walked into
+
+`tests/ui/test_roi_inspection_interactions.py::test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates_dock`
+fails intermittently, serially, on **both** main and this branch. Measured on
+the same three-test invocation, alone, one process at a time: **main 2 of 4
+failed, this branch 2 of 6.** Inherited, not introduced.
+
+It is the PyQtGraph twin of the strict-xfailed WGPU hidden-ROI defect in
+[queue.md](../queue.md), which the queue records as passing. The shape fits the
+same trigger: the test waits on `_compute_roi_inspection_snapshot` having been
+called once and then immediately asserts `_roi_info_panel is not None`, but the
+panel is populated from `setRoiInfoRows` off `_set_committed_display_frame`
+(`display_presenter.py:527`), which is a different event-loop turn. Under load
+the assert can land first.
+
+Two other tests in the same `--since` selection —
+`test_wgpu_expanded_montage_never_hides_retained_sixty` and
+`test_single_slice_to_full_montage_presents_around_retained_exact_tile[scalar]`
+— reported only under `-n auto` and pass serially on both branches: the
+documented `tests/gpu` + `tests/ui` contention, reproduced here by running two
+pytest processes at once, which is worth not doing.
+
 ### One correction to the eagerness map
 
 §5 says the residency warm "warms one tile then immediately hides it
