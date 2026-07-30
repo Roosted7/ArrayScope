@@ -29,7 +29,16 @@ def inspector():
     return runpy.run_path(str(INSPECTOR), run_name="arrayscope_demo_inspector")
 
 
-def _facts(inspector, scenario, fmt, *, width, height=600, duration=10.0):
+def _facts(
+    inspector,
+    scenario,
+    fmt,
+    *,
+    width,
+    height=600,
+    duration=10.0,
+    size_bytes=1000,
+):
     return inspector["MediaFacts"](
         path=f"/tmp/{scenario}.{fmt}",
         scenario=scenario,
@@ -40,7 +49,7 @@ def _facts(inspector, scenario, fmt, *, width, height=600, duration=10.0):
         frames=300,
         stream_index=0,
         duration_s=duration,
-        size_bytes=1000,
+        size_bytes=size_bytes,
         inline_scale=inspector["README_INLINE_WIDTH"] / width,
     )
 
@@ -288,6 +297,24 @@ def test_every_inline_format_must_fill_the_readme_slot(inspector):
     assert "AVIF is enlarged 1.16x at README width" in messages
     assert "GIF is enlarged 1.16x at README width" in messages
     # The linked MP4 is never placed in the 880 px slot.
+    assert not [message for message in messages if message.startswith("MP4")]
+
+
+def test_every_inline_format_must_stay_under_the_size_budget(inspector):
+    grouped = {
+        "heavy": [
+            _facts(inspector, "heavy", "mp4", width=1100, size_bytes=9_000_000),
+            _facts(inspector, "heavy", "avif", width=880, size_bytes=3_500_001),
+            _facts(inspector, "heavy", "gif", width=880, size_bytes=3_500_000),
+        ]
+    }
+
+    messages = [
+        finding.message for finding in inspector["parity_findings"](grouped, ("mp4", "avif", "gif"))
+    ]
+
+    assert "AVIF is 3.50 MB; inline budget is 3.50 MB" in messages
+    assert not [message for message in messages if message.startswith("GIF")]
     assert not [message for message in messages if message.startswith("MP4")]
 
 

@@ -37,6 +37,7 @@ DEFAULT_MEDIA_ROOT = REPO_ROOT / "docs" / "media"
 DEFAULT_OUT = REPO_ROOT / "tests" / "artifacts" / "demo-inspection"
 DEFAULT_FORMATS = ("mp4", "avif", "gif")
 README_INLINE_WIDTH = 880
+MAX_INLINE_BYTES = 3_500_000
 # MP4 is linked, not embedded; every other format is rendered in the README
 # slot and must therefore be at least as wide as it.
 LINKED_FORMATS = frozenset({"mp4"})
@@ -336,7 +337,10 @@ def render_event_sheet(
 
 
 def parity_findings(
-    grouped: dict[str, list[MediaFacts]], expected_formats: tuple[str, ...]
+    grouped: dict[str, list[MediaFacts]],
+    expected_formats: tuple[str, ...],
+    *,
+    max_inline_bytes: int = MAX_INLINE_BYTES,
 ) -> list[Finding]:
     findings: list[Finding] = []
     for scenario, items in sorted(grouped.items()):
@@ -347,15 +351,26 @@ def parity_findings(
                 Finding("error", scenario, f"missing expected formats: {', '.join(missing)}")
             )
         for item in sorted(items, key=lambda value: value.format):
-            if item.format in LINKED_FORMATS or item.width >= README_INLINE_WIDTH:
+            if item.format in LINKED_FORMATS:
                 continue
-            findings.append(
-                Finding(
-                    "error",
-                    scenario,
-                    f"{item.format.upper()} is enlarged {item.inline_scale:.2f}x at README width",
+            if item.width < README_INLINE_WIDTH:
+                findings.append(
+                    Finding(
+                        "error",
+                        scenario,
+                        f"{item.format.upper()} is enlarged {item.inline_scale:.2f}x "
+                        "at README width",
+                    )
                 )
-            )
+            if item.size_bytes > max_inline_bytes:
+                findings.append(
+                    Finding(
+                        "error",
+                        scenario,
+                        f"{item.format.upper()} is {item.size_bytes / 1e6:.2f} MB; "
+                        f"inline budget is {max_inline_bytes / 1e6:.2f} MB",
+                    )
+                )
         if len(items) < 2:
             continue
         aspects = [item.width / item.height for item in items]
@@ -565,6 +580,7 @@ def inspect(
     columns: int,
     thumb_width: int,
     require_timelines: bool = False,
+    max_inline_bytes: int = MAX_INLINE_BYTES,
 ) -> tuple[dict, list[Finding]]:
     media = sorted(
         path
@@ -579,7 +595,11 @@ def inspect(
     grouped: dict[str, list[MediaFacts]] = {}
     for item in facts:
         grouped.setdefault(item.scenario, []).append(item)
-    findings = parity_findings(grouped, expected_formats)
+    findings = parity_findings(
+        grouped,
+        expected_formats,
+        max_inline_bytes=max_inline_bytes,
+    )
     storyboards: dict[str, str] = {}
     timelines: dict[str, dict] = {}
     event_sheets: dict[str, str] = {}
@@ -628,6 +648,7 @@ def inspect(
     report = {
         "media_root": str(media_root.resolve()),
         "expected_formats": list(expected_formats),
+        "max_inline_bytes": max_inline_bytes,
         "media": [asdict(item) for item in facts],
         "findings": [asdict(item) for item in findings],
         "timelines": timelines,
@@ -658,6 +679,12 @@ def main() -> int:
     parser.add_argument("--columns", type=int, default=4)
     parser.add_argument("--thumb-width", type=int, default=440)
     parser.add_argument(
+        "--max-inline-bytes",
+        type=int,
+        default=MAX_INLINE_BYTES,
+        help="maximum encoded size for each README-inline format",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help=(
@@ -675,9 +702,10 @@ def main() -> int:
     if not expected_formats:
         print("--expected-formats must name at least one format", file=sys.stderr)
         return 2
-    if args.samples < 1 or args.columns < 1 or args.thumb_width < 80:
+    if args.samples < 1 or args.columns < 1 or args.thumb_width < 80 or args.max_inline_bytes < 1:
         print(
-            "samples/columns must be positive and thumb width must be at least 80", file=sys.stderr
+            "samples/columns/inline bytes must be positive and thumb width must be at least 80",
+            file=sys.stderr,
         )
         return 2
     try:
@@ -690,6 +718,7 @@ def main() -> int:
             columns=args.columns,
             thumb_width=args.thumb_width,
             require_timelines=args.strict,
+            max_inline_bytes=args.max_inline_bytes,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"demo inspection failed: {exc}", file=sys.stderr)

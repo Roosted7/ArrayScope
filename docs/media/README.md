@@ -8,6 +8,10 @@ The `workflow` scenario deliberately stops on the highlighted dimension-export
 entry. It proves discoverability without opening a modal save dialog or writing
 files during documentation generation.
 
+Every README-inline AVIF and GIF must be at least 880 px wide and no larger
+than 3.5 MB. `tools/demo_inspector.py --strict` enforces both limits; linked
+MP4 files retain source resolution and are exempt from the inline byte budget.
+
 ## How it works
 
 [`tools/demo_recorder.py`](../../tools/demo_recorder.py) drives the real
