@@ -461,6 +461,25 @@ def command_accept_reds(args) -> int:
     return 0
 
 
+def command_adopt_map(args) -> int:
+    """Pull in the map recorded by whichever checkout did the work.
+
+    Runs automatically from `.githooks/post-merge`; this is the hand form, for
+    a checkout whose hooks are not enabled or a merge that already happened.
+    """
+
+    donor = testmon_policy.adopt_map_from_identical_worktree(REPO_ROOT)
+    if donor is None:
+        print(
+            "Nothing to adopt: no sibling worktree sits on this commit with a "
+            "newer map.\nThat is the normal answer unless you just merged one."
+        )
+        return 0
+    print(f"Adopted the map recorded at this commit by {donor}.")
+    print("Its fingerprints are identical, so nothing needs re-running to trust it.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
@@ -506,6 +525,12 @@ def main(argv: list[str] | None = None) -> int:
         help="call the current coverage this checkout's baseline, not the inherited one",
     )
     accept_coverage.set_defaults(func=command_accept_coverage)
+
+    adopt = subparsers.add_parser(
+        "adopt-map",
+        help="take the map of a sibling worktree sitting on this exact commit",
+    )
+    adopt.set_defaults(func=command_adopt_map)
 
     accept = subparsers.add_parser(
         "accept-reds",

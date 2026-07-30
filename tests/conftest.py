@@ -570,6 +570,10 @@ def pytest_report_header(config):
         lines.append(f"test selection: off ({decision.reason}) — running everything")
         return lines
 
+    since = config.getoption("since", None)
+    if since is not None:
+        lines.append(testmon_policy.describe_baseline(config.rootdir, since or None))
+
     donor = getattr(config, "arrayscope_selection_seed", None)
     if donor:
         lines.append(f"test selection: seeded this checkout's map from {donor}")

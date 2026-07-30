@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1165,3 +1166,97 @@ def test_a_bypass_is_priced_from_the_map_before_anything_runs():
     assert unselected_run_seconds(recorded, ("tests/core",), under) == 1.0
     # An empty map cannot price anything, and must not invent a refusal.
     assert unselected_run_seconds({}, (), under) == 0.0
+
+
+def _fake_worktrees(monkeypatch, entries):
+    monkeypatch.setattr(testmon_policy, "_worktree_heads", lambda rootdir: entries)
+
+
+def test_a_merge_adopts_the_map_of_the_worktree_that_did_the_work(tmp_path, monkeypatch):
+    """The map has to follow the work, and the work happens in worktrees.
+
+    Almost nothing is done in the main checkout, so its map predates every
+    merge: it reports reds inherited from whatever seeded it and re-records
+    what was traced minutes earlier elsewhere. Landing a branch used to cost a
+    --rerun-reds and a --since there purely to quiet a map nobody updated.
+
+    After a fast-forward both HEADs are the same commit, which is stronger than
+    the "close enough donor" seeding settles for -- identical commits mean
+    identical fingerprints, so the adopted map needs no invalidation pass.
+    """
+
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    root, branch = tmp_path / "main", tmp_path / "wt"
+    root.mkdir()
+    branch.mkdir()
+    (root / "themap").write_bytes(b"stale")
+    (branch / "themap").write_bytes(b"recorded-the-merge")
+    os.utime(root / "themap", (1, 1))
+    os.utime(branch / "themap", (2, 2))
+
+    _fake_worktrees(monkeypatch, [(root, "abc123"), (branch, "abc123")])
+
+    assert testmon_policy.adopt_map_from_identical_worktree(root) == str(branch / "themap")
+    assert (root / "themap").read_bytes() == b"recorded-the-merge"
+
+
+def test_adoption_refuses_a_different_commit_or_an_older_map(tmp_path, monkeypatch):
+    """Both halves of the safety argument, since only equality makes it free."""
+
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    root, branch = tmp_path / "main", tmp_path / "wt"
+    root.mkdir()
+    branch.mkdir()
+    (root / "themap").write_bytes(b"ours")
+    (branch / "themap").write_bytes(b"theirs")
+    os.utime(root / "themap", (1, 1))
+    os.utime(branch / "themap", (2, 2))
+
+    # A worktree on another commit is not this tree, so its map is not free.
+    _fake_worktrees(monkeypatch, [(root, "abc123"), (branch, "def456")])
+    assert testmon_policy.adopt_map_from_identical_worktree(root) is None
+    assert (root / "themap").read_bytes() == b"ours"
+
+    # Same commit, but ours ran later: adopting would throw that run away.
+    os.utime(root / "themap", (3, 3))
+    _fake_worktrees(monkeypatch, [(root, "abc123"), (branch, "abc123")])
+    assert testmon_policy.adopt_map_from_identical_worktree(root) is None
+    assert (root / "themap").read_bytes() == b"ours"
+
+
+def test_a_bare_since_says_what_it_decided_to_compare_against(monkeypatch):
+    """Which of the three baselines it found changes the answer completely.
+
+    A bare `--since` tries ARRAYSCOPE_BASELINE_REF, then the upstream, then
+    `main`. Standing on `main` here it resolves to `origin/main`, which nothing
+    has been pushed to for 261 commits, so the branch-sized question quietly
+    becomes a 2000-test one. The ref name alone does not show that -- the
+    distance does, so it is counted and printed before the run.
+    """
+
+    monkeypatch.setattr(
+        testmon_policy,
+        "resolve_baseline",
+        lambda rootdir, explicit: ("@{upstream}", "41a21f64" * 5),
+    )
+    counts = {"41a21f64" * 5 + "..HEAD": "261", "HEAD..@{upstream}": "0"}
+    monkeypatch.setattr(
+        testmon_policy,
+        "_git",
+        lambda rootdir, *args: counts.get(args[-1], ""),
+    )
+
+    line = testmon_policy.describe_baseline("/repo", None)
+
+    assert "--since @{upstream} (resolved)" in line
+    assert "branch point 41a21f64" in line
+    assert "261 commit(s) of yours since it" in line
+
+
+def test_an_explicitly_named_baseline_is_reported_as_named(monkeypatch):
+    monkeypatch.setattr(
+        testmon_policy, "resolve_baseline", lambda rootdir, explicit: (explicit, "abcdef12" * 5)
+    )
+    monkeypatch.setattr(testmon_policy, "_git", lambda rootdir, *args: "3")
+
+    assert "--since origin/main (named)" in testmon_policy.describe_baseline("/repo", "origin/main")

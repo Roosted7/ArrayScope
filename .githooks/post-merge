@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# Adopt the selection map of the worktree whose work was just merged.
+#
+# Almost all work here happens in a throwaway worktree, which means the map that
+# recorded it is the branch's, and it is deleted with the worktree. The main
+# checkout keeps a map from before the merge: it reports reds inherited from
+# whatever seeded it, and re-records work that was traced minutes earlier
+# somewhere else. Landing a branch used to cost a `--rerun-reds` and a `--since`
+# in the main checkout purely to quiet a map nobody had updated.
+#
+# After a fast-forward the two HEADs are equal, so the branch's map is not
+# merely a good donor: identical commits mean identical fingerprints, and the
+# adopted map needs no invalidation pass. Anything that does differ is still
+# content-addressed and re-runs, so the failure mode stays "runs more tests than
+# necessary", never fewer.
+#
+# Silent when there is nothing to adopt, which is the common case for a merge
+# that did not come from a sibling worktree.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+
+if ! command -v python >/dev/null 2>&1; then
+	# Unlike the lint gate, this one is an optimisation: a missing interpreter
+	# costs a re-record, never a wrong answer, so it must not fail the merge.
+	exit 0
+fi
+
+python - "$root" <<'PY' || true
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+try:
+    from tests import testmon_policy
+except Exception:
+    raise SystemExit(0)
+
+donor = testmon_policy.adopt_map_from_identical_worktree(root)
+if donor:
+    print(f"test selection: adopted the map recorded at this commit by {donor}")
+PY

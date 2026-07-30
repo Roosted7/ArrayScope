@@ -19,6 +19,12 @@ runs*, never *which ring a claim needs*.
    Selection does not re-run those, so even a node id reports it deselected.
    `--since` implies it: a merge gate that declined to run a red is not a gate,
    and the moment the branch lands an inherited red is main's red.
+
+   A bare `--since` picks its baseline from `ARRAYSCOPE_BASELINE_REF`, then the
+   upstream, then `main`, and **prints which one it found and how many commits
+   back it is**. That matters on `main` itself, where the upstream resolves and
+   may be far behind if nothing has been pushed — the run is then honest but
+   enormous, and the printed distance is what says so.
 4. **`--no-testmon` runs only a short list of node ids.** Everything else —
    a bare sweep, a directory, a file, or node ids costing over 5 s — is
    **refused** (exit 4), and the answer is `--testmon-noselect`, which runs
@@ -78,7 +84,8 @@ passes says the affected tests pass — a strictly smaller claim.
 | Goal | Command |
 |---|---|
 | Inner loop | `pytest` |
-| Everything this whole branch changed — pre-merge, after a rebase, or in a borrowed checkout | `pytest --since` |
+| Everything this whole branch changed — pre-merge, after a rebase, or in a borrowed checkout | `pytest --since` (it prints which baseline it picked, and how far back) |
+| Landing a worktree branch: give the main checkout the map that recorded it | automatic on merge (`.githooks/post-merge`), or `python tools/test_selection.py adopt-map` |
 | Blast radius without running anything | `python tools/test_selection.py` |
 | What the map does *not* cover, which reds are yours | `python tools/test_selection.py status` |
 | The current reds are not yours (stale worktree, stacked branch) | `python tools/test_selection.py accept-reds` |

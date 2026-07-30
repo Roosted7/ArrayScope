@@ -453,9 +453,19 @@ def seed_map(rootdir: os.PathLike[str] | str, *, seeding: bool = True) -> str | 
     donor = _best_donor_map(Path(rootdir).resolve(), destination.name)
     if donor is None:
         return None
-    # Copy through a temporary name in the destination directory: a half-written
-    # SQLite file read by a concurrently starting run would look like a corrupt
-    # map rather than a missing one.
+    if not _copy_map(donor, destination):
+        return None
+    return str(donor)
+
+
+def _copy_map(donor: Path, destination: Path) -> bool:
+    """Atomically put ``donor`` at ``destination``, sidecar included.
+
+    Through a temporary name in the destination directory: a half-written
+    SQLite file read by a concurrently starting run would look like a corrupt
+    map rather than a missing one.
+    """
+
     import shutil
     from tempfile import mkstemp
 
@@ -466,9 +476,85 @@ def seed_map(rootdir: os.PathLike[str] | str, *, seeding: bool = True) -> str | 
         os.replace(staged, destination)
     except OSError:
         Path(staged).unlink(missing_ok=True)
-        return None
+        return False
     _seed_coverage_sidecar(donor, destination)
-    return str(donor)
+    return True
+
+
+def _worktree_heads(rootdir: Path) -> list[tuple[Path, str]]:
+    """``(checkout, HEAD)`` for every worktree of this repository."""
+
+    import subprocess
+
+    try:
+        listing = subprocess.run(
+            ("git", "worktree", "list", "--porcelain"),
+            cwd=str(rootdir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if listing.returncode != 0:
+        return []
+    found: list[tuple[Path, str]] = []
+    checkout: Path | None = None
+    for line in listing.stdout.splitlines():
+        if line.startswith("worktree "):
+            checkout = Path(line[len("worktree ") :]).resolve()
+        elif line.startswith("HEAD ") and checkout is not None:
+            found.append((checkout, line[len("HEAD ") :].strip()))
+            checkout = None
+    return found
+
+
+def adopt_map_from_identical_worktree(rootdir: os.PathLike[str] | str) -> str | None:
+    """Take the map of a sibling worktree checked out at this exact commit.
+
+    Almost all work here happens in a throwaway worktree, so the map that
+    recorded it is the *branch's*, and it is deleted with the worktree. The main
+    checkout meanwhile keeps a map from before the merge: it reports reds
+    inherited from whatever seeded it, and re-records work that was already
+    traced minutes earlier somewhere else. Landing a branch therefore used to
+    cost a `--rerun-reds` and a `--since` in the main checkout purely to quiet a
+    map nobody had updated.
+
+    After a fast-forward the two HEADs are equal, which is stronger than the
+    "close enough donor" :func:`seed_map` settles for: identical commits mean
+    identical fingerprints, so the adopted map needs no invalidation pass at
+    all. Anything that does differ is still content-addressed and re-runs, so
+    the failure mode stays "runs more tests than necessary".
+
+    Newest wins, because a merge is not the only way two checkouts sit on one
+    commit and the map that ran most recently is the one that knows most.
+    """
+
+    rootdir = Path(rootdir).resolve()
+    destination = map_path(rootdir)
+    heads = dict(_worktree_heads(rootdir))
+    head = heads.get(rootdir)
+    if head is None:
+        return None
+
+    best: tuple[float, Path] | None = None
+    for checkout, other in heads.items():
+        if checkout == rootdir or other != head:
+            continue
+        candidate = checkout / destination.name
+        if not candidate.is_file() or candidate.stat().st_size == 0:
+            continue
+        stamp = candidate.stat().st_mtime
+        if best is None or stamp > best[0]:
+            best = (stamp, candidate)
+    if best is None:
+        return None
+    if destination.is_file() and destination.stat().st_mtime >= best[0]:
+        return None  # ours already ran later; adopting would lose work
+    if not _copy_map(best[1], destination):
+        return None
+    return str(best[1])
 
 
 def _seed_coverage_sidecar(donor: Path, destination: Path) -> None:
@@ -729,6 +815,33 @@ def resolve_baseline(rootdir, explicit: str | None) -> tuple[str, str]:
         f"--since: no baseline could be resolved (tried {tried}). Name one "
         "explicitly, e.g. `--since origin/main`, or set ARRAYSCOPE_BASELINE_REF."
     )
+
+
+def describe_baseline(rootdir, explicit: str | None) -> str:
+    """One line naming what a bare ``--since`` decided to compare against.
+
+    A bare ``--since`` picks from three sources in order --
+    ``ARRAYSCOPE_BASELINE_REF``, the upstream, then ``main`` -- and which one it
+    finds changes the answer completely. Standing on ``main`` in this
+    repository it resolves to ``origin/main``, which nothing has been pushed to
+    for 261 commits, so the "branch-sized" question quietly becomes a
+    2000-test one. The ref alone does not show that; the distance does, which
+    is why it is counted here and printed before the run rather than after.
+    """
+
+    try:
+        ref, merge_base = resolve_baseline(rootdir, explicit)
+    except UsageError as error:
+        return f"test selection: --since could not resolve a baseline ({error})"
+    chosen = "named" if explicit else "resolved"
+    behind = (_git(rootdir, "rev-list", "--count", f"{merge_base}..HEAD") or "").strip()
+    ahead = (_git(rootdir, "rev-list", "--count", f"HEAD..{ref}") or "").strip()
+    parts = [f"test selection: --since {ref} ({chosen}), branch point {merge_base[:8]}"]
+    if behind:
+        parts.append(f"{behind} commit(s) of yours since it")
+    if ahead and ahead != "0":
+        parts.append(f"{ref} is {ahead} ahead of you")
+    return " — ".join(parts)
 
 
 def baseline_method_checksums(rootdir, merge_base: str) -> dict[str, list | None] | None:
