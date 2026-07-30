@@ -1637,6 +1637,17 @@ class FrameSession:
         precisely when the viewport crosses a tile boundary or a zoom
         threshold, which is the only time planning has anything to do. Returns
         ``None`` when there is no camera yet (nothing to compare).
+
+        The set is derived through ``viewport_tiles``, the same way
+        ``retarget_viewport`` derives ``visible_tiles``, and that is
+        load-bearing rather than tidiness. This key guards a skip of the very
+        pass that computes that set, so it has to change whenever that set
+        would: derived any other way it can only be *coarser*, and a coarser
+        key is a key that compares equal across two cameras the session would
+        have given different visible tiles -- i.e. a skipped retarget that had
+        real work, with no stall to report it. This key read the raw camera
+        rect while the session read the rect snapped outward to whole-tile
+        bounds, which on the 272-tile field montage is 6 tiles against 15.
         """
 
         if view_range is None or plan is None:
@@ -1648,7 +1659,12 @@ class FrameSession:
             return None
         active = frozenset(
             int(tile.montage_index)
-            for tile in plan.tiles_intersecting(view_range, margin_tiles=VISIBLE_MARGIN_TILES)
+            for tile in viewport_tiles(
+                plan,
+                view_range=view_range,
+                viewport_shape=viewport_shape,
+                margin_tiles=VISIBLE_MARGIN_TILES,
+            )
         )
         # Round the span generously: pan drift is ~1e-12, a real zoom step is
         # >0.1%, and adjacent LOD levels are 2x apart.

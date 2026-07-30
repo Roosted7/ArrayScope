@@ -6160,6 +6160,60 @@ def test_commit_policy_and_convergence_latch_are_different_questions():
     assert viewport_convergence_latch_backend(window_for(transient), SimpleNamespace()) is False
 
 
+def test_convergence_latch_key_names_the_set_the_session_would_plan():
+    """The key that skips a retarget has to see what the retarget would see.
+
+    ``viewport_invariant_key`` guards a skip of the very pass that derives
+    ``visible_tiles``, so any camera pair the key calls equal must be a pair
+    the session would give the same visible set.  Derived from the raw camera
+    rect it is strictly *coarser* than the session's snapped derivation, and a
+    coarser key compares equal across cameras whose visible sets differ --
+    which is a skipped retarget with real work behind it and no stall to
+    report it.  Nothing observed this while the latch was WGPU-only.
+
+    The two assertions before the equality are the regime: on a camera where
+    both conventions happen to agree, the equality holds for the unfixed code
+    too and the test proves nothing.
+    """
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import (
+        VISIBLE_MARGIN_TILES,
+        make_montage_plan,
+        viewport_tiles,
+    )
+    from arrayscope.window.frame_session import FrameSession
+
+    state = ViewState.from_shape((64, 64, 272)).with_montage_axis(
+        2, columns=17, indices=tuple(range(272)), text="0:272"
+    )
+    plan = make_montage_plan(
+        state, axis=2, indices=tuple(range(272)), tile_shape=(64, 64), columns=17
+    )
+    tile = plan.tiles[136]
+    cx = float(tile.x0) + float(tile.width) * 0.5
+    cy = float(tile.y0) + float(tile.height) * 0.5
+    view_range = ((cx - 64.0, cx + 64.0), (cy - 64.0, cy + 64.0))
+    viewport_shape = (800, 800)
+
+    raw = {int(t.montage_index) for t in plan.tiles_intersecting(view_range, margin_tiles=0)}
+    planned = {
+        int(t.montage_index)
+        for t in viewport_tiles(
+            plan,
+            view_range=view_range,
+            viewport_shape=viewport_shape,
+            margin_tiles=VISIBLE_MARGIN_TILES,
+        )
+    }
+    assert raw != planned, "camera chosen so the two rect conventions disagree"
+    assert 0 < len(planned) < len(plan.tiles), "a whole-montage set would hold for any convention"
+
+    key = FrameSession.viewport_invariant_key(SimpleNamespace(), plan, view_range, viewport_shape)
+    assert key is not None
+    assert set(key[1]) == planned
+
+
 def test_retained_payload_store_is_keyed_by_semantic_source_identity():
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.shader_mapping import TexturePlaneKind
