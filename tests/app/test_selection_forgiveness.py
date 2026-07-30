@@ -571,6 +571,115 @@ def test_a_decomposition_of_every_source_file_stays_cheap_and_total():
     assert not failures
 
 
+# --------------------------------------------------------------------------- #
+# --since (the same two rules, mirrored)
+# --------------------------------------------------------------------------- #
+
+
+def _since_arms(tmp_path, baseline: str, current: str, *, relative: str = RELATIVE, lines=None):
+    """``(reached_today, reached_with_forgiveness)`` for one branch change.
+
+    Mirror image of the map case: here the fingerprint is *current* and the
+    checksum list is the *baseline*'s, so the equivalent checksums to append are
+    the current ones.
+    """
+
+    from testmon.db import check_fingerprint_db
+
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(current, encoding="utf-8")
+    recorded = _record(current, lines or (COVERED_LINE,))
+
+    baseline_checksums = _checksums(baseline)
+    extra = testmon_policy.since_forgivable_checksums(tmp_path, relative, baseline.encode("utf-8"))
+    selects_today = not check_fingerprint_db({relative: baseline_checksums}, relative, recorded)
+    still_selects = not check_fingerprint_db(
+        {relative: baseline_checksums + extra}, relative, recorded
+    )
+    return selects_today, still_selects
+
+
+def test_since_no_longer_reaches_a_file_the_branch_only_added_a_function_to(tmp_path):
+    """Measured, translating the settled map forward: 166 → 32 on ``lod.py``,
+    258 → 0 on ``frame_session.py``, 157 → 16 on ``view_state.py``, 297 → 0 on a
+    test file. ``--since`` is the pre-merge command, so this is the case that
+    made it a flag nobody could afford."""
+
+    selects_today, still_selects = _since_arms(
+        tmp_path, BEFORE, BEFORE + "\n\ndef added():\n    return 1\n"
+    )
+    assert selects_today
+    assert not still_selects, "the edit must be forgiven"
+
+
+def test_since_still_reaches_a_body_the_branch_changed(tmp_path):
+    """The measurement that says the mirrored rules did not simply switch the
+    flag off: a changed body is still reached."""
+
+    current = BEFORE.replace("return value + TILE", "return value - TILE")
+    selects_today, still_selects = _since_arms(tmp_path, BEFORE, current)
+    assert selects_today
+    assert still_selects
+
+
+def test_since_still_reaches_a_changed_constant_and_a_new_import(tmp_path):
+    for current in (BEFORE.replace("TILE = 8", "TILE = 16"), BEFORE + "\nimport sys\n"):
+        selects_today, still_selects = _since_arms(tmp_path, BEFORE, current)
+        assert selects_today
+        assert still_selects, current
+
+
+def test_since_forgives_a_block_the_branch_only_moved(tmp_path):
+    """The index-free digest rule on its own: the branch inserted a definition
+    above ``helper``, so ``helper``'s checksum shifted while its code did not."""
+
+    current = "def inserted():\n    return 0\n\n\n" + BEFORE
+    line = current.splitlines().index("    return value + TILE") + 1
+    selects_today, still_selects = _since_arms(tmp_path, BEFORE, current, lines=(line,))
+    assert selects_today
+    assert not still_selects, "the edit must be forgiven"
+
+
+def test_since_refuses_the_same_things_the_map_does(tmp_path):
+    """One gate, two callers. Spot-checked here rather than restated: a decorated
+    definition, a rebinding, ``__all__`` and a declared child-process entry
+    point are refused on this path too."""
+
+    for current in (
+        BEFORE + "\n\n@os.wrap\ndef added():\n    return 1\n",
+        BEFORE + "\n\ndef helper(value):\n    return 0\n",
+    ):
+        selects_today, still_selects = _since_arms(tmp_path, BEFORE, current)
+        assert selects_today
+        assert still_selects, current
+
+    baseline = BEFORE + '\n__all__ = ["helper"]\n'
+    selects_today, still_selects = _since_arms(
+        tmp_path, baseline, baseline + "\n\ndef added():\n    return 1\n"
+    )
+    assert selects_today
+    assert still_selects
+
+    entry_point = sorted(testmon_policy.declared_whole_file_paths())[0]
+    selects_today, still_selects = _since_arms(
+        tmp_path, BEFORE, BEFORE + "\n\ndef added():\n    return 1\n", relative=entry_point
+    )
+    assert selects_today
+    assert still_selects
+
+
+def test_since_forgiveness_never_raises_on_a_revision_it_cannot_read(tmp_path):
+    """``--since`` is a merge gate; it degrades to selecting more, never to
+    failing."""
+
+    assert testmon_policy.since_forgivable_checksums(tmp_path, "gone.py", b"x = 1\n") == []
+    assert testmon_policy.since_forgivable_checksums(tmp_path, "icon.png", b"x = 1\n") == []
+    (tmp_path / RELATIVE).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / RELATIVE).write_text(BEFORE, encoding="utf-8")
+    assert testmon_policy.since_forgivable_checksums(tmp_path, RELATIVE, b"def (\n") == []
+
+
 @pytest.mark.parametrize(
     ("expression", "inert"),
     [

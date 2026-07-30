@@ -1015,6 +1015,13 @@ def baseline_method_checksums(rootdir, merge_base: str) -> dict[str, list | None
     point, which testmon's comparison reads as "all of it changed" — the right
     fallback for a fixture array or an icon, which have no method structure to
     compare.
+
+    Each list is extended by :func:`since_forgivable_checksums`, which is module-
+    block forgiveness in mirror image: here the fingerprints are *current* and
+    the checksum list is the *baseline*'s, so the equivalent checksums to append
+    are the current ones. Without it ``--since`` degrades to file-level for every
+    file the branch added a function to — measured 166 → 32, 258 → 0, 157 → 16,
+    297 → 0 on this tree.
     """
 
     from testmon.process_code import Module
@@ -1047,8 +1054,54 @@ def baseline_method_checksums(rootdir, merge_base: str) -> dict[str, list | None
         except Exception:  # unparseable back there: treat as fully changed
             checksums[path] = None
             continue
+        # Forgiveness never fails a run; it only ever declines.
+        with contextlib.suppress(Exception):
+            baseline = list(baseline) + since_forgivable_checksums(rootdir, path, source)
         checksums[path] = baseline
     return checksums
+
+
+def since_forgivable_checksums(rootdir, relative: str, baseline_source: bytes) -> list[int]:
+    """Current checksums of ``relative`` that the branch point already describes.
+
+    The mirror of :func:`forgivable_checksums`, and cheaper: ``git show`` has
+    already produced the baseline revision, so nothing has to be retained
+    anywhere. Same two rules, same gate, same degradation — an unreadable or
+    unparseable revision on either side forgives nothing.
+
+    Appending to the baseline's checksum list is again a subset test's
+    right-hand side, so the worst a mistake here can do is leave one test out of
+    a pre-merge run, and each appended checksum is one of: a block whose
+    index-free body digest already existed at the branch point, or the module
+    block of a file the branch only inserted inert definitions into.
+    """
+
+    from testmon.process_code import read_source_sha
+
+    from tests import coverage_map
+
+    if not relative.endswith(".py") or relative in declared_whole_file_paths():
+        return []
+    current_source, _ = read_source_sha(Path(rootdir) / relative)
+    if current_source is None:
+        return []
+    baseline_text = baseline_source.decode("utf-8", "replace")
+    if "__all__" in current_source or "__all__" in baseline_text:
+        return []
+    baseline_elements = coverage_map.elements_of(baseline_text, relative, rootdir)
+    functions, module_checksum, current_elements = coverage_map.revision_of(
+        current_source, relative, rootdir
+    )
+    if baseline_elements is None or current_elements is None:
+        return []
+
+    before = coverage_map.bodies_at(rootdir, relative, baseline_source)
+    forgiven = [function.checksum for function in functions if function.body in before]
+    if module_checksum is not None and coverage_map.forgives_module_block(
+        coverage_map.digests_of(baseline_elements), current_elements
+    ):
+        forgiven.append(module_checksum)
+    return forgiven
 
 
 def tests_reached_since_baseline(data, checksums) -> frozenset[str] | None:
