@@ -531,7 +531,7 @@ class Recorder:
         point_x, point_y = (float(value) for value in target["point"])
         _, _, width, height = (float(value) for value in target["rect"])
         context_width = min(float(self.win.width() - 8), max(200.0, width + 36.0))
-        context_height = min(float(self.win.height() - 8), max(120.0, min(height + 36.0, 250.0)))
+        context_height = min(float(self.win.height() - 8), max(120.0, min(height + 36.0, 180.0)))
         left = max(4.0, min(point_x - context_width / 2.0, self.win.width() - context_width - 4.0))
         top = max(
             4.0,
@@ -1003,6 +1003,51 @@ class Recorder:
         action_event["activate_frame"] = self.frame_index - 1
         self._finish_action(action_event)
 
+    def drag_window_levels(self, *, low_fraction: float, high_fraction: float) -> None:
+        """Animate an honest histogram-window gesture and its pixel response."""
+        from pyqtgraph.Qt import QtCore
+
+        view = self.win.img_view
+        histogram = view.getHistogramWidget()
+        bounds = view.getHistogramDataBounds() or view.getLevels()
+        lower, upper = (float(value) for value in bounds)
+        span = upper - lower
+        if span <= 0 or not (0.0 <= low_fraction < high_fraction <= 1.0):
+            raise RuntimeError(f"invalid histogram bounds/fractions: {bounds!r}")
+        start_levels = tuple(float(value) for value in view.getLevels())
+        end_levels = (
+            lower + low_fraction * span,
+            lower + high_fraction * span,
+        )
+        target = self._widget_target(histogram, (0.5, 0.55))
+        event = self._start_action("drag", "adjust histogram window and level", target=target)
+        self._frame_event(event, target)
+        start_point = self.widget_point(histogram, (0.5, 0.72))
+        end_point = self.widget_point(histogram, (0.5, 0.42))
+        self.move_to(start_point, seconds=0.5)
+        event["press_frame"] = self.frame_index
+        event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
+        self._ripples.append((self.frame_index, QtCore.QPointF(self.cursor)))
+        self.cursor_pressed = True
+        steps = self._frames_for(1.1)
+        for index in range(1, steps + 1):
+            t = _ease(index / steps)
+            view.setLevels(
+                start_levels[0] + (end_levels[0] - start_levels[0]) * t,
+                start_levels[1] + (end_levels[1] - start_levels[1]) * t,
+            )
+            self.cursor = QtCore.QPointF(
+                start_point.x() + (end_point.x() - start_point.x()) * t,
+                start_point.y() + (end_point.y() - start_point.y()) * t,
+            )
+            self.capture()
+        self.cursor_pressed = False
+        event["activate_frame"] = self.frame_index - 1
+        self.settle()
+        self.hold(0.55)
+        self._finish_action(event)
+        self._focus_rect = None
+
     def zoom_image(self, factor: float, center_xy, seconds=1.2) -> None:
         """Smoothly zoom the viewport by ``factor`` around an image point,
         with the cursor parked on that point (wheel-zoom look)."""
@@ -1128,8 +1173,11 @@ def s_showcase(rec: Recorder):
 
     rec.caption("Hover for live coordinates and values")
     rec.move_to(rec.image_point(30, 64), seconds=0.7)
-    rec.hover_image([(30, 64), (74, 44), (96, 82), (64, 64)], seconds=3.2)
-    rec.hold(0.4)
+    rec.hover_image([(30, 64), (74, 44), (96, 82), (64, 64)], seconds=2.2)
+    rec.hold(0.25)
+
+    rec.caption("Drag the histogram handles to adjust window and level")
+    rec.drag_window_levels(low_fraction=0.08, high_fraction=0.72)
 
     rec.caption("Scrub through any dimension")
     chip = win.dimension_strip.chip(2)
@@ -1141,7 +1189,7 @@ def s_showcase(rec: Recorder):
         label="scrub axis 2 slices",
         control_label="the axis 2 slice range",
     )
-    rec.hold(0.6)
+    rec.hold(0.35)
 
     rec.caption("Crop away the bright left landmark with an explicit range")
     axis0_edit = win.dimension_strip.chip(0).slice_edit
@@ -1152,7 +1200,7 @@ def s_showcase(rec: Recorder):
         label="crop axis 0 to 72:352",
         control_label="the axis 0 slice range",
     )
-    rec.hold_until_settled(1.5, tail_s=0.8)
+    rec.hold_until_settled(1.5, tail_s=0.6)
     rec.caption("Return to the full axis with ':'")
     rec.type_into(
         axis0_edit,
@@ -1161,28 +1209,28 @@ def s_showcase(rec: Recorder):
         label="restore full axis 0",
         control_label="the axis 0 slice range",
     )
-    rec.hold_until_settled(1.5, tail_s=0.6)
+    rec.hold_until_settled(1.5, tail_s=0.45)
 
     rec.caption("Re-map the image axes with one click")
     rec.click(win.dimension_strip.chip(2).y_button)
-    rec.hold_until_settled(2.0, tail_s=1.2)
+    rec.hold_until_settled(2.0, tail_s=0.8)
     rec.click(win.dimension_strip.chip(0).y_button)
-    rec.hold_until_settled(2.0, tail_s=1.0)
+    rec.hold_until_settled(2.0, tail_s=0.7)
 
     rec.caption("Zoom and pan freely — true 1:1 and fit are one click away")
     rec.move_to(rec.image_point(74, 44), seconds=0.6)
-    rec.zoom_image(3.0, (74, 44), seconds=1.6)
-    rec.hold(0.4)
-    rec.pan_image(18, 10, seconds=1.2)
-    rec.hold(0.4)
+    rec.zoom_image(3.0, (74, 44), seconds=1.2)
+    rec.hold(0.25)
+    rec.pan_image(18, 10, seconds=0.9)
+    rec.hold(0.25)
     one_to_one_widget = rec.toolbar_action_widget(
         win.display_toolbar, win.display_toolbar.one_to_one_action
     )
     rec.click(one_to_one_widget, label="show image at true 1:1")
-    rec.hold_until_settled(1.5, tail_s=0.8)
+    rec.hold_until_settled(1.5, tail_s=0.6)
     fit_widget = rec.toolbar_action_widget(win.display_toolbar, win.display_toolbar.fit_action)
     rec.click(fit_widget)
-    rec.hold_until_settled(2.0, tail_s=1.6)
+    rec.hold_until_settled(2.0, tail_s=1.0)
 
 
 @scenario("fft")

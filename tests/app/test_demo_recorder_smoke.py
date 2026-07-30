@@ -126,13 +126,18 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
     if name == "showcase":
         labels = {event["label"] for event in actions}
         assert {
+            "adjust histogram window and level",
             "scrub axis 2 slices",
             "crop axis 0 to 72:352",
             "restore full axis 0",
             "show image at true 1:1",
         } <= labels
         framed_labels = {event["label"] for event in actions if event.get("detail_inset")}
-        assert {"crop axis 0 to 72:352", "show image at true 1:1"} <= framed_labels
+        assert {
+            "adjust histogram window and level",
+            "crop axis 0 to 72:352",
+            "show image at true 1:1",
+        } <= framed_labels
     if name == "montage":
         montage_action = next(
             event for event in actions if event["label"] == "enter montage range on axis 2"
