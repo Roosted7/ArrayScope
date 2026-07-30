@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 
 def test_file_view_session_round_trips_recipe_viewport_and_rois(tmp_path):
@@ -162,6 +163,77 @@ def test_viewport_session_rejects_malformed_viewport_shape():
 
     with pytest.raises(ValueError, match=r"viewport\.viewport_shape"):
         viewport_from_mapping({"mode": "user", "view_range": None, "viewport_shape": [100]})
+
+
+@pytest.mark.parametrize(
+    ("saved_shape", "target_shape"),
+    [
+        ((4, 5, 6), (4, 5, 3, 2)),  # a rank-increasing step was added
+        ((4, 5, 3, 2), (4, 5, 6)),  # ...and the same step taken away again
+        ((4, 5, 6), (4, 5, 6)),  # the unchanged case still round-trips
+    ],
+)
+def test_view_state_recipe_migrates_across_a_rank_change(saved_shape, target_shape):
+    """A saved view state restores against a document of a DIFFERENT rank.
+
+    The state is rebuilt at its own recorded rank and only then migrated, so
+    both directions work. Building it directly at the target rank -- what this
+    used to do -- fed per-axis tuples of the saved rank into a ``ViewState``
+    declared at the target rank and raised "slice_indices length must match
+    ndim" before ``for_shape`` could migrate anything. That is live the moment
+    operations are edited between save and restore, which a rank-increasing
+    operation makes ordinary.
+    """
+
+    from arrayscope.core.view_recipe import view_state_from_mapping, view_state_to_mapping
+    from arrayscope.core.view_state import ViewState
+
+    saved = ViewState.from_shape(saved_shape).with_slice(0, 3)
+    mapping = view_state_to_mapping(saved)
+
+    restored = view_state_from_mapping(mapping, target_shape)
+
+    assert restored.ndim == len(target_shape)
+    assert restored.shape == target_shape
+    assert len(restored.slice_indices) == len(target_shape)
+    assert len(restored.axis_flipped) == len(target_shape)
+    assert len(restored.axis_range_indices) == len(target_shape)
+    # An axis that survives keeps its position.
+    assert restored.slice_indices[0] == 3
+
+
+def test_view_recipe_round_trips_a_rank_increasing_step(tmp_path):
+    """The recipe carries the step AND a view state at the rank it produces."""
+
+    import numpy as np
+
+    from arrayscope.core.view_recipe import (
+        DisplaySettings,
+        ViewRecipe,
+        load_view_recipe,
+        save_view_recipe,
+    )
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.operations.registry import create_operation
+
+    base = np.zeros((4, 8, 5), dtype=np.float32)
+    step = create_operation("split_axis", axis=1, parameters={"factor": 4})
+    recipe = ViewRecipe(
+        view_state=ViewState.from_shape((4, 2, 4, 5)).with_slice(2, 3),
+        display=DisplaySettings(
+            channel="real", scale="linear", aspect_mode="fit", window_mode="relative"
+        ),
+        steps=(step,),
+    )
+    path = tmp_path / "rank-increase.json"
+    save_view_recipe(str(path), recipe)
+
+    loaded = load_view_recipe(str(path), base.shape, base_data=base)
+
+    assert loaded.view_state.shape == (4, 2, 4, 5)
+    assert loaded.view_state.slice_indices[2] == 3
+    assert len(loaded.steps) == 1
+    assert loaded.steps[0].operation.output_shape(base.shape) == (4, 2, 4, 5)
 
 
 def test_roi_session_round_trip_normalizes_geometry_and_rgb_color():

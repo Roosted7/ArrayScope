@@ -131,7 +131,7 @@ def save_session_file(config_dir, session: FileViewSession) -> Path:
 
 
 def load_session_file(
-    config_dir, metadata: dict[str, object], base_shape, *, filename=None
+    config_dir, metadata: dict[str, object], base_shape, *, filename=None, base_data=None
 ) -> FileViewSession | None:
     path = (
         session_path_for_filename(config_dir, filename)
@@ -140,7 +140,7 @@ def load_session_file(
     )
     if not path.exists():
         return None
-    session = loads_session(path.read_text(encoding="utf-8"), base_shape)
+    session = loads_session(path.read_text(encoding="utf-8"), base_shape, base_data=base_data)
     if not metadata_matches(session.metadata, metadata):
         return None
     return session
@@ -158,7 +158,7 @@ def session_to_mapping(session: FileViewSession) -> dict[str, object]:
     }
 
 
-def session_from_mapping(mapping, base_shape) -> FileViewSession:
+def session_from_mapping(mapping, base_shape, *, base_data=None) -> FileViewSession:
     if not isinstance(mapping, dict):
         raise ValueError("file view session must be a JSON object")
     if mapping.get("version") != VIEW_SESSION_VERSION:
@@ -166,7 +166,7 @@ def session_from_mapping(mapping, base_shape) -> FileViewSession:
     viewport = mapping.get("viewport")
     return FileViewSession(
         metadata=dict(mapping.get("metadata", {})),
-        recipe=recipe_from_mapping(mapping.get("recipe", {}), base_shape),
+        recipe=recipe_from_mapping(mapping.get("recipe", {}), base_shape, base_data=base_data),
         viewport=None if viewport is None else viewport_from_mapping(viewport),
         rois=tuple(roi_from_mapping(item) for item in tuple(mapping.get("rois", ()) or ())),
         selected_roi_id=mapping.get("selected_roi_id"),
@@ -182,8 +182,8 @@ def dumps_session(session: FileViewSession) -> str:
     return json.dumps(session_to_mapping(session), sort_keys=True, separators=(",", ":"))
 
 
-def loads_session(text: str, base_shape) -> FileViewSession:
-    return session_from_mapping(json.loads(str(text)), base_shape)
+def loads_session(text: str, base_shape, *, base_data=None) -> FileViewSession:
+    return session_from_mapping(json.loads(str(text)), base_shape, base_data=base_data)
 
 
 def viewport_to_mapping(viewport: ViewportSession) -> dict[str, object]:

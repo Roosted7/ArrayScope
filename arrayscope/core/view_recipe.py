@@ -8,6 +8,7 @@ import tempfile
 from dataclasses import dataclass
 
 from arrayscope.core.view_state import ViewState
+from arrayscope.operations.pipeline import evaluate_shape
 from arrayscope.operations.recipes import operation_to_recipe_item, steps_from_recipe
 
 VIEW_RECIPE_VERSION = 1
@@ -56,19 +57,51 @@ def view_state_to_mapping(state: ViewState):
     }
 
 
+def _per_axis(values, ndim, fill):
+    """``values`` resized to exactly ``ndim`` entries, padding with ``fill``.
+
+    A recipe's per-axis tuples are only ever read back at the rank they were
+    written at (see :func:`view_state_from_mapping`); this trims/pads the one
+    case that rank cannot fix -- a hand-edited or truncated payload.
+    """
+
+    values = () if values is None else tuple(values)
+    if len(values) >= ndim:
+        return values[:ndim]
+    return values + (fill,) * (ndim - len(values))
+
+
 def view_state_from_mapping(mapping, base_shape):
+    """Rebuild a :class:`ViewState` from ``mapping`` and migrate it to ``base_shape``.
+
+    The state is constructed at *its own* recorded rank and only then handed to
+    :meth:`ViewState.for_shape`. Constructing it directly at ``base_shape``
+    -- what this used to do -- fed per-axis tuples of the recorded rank into a
+    ``ViewState`` declared at the target rank, so a recipe saved against a 3-D
+    document and restored against a 4-D one (or the reverse) raised
+    ``slice_indices length must match ndim`` before any migration could run.
+    That is live the moment operations are edited between save and restore, and
+    it is exactly what a rank-increasing operation makes ordinary.
+
+    ``for_shape`` stays the single owner of rank migration: everything below
+    only reconstitutes the saved state faithfully at the rank it was saved at.
+    """
+
     if not isinstance(mapping, dict):
         raise ValueError("view_state must be an object")
+    base_shape = tuple(int(size) for size in base_shape)
+    recorded_shape = tuple(int(size) for size in (mapping.get("shape") or base_shape))
+    ndim = len(recorded_shape)
     state = ViewState(
-        ndim=len(tuple(base_shape)),
-        shape=tuple(base_shape),
+        ndim=ndim,
+        shape=recorded_shape,
         image_axes=tuple(mapping["image_axes"]) if mapping.get("image_axes") is not None else None,
         line_axis=mapping.get("line_axis"),
-        slice_indices=tuple(mapping.get("slice_indices", (0,) * len(tuple(base_shape)))),
+        slice_indices=_per_axis(mapping.get("slice_indices"), ndim, 0),
         channel=mapping.get("channel", "real"),
         scale=mapping.get("scale", "linear"),
-        axis_flipped=tuple(mapping.get("axis_flipped", (False,) * len(tuple(base_shape)))),
-        axis_fftshifted=tuple(mapping.get("axis_fftshifted", (False,) * len(tuple(base_shape)))),
+        axis_flipped=_per_axis(mapping.get("axis_flipped"), ndim, False),
+        axis_fftshifted=_per_axis(mapping.get("axis_fftshifted"), ndim, False),
         montage_axis=mapping.get("montage_axis"),
         montage_columns=mapping.get("montage_columns"),
         montage_indices=tuple(mapping["montage_indices"])
@@ -77,9 +110,9 @@ def view_state_from_mapping(mapping, base_shape):
         montage_text=mapping.get("montage_text"),
         axis_range_indices=tuple(
             None if value is None else tuple(value)
-            for value in mapping.get("axis_range_indices", (None,) * len(tuple(base_shape)))
+            for value in _per_axis(mapping.get("axis_range_indices"), ndim, None)
         ),
-        axis_range_text=tuple(mapping.get("axis_range_text", (None,) * len(tuple(base_shape)))),
+        axis_range_text=_per_axis(mapping.get("axis_range_text"), ndim, None),
     )
     return state.for_shape(base_shape, preserve_flags=True)
 
@@ -122,17 +155,30 @@ def recipe_to_mapping(recipe: ViewRecipe):
     }
 
 
-def recipe_from_mapping(mapping, base_shape, *, imported: bool = False):
+def recipe_from_mapping(mapping, base_shape, *, imported: bool = False, base_data=None):
+    """Rebuild a :class:`ViewRecipe` against ``base_shape``.
+
+    ``base_data`` is optional and only ever used to *predict a shape*: an
+    operation whose output shape is discovered rather than declared (an
+    ADR-0060 plugin op) can only answer from a real input, and
+    :func:`~arrayscope.operations.pipeline.evaluate_shape` is the one place
+    that funnel lives. Walking ``step.operation.output_shape`` directly -- what
+    this used to do -- raised ``CharacterizationUnavailable`` for exactly those
+    operations, which surfaced as "Skipped saved view" on restore.
+    """
+
     if not isinstance(mapping, dict):
         raise ValueError("view recipe must be a JSON object")
     if mapping.get("version") != VIEW_RECIPE_VERSION:
         raise ValueError(f"unsupported view recipe version: {mapping.get('version')!r}")
     operations_recipe = {"version": 2, "operations": mapping.get("operations", [])}
     steps = steps_from_recipe(operations_recipe, base_shape, imported=imported)
-    shape = tuple(base_shape)
-    for step in steps:
-        if step.enabled:
-            shape = step.operation.output_shape(shape)
+    shape = evaluate_shape(
+        tuple(base_shape),
+        tuple(step.operation for step in steps if step.enabled),
+        base_dtype=getattr(base_data, "dtype", None),
+        base_data=base_data,
+    )
     return ViewRecipe(
         view_state=view_state_from_mapping(mapping.get("view_state", {}), shape),
         display=display_settings_from_mapping(mapping.get("display", {})),
@@ -146,12 +192,12 @@ def dumps_view_recipe(recipe: ViewRecipe, **kwargs):
     return json.dumps(recipe_to_mapping(recipe), **options)
 
 
-def loads_view_recipe(text: str, base_shape, *, imported: bool = False):
+def loads_view_recipe(text: str, base_shape, *, imported: bool = False, base_data=None):
     try:
         mapping = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON view recipe: {exc}") from exc
-    return recipe_from_mapping(mapping, base_shape, imported=imported)
+    return recipe_from_mapping(mapping, base_shape, imported=imported, base_data=base_data)
 
 
 def save_view_recipe(path, recipe: ViewRecipe):
@@ -166,6 +212,6 @@ def save_view_recipe(path, recipe: ViewRecipe):
     os.replace(temporary_path, path)
 
 
-def load_view_recipe(path, base_shape):
+def load_view_recipe(path, base_shape, *, base_data=None):
     with open(path, encoding="utf-8") as recipe_file:
-        return loads_view_recipe(recipe_file.read(), base_shape, imported=True)
+        return loads_view_recipe(recipe_file.read(), base_shape, imported=True, base_data=base_data)
