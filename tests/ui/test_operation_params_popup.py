@@ -13,6 +13,8 @@ from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.operations.input_slots import (
     SLOT_DIMENSION_SET,
+    SLOT_FILE,
+    SLOT_SAVED_ARRAY,
     OperationInputSlot,
     SlotBinding,
     SlotSourceOption,
@@ -187,14 +189,62 @@ def test_each_parameter_kind_renders_its_own_widget(qtbot):
     }
 
 
-def test_path_field_gets_a_browse_button_beside_its_line_edit(qtbot):
+def test_path_field_gets_a_browse_button_beside_its_line_edit(qtbot, monkeypatch):
     popup, form = _kinds_popup(qtbot)
 
     row = popup._editors["model"].parentWidget()
     assert row.layout().count() == 2  # line edit + browse
     assert popup._editors["wavelet"].parentWidget() is not row
 
-    popup._form.set_value("model", "/tmp/weights.pt")
-    popup._sync_from_form()
+    monkeypatch.setattr(
+        "arrayscope.ui.operation_params_popup.get_open_file_name",
+        lambda *_args, **_kwargs: ("/tmp/weights.pt", ""),
+    )
+    popup._choose_path("model")
+
     assert popup._editors["model"].text() == "/tmp/weights.pt"
     assert form.values()["model"] == "/tmp/weights.pt"
+
+    # A cancelled dialog leaves the field alone.
+    monkeypatch.setattr(
+        "arrayscope.ui.operation_params_popup.get_open_file_name",
+        lambda *_args, **_kwargs: ("", ""),
+    )
+    popup._choose_path("model")
+    assert form.values()["model"] == "/tmp/weights.pt"
+
+
+@pytest.mark.parametrize(
+    ("kind", "prompt", "pattern", "expected_label"),
+    [
+        (SLOT_SAVED_ARRAY, "Choose a saved array", "NumPy arrays (*.npy)", "Saved array — r.npy"),
+        (SLOT_FILE, "Choose a file", "All files (*)", "File — r.npy"),
+    ],
+)
+def test_browsing_binds_a_file_backed_slot(
+    qtbot, monkeypatch, kind, prompt, pattern, expected_label
+):
+    slot = OperationInputSlot("reference", "Reference", accepts=(kind,))
+    entry = OperationEntry(
+        id=f"test:browse-{kind}",
+        label="Browse",
+        operation_type=object,
+        requires_axis=False,
+        input_slots=(slot,),
+    )
+    form = build_parameter_form(entry, shape=(4, 5))
+    popup = OperationParamsPopup(entry, form, lambda values, bindings: None)
+    qtbot.addWidget(popup)
+    assert form.validate() is not None  # unbound to start with
+
+    monkeypatch.setattr(
+        "arrayscope.ui.operation_params_popup.get_open_file_name",
+        lambda *_args, **_kwargs: ("/tmp/r.npy", ""),
+    )
+    popup._choose_slot_file("reference", kind, prompt, pattern)
+
+    binding = form.bindings()["reference"]
+    assert binding.kind == kind
+    assert binding.path == "/tmp/r.npy"
+    assert binding.label == expected_label
+    assert popup._slot_combos["reference"].currentText() == expected_label
