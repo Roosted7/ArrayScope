@@ -27,6 +27,9 @@ from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
 )
 from arrayscope.display.montage import (
+    COVERAGE_MARGIN_TILES,
+    RETENTION_HALO_TILES,
+    VISIBLE_MARGIN_TILES,
     MontageTileState,
     RenderedTile,
     make_montage_plan,
@@ -105,7 +108,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         frame_key = None if frame is None else getattr(frame, "key", None)
         if getattr(frame_key, "request_key", None) != expected_key:
             return False
-        for tile in viewport_plan.candidate_tiles(margin_tiles=0):
+        for tile in viewport_plan.candidate_tiles(margin_tiles=VISIBLE_MARGIN_TILES):
             if (
                 evaluator.cached_montage_tile(
                     tile.view_state,
@@ -448,12 +451,27 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         if not montage_viewport_retarget_policy(capabilities, display_mode).enabled:
             return False
         view_state = self.win.view_state
+        # A resize is a live drag, so it deliberately does NOT widen the
+        # production request: ``coverage`` stays at the drawn set and no tile
+        # is asked for that the settled camera will not need. The retention
+        # halo is a different kind of thing and gets the ordinary ring.
+        #
+        # This used to pass 0 for both, unexplained. It came in with "Reduce
+        # VisPy zoom path further" (19d36f45) alongside
+        # ``_cancel_vispy_speculative_work`` and ``priority_retarget_limit=1``;
+        # both of those were deleted with VisPy (54d1fd5b, 934081fb) and this
+        # line was left behind. Its cost was not the coverage half but the
+        # halo half: ``retarget_viewport`` feeds ``near`` straight into
+        # ``retarget_tile_priority``, so every window resize replaced the
+        # session's priority context with one whose NEAR band was empty --
+        # flattening the ordering that prefetch and per-commit admission both
+        # read -- until some later camera move happened to rebuild it.
         _additions, presentation_changed = session.retarget_viewport(
             view_range=viewport_plan.view_range,
             viewport_shape=viewport_plan.viewport_shape,
             plan=viewport_plan.plan,
-            coverage_margin_tiles=0,
-            near_margin_tiles=0,
+            coverage_margin_tiles=VISIBLE_MARGIN_TILES,
+            near_margin_tiles=RETENTION_HALO_TILES,
             priority_focus=viewport_plan.priority_focus,
         )
         memory_policy = self._memory_policy() if hasattr(self, "_memory_policy") else None
@@ -563,9 +581,13 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         previous_session_plan = getattr(getattr(self, "_frame_session", None), "plan", None)
         self._remap_montage_rois_for_layout_reflow(previous_session_plan, plan)
         current_range = viewport_plan.view_range
-        display_tiles = viewport_plan.candidate_tiles(margin_tiles=0)
+        display_tiles = viewport_plan.candidate_tiles(margin_tiles=VISIBLE_MARGIN_TILES)
         candidate_tiles = viewport_plan.candidate_tiles(
-            margin_tiles=1 if viewport_plan.persistent_tile_residency else 0,
+            margin_tiles=(
+                COVERAGE_MARGIN_TILES
+                if viewport_plan.persistent_tile_residency
+                else VISIBLE_MARGIN_TILES
+            ),
             prioritize=True,
         )
         shader_display = viewport_plan.shader_display
@@ -1637,7 +1659,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             return
         keep = {
             int(tile.montage_index)
-            for tile in session.plan.tiles_intersecting(session.view_range, margin_tiles=2)
+            for tile in session.plan.tiles_intersecting(
+                session.view_range, margin_tiles=RETENTION_HALO_TILES
+            )
         }
         if not keep:
             return

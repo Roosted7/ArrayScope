@@ -1180,3 +1180,130 @@ def test_prefetch_menu_action_exists_and_toggles_setting(qtbot):
         assert not win.app_settings.prefetch_nearby_slices
     finally:
         win.close()
+
+
+def _halo_montage_window(qtbot, *, indices=64, tile=16, columns=8):
+    """A montage large enough that its retention halo is a genuine subset.
+
+    A halo test on a montage that fits the viewport cannot fail: every ring
+    covers every tile, so "the halo came first" and "everything came first"
+    are the same statement. The regime is asserted before the behaviour.
+    """
+
+    import numpy as np
+
+    from arrayscope.display.montage import RETENTION_HALO_TILES, viewport_tiles
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(
+        np.arange(tile * tile * indices, dtype=np.float32).reshape(tile, tile, indices)
+    )
+    qtbot.addWidget(win)
+    _process_events(qtbot)
+    state = win.view_state.with_montage_axis(
+        2, columns=columns, indices=tuple(range(indices)), text=f"0:{indices}"
+    )
+    win._set_view_state(state)
+    win.render(reason="test-halo-prefetch")
+    qtbot.waitUntil(
+        lambda: win.renderer._frame_session is not None,
+        timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+    )
+    session = win.renderer._frame_session
+
+    anchor = session.plan.tiles[len(session.plan.tiles) // 2]
+    cx = float(anchor.x0) + float(anchor.width) * 0.5
+    cy = float(anchor.y0) + float(anchor.height) * 0.5
+    half = float(anchor.width) * 0.6
+    session.retarget_viewport(
+        view_range=((cx - half, cx + half), (cy - half, cy + half)),
+        viewport_shape=(200, 200),
+    )
+    # Retargeting a live session posts a deferred walk invitation. Let it fire
+    # here, while this window is still the current one: left pending, it fires
+    # inside whatever test runs next and reports as a failure there.
+    _process_events(qtbot)
+    halo = {
+        int(t.montage_index)
+        for t in viewport_tiles(
+            session.plan,
+            view_range=session.view_range,
+            viewport_shape=session.viewport_shape,
+            margin_tiles=RETENTION_HALO_TILES,
+        )
+    }
+    assert 0 < len(halo) < len(session.plan.tiles), (
+        f"regime: halo {len(halo)} of {len(session.plan.tiles)} tiles proves nothing"
+    )
+    return win, session, halo
+
+
+def test_idle_prefetch_walks_the_retention_halo_before_the_rest_of_the_montage(qtbot):
+    """The idle candidate set is the whole montage; its ORDER must be the halo.
+
+    Prefetch ranks candidates by ``TilePriorityBand``, and the NEAR band is
+    exactly the retention halo -- but only when the session's priority context
+    carries one. Every path that retargets the session must therefore hand it
+    the halo, which is what makes this an end-to-end assertion rather than a
+    restatement of the band enum.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.window import montage_prefetch
+
+    win, session, halo = _halo_montage_window(qtbot)
+    try:
+        candidates = montage_prefetch._candidate_tiles(session)
+        numbers = [int(t.montage_index) for t in candidates]
+        assert numbers, "regime: the walk must have candidates to order"
+
+        in_halo = [n in halo for n in numbers]
+        # Candidates exclude the visible set, so this is ring-then-everything.
+        assert any(in_halo), "regime: some candidate must be inside the halo"
+        assert not all(in_halo), "regime: some candidate must be outside the halo"
+        last_halo = max(i for i, flag in enumerate(in_halo) if flag)
+        first_outside = min(i for i, flag in enumerate(in_halo) if not flag)
+        assert last_halo < first_outside, (
+            f"a non-halo tile was walked before halo tile at index {last_halo}"
+        )
+    finally:
+        win.close()
+
+
+def test_a_window_resize_leaves_the_priority_halo_intact(qtbot):
+    """A resize used to blank the NEAR band, flattening every ordering.
+
+    ``_retarget_montage_resize_payloads`` passed ``near_margin_tiles=0``, which
+    ``retarget_viewport`` feeds straight into ``retarget_tile_priority``: the
+    session's one priority context came back with an empty NEAR band and stayed
+    that way until some later camera move happened to rebuild it. Prefetch
+    candidate order and per-commit upsert admission both read that context, so
+    a resize silently un-ranked the halo for everything downstream.
+
+    The 0 came in with "Reduce VisPy zoom path further" (19d36f45) beside
+    ``_cancel_vispy_speculative_work`` and ``priority_retarget_limit=1``; both
+    of those left with VisPy and this one stayed.
+    """
+
+    _clear_arrayscope_settings()
+    from arrayscope.display.montage import RETENTION_HALO_TILES, VISIBLE_MARGIN_TILES
+
+    win, session, halo = _halo_montage_window(qtbot)
+    try:
+        visible = {int(t.montage_index) for t in session.visible_tiles}
+        assert session.tile_priority_context().near_tiles == halo
+
+        # What the resize path asks for: no wider production request, but the
+        # ordinary retention halo.
+        session.retarget_viewport(
+            view_range=session.view_range,
+            viewport_shape=session.viewport_shape,
+            coverage_margin_tiles=VISIBLE_MARGIN_TILES,
+            near_margin_tiles=RETENTION_HALO_TILES,
+        )
+
+        near = session.tile_priority_context().near_tiles
+        assert near == halo, "a resize must not narrow the retention halo"
+        assert near > visible, "regime: the halo must be wider than the drawn set"
+    finally:
+        win.close()
