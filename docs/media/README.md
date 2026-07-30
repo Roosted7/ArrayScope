@@ -51,8 +51,11 @@ automatic final-format inspection). Requires `ffmpeg` (and optionally
 `gifsicle`) on `PATH`. A successful full recording writes each scenario's
 timeline next to its media and runs the strict inspector before returning.
 
-Commit the refreshed files in this directory together with the change that
-made them stale.
+Land recorder, scenario, test, and audit changes as bounded text commits first.
+After the final pixel review, commit all refreshed generated files in this
+directory once in a single recording commit. Re-recording media in intermediate
+commits permanently multiplies large binary blobs even when the branch's final
+tree is small.
 
 ## Inspecting what viewers actually receive
 
@@ -82,12 +85,14 @@ interaction needs closer inspection. `--strict` fails when a companion format
 is missing, encoded durations/aspect ratios disagree, an action's cursor
 misses (or a click lacks) its recorded target, or an action starts before its
 caption can be read. It also refuses any inline format narrower than the
-README's 880 px slot, because browser enlargement damages small text and
-palette edges. Every recorded scenario writes `<scenario>.timeline.json`
-beside its final media, and `--strict` requires it: without a timeline nothing
-can adjudicate cursor targets or caption timing, so accepting one would be a
-gate that cannot fail. Media without a timeline stays inspectable through
-uniform samples in a non-strict run.
+README's 880 px slot or larger than the 3.5 MB byte budget, because browser
+enlargement damages small text and palette edges while oversized fallback
+media makes the README expensive. A declared DETAIL inset must also carry a
+valid in-frame source rectangle. Every recorded scenario writes
+`<scenario>.timeline.json` beside its final media, and `--strict` requires it:
+without a timeline nothing can adjudicate cursor targets, caption timing, or
+inset framing, so accepting one would be a gate that cannot fail. Media without
+a timeline stays inspectable through uniform samples in a non-strict run.
 These structural checks complement, but do not replace, reviewing cursor
 alignment, click/menu visibility, captions, readable scale, and whether each
 promised feature is actually visible. The dated
@@ -115,6 +120,12 @@ They use a 22 px font, wrap or elide within two bounded lines, and receive a
 lead-in before the described action begins. The timeline distinguishes the
 application `window_size` from the final `capture_size`, so target checks
 remain in the application's coordinate system.
+
+Control-heavy actions add a bordered DETAIL inset sourced from the active
+control, popup, or focused result. The full application remains visible as
+context while labels, values, menu rows, histogram handles, and export entries
+are enlarged. The source rectangle is stored in the action manifest so strict
+inspection can reject missing or out-of-frame framing evidence.
 
 All five walkthrough windows are 1100 px wide and both inline encodes are
 880 px. This gives every scenario the same 0.8× application-to-README scale;

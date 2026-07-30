@@ -178,31 +178,43 @@ five scenarios and fifteen final encodes:
 
 | Scenario | Final MP4 duration | Final source frame | Closed findings |
 |---|---:|---:|---|
-| `showcase` | 30.00 s | 1100×858 | Visible slice scrub, explicit crop/restore, real 1:1 and fit actions |
-| `fft` | 27.63 s | 1100×838 | Real menus/combos, exact stack checkbox, no ambiguous linear-magnitude failure beat |
+| `showcase` | 28.23 s | 1100×858 | Visible slice scrub, asymmetric crop/restore, real window/level gesture, meaningful 1:1 and fit actions |
+| `fft` | 26.90 s | 1100×838 | Readable menus/combos, exact stack checkbox, display mapping before the first transform |
 | `montage` | 12.50 s | 1100×858 | Caption precedes trigger, semantic `:` action, incomplete→complete presentation, zoom/fit |
-| `roi` | 17.37 s | 1100×898 | Honest panel transitions, animated rectangle/polyline, visible live-profile activation |
+| `roi` | 18.27 s | 1100×898 | Honest panel transitions, animated rectangle/polyline, magnified live statistics and profile activation |
 | `workflow` | 13.27 s | 1100×858 | Real parameterized Crop form and highlighted dimension video/PNG export entry |
 
 All inline AVIF and GIF files are 880 px wide, so the README renders them at
 native width rather than enlarging a smaller GIF. Every format has a companion
-timeline, and strict inspection produced no structural, scale, duration,
-cursor-target, or companion-file finding.
+timeline. Strict inspection produced no structural, scale, duration,
+cursor-target, caption-timing, inline-byte-budget, or companion-file finding.
+Every one of the fifteen final-format storyboards and all five event sheets was
+also reviewed directly; the structural report was not treated as pixel
+acceptance.
 
-The bounded implementation history is:
+The bounded implementation history, stated without commit hashes so it remains
+valid across the required media-history rewrite, is:
 
-1. `afc10b81` — final-format storyboard, report, and HTML inspection.
-2. `c5834ade` — this baseline audit and explicit acceptance gates.
-3. `ef73fa3f` — action timelines and before/act/after event sheets.
-4. `61c46fd6` — faithful FFT popup/combo composition and targets.
-5. `b2b98eba` — honest click ownership and animated ROI gestures.
-6. `0a070ce5` — dedicated, wrapped caption band.
-7. `b8d1ac31` — native-width inline media and readable source layouts.
-8. `b15b571f` — showcase crop and real 1:1 behavior.
-9. `836f855a` — unambiguous logarithmic-magnitude FFT sequence.
-10. `d36c1fe1` — parameterized-operation and export-menu workflow.
-11. `47ee9a22` — semantic montage trigger and readable hold.
-12. `df4623b4` — direct coverage of the production export-menu seam.
+1. Final-format storyboard, report, and HTML inspection.
+2. This baseline audit and explicit acceptance gates.
+3. Action timelines and before/act/after event sheets.
+4. Faithful FFT popup/combo composition and targets.
+5. Honest click ownership and animated ROI gestures.
+6. Dedicated, wrapped caption band.
+7. Native-width inline media and readable source layouts.
+8. Showcase crop and real 1:1 behavior.
+9. Unambiguous logarithmic-magnitude FFT sequence.
+10. Parameterized-operation and export-menu workflow.
+11. Semantic montage trigger and readable hold.
+12. Direct coverage of the production export-menu seam.
+13. Fail-closed inspection of timelines, targets, captions, labels, and inline
+    dimensions.
+14. Structured, slice-varying volume fixtures for the three volume tours.
+15. Display mapping before FFT, with human-readable choice rows.
+16. Manifest-backed detail insets for control-heavy actions.
+17. A real histogram window/level gesture.
+18. A strict inline-media byte budget.
+19. Focused magnification of ROI statistics.
 
 Some README claims deliberately remain prose: flip/FFT-shift variants, every
 ROI shape, resource diagnostics/WGPU behavior, and asynchronous file loading.
@@ -211,34 +223,25 @@ misrepresent offscreen PyQtGraph capture as hardware/file-stream evidence.
 The new workflow previews export discoverability but intentionally does not
 open a modal dialog or write a user file.
 
-## Still open after the closure
+## Closure of the second pixel review
 
-Reviewing the decoded storyboards frame by frame — rather than the structural
-report — leaves five findings that the acceptance criteria above do not yet
-hold the media to. They are recorded here so the next pass starts from
-evidence rather than from a fresh reading of the same files.
+The second review decoded the shipped media and found failures that the first
+structural gate could not see. Each finding was closed in code, re-recorded,
+and then checked in the decoded pixels:
 
-| # | Finding | Why the current gate misses it |
+| Review item | Landed closure | Pixel or gate evidence |
 |---|---|---|
-| 1 | `fft` still spends roughly 4.5 s–11.5 s on a near-black frame: the Real channel of a linear-scaled complex FFT. The ambiguous-failure beat was moved, not removed. | Nothing measures decoded luminance, so "does this read as broken?" is still a human question. |
-| 2 | The `showcase` crop beat is invisible. Cropping a centred Gaussian to `16:112` removes near-zero margins and the view refits, so the pixels before and after are indistinguishable. | The timeline proves the action ran and hit its target; no check asks whether the frame changed. |
-| 3 | The composited channel/scale choice lists render the combo's own abbreviations (`R`, `|x|`, `∠`) at ~40 px wide. The menu is visible but unreadable, so "show the real choice" is only half met. | Target geometry is validated; legibility is not. |
-| 4 | `showcase`, `montage`, and `workflow` all use `_volume3d`, a sum of Gaussians with no structure. Zoom, pan, 1:1, montage tiles, and the crop all act on a featureless blob; `_phantom2d` (used by `fft`/`roi`) reads far better. | Dataset choice is not part of any acceptance criterion. |
-| 5 | The `true 1:1` beat shows a 128 px image in an ~830 px viewport — a speck in black. Correct, but it reads as the same kind of failure the FFT black beat did. | Same gap as #1. |
+| A — black FFT beat | Select logarithmic magnitude before the first centered FFT. | The transform now remains visible from its first result; the former ~4.5–11.5 s near-black hold is absent from all three FFT storyboards. |
+| B — invisible crop | Use a structured 384×320×36 volume and crop axis 0 asymmetrically to `72:352`. | The edge landmark, field of view, and refit visibly change before the restore. |
+| C — unreadable choices | Give composited combo rows scenario-supplied human names, with accessible text and tooltips as fallbacks. | Channel and scale rows read as full names; the event sheet shows them in a 1.9× detail inset rather than as 40 px glyph menus. |
+| D — featureless volumes | Replace the Gaussian-only fixture with ellipses, an edge landmark, a striped insert, and z-varying structure. | Showcase, montage, and workflow now have recognizable spatial and slice-to-slice evidence; the montage's final row reads as valid data. |
+| E — broken-looking 1:1 | Use the 384×320 showcase source. | At 1:1 the image remains a meaningful pixel-exact view instead of a 128 px speck. |
+| F — missing framing | Add a bordered DETAIL inset that follows the active live or composited target while retaining the full window as context. Record and validate its source rectangle. | Control-heavy beats decode at roughly 1.9×; the wider ROI statistics table uses a focused 1.3× inset. |
+| G — omitted window/level row | Drive a real histogram range drag through the production level-setting path. | The histogram handles and image contrast visibly change in the showcase event sheet and encodes. |
+| H — media weight/history | Enforce a 3.5 MB limit for every inline AVIF/GIF and place all final generated files in one recording commit after the bounded code/docs commits. | `showcase.gif` fell from 3.73 MB to 3.19 MB; linked MP4 files remain exempt from the inline budget. |
+| I — stale recorded labels | Re-record all five scenarios after the widget-label correction. | Timelines use control names rather than current values or bare `QComboBox`; event sheets contain readable multiplication text rather than the former tofu glyph. |
 
-Three process findings sit alongside them:
-
-- **One coverage row was neither shown nor declared prose.** "Adjust
-  window/level → add a visible histogram/window adjustment if it stays
-  concise" appears in the coverage table above, is absent from the landed
-  outcome, and is missing from the deliberately-prose paragraph. Either
-  demonstrate it or say why it stays prose.
-
-- **Framing was never implemented.** "Control-heavy beats receive enough hold
-  time *and framing* to read the relevant label" was met only by widening the
-  window and holding longer. No beat crops or magnifies its subject, so a
-  popup row is still ~1.5 % of the frame.
-- **Media weight.** The thirteen commits write 38.0 MB of blobs to reach a
-  12.1 MB final `docs/media/`; each re-record commits another full set. Squash
-  the media so history carries one copy of each final file. `showcase.gif`
-  alone is 3.73 MB and is the largest file in the repository's documentation.
+Luminance, semantic salience, and whether an operation makes an understandable
+pixel change remain human visual-review questions. The inspector deliberately
+does not pretend that geometry and timing alone prove those properties; its
+storyboards and event sheets make that review repeatable.
