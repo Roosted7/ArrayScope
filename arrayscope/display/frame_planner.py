@@ -476,7 +476,8 @@ class FramePlanner:
         ``(semantic_key, "montage", axis, source_index)``. Measured on a
         272-tile montage driven through the real viewport machinery, all
         three hold across a pan while ``target`` (a fresh object every
-        retarget) and ``view_range`` do not — see the branch's dated note.
+        retarget) and ``view_range`` do not —
+        ``docs/redesign/frame-plan-region-reuse-2026-07-30.md``.
 
         Returns None when reuse is off or the key is unhashable (a test
         double for the frame target), which puts the caller back on the

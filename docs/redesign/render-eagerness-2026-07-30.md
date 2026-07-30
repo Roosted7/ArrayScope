@@ -280,6 +280,13 @@ Already correctly scoped, for contrast: `mark_ladder_swaps_for_current_demand`
 (`montage.py:209`) — which is what makes the `id(plan)`-keyed caches viable in
 the first place.
 
+**Closure log.** The first two rows (`_plan_montage` and
+`FramePlan.__post_init__`) are addressed in
+[frame-plan-region-reuse-2026-07-30.md](frame-plan-region-reuse-2026-07-30.md):
+the pan-invariant region skeleton and its derived signature are built once
+per montage plan, measured 85–93% off the planner's per-retarget cost at 272
+tiles. The remaining rows are open.
+
 This section is consistent with the measured
 [index-scroll anatomy](../../docs/redesign/) finding that de-duplicating
 per-tile work, not GPU or upload work, produced the −25%.
