@@ -44,9 +44,40 @@ Useful flags: `--list`, `--only <substring>`, `--formats gif,avif,mp4`,
 Commit the refreshed files in this directory together with the change that
 made them stale.
 
+## Inspecting what viewers actually receive
+
+Encoding success is not a visual acceptance gate. After regenerating media,
+decode the final MP4, AVIF, and GIF files into agent-readable contact sheets
+and a local review gallery:
+
+```bash
+PATH=~/miniconda3/bin:$PATH direnv exec . \
+  python tools/demo_inspector.py --strict
+```
+
+The report is written under `tests/artifacts/demo-inspection/` (gitignored):
+
+- `*-storyboard.png` is a timestamped, evenly sampled contact sheet of each
+  final encoded file. Image-capable agents can open these PNGs directly.
+- `report.json` records dimensions, duration, frame rate, file size, README
+  display scale, companion-format parity, and absolute artifact paths.
+- `index.html` plays every final format beside its storyboard for human
+  review.
+
+Use `--only <substring>` for one scenario and increase `--samples` when an
+interaction needs closer inspection. `--strict` fails when a companion format
+is missing or when encoded durations/aspect ratios disagree. Those structural
+checks complement, but do not replace, reviewing cursor alignment, click/menu
+visibility, captions, readable scale, and whether each promised feature is
+actually visible.
+
 ## Staying maintainable
 
 `tests/app/test_demo_recorder_smoke.py` records every scenario in `--smoke`
 mode in CI. If a widget or window entry point a scenario scripts against is
 renamed or removed, the suite fails at once — the demos break loudly in the
 PR that changed the UI, not silently in the README.
+
+`tests/app/test_demo_inspector.py` creates a small encoded video and proves the
+inspection path decodes the final artifact, writes a usable storyboard/JSON/
+HTML bundle, and fails closed when an expected companion format is absent.
