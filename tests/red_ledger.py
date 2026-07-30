@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections import Counter
 from pathlib import Path
 
 #: Sits next to the map, shares its lifetime, gitignored like it.
@@ -322,6 +323,63 @@ def _merge_marks(theirs: dict, ours: dict) -> dict:
             )[:_RECENT_LIMIT],
         }
     return merged
+
+
+def context_summary(mark) -> str | None:
+    """The conditions of one test's recorded observations, as a single line.
+
+    Facts in the order a reader wants them and nothing else: what the machine
+    was carrying, how many workers the run had, which command it was. No
+    verdict, no ranking, no "probably load" — the correlation is the reader's
+    to draw, and a harness that drew it would be a harness that dismissed
+    observations for them.
+
+    The load figures are the raw one-minute averages; where the run was too
+    young for its own parallelism to be subtractable the opening sample stands
+    in (the file keeps the distinction, this line does not — both are the same
+    machine during the same run). ``foreign`` is the estimate of the part that
+    was not this suite.
+    """
+
+    recent = _recent_of(mark)
+    if not recent:
+        return None
+    parts = [
+        _numbers("loads", [entry.get("load", entry.get("load_at_start")) for entry in recent]),
+        _numbers("foreign", [entry.get("foreign_load") for entry in recent]),
+        _numbers("workers", [entry.get("workers") for entry in recent], digits=0),
+    ]
+    shapes = Counter(str(entry["shape"]) for entry in recent if entry.get("shape"))
+    if shapes:
+        parts.append("shapes " + " ".join(f"{name}×{n}" for name, n in shapes.most_common()))
+    stated = [part for part in parts if part]
+    if not stated:
+        return None
+    line = ", ".join(stated)
+    if _every_observation_was_under_foreign_load(recent):
+        # A fact about the conditions, and only that. It does not explain the
+        # flake, does not excuse it, and changes nothing the harness does.
+        line += " — all observations under external load"
+    return line
+
+
+def _numbers(label: str, values: list, *, digits: int = 1) -> str:
+    numeric = [value if isinstance(value, (int, float)) else None for value in values]
+    if not any(value is not None for value in numeric):
+        return ""
+    rendered = "/".join("?" if value is None else f"{value:.{digits}f}" for value in numeric)
+    return f"{label} {rendered}"
+
+
+def _every_observation_was_under_foreign_load(recent: list[dict]) -> bool:
+    from tests.load_report import busy_threshold
+
+    threshold = busy_threshold()
+    for entry in recent:
+        load = entry.get("foreign_load", entry.get("load", entry.get("load_at_start")))
+        if not isinstance(load, (int, float)) or load < threshold:
+            return False
+    return bool(recent)
 
 
 def _read_flakes(path: Path) -> dict[str, dict[str, dict]]:

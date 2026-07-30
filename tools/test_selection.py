@@ -231,10 +231,14 @@ def command_status(args) -> int:
             "then passed."
         )
         print("`--since` never trusts their recorded green; the mark clears when their")
-        print("dependencies change:")
+        print("dependencies change. The conditions below are recorded evidence for a")
+        print("diagnosis, and are never used to discount an observation:")
         for name, mark in sorted(flakes.items()):
             seen = mark.get("last_seen") or "?"
             print(f"    {mark.get('count', 1)}x  last {seen}  {name}")
+            conditions = red_ledger.context_summary(mark)
+            if conditions:
+                print(f"        {conditions}")
         print()
     print()
     print("declared child-process dependencies (invisible to coverage):")

@@ -44,7 +44,14 @@ def _cpu_count() -> int:
     return os.cpu_count() or 1
 
 
-def _busy_threshold() -> float:
+def busy_threshold() -> float:
+    """The load above which this file is willing to say "busy", out loud.
+
+    Public because the flake ledger prints the same judgement about loads it
+    recorded minutes or days ago, and two thresholds that could drift apart
+    would let the same number read as busy in one report and quiet in the other.
+    """
+
     return max(_BUSY_FLOOR, _BUSY_SHARE * _cpu_count())
 
 
@@ -74,7 +81,7 @@ class LoadWindow:
 def opening_line(start: LoadWindow) -> str | None:
     """A warning for load that was already there before this run started."""
 
-    if start.load is None or start.load < _busy_threshold():
+    if start.load is None or start.load < busy_threshold():
         return None
     return (
         f"WARNING: system load {start.load:.1f} on {_cpu_count()} cores before this run — "
@@ -93,7 +100,7 @@ def closing_line(start: LoadWindow, end: LoadWindow) -> str | None:
     if end.load is None:
         return None
     foreign = end.load - end.own_parallelism_since(start)
-    if foreign < _busy_threshold():
+    if foreign < busy_threshold():
         return None
     return (
         f"WARNING: ~{foreign:.1f} of the load on {_cpu_count()} cores during this run came from "

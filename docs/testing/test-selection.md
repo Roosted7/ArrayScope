@@ -769,6 +769,54 @@ re-recorded. New code is new evidence, and the old flakiness was never about it.
 No score, no decay, no threshold: one observation is enough to know the
 fingerprint does not determine the outcome.
 
+The ledger travels with the map. Almost all work here happens in a worktree that
+is then deleted, so an observation used to die with the checkout that made it —
+while the map it is *about* went on to be [adopted](#the-map) by the main
+checkout, arriving able to vouch for a green somebody had just watched flip.
+Seeding and adoption now carry it, merging rather than replacing: both sides are
+records of things that happened, counts add, and the newer sighting wins. The
+count is therefore "how often this kept happening", not an audited total — an
+observation seeded out and adopted back is counted twice — which is why nothing
+in the harness branches on its value.
+
+#### What each observation records
+
+A count answers *how often*. The next question is always *under what*, so each
+observation keeps the conditions of the run it happened on — the last five per
+test, newest first:
+
+| Recorded | What it is |
+|---|---|
+| `at` | when, ISO-8601 UTC |
+| `load` | the one-minute load average at that moment, this suite included |
+| `foreign_load` | that, minus this run's own parallelism — an estimate of what *else* was on the machine |
+| `load_at_start` | stands in for both when the run was still too young for the subtraction to mean anything. The name is the disclosure |
+| `workers` | xdist workers, `0` for in-process. Absent if an `-n auto` had not resolved yet |
+| `shape` | `loop`, `since`, `rerun-reds` or `noselect` |
+
+`python tools/test_selection.py status` prints them under each flake:
+
+```
+observed flakes (1) — went red, nothing they execute changed, then passed.
+    4x  last 2026-07-30 21:12  tests/ui/test_zoom.py::test_settles
+        loads 6.2/7.9/9.3/4.1, foreign 4.1/5.2/6.9/0.3, workers 8/8/8/0,
+        shapes loop×3 rerun-reds×1
+```
+
+This is **diagnosis evidence, and nothing else**. It is what lets you tell a
+test that flips on a quiet machine, serially — a real defect, and a cheap one to
+reproduce — from one only ever seen at load 9 on eight workers, which is a
+different investigation. The line states facts in the order a reader wants them
+and draws no conclusion; if every observation was made under external load
+(above `tests/load_report.py`'s busy threshold) it says exactly that, as a fact.
+
+**The harness records confounders and never uses them to discount an
+observation.** No mark is weakened, hidden, expired or explained away because
+the machine was busy, the run was wide, or the shape was unusual. Load is a
+trigger for real flakes at least as often as it is an alibi, so an automatic
+"probably just load" would suppress precisely the observations worth acting on.
+The correlation is a human judgement, made from the printed facts.
+
 **The baseline is resolved, not assumed**, and the run prints which ref it used.
 In order: `ARRAYSCOPE_BASELINE_REF`, then the branch's upstream, then `main`,
 then `origin/main`. The upstream comes first so a branch stacked on another
