@@ -1063,6 +1063,27 @@ def test_rerun_reds_is_a_flag_and_nothing_else():
     assert testmon_policy.rerun_known_red_tests(_option_config(rerun_reds=True)) is True
 
 
+def test_since_re_runs_inherited_reds_without_being_asked():
+    """The merge gate owns the reds it would otherwise only mention.
+
+    `--since` claims "everything this branch changed, ready to merge", and an
+    inherited red it declines to run is a hole in that claim -- the moment the
+    branch lands, someone else's red is main's red. It used to only print the
+    skip: one grey line under a bold `900 passed`, which reads as noise, and
+    did, for an entire session.
+
+    The inner loop keeps the cheap behaviour: re-running every red on a clean
+    tree measured 124 s, and an inner loop that costs two minutes to
+    re-confirm what everybody already knows is one nobody uses.
+    """
+
+    assert testmon_policy.rerun_known_red_tests(_option_config(since="")) is True
+    assert testmon_policy.rerun_known_red_tests(_option_config(since="main")) is True
+    # The plain loop still skips them.
+    assert testmon_policy.rerun_known_red_tests(_option_config(since=None)) is False
+    assert testmon_policy.rerun_known_red_tests(_option_config()) is False
+
+
 def test_a_config_without_the_option_reads_as_off():
     """`tools/test_selection.py` builds configs that never registered it."""
 

@@ -251,6 +251,14 @@ def rerun_known_red_tests(config=None) -> bool:
     you are fixing one of them, since the fix can land outside the truncated
     dependency set of the run that failed.
 
+    **``--since`` implies it.** That run means "everything this branch changed,
+    ready to merge", and a red it declined to re-run is a hole in exactly that
+    claim: the moment the branch lands, an inherited red is main's red. It used
+    to only *print* the skip, one grey line under a bold ``900 passed``, which
+    is a line that gets read as noise -- it was, for a whole session, by the
+    author of this paragraph. The inner loop keeps the cheap behaviour, because
+    two minutes to re-confirm what everybody knows is an inner loop nobody uses.
+
     The flag is the only spelling. An ``ARRAYSCOPE_TESTMON_RERUN_FAILING``
     variable used to shadow it, justified by workers being "handed no command
     line of their own"; that was measured false on 2026-07-30 — an xdist worker
@@ -261,6 +269,9 @@ def rerun_known_red_tests(config=None) -> bool:
     if config is not None:
         try:
             if bool(config.getoption("rerun_reds", False)):
+                return True
+            # --since is a merge gate, so it owns the inherited reds too.
+            if config.getoption("since", None) is not None:
                 return True
         except (AttributeError, ValueError):
             # Not a pytest run, or the option was never registered — the

@@ -17,6 +17,8 @@ runs*, never *which ring a claim needs*.
    somebody else was iterating in. Still selected, still fast.
 3. **`pytest --rerun-reds` when the red you are fixing is one you inherited.**
    Selection does not re-run those, so even a node id reports it deselected.
+   `--since` implies it: a merge gate that declined to run a red is not a gate,
+   and the moment the branch lands an inherited red is main's red.
 4. **`--no-testmon` runs only a short list of node ids.** Everything else —
    a bare sweep, a directory, a file, or node ids costing over 5 s — is
    **refused** (exit 4), and the answer is `--testmon-noselect`, which runs
@@ -80,7 +82,7 @@ passes says the affected tests pass — a strictly smaller claim.
 | Blast radius without running anything | `python tools/test_selection.py` |
 | What the map does *not* cover, which reds are yours | `python tools/test_selection.py status` |
 | The current reds are not yours (stale worktree, stacked branch) | `python tools/test_selection.py accept-reds` |
-| Re-run the inherited reds too | `pytest --rerun-reds` |
+| Re-run the inherited reds too | `pytest --rerun-reds` (implied by `--since`) |
 | Rebuild the map from scratch | `rm .testmondata && pytest` |
 | Re-record without deselecting | `pytest --testmon-noselect` |
 | Run a whole file or directory regardless of selection | `pytest --testmon-noselect <paths>` |
