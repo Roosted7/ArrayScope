@@ -108,6 +108,67 @@ add bounds appropriate to your data, such as `0.0` and `1.0`. When a user adds
 the operation, the same metadata builds the parameter popup and prevents an
 out-of-bounds value from being applied.
 
+## Apply it to a subset of the dimensions
+
+Most functions you already have are written for one image, not for a whole
+5-D acquisition. You do not have to widen them.
+
+An operation is told which axes to work on in one of three ways: none, exactly
+one (**Requires axis**, a single dropdown at add time), or an axis **set**
+(`"requires_axes": true`, which renders a checkbox per dimension in the
+parameter popup). A set is normalized on the way in — sorted, deduplicated,
+non-empty — so picking dimensions 2 and 0 is the same operation as picking 0
+and 2.
+
+On top of the set, `"maps_over_slabs": true` changes what your function
+receives. It is handed each *slab* spanning exactly the selected axes, once per
+position of every other axis, and ArrayScope reassembles the results:
+
+```python
+def unsharp_image(data, amount: float = 1.0):
+    """Sharpen one image. `data` is a 2-D slab, not the volume."""
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+
+    blurred = gaussian_filter(np.asarray(data, dtype=float), sigma=2.0)
+    return data + amount * (data - blurred)
+```
+
+Import it, then set `"maps_over_slabs": true` and `"axis_arity": [2, 2]` in the
+operation's wrapper JSON — `<slug>.json`, next to your code file in the user
+operations folder, reachable from the manager's **Open folder**; the fields are
+listed in the [wrapper schema](plugin-operations.md#wrapper-schema). The arity
+says this function only makes sense on an image. Add the operation to a 5-D
+dataset, tick the two displayed dimensions, and it runs on every slice of the
+remaining three without a loop anywhere in your code.
+
+The declaration buys more than convenience. Because ArrayScope knows the
+operation only couples the selected axes, scrubbing an *un-selected* dimension
+recomputes a single slab instead of re-running your function over the whole
+volume. Two rules follow from that, and both are enforced rather than assumed:
+
+- Return a slab of the shape you were given and you keep the per-slab
+  behaviour. Resize the slab and the operation still runs correctly, but falls
+  back to whole-array evaluation — the cheap path would otherwise have to place
+  chunks using a fitted shape rule, and a misplaced chunk is a wrong picture
+  shown at interactive speed.
+- Return a slab with a different number of dimensions and the operation is
+  refused: there is no position in the array for a slab that lost an axis.
+
+If you want the axes themselves rather than a slab — you are writing the N-D
+code yourself — declare an `axes` argument instead:
+
+```python
+def sum_over(data, axes):
+    """Sum over the chosen dimensions, keeping them as length 1."""
+    import numpy as np
+
+    return np.sum(data, axis=tuple(axes), keepdims=True)
+```
+
+`axes` is recognized on import the way `axis` is, so it becomes the axis
+picker rather than one more number to type.
+
 ## Add auxiliary array inputs
 
 The primary array remains the function's first argument. Declare every

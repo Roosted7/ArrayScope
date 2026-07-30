@@ -100,12 +100,78 @@ def make_roll():
 | `output_shape` | identity | Compatibility adapter used only when bounded characterization cannot run. Discovered output is authoritative. |
 | `output_dtype` | identity | Compatibility adapter used only when bounded characterization cannot run. Discovered output is authoritative. |
 | `parameters` | `()` | Tuple of `OperationParameter` (see below). |
-| `requires_axis` | `False` | Whether the op takes an axis. |
+| `requires_axis` | `False` | The op takes exactly one axis, passed to `build` as its first argument. |
+| `requires_axes` | `False` | The op takes an axis **set** instead. Mutually exclusive with `requires_axis`; `build` receives a sorted tuple. |
+| `axis_arity` | `(1, None)` | `(minimum, maximum)` bound on the size of that set. `None` maximum = as many as the array has. |
+| `maps_over_slabs` | `False` | Apply the callable to each **slab** spanning the selected axes and broadcast over the rest. Implies `requires_axes`. |
 | `changes_shape` | `False` | Whether output shape differs from input. |
 | `group` | `"Other"` | Taxonomy group for menus/palettes (see `DEFAULT_GROUP_ORDER`). |
 | `description` | `""` | One-line summary shown in tooltips / the operation manager. |
 | `icon` | `"data_array"` | Material icon name the UI renders for this op. |
 | `source_identity` | `None` | Hashable value, or callable returning one, that invalidates characterization when code changes. |
+
+### Applying over a set of axes
+
+An operation is told which axes to work on in exactly one of three ways, and
+every surface (add popup, params popup, palette, recipe, `create_operation`)
+branches on the single derived `OperationEntry.axis_selection`:
+
+| `axis_selection` | declared by | the op receives | recipe key |
+| --- | --- | --- | --- |
+| `"none"` | neither flag | nothing | — |
+| `"one"` | `requires_axis=True` | `axis`, an `int` | `"axis": 1` |
+| `"set"` | `requires_axes=True` | `axes`, a sorted tuple of unique ints | `"axes": [1, 2]` |
+
+The set is normalized once, on the way in: sorted, deduplicated, non-empty,
+within `axis_arity`, and within the array's rank when the caller knows it. So
+`axes=(2, 0)` and `axes=(0, 2)` build the *same* operation — equal, equally
+hashed, one stage-cache key, one recipe item.
+
+A `requires_axes` op declares its capabilities over the set: `blocking_axes`
+and `expands_request_axes` are the selected axes, and everything else stays
+chunkable. That complement *is* the broadcast — chunked evaluation walks it
+while each chunk carries the selected axes whole. The built-in
+`centered_fftn` / `centered_ifftn` / `mean_axes` are the worked examples.
+
+### `maps_over_slabs`: write a 2-D function, get an N-D operation
+
+Declaring `maps_over_slabs` (which implies `requires_axes`) changes what your
+callable is handed. Instead of the whole array it receives, one at a time, each
+**slab** spanning exactly the selected axes — a 2-D image when two axes are
+selected — and ArrayScope broadcasts over every other axis:
+
+```python
+def make_normalize_image():
+    def fn(image):            # a 2-D slab, not the volume
+        peak = float(abs(image).max())
+        return image / peak if peak else image
+
+    return PluginOperationSpec(
+        id="mypkg:normalize_image",
+        label="Normalize each image",
+        fn=fn,
+        maps_over_slabs=True,   # implies requires_axes
+        axis_arity=(2, 2),      # this one is strictly 2-D
+    )
+```
+
+Your callable is deliberately **not** told which axes its slab spans: the slab
+has its own axis numbering, and indexing it by the array's would be wrong.
+
+Two things follow from the declaration:
+
+- **Characterization is slab-shaped.** The probes below run at slab rank, so a
+  shape rule is fitted for one slab and projected back onto the array by
+  substituting the predicted slab sizes into the selected axis positions.
+- **The capability declaration is gated on shape preservation.** If your
+  callable returns a slab of the shape it was given, the operation declares
+  blocking = the selected axes and chunkable = the complement, so scrubbing an
+  un-applied dimension recomputes one slab instead of the volume. If it
+  *resizes* the slab it still runs correctly and is still a cache stage, but it
+  falls back to whole-array blocking — chunk placement would otherwise depend
+  on the fitted shape rule, and a misplaced chunk is a wrong picture at
+  interactive speed. A callable that changes the slab's **rank** is refused
+  outright: there is no position in the array for a slab that lost an axis.
 
 ArrayScope runs `fn` on bounded representative slabs and discovers shape,
 dtype, and region behavior together. It extrapolates only identity,
@@ -417,6 +483,9 @@ wrapper JSON `<slug>.json`; an *imported* op also has its copied code file
     "callable": "my_function"
   },
   "requires_axis": true,
+  "requires_axes": false,
+  "axis_arity": [1, null],
+  "maps_over_slabs": false,
   "changes_shape": false,
   "input_slots": [
     {
@@ -591,6 +660,12 @@ so a link-mode edit that changes the signature is honored:
 
 - `axis` is passed **only if** your function declares an `axis` parameter (or
   `**kwargs`). A function with an `axis` param sets `requires_axis` on import.
+- `axes` is the axis-**set** counterpart: a function declaring an `axes`
+  parameter sets `requires_axes` on import and receives the sorted tuple. It is
+  not treated as an ordinary parameter, so you are not asked to type a number
+  into a spin box for the thing the axis picker exists to choose.
+- a wrapper with `"maps_over_slabs": true` overrides both: your function is
+  called once per slab and receives neither.
 - each declared parameter is passed **by name**, only if your function accepts
   that name (or `**kwargs`).
 
