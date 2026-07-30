@@ -602,13 +602,17 @@ def evaluate_shared_preview(
         )
     previews = []
     # PyQtGraph CPU-composites its final complex tiles, but its compact preview
-    # format deliberately retains the reduced complex source plane.  Produce
-    # the shader-style value payload here for both backends; PyQtGraph bakes
-    # that plane through the round mapping when it builds the Qt preview atlas.
+    # format deliberately retains the reduced complex source plane, which it
+    # bakes through the round mapping when it builds the Qt preview atlas.  So a
+    # CPU backend takes the value payload in exactly two cases: it is holding
+    # that complex atlas, or the values already ARE its display plane (a real
+    # source under a scalar channel).  The mixed case -- a complex source under a
+    # scalar channel -- composites, because its display plane is an extracted
+    # scalar that no complex payload can stand in for.
     shader_preview = (
         bool(shader_display)
-        or np.iscomplexobj(transformed)
-        or not bool(getattr(session, "rgb", False))
+        or preview_retains_complex_source(session, transformed)
+        or (not bool(getattr(session, "rgb", False)) and not np.iscomplexobj(transformed))
     )
     for tile in tuple(tiles or ()):
         _check_preview_cancelled(cancellation_token)
@@ -1118,6 +1122,26 @@ def display_output_is_composited_rgb(session) -> bool:
     return bool(getattr(session, "rgb", False)) and not bool(
         getattr(session, "shader_display", False)
     )
+
+
+def preview_retains_complex_source(session, values) -> bool:
+    """Whether a CPU-mapping backend keeps the reduced COMPLEX plane in a preview.
+
+    The one owner of the "complex atlas or composited plane" question, because
+    the two producers that ask it must not answer it differently.
+
+    The compact PyQtGraph atlas retains reduced ``complex64`` pages and bakes
+    its RGB from them, so a complex *display* keeps the complex source. A
+    complex source shown through a SCALAR channel (real/abs) does not: its
+    display plane is an extracted scalar, so a complex payload can never
+    satisfy the tile's ``scalar_r32f`` target. Testing ``iscomplexobj`` without
+    also asking whether the display is complex handed those sessions a payload
+    no commit could accept, and stranded every ``channel-real`` and
+    ``complex-mode`` montage transition in a permanent stall with six
+    unpresentable payloads.
+    """
+
+    return bool(getattr(session, "rgb", False)) and bool(np.iscomplexobj(values))
 
 
 def can_evaluate_reduced_preview(session, tile) -> bool:
@@ -2090,7 +2114,7 @@ def _evaluate_tile_reduced_input_preview(
         final_region_for_request(transformed.shape, request),
     )
     canonical_orientation = bool(getattr(session, "canonical_orientation", False))
-    if bool(shader_display) or np.iscomplexobj(slab):
+    if bool(shader_display) or preview_retains_complex_source(session, slab):
         value = make_shader_image_from_slab(
             slab,
             request,
