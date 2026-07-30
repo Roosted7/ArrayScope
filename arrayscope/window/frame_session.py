@@ -2760,6 +2760,7 @@ class FrameSession:
             if planes is None:
                 decline(declined_reason[0] if declined_reason else "no_reslicable_plane")
                 continue
+
             # Bind every enclosing-loop value the closure reads as a default
             # argument.  The retained-LOD path builds more than one candidate
             # per tile and the governed seed runs chunks across posted

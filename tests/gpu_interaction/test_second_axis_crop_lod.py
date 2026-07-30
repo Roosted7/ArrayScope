@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from time import monotonic, sleep
+
 import numpy as np
 import pytest
-from time import monotonic, sleep
 
 from arrayscope.tools.framebuffer_reference import assert_wgpu_frame_matches_cpu_reference
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
@@ -151,7 +152,8 @@ def test_second_display_axis_crop_presents_resident_lod_before_refining(
         observation_count, max_callback_ms, current = (
             win.resource_governor.ui_observation_epoch_evidence(epoch)
         )
-        assert current and observation_count > 0
+        assert current
+        assert observation_count > 0
         assert max_callback_ms <= 50.0, (
             f"retained crop handoff exceeded R5: {max_callback_ms:.3f} ms"
         )

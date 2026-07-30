@@ -592,6 +592,17 @@ class FramePipelineEffects:
     def _publish_resident_crop_rebinds(self) -> None:
         """Arm evidence and the atomic mapping handoff after all slots rebind."""
 
+        # This is the SECOND rebind seam, and it is the one that publishes a
+        # complete 272-tile retained cohort before any exact ACK.  The ordinary
+        # seam arms the R3 clamp inline; without the same call here the whole
+        # fallback cohort would be drawn through the predecessor window and
+        # only discover its bounds on a later commit.  The clamp is keyed on
+        # the rebound scope, so it covers every wrapper this gate is about to
+        # hand to the backend.
+        _arm_resident_crop_rebind_level_clamp(
+            self.session,
+            tuple(getattr(self.session, "resident_crop_fallback_source_ids", None) or ()),
+        )
         self.renderer.rearm_crop_rebind_level_evidence(self.session)
         owner = (
             int(getattr(self.session, "session_id", 0) or 0),
