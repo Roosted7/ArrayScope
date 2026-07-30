@@ -839,11 +839,6 @@ class ImageViewShell(QtWidgets.QWidget):
     def montageDisplayMode(self) -> str:
         return str(self._montage_display_mode)
 
-    def clearMontageTileLayer(self) -> None:
-        """Backend contract: drop the tiled presentation for a surface reset."""
-
-        raise NotImplementedError
-
     def invalidate_tiled_presentation(self, reason: str, *, hide_pixels: bool = True) -> None:
         """Hide semantically superseded pixels without discarding residency.
 
@@ -1191,24 +1186,10 @@ class ImageViewShell(QtWidgets.QWidget):
             "native_pointer_interaction": bool(self.capabilities.native_pointer_interaction),
             "montage_display_mode": self.montageDisplayMode(),
             "physically_visible_tile_count": physically_visible_tile_count,
-            "last_reset_reason": str(getattr(self, "_last_surface_reset_reason", "")),
         }
 
     def interaction_event_owner(self) -> str:
         return "shared-controller"
-
-    def reset_surface(self, reason: str) -> None:
-        self._cancel_interaction("surface-reset")
-        self._last_surface_reset_reason = str(reason)
-        self.reset_tiled_residency(reason)
-        self.clearMontageTileOverlays()
-        layer = getattr(self, "_tile_truth_overlay_layer", None)
-        if layer is not None:
-            layer.clear()
-        overlay = getattr(self, "_evaluation_overlay", None)
-        if overlay is not None:
-            overlay.hide()
-        self.setImageStale(False)
 
     def teardown_surface(self) -> None:
         if self._surface_teardown_done:
@@ -2886,9 +2867,6 @@ class ImageView2D(ImageViewShell):
 
     def _tiled_presentation_layer(self):
         return self._montage_tile_layer
-
-    def clearMontageTileLayer(self) -> None:
-        self.reset_tiled_residency("surface-reset")
 
     def invalidate_tiled_presentation(self, reason: str, *, hide_pixels: bool = True) -> None:
         # The retained ImageItems keep drawing the previous plane when

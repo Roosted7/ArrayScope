@@ -601,6 +601,45 @@ adjudication belongs to [queue row 12](../queue.md).
   no production caller; the WGPU total-wipe `reset_tiled_residency`
   (`wgpu_imageview2d.py:2762`) is reachable only through them and `clear()`.
 
+### 7.1 Adjudicated 2026-07-30 — all six deleted
+
+Every entry above was rot, and every one of them was orphaned by a named
+commit rather than by drift:
+
+| Entry | Orphaned by | Survivor |
+|---|---|---|
+| `_remove_tile` | `02bc08ae` "Add proper residency to PyQtGraph" | `_evict_resident_state` (budget-governed, refuses a visible state) |
+| `_discard_direct_reuse_pool` | never had one | `clear()` and `_prune_resident_items` |
+| `prune` / `discard` | `934081fb` "Delete duplicate FrameSession tile-work queue" | none needed — production builds the queue from a candidate set and drains it |
+| `ChunkStore` / `SlotPool` | never adopted | `PageTable` + the executor's own layer pools |
+| `clearMontageTileLayer` | `da54e9db` "Improve VisPy atlas re-usage" | `hide_tiled_presentation` / `invalidate_tiled_presentation` |
+| `reset_surface` | born unreachable in `ff0fa59d` | none — see below |
+
+Two findings worth keeping:
+
+- **`reset_surface` was speculative contract, not decayed contract.** It was
+  introduced with the `ImageSurface` protocol and never had a caller in
+  `arrayscope/`. The event class that would justify it does not exist either:
+  the tree has no device-lost, context-loss, or surface-lost handling anywhere,
+  and no runtime backend switch. Its one product-visible artifact was
+  `presentation_diagnostics()["last_reset_reason"]`, which only a test read.
+- **The residue is `clear()`.** With `reset_surface` and
+  `clearMontageTileLayer` gone, `reset_tiled_residency` is reachable only from
+  `ImageViewShell.clear()` / `WgpuImageView2D.clear()` — and `clear()` itself
+  has no caller in `arrayscope/`, `tools/`, or `tests/`. That is the same
+  cluster one level down. It is left standing deliberately: `reset_tiled_residency`
+  is a declared backend-contract member with its own contract test
+  (`test_reset_tiled_residency_survives_and_recommits`), so retiring the reset
+  boundary is a contract decision, not a dead-code sweep. Next row-12 candidate.
+
+A third finding is about the guard rather than the code: `ChunkStore` and
+`SlotPool` were invisible to `tools/dead_code.py` **because** `gpu/__init__.py`
+imported them. The guard rightly refuses to count an `__all__` entry as a
+caller, but it does count the `from … import …` line that feeds it. A
+re-export-only package `__init__` therefore launders test-only code into
+"reachable" — the same rot one level up, and the reason this module had to be
+found by reading rather than by the gate.
+
 ---
 
 ## 8. Summary of the gap

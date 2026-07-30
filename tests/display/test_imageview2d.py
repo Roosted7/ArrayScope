@@ -3261,7 +3261,6 @@ def test_profile_drag_is_owned_by_shared_pointer_lifecycle(qt_app, backend):
     ("action", "reason"),
     [
         ("mode-change", "tool-change"),
-        ("surface-reset", "surface-reset"),
         ("target-removal", "target-removed"),
         ("window-deactivate", "window-deactivate"),
     ],
@@ -3287,8 +3286,6 @@ def test_pointer_capture_is_cancelled_by_interruptions(qt_app, action, reason):
 
         if action == "mode-change":
             view.setInspectionTool("profile")
-        elif action == "surface-reset":
-            view.reset_surface("surface-reset")
         elif action == "target-removal":
             view.removeRoi(selection.id)
         elif action == "window-deactivate":
@@ -3321,7 +3318,11 @@ def test_pointer_capture_is_cancelled_by_close(qt_app):
 
 
 @pytest.mark.parametrize("phase", ["armed", "drawing"])
-def test_surface_reset_cancels_roi_drawing_lifecycle(qt_app, phase):
+def test_window_deactivation_cancels_roi_drawing_lifecycle(qt_app, phase):
+    # Drawing has its own lifecycle state (a pending tool and accumulated
+    # points) that dragging does not, so an interruption has to clear more than
+    # the pointer capture. This used to be driven through ``reset_surface``,
+    # which no shipped path ever called; window deactivation is a real one.
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.display.imageview2d import ImageView2D
@@ -3345,12 +3346,12 @@ def test_surface_reset_cancels_roi_drawing_lifecycle(qt_app, phase):
         else:
             assert view.interactionState().phase is PointerPhase.DRAWING_ARMED
 
-        view.reset_surface("surface-reset")
+        view.event(QtCore.QEvent(QtCore.QEvent.Type.WindowDeactivate))
 
         assert view.interactionState().phase is PointerPhase.IDLE
         assert view.interactionState().pending_draw_tool is None
         assert view.interactionState().drawing_points == ()
-        assert view.interactionState().last_cancel_reason == "surface-reset"
+        assert view.interactionState().last_cancel_reason == "window-deactivate"
     finally:
         view.close()
 

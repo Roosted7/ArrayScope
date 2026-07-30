@@ -45,7 +45,10 @@ Read in order: `docs/decisions/0055-…`, `docs/decisions/0056-…`,
 
 - **G1/G2**: `arrayscope/gpu/` (Qt/VisPy-free): DataChunkKey/ViewTileKey,
   anisotropic `ChunkLod` (reduction vector + semantic reducer), `ChunkGrid`
-  window math, `PageTable` (generations, LRU, pins, remap), `ChunkStore`.
+  window math, `PageTable` (generations, LRU, pins, remap). The `ChunkStore`
+  facade that once sat over `PageTable` was deleted 2026-07-30: no shipped
+  path ever adopted it, and its eager evict-at-reservation loop described a
+  residency model the WGPU executor does not implement.
   The VisPy atlas pool's residency bookkeeping runs on `PageTable`.
 - **G3 (window-shift fast path, real-GL verified)**: exact non-montage
   payloads carry `PayloadSourceAnchor` (content key + native rect;

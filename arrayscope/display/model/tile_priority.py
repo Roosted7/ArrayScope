@@ -119,24 +119,6 @@ class MontageTilePriorityQueue:
         for tile in tuple(tiles or ()):
             self.append(tile)
 
-    def discard(self, tile_or_index) -> bool:
-        index = _tile_index(tile_or_index)
-        if index not in self._tiles:
-            return False
-        self._tiles.pop(index, None)
-        self._versions.pop(index, None)
-        self._sequence.pop(index, None)
-        return True
-
-    def prune(self, keep: set[int] | frozenset[int]) -> int:
-        keep = {int(index) for index in keep}
-        removed = 0
-        for index in tuple(self._tiles):
-            if int(index) not in keep:
-                self.discard(index)
-                removed += 1
-        return int(removed)
-
     def set_context(self, context: TilePriorityContext, *, max_items: int | None = None) -> int:
         """Adopt a new scheduling context; takes effect on every tile.
 
@@ -175,7 +157,10 @@ class MontageTilePriorityQueue:
             self._versions.pop(index, None)
             self._sequence.pop(index, None)
             return tile
-        # Heap entries can all be stale after heavy pruning. Rebuild lazily.
+        # Reached only if every heap entry was stale while tiles remain. No
+        # in-tree path produces that today (``discard``/``prune``, the lazy
+        # deletion that did, were removed as dead in 2026-07-30); the rebuild
+        # stays as the recovery any future out-of-band removal would need.
         self._rebuild_heap()
         if self._heap:
             return self.pop()

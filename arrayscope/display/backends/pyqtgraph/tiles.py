@@ -2446,19 +2446,6 @@ class MontageTileLayer:
         self._add_to_direct_reuse_pool(existing)
         self._touch_resident_state(existing)
 
-    def _remove_tile(self, tile_number: int) -> None:
-        state = self._states.pop(int(tile_number), None)
-        if state is None:
-            return
-        self._unregister_source_state(state)
-        self._remove_from_direct_reuse_pool(state)
-        with contextlib.suppress(Exception):
-            self.layer_owner.remove_tile_item(int(tile_number))
-        self._resident_bytes -= int(getattr(state, "resident_nbytes", 0) or 0)
-        self._rgb_source_cache_bytes -= int(getattr(state, "source_cache_nbytes", 0) or 0)
-        state.resident_nbytes = 0
-        state.source_cache_nbytes = 0
-
     def _set_tile_data(
         self,
         state: TileLayerItemState,
@@ -2720,22 +2707,6 @@ class MontageTileLayer:
             if int(state.tile_number) not in protected_tiles:
                 return self._pop_direct_reuse_pool(index)
         return self._pop_direct_reuse_pool(0)
-
-    def _discard_direct_reuse_pool(self) -> None:
-        for state in tuple(self._direct_reuse_pool):
-            self._unregister_source_state(state)
-            self._set_state_visible(state, False)
-            state.rgb_base = None
-            state.hist_source = None
-            state.display_cache = None
-            state.source_cache_nbytes = 0
-            state.resident_nbytes = 0
-        self._direct_reuse_pool.clear()
-        self._direct_reuse_pool_ids.clear()
-        self._rgb_source_cache_bytes = 0
-        self._resident_bytes = sum(
-            int(getattr(state, "resident_nbytes", 0) or 0) for state in self._states.values()
-        )
 
     def _resident_count(self) -> int:
         return len(self._states)

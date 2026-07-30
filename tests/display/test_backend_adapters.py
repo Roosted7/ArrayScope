@@ -82,9 +82,6 @@ class _FakeSurface:
     def sync_interaction_state(self, state):
         self.calls.append(("interaction", state, None))
 
-    def reset_surface(self, reason):
-        self.calls.append(("reset", str(reason), None))
-
     def teardown_surface(self):
         self.calls.append(("teardown", None, None))
 
@@ -249,9 +246,12 @@ def test_pyqtgraph_surface_exposes_lifecycle_contract(qt_app):
         assert surface.presentation_diagnostics()["physically_visible_tile_count"] == 1
         assert tiled_presentation_visible(surface) is True
 
-        surface.reset_surface("test-context-loss")
+        # Superseding the tiled presentation retracts the physical count. This
+        # used to be asserted through ``reset_surface``, which no shipped path
+        # ever called; ``invalidate_tiled_presentation`` is the boundary a
+        # session transition really crosses.
+        surface.invalidate_tiled_presentation("test-supersede")
         assert surface.presentation_diagnostics()["physically_visible_tile_count"] == 0
-        assert surface.presentation_diagnostics()["last_reset_reason"] == "test-context-loss"
         surface.teardown_surface()
         surface.teardown_surface()
     finally:

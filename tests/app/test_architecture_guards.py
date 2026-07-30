@@ -1190,7 +1190,6 @@ def test_image_view_shell_exposes_surface_contract():
         "def presentation_diagnostics",
         "def interaction_event_owner",
         "def sync_interaction_state",
-        "def reset_surface",
         "def teardown_surface",
     ):
         assert method in backend_text

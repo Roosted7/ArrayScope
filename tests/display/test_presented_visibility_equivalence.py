@@ -266,14 +266,6 @@ def test_eviction_under_a_residency_budget_agrees(view):
     assert _check(view) == {0, 1}
 
 
-def test_discarding_the_reuse_pool_agrees(view):
-    _present(view, _payloads(8))
-    _present(view, _payloads(2), revision=2)
-    view._montage_tile_layer._discard_direct_reuse_pool()
-
-    assert _check(view) == {0, 1}
-
-
 # --- residency reset ----------------------------------------------------------
 
 

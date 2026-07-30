@@ -17,7 +17,7 @@ Command → engine-seam mapping (from the endpoint doc):
 
 ========================  ====================================================
 ``BindContentPlanes``     session/montage plane set → flat-table spans
-``EnsureChunkResident``   ``ChunkStore.ensure`` / pool chunk plan (G1/G3b-2)
+``EnsureChunkResident``   ``WgpuExecutor._ensure`` -> ``PageTable`` + slot pool
 ``EvictChunk``            ``PageTable.unbind``
 ``UpdateTileInstances``   draw parts / quad emission (G3c)
 ``UpdateOverlayGeometry`` shell overlay state -> flat primitive buffer

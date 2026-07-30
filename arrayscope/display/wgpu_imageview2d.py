@@ -2730,9 +2730,6 @@ class WgpuImageView2D(ImageViewShell):
 
     # ---- hide / invalidate / reset -------------------------------------------
 
-    def clearMontageTileLayer(self) -> None:
-        self.hide_tiled_presentation("surface-reset")
-
     def hide_tiled_presentation(self, reason: str) -> None:
         self._wgpu_committed = None
         self._wgpu_tiled_binding_signature = None
@@ -3515,10 +3512,6 @@ class WgpuImageView2D(ImageViewShell):
         diagnostics.update(self.wgpuPresentationDiagnostics())
         diagnostics["interaction_event_owner"] = self.interaction_event_owner()
         return diagnostics
-
-    def reset_surface(self, reason: str) -> None:
-        super().reset_surface(reason)
-        self._wgpu_canvas_update_pending = False
 
     def teardown_surface(self) -> None:
         if getattr(self, "_surface_teardown_done", False):

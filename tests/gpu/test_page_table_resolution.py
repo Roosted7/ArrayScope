@@ -12,15 +12,7 @@ an origin delta of 256 source samples becomes an offset of 64 stored samples.
 
 import pytest
 
-from arrayscope.gpu import (
-    CapacityError,
-    ChunkLod,
-    ChunkStore,
-    DataChunkKey,
-    PageSlot,
-    PageTable,
-    SlotPool,
-)
+from arrayscope.gpu import ChunkLod, DataChunkKey, PageSlot, PageTable
 
 
 def chunk(
@@ -216,38 +208,44 @@ def test_remap_and_slot_reuse_mint_new_binding_generations():
 
 
 def test_owner_pin_replacement_keeps_shared_coverage_until_last_owner_releases():
-    store = ChunkStore(SlotPool(pool_id="lod", slots_per_page=3, max_pages=1))
+    # ``replace_pin_set`` is how the executor publishes one consumer's coverage
+    # (bound planes, the LOD generation, the histogram shield) without
+    # disturbing another's: a page stays unevictable while ANY owner still
+    # names it, and becomes a candidate the moment the last one moves on.
+    table = PageTable()
     coarse = chunk(origin=(0, 0), shape=(1024, 1024), reduction=(3, 3))
     fine_a = chunk(origin=(0, 0), shape=(512, 512), reduction=(1, 1))
     fine_b = chunk(origin=(512, 0), shape=(512, 512), reduction=(1, 1))
-    for key in (coarse, fine_a, fine_b):
-        store.ensure(key, nbytes=1)
+    for slot_index, key in enumerate((coarse, fine_a, fine_b)):
+        bind(table, key, slot_index)
 
-    store.replace_pins("view-a", (coarse,))
-    store.replace_pins("view-b", (coarse,))
-    store.replace_pins("view-a", (fine_a,))
-    assert coarse not in store.table.eviction_candidates()
-    assert fine_a not in store.table.eviction_candidates()
+    table.replace_pin_set("view-a", (coarse,))
+    table.replace_pin_set("view-b", (coarse,))
+    table.replace_pin_set("view-a", (fine_a,))
+    assert coarse not in table.eviction_candidates()
+    assert fine_a not in table.eviction_candidates()
 
-    store.replace_pins("view-b", (fine_b,))
-    assert coarse in store.table.eviction_candidates()
-    assert fine_a not in store.table.eviction_candidates()
-    assert fine_b not in store.table.eviction_candidates()
+    table.replace_pin_set("view-b", (fine_b,))
+    assert coarse in table.eviction_candidates()
+    assert fine_a not in table.eviction_candidates()
+    assert fine_b not in table.eviction_candidates()
 
 
-def test_all_pinned_capacity_denial_preserves_resolvable_coverage():
-    store = ChunkStore(SlotPool(pool_id="lod", slots_per_page=1, max_pages=1))
+def test_all_pinned_table_offers_nothing_to_evict_and_still_resolves():
+    # The pool-exhaustion decision point: with every binding pinned there is no
+    # eviction candidate, so a caller that cannot grow must serve the target
+    # from the coverage it already has rather than dropping a pinned page.
+    table = PageTable()
     coarse = chunk(origin=(0, 0), shape=(1024, 1024), reduction=(3, 3))
     target = chunk(origin=(256, 256))
-    coarse_slot = store.ensure(coarse, nbytes=1).slot
-    store.replace_pins("active-view", (coarse,))
+    coarse_slot = bind(table, coarse, 0)
+    table.replace_pin_set("active-view", (coarse,))
 
-    with pytest.raises(CapacityError):
-        store.ensure(target, nbytes=1)
+    assert table.eviction_candidates() == ()
 
-    assert len(store.table) == 1
+    assert len(table) == 1
     assert_resolution(
-        store.table.resolve(target),
+        table.resolve(target),
         target=target,
         actual=coarse,
         slot=coarse_slot,

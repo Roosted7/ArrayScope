@@ -5374,9 +5374,6 @@ def test_interactive_index_window_retarget_defers_stage_fan_in_without_planning(
         def sync_interaction_state(self, _state):
             pass
 
-        def reset_surface(self, _reason):
-            pass
-
         def teardown_surface(self):
             pass
 

@@ -187,7 +187,7 @@ one-physical-texture-per-tile:
 
 | Protocol command | Existing G-program seam |
 |---|---|
-| ensure chunk resident | `ChunkStore.ensure` / pool chunk plan (G1/G3b-2) |
+| ensure chunk resident | `WgpuExecutor._ensure` -> `PageTable` + layer pool (G1/G3b-2) |
 | update page mapping | `PageTable` bind/remap (G1/G2) |
 | update tile instances | draw parts / quad emission (G3c) |
 | set display mapping | shader-mapping uniforms + physical-truth audit |

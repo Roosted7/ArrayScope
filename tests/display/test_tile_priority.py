@@ -116,22 +116,6 @@ def test_priority_queue_bulk_drain_stays_in_priority_order():
     assert popped == sorted(popped, key=distance)
 
 
-def test_priority_queue_prunes_stale_entries_lazily():
-    plan = _plan()
-    queue = MontageTilePriorityQueue(
-        plan.tiles,
-        context=_context(focus=(16.0, 16.0), visible=range(9)),
-    )
-
-    removed = queue.prune({8})
-    queue.set_context(_context(focus=(16.0, 16.0), visible=(8,)), max_items=1)
-
-    assert removed == 8
-    assert len(queue) == 1
-    assert queue.pop().montage_index == 8
-    assert not queue
-
-
 def test_priority_queue_retarget_takes_full_effect_on_every_pop():
     # The architectural invariant behind montage fill order: pop() always
     # returns the best tile under the CURRENT context, regardless of which

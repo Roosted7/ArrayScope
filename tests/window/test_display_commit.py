@@ -165,9 +165,6 @@ class _FakeImageView:
     def sync_interaction_state(self, state):
         self.interaction_state = state
 
-    def reset_surface(self, reason):
-        self.reset_reason = str(reason)
-
     def teardown_surface(self):
         self.teardown_called = True
 
