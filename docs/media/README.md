@@ -91,6 +91,12 @@ presentation seam with the live combo model and `setCurrentIndex()` signal
 path. This keeps menus visible without pretending an unrelated cursor click
 caused the change.
 
+The same honesty rule applies when no visible control exists in the captured
+layout: the timeline records a named `transition` without drawing a click
+ripple. Drawing interactions are recorded as gestures with their own
+press-to-result frame range. A click is reserved for a live widget or
+composited action whose target contains the cursor.
+
 ## Staying maintainable
 
 `tests/app/test_demo_recorder_smoke.py` records every scenario in `--smoke`

@@ -548,6 +548,38 @@ class Recorder:
     def _finish_action(self, event: dict) -> None:
         event["end_frame"] = self.frame_index
 
+    def transition(self, label: str, invoke, *, settle_after: bool = True, hold_s: float = 0.3):
+        """Record an honest non-pointer transition.
+
+        Some documented states have no visible control in the current layout.
+        They must not borrow a click ripple from an unrelated cursor position.
+        """
+        event = self._start_action("transition", label)
+        invoke()
+        event["activate_frame"] = self.frame_index
+        if settle_after:
+            self.settle()
+        self.hold(hold_s)
+        self._finish_action(event)
+
+    def begin_gesture(self, label: str) -> dict:
+        from pyqtgraph.Qt import QtCore
+
+        event = self._start_action("drag", label)
+        event["press_frame"] = self.frame_index
+        event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
+        self._ripples.append((self.frame_index, QtCore.QPointF(self.cursor)))
+        self.cursor_pressed = True
+        return event
+
+    def finish_gesture(self, event: dict, *, settle_after: bool = True, hold_s: float = 0.3):
+        self.cursor_pressed = False
+        event["activate_frame"] = max(event["start_frame"], self.frame_index - 1)
+        if settle_after:
+            self.settle()
+        self.hold(hold_s)
+        self._finish_action(event)
+
     def write_manifest(self) -> Path:
         if self._open_caption_event is not None:
             self._open_caption_event["end_frame"] = self.frame_index
@@ -800,6 +832,8 @@ def s_showcase(rec: Recorder):
 
 @scenario("fft")
 def s_fft(rec: Recorder):
+    from pyqtgraph.Qt import QtWidgets
+
     win = rec.window(_phantom2d(384), size=(1280, 800))
     rec.caption("A phantom image — let's look at its k-space")
     rec.hold(1.8)
@@ -857,15 +891,20 @@ def s_fft(rec: Recorder):
         rec.choose_combo_item(scale, "log", label="restore log scale")
     _back_to_log_magnitude()
     rec.settle()
-    dock_body = win.operation_dock.widget()
-    rec.move_to(dock_body, seconds=0.8)
-    rec.click(
-        dock_body, rel=(0.15, 0.25), invoke=lambda: win.set_operation_enabled(0, False), move_s=0.3
-    )
+    operation_list = win.operation_dock.operation_list
+    first_item = operation_list.item(0)
+    first_row = operation_list.itemWidget(first_item)
+    first_toggle = next(iter(first_row.findChildren(QtWidgets.QCheckBox)), None)
+    if first_toggle is None:
+        raise RuntimeError("first operation row has no enable checkbox")
+    rec.click(first_toggle, label="disable first FFT")
     rec.hold_until_settled(2.5, tail_s=1.0)
-    rec.click(
-        dock_body, rel=(0.15, 0.25), invoke=lambda: win.set_operation_enabled(0, True), move_s=0.2
-    )
+    first_item = operation_list.item(0)
+    first_row = operation_list.itemWidget(first_item)
+    first_toggle = next(iter(first_row.findChildren(QtWidgets.QCheckBox)), None)
+    if first_toggle is None:
+        raise RuntimeError("rebuilt operation row has no enable checkbox")
+    rec.click(first_toggle, label="enable first FFT", move_s=0.2)
     rec.hold_until_settled(2.5, tail_s=1.6)
 
 
@@ -907,8 +946,7 @@ def s_roi(rec: Recorder):
     x0, y0, x1, y1 = 62.0, 78.0, 148.0, 152.0
     rec.move_to(rec.image_point(x0, y0), seconds=0.8)
     selection = win.img_view.createRoi(RoiKind.RECTANGLE, rect=(x0, y0, 2.0, 2.0))
-    rec.cursor_pressed = True
-    rec._ripples.append((rec.frame_index, rec.cursor))
+    rectangle_gesture = rec.begin_gesture("draw rectangle ROI")
     steps = rec._frames_for(1.4)
     for i in range(1, steps + 1):
         t = _ease(i / steps)
@@ -917,26 +955,49 @@ def s_roi(rec: Recorder):
         win.img_view._set_roi_geometry(selection.id, geometry, emit=i == steps)
         rec.cursor = rec.image_point(x0 + rect[2], y0 + rect[3])
         rec.capture()
-    rec.cursor_pressed = False
-    rec.settle()
-    rec.hold(0.6)
+    rec.finish_gesture(rectangle_gesture, hold_s=0.6)
 
     rec.caption("Statistics and histograms update live")
-    rec.click(None, invoke=win._show_inspection_dock, settle_after=True)
+    rec.transition("open inspection panel", win._show_inspection_dock)
     rec.hold_until_settled(2.5, tail_s=1.8)
 
     rec.caption("Trace a line profile through the features")
-    win.img_view.createRoi(RoiKind.POLYLINE, points=((30.0, 220.0), (118.0, 96.0), (216.0, 190.0)))
-    rec.move_to(rec.image_point(216, 190), seconds=1.0)
+    polyline_points = ((30.0, 220.0), (118.0, 96.0), (216.0, 190.0))
+    rec.move_to(rec.image_point(*polyline_points[0]), seconds=0.6)
+    polyline = win.img_view.createRoi(
+        RoiKind.POLYLINE,
+        points=(polyline_points[0], polyline_points[0]),
+    )
+    polyline_gesture = rec.begin_gesture("draw polyline profile")
+    drawn = [polyline_points[0]]
+    for destination in polyline_points[1:]:
+        start = drawn[-1]
+        segment_frames = rec._frames_for(0.8)
+        for index in range(1, segment_frames + 1):
+            t = _ease(index / segment_frames)
+            point = (
+                start[0] + (destination[0] - start[0]) * t,
+                start[1] + (destination[1] - start[1]) * t,
+            )
+            geometry = dataclasses.replace(polyline.geometry, points=(*drawn, point))
+            win.img_view._set_roi_geometry(polyline.id, geometry, emit=False)
+            rec.cursor = rec.image_point(*point)
+            rec.capture()
+        drawn.append(destination)
+    geometry = dataclasses.replace(polyline.geometry, points=tuple(drawn))
+    win.img_view._set_roi_geometry(polyline.id, geometry, emit=True)
+    rec.finish_gesture(polyline_gesture)
     rec.hold_until_settled(2.5, tail_s=1.6)
 
     # Give the profile finale room: put the inspection panel away again.
-    rec.click(None, invoke=lambda: win.inspection_dock.close(), settle_after=True)
+    rec.transition("close inspection panel", win.inspection_dock.close)
     rec.hold(0.4)
 
     rec.caption("Live profiles follow the pointer")
-    win.widgets["buttons"]["display"]["live_profile"].setChecked(True)
-    rec.settle()
+    rec.transition(
+        "enable live pointer profile",
+        lambda: win.widgets["buttons"]["display"]["live_profile"].setChecked(True),
+    )
 
     for x, y in ((60.0, 60.0), (120.0, 120.0), (200.0, 96.0)):
         rec.move_to(rec.image_point(x, y), seconds=0.7)

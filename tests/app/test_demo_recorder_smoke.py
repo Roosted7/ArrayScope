@@ -83,3 +83,18 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             cursor_x, cursor_y = event["cursor_at_press"]
             assert x <= cursor_x <= x + width
             assert y <= cursor_y <= y + height
+        assert {"disable first FFT", "enable first FFT"} <= {
+            event["label"] for event in actions if event["kind"] == "click"
+        }
+    if name == "roi":
+        labels = {event["label"] for event in actions}
+        assert {
+            "draw rectangle ROI",
+            "open inspection panel",
+            "draw polyline profile",
+            "close inspection panel",
+            "enable live pointer profile",
+        } <= labels
+        assert not [
+            event for event in actions if event["kind"] == "click" and event["target"] is None
+        ], "ROI transitions must not imply a click at an unrelated cursor position"
