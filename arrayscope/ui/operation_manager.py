@@ -34,7 +34,12 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.operations import library
 from arrayscope.operations.operation_definitions import export_operation_definition
-from arrayscope.operations.registry import get_operation_entry
+from arrayscope.operations.registry import (
+    NUMERIC_PARAMETER_KINDS,
+    PARAMETER_KINDS,
+    OperationParameter,
+    get_operation_entry,
+)
 from arrayscope.ui.file_dialogs import get_open_file_name, get_save_file_name
 from arrayscope.ui.icons import material_icon, set_button_icon, set_label_icon
 from arrayscope.ui.toasts import show_status_message
@@ -43,7 +48,10 @@ from arrayscope.ui.user_library_manager import (
 )
 from arrayscope.ui.user_library_manager import UserLibraryManagerDialog
 
-_KIND_CHOICES = ("int", "float")
+# The parameter kinds the editor offers is the registry's vocabulary, never a
+# copy of it: a manager that knew only ("int", "float") would render an enum as
+# a float and the next autosave would write that back, destroying the choices.
+_KIND_CHOICES = PARAMETER_KINDS
 _PARAM_LABEL_ROLE = QtCore.Qt.ItemDataRole.UserRole
 _RUNTIME_CHOICES = (
     ("Python", "python"),
@@ -306,16 +314,18 @@ class OperationManagerDialog(UserLibraryManagerDialog):
         right.addWidget(self.advanced_panel)
 
         right.addWidget(QtWidgets.QLabel("Parameters"))
-        self.params_table = QtWidgets.QTableWidget(0, 7, self)
+        self.params_table = QtWidgets.QTableWidget(0, 8, self)
         self.params_table.setHorizontalHeaderLabels(
-            ["Name", "Kind", "Default", "Min", "Max", "Step", "Description"]
+            ["Name", "Kind", "Default", "Min", "Max", "Step", "Choices", "Description"]
         )
         header = self.params_table.horizontalHeader()
         header.setStretchLastSection(False)
-        for column in range(6):
+        for column in range(7):
             header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        for column, width in enumerate((70, 54, 58, 38, 38, 42)):
+        header.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(7, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setMinimumSectionSize(28)
+        for column, width in enumerate((66, 56, 50, 34, 34, 38, 84)):
             header.resizeSection(column, width)
         self.params_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.params_table.setMinimumHeight(215)
@@ -733,6 +743,10 @@ class OperationManagerDialog(UserLibraryManagerDialog):
                 normalized["label"] = str(
                     normalized.get("label") or normalized["name"].replace("_", " ").title()
                 )
+                choices = normalized.get("choices")
+                normalized["choices"] = (
+                    [str(choice) for choice in choices] if isinstance(choices, list) else []
+                )
                 normalized["description"] = str(normalized.get("description", ""))
                 self._append_parameter_row(_RawField(normalized), editable=True)
             self.params_table.setEditTriggers(
@@ -788,7 +802,7 @@ class OperationManagerDialog(UserLibraryManagerDialog):
         # definition to wherever it now lives in the tree.
         self._loaded_problem = problem._replace(
             payload=payload,
-            operation_id=str(claimed) if isinstance(claimed, str) and claimed else None,
+            item_id=str(claimed) if isinstance(claimed, str) and claimed else None,
         )
         if library.update_user_operation_file(problem.path, payload):
             show_status_message(self._window, "Saved the wrapper and rescanned.", timeout=2500)
@@ -1193,7 +1207,11 @@ class OperationManagerDialog(UserLibraryManagerDialog):
         self.params_table.insertRow(row)
 
         def _text(value):
-            return "" if value is None else str(value)
+            if value is None:
+                return ""
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            return str(value)
 
         name = getattr(parameter, "name", "") if parameter is not None else ""
         kind = getattr(parameter, "kind", "float") if parameter is not None else "float"
@@ -1207,15 +1225,70 @@ class OperationManagerDialog(UserLibraryManagerDialog):
         self.params_table.setItem(row, 0, name_item)
         kind_combo = QtWidgets.QComboBox()
         kind_combo.addItems(_KIND_CHOICES)
-        kind_combo.setCurrentText(kind if kind in _KIND_CHOICES else "float")
+        if kind not in _KIND_CHOICES:
+            # A kind this build does not know is shown as stored rather than
+            # coerced: the next autosave writes back whatever this combo says,
+            # so silently reading an unknown kind as "float" would rewrite the
+            # user's definition into a different one.
+            kind_combo.addItem(str(kind))
+        kind_combo.setCurrentText(str(kind))
         kind_combo.setEnabled(editable)
-        kind_combo.currentIndexChanged.connect(lambda *_: self._apply_user_edits())
+        kind_combo.currentIndexChanged.connect(lambda *_: self._on_parameter_kind_changed())
         self.params_table.setCellWidget(row, 1, kind_combo)
         for column, attribute in ((2, "default"), (3, "minimum"), (4, "maximum"), (5, "step")):
             value = getattr(parameter, attribute, None) if parameter is not None else None
             self.params_table.setItem(row, column, QtWidgets.QTableWidgetItem(_text(value)))
+        choices = getattr(parameter, "choices", ()) if parameter is not None else ()
+        self.params_table.setItem(
+            row, 6, QtWidgets.QTableWidgetItem(", ".join(str(choice) for choice in choices or ()))
+        )
         description = getattr(parameter, "description", "") if parameter is not None else ""
-        self.params_table.setItem(row, 6, QtWidgets.QTableWidgetItem(description))
+        self.params_table.setItem(row, 7, QtWidgets.QTableWidgetItem(description))
+        self._sync_parameter_row_cells(row)
+
+    def _on_parameter_kind_changed(self):
+        """A kind change decides which of this row's cells mean anything.
+
+        Saving first, then syncing: the save notifies the library, the table is
+        rebuilt from the stored wrapper, and every cell handed out before that
+        is a dead C++ object. Syncing the rows that exist *after* the rebuild is
+        the only ordering that touches live items.
+        """
+
+        self._apply_user_edits()
+        for row in range(self.params_table.rowCount()):
+            self._sync_parameter_row_cells(row)
+
+    def _sync_parameter_row_cells(self, row: int):
+        """Grey out the cells the selected kind cannot carry.
+
+        ``OperationParameter`` *raises* when a non-numeric parameter declares a
+        minimum, a maximum or a step, and when a non-enum declares choices --
+        so a stale value left in one of those cells would not be a cosmetic
+        oddity, it would turn the wrapper into a Problems row on the next save.
+        The columns say so before that happens, and ``_table_parameters`` omits
+        them regardless.
+        """
+
+        widget = self.params_table.cellWidget(row, 1)
+        kind = widget.currentText() if widget is not None else "float"
+        numeric = kind in NUMERIC_PARAMETER_KINDS
+        for column, applicable in ((3, numeric), (4, numeric), (5, numeric), (6, kind == "enum")):
+            item = self.params_table.item(row, column)
+            if item is None:
+                continue
+            flags = item.flags()
+            editable = bool(flags & QtCore.Qt.ItemFlag.ItemIsEditable)
+            if applicable and not editable:
+                item.setFlags(flags | QtCore.Qt.ItemFlag.ItemIsEditable)
+            elif not applicable:
+                if editable:
+                    item.setFlags(flags & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                item.setToolTip(
+                    f"Not used by a {kind} parameter."
+                    if column != 6
+                    else "Only an enum parameter has choices."
+                )
 
     def _add_parameter_row(self):
         """Append a *named* parameter row.
@@ -1229,10 +1302,24 @@ class OperationManagerDialog(UserLibraryManagerDialog):
 
         if not self._editing_definition():
             return
-        self._append_parameter_row(
-            _RawField({"name": self._unused_row_name(self.params_table, "parameter")}),
-            editable=True,
-        )
+        # Signals blocked while the row is filled: every ``setItem`` emits
+        # ``cellChanged``, which saves, which rebuilds this table -- so an
+        # unblocked append would persist a half-written row and then keep
+        # writing into cells whose C++ objects are already gone.
+        self.params_table.blockSignals(True)
+        try:
+            self._append_parameter_row(
+                # An empty label rather than one derived from the generated
+                # name: the stored label wins over the derived one, so seeding
+                # it here would freeze "Parameter 1" onto whatever the user
+                # renames the row to.
+                _RawField(
+                    {"name": self._unused_row_name(self.params_table, "parameter"), "label": ""}
+                ),
+                editable=True,
+            )
+        finally:
+            self.params_table.blockSignals(False)
         self._apply_user_edits()
 
     @staticmethod
@@ -1293,16 +1380,23 @@ class OperationManagerDialog(UserLibraryManagerDialog):
         if not self._editing_definition():
             return
         name = self._unused_row_name(self.slots_table, "input")
-        self._append_input_slot_row(
-            _RawField(
-                {
-                    "name": name,
-                    "label": name.replace("_", " ").title(),
-                    "accepts": ["dimension-set", "open-document", "saved-array"],
-                    "description": "",
-                }
+        # Blocked for the same reason as the parameter row: a slot saved before
+        # its ``accepts`` cell is written declares no source kind, which the
+        # loader refuses outright.
+        self.slots_table.blockSignals(True)
+        try:
+            self._append_input_slot_row(
+                _RawField(
+                    {
+                        "name": name,
+                        "label": name.replace("_", " ").title(),
+                        "accepts": ["dimension-set", "open-document", "saved-array"],
+                        "description": "",
+                    }
+                )
             )
-        )
+        finally:
+            self.slots_table.blockSignals(False)
         self._apply_user_edits()
 
     def _remove_input_slot_row(self):
@@ -1354,15 +1448,58 @@ class OperationManagerDialog(UserLibraryManagerDialog):
                 "label": (name_item.data(_PARAM_LABEL_ROLE) or name.replace("_", " ").title()),
                 "kind": kind,
             }
-            for column, key in ((2, "default"), (3, "minimum"), (4, "maximum"), (5, "step")):
-                value = self._parse_number(self.params_table.item(row, column), kind)
-                if value is not None:
-                    payload[key] = value
-            description_item = self.params_table.item(row, 6)
+            default = self._cell_default(self.params_table.item(row, 2), kind)
+            if default is not None:
+                payload["default"] = default
+            if kind in NUMERIC_PARAMETER_KINDS:
+                # Range and step are numeric-only *by validation*, not by
+                # convention: ``OperationParameter`` raises on a string
+                # parameter that carries a minimum, so emitting one would
+                # rewrite the definition into a Problems row.
+                for column, key in ((3, "minimum"), (4, "maximum"), (5, "step")):
+                    value = self._parse_number(self.params_table.item(row, column), kind)
+                    if value is not None:
+                        payload[key] = value
+            if kind == "enum":
+                choices_item = self.params_table.item(row, 6)
+                payload["choices"] = [
+                    choice.strip()
+                    for choice in ("" if choices_item is None else choices_item.text()).split(",")
+                    if choice.strip()
+                ]
+            description_item = self.params_table.item(row, 7)
             if description_item is not None and description_item.text().strip():
                 payload["description"] = description_item.text().strip()
             parameters.append(payload)
         return parameters
+
+    @classmethod
+    def _cell_default(cls, item, kind):
+        """A default in the kind's own type -- text stays text, never a float.
+
+        The whole table used to go through ``float()``. With only int and float
+        kinds that was harmless; with string, enum, path and bool it would turn
+        ``mode="reflect"`` into nothing and ``true`` into nothing on the very
+        next autosave.
+        """
+
+        if item is None:
+            return None
+        text = item.text().strip()
+        if not text:
+            return None
+        if kind in NUMERIC_PARAMETER_KINDS:
+            return cls._parse_number(item, kind)
+        if kind == "bool":
+            lowered = text.casefold()
+            if lowered in {"true", "yes", "1", "on"}:
+                return True
+            if lowered in {"false", "no", "0", "off"}:
+                return False
+            # Neither: keep the text so the user sees what they typed rather
+            # than a silent False, and let the loader say it is invalid.
+            return text
+        return text
 
     @staticmethod
     def _parse_number(item, kind):
@@ -1401,15 +1538,42 @@ class OperationManagerDialog(UserLibraryManagerDialog):
             return
         if operation_id is None or not _is_user_op(operation_id):
             return
+        parameters = self._table_parameters()
+        reason = self._parameter_rejection(parameters)
+        if reason:
+            # Do not write it. The editor saves on every keystroke-group, and a
+            # parameter schema is validated on load, so an intermediate state --
+            # "kind is enum, choices not typed yet" -- would be persisted,
+            # rejected by the loader, and the definition would leave the tree
+            # for the Problems group mid-edit. Holding the row uncommitted keeps
+            # it on screen and says what is missing; the next edit that makes it
+            # valid saves the whole thing.
+            self.status_label.setText(f"Not saved yet — {reason}")
+            return
         library.update_user_operation(
             operation_id,
             label=self.label_edit.text().strip() or operation_id,
             description=self.description_edit.text().strip(),
             icon=self.icon_edit.text().strip() or "extension",
             requires_axis=self.requires_axis_check.isChecked(),
-            parameters=self._table_parameters(),
+            parameters=parameters,
             input_slots=self._table_input_slots(),
         )
+
+    @staticmethod
+    def _parameter_rejection(payloads) -> str:
+        """Why the loader would refuse these rows, or ``""``.
+
+        Asked with the registry's own constructor rather than a second copy of
+        its rules, so the editor cannot drift from what the loader accepts.
+        """
+
+        for payload in payloads:
+            try:
+                OperationParameter(**payload)
+            except Exception as exc:
+                return str(exc)
+        return ""
 
     def _on_requires_axis_toggled(self, _checked):
         self._apply_user_edits()

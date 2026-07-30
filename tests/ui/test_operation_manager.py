@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -7,9 +8,13 @@ import pytest
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from pyqtgraph.Qt import QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets
 
-from tests.ui.helpers import clear_arrayscope_settings, process_events
+from tests.ui.helpers import (
+    auto_confirm_message_boxes,
+    clear_arrayscope_settings,
+    process_events,
+)
 
 _AXIS_AND_PLAIN_SRC = '''
 import numpy as np
@@ -24,6 +29,14 @@ def double(data):
     """Double every sample."""
     return data * 2
 '''
+
+
+@pytest.fixture(autouse=True)
+def _confirm_destructive_actions(monkeypatch):
+    # Removing or hiding a stored definition asks first on both sides now, and an
+    # offscreen modal never gets an answer. Tests that care about *declining*
+    # re-arm it themselves.
+    auto_confirm_message_boxes(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -121,7 +134,7 @@ def test_drag_persist_moves_op_between_groups(qtbot):
         assert mean_item is not None
         assert complex_group is not None
         complex_group.insertChild(0, mean_item)
-        dialog._persist_layout()
+        dialog.persist_layout()
         process_events(qtbot)
 
         groups = dict(library.grouped_operations())
@@ -284,15 +297,15 @@ def test_parameter_and_input_slot_tables_preserve_editable_schema(qtbot, tmp_pat
         # back the full schema rather than only its happy-path name/default.
         assert dialog.select_operation(bounded_id)
         process_events(qtbot)
-        assert dialog.params_table.columnCount() == 7
+        assert dialog.params_table.columnCount() == 8
         assert dialog.params_table.item(0, 3).text() == "0.0"
         assert dialog.params_table.item(0, 4).text() == "1.0"
         assert dialog.params_table.item(0, 5).text() == "0.05"
-        assert dialog.params_table.item(0, 6).text() == "Scale factor."
+        assert dialog.params_table.item(0, 7).text() == "Scale factor."
         assert dialog.params_table.minimumHeight() >= 200
         assert dialog.params_table.horizontalScrollBar().maximum() == 0
 
-        dialog.params_table.item(0, 6).setText("Editable help.")
+        dialog.params_table.item(0, 7).setText("Editable help.")
         process_events(qtbot)
         assert (
             registry.get_operation_entry(bounded_id).parameters[0].description == "Editable help."
@@ -321,11 +334,6 @@ def test_reset_all_clears_layout_and_unhides(qtbot, monkeypatch):
     win = _window(qtbot)
     dialog = _manager(qtbot, win)
     try:
-        monkeypatch.setattr(
-            QtWidgets.QMessageBox,
-            "question",
-            lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes,
-        )
         dialog.reset_all_button.click()
         process_events(qtbot)
         assert "mean" not in library.hidden_operations()
@@ -346,9 +354,10 @@ def test_menu_entries_open_dialogs(qtbot):
             if menu_action.text() != "View":
                 continue
             for sub in menu_action.menu().actions():
-                if sub.text() == "Colormap manager…":
+                # One verb across every surface (ADR 0063).
+                if sub.text() == "Manage colormaps…":
                     colormap_action = sub
-                elif sub.text() == "Operation manager…":
+                elif sub.text() == "Manage operations…":
                     operation_action = sub
         assert colormap_action is not None
         assert operation_action is not None
@@ -361,8 +370,8 @@ def test_menu_entries_open_dialogs(qtbot):
 
         colormap_action.trigger()
         process_events(qtbot)
-        assert win._colormap_designer_dialog is not None
-        win._colormap_designer_dialog.close()
+        assert win._colormap_manager_dialog is not None
+        win._colormap_manager_dialog.close()
     finally:
         win.close()
 
@@ -800,6 +809,187 @@ def test_command_runtime_and_advanced_environment_editor_share_the_manager(qtbot
         assert len(records) == 1
         assert records[0].id == "recon"
         assert dict(records[0].variables)["BART_TOOLBOX_PATH"] == "/opt/bart"
+    finally:
+        dialog.close()
+        win.close()
+
+
+# ---------------------------------------------------------------------------
+# Parameter kinds beyond int/float
+# ---------------------------------------------------------------------------
+
+
+def _cell(dialog, qtbot, row, column):
+    """Re-read a cell: this editor saves per edit and rebuilds its own table."""
+
+    process_events(qtbot)
+    return dialog.params_table.item(row, column)
+
+
+def test_add_parameter_and_add_slot_actually_add_a_row(qtbot):
+    from arrayscope.operations import library, registry
+
+    operation_id = library.create_empty_user_operation()
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        assert dialog.select_operation(operation_id)
+        process_events(qtbot)
+        # Both buttons used to append a blank row, persist nothing (an unnamed
+        # row is skipped), and then have the library refresh wipe the row the
+        # click had just created: measured rowCount 0 -> 0.
+        dialog.add_param_button.click()
+        process_events(qtbot)
+        assert dialog.params_table.rowCount() == 1
+        assert registry.get_operation_entry(operation_id).parameters[0].name == "parameter_1"
+
+        dialog.add_slot_button.click()
+        process_events(qtbot)
+        assert dialog.slots_table.rowCount() == 1
+        assert registry.get_operation_entry(operation_id).input_slots[0].name == "input_1"
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_an_enum_parameter_is_authored_and_round_trips(qtbot):
+    from arrayscope.operations import library, registry
+
+    operation_id = library.create_empty_user_operation()
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        assert dialog.select_operation(operation_id)
+        dialog.add_param_button.click()
+        process_events(qtbot)
+        _cell(dialog, qtbot, 0, 0).setText("mode")
+        process_events(qtbot)
+        dialog.params_table.cellWidget(0, 1).setCurrentText("enum")
+        process_events(qtbot)
+
+        # An enum with no choices is refused by the loader, so it is never
+        # written: the row stays on screen, uncommitted, and says why. Saving it
+        # would move the definition into Problems mid-edit.
+        assert "Not saved yet" in dialog.status_label.text()
+        assert not library.user_operation_problems()
+
+        _cell(dialog, qtbot, 0, 6).setText("reflect, nearest , wrap")
+        _cell(dialog, qtbot, 0, 2).setText("reflect")
+        _cell(dialog, qtbot, 0, 3).setText("999")  # a range is meaningless here
+        process_events(qtbot)
+
+        parameter = registry.get_operation_entry(operation_id).parameters[0]
+        assert parameter.kind == "enum"
+        assert parameter.choices == ("reflect", "nearest", "wrap")
+        assert parameter.default == "reflect"
+        assert parameter.minimum is None  # emitting it would raise on load
+        assert not library.user_operation_problems()
+
+        # And the editor reads back what it wrote.
+        assert dialog.select_operation("mean")
+        assert dialog.select_operation(operation_id)
+        process_events(qtbot)
+        assert dialog.params_table.cellWidget(0, 1).currentText() == "enum"
+        assert dialog.params_table.item(0, 2).text() == "reflect"
+        assert dialog.params_table.item(0, 6).text() == "reflect, nearest, wrap"
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_a_bool_parameter_round_trips_as_a_bool(qtbot):
+    from arrayscope.operations import library, registry
+
+    operation_id = library.create_empty_user_operation()
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        assert dialog.select_operation(operation_id)
+        dialog.add_param_button.click()
+        process_events(qtbot)
+        _cell(dialog, qtbot, 0, 0).setText("normalize")
+        process_events(qtbot)
+        dialog.params_table.cellWidget(0, 1).setCurrentText("bool")
+        process_events(qtbot)
+        _cell(dialog, qtbot, 0, 2).setText("true")
+        process_events(qtbot)
+
+        parameter = registry.get_operation_entry(operation_id).parameters[0]
+        assert parameter.kind == "bool"
+        assert parameter.default is True  # not 1.0, and not the string "true"
+        assert dialog.select_operation("mean")
+        assert dialog.select_operation(operation_id)
+        process_events(qtbot)
+        assert dialog.params_table.item(0, 2).text() == "true"
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_range_and_choice_cells_are_disabled_for_the_kinds_that_reject_them(qtbot):
+    from arrayscope.operations import library
+
+    operation_id = library.create_empty_user_operation()
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        assert dialog.select_operation(operation_id)
+        dialog.add_param_button.click()
+        process_events(qtbot)
+        editable = QtCore.Qt.ItemFlag.ItemIsEditable
+
+        # float: a range applies, choices do not.
+        assert dialog.params_table.item(0, 3).flags() & editable
+        assert not dialog.params_table.item(0, 6).flags() & editable
+
+        dialog.params_table.cellWidget(0, 1).setCurrentText("string")
+        process_events(qtbot)
+        for column in (3, 4, 5, 6):
+            item = dialog.params_table.item(0, column)
+            assert not item.flags() & editable
+            assert item.toolTip()
+
+        dialog.params_table.cellWidget(0, 1).setCurrentText("enum")
+        process_events(qtbot)
+        assert dialog.params_table.item(0, 6).flags() & editable
+        assert not dialog.params_table.item(0, 3).flags() & editable
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_export_and_import_round_trip_a_definition(qtbot, tmp_path, monkeypatch):
+    from arrayscope.operations import library, registry
+    from arrayscope.ui import operation_manager
+
+    src = _write_source(
+        tmp_path, "gain.py", "def gain(data, k: float = 2.0):\n    return data * k\n"
+    )
+    operation_id = library.import_custom_operation(src, "gain", label="Gain")
+    exported = tmp_path / "gain-definition.json"
+    monkeypatch.setattr(
+        operation_manager, "get_save_file_name", lambda *a, **k: (str(exported), "")
+    )
+    monkeypatch.setattr(
+        operation_manager, "get_open_file_name", lambda *a, **k: (str(exported), "")
+    )
+
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        assert dialog.select_operation(operation_id)
+        dialog.export_button.click()
+        process_events(qtbot)
+        assert json.loads(exported.read_text())["label"] == "Gain"
+
+        dialog.import_button.click()
+        process_events(qtbot)
+        imported = dialog.selected_operation_id()
+        assert imported is not None
+        # A fresh id, never an overwrite of the definition it was exported from.
+        assert imported != operation_id
+        assert registry.get_operation_entry(imported).label == "Gain 2"
+        assert not library.user_operation_problems()
     finally:
         dialog.close()
         win.close()

@@ -287,6 +287,14 @@ class ColormapManagerDialog(UserLibraryManagerDialog):
     def _load_repair_editor(self, problem):
         self.repair_box.setVisible(True)
         self._loaded = None
+        # Clear the gradient editor rather than leaving the previously selected
+        # map in it: a disabled widget still reads as "this is what is here".
+        self._suppress = True
+        try:
+            self.name_edit.setText(str(problem.item_id or ""))
+            self._set_gradient_stops(((0.0, (0, 0, 0)), (1.0, (0, 0, 0))))
+        finally:
+            self._suppress = False
         self.problem_message_label.setText(
             problem.message
             if problem.payload is not None
