@@ -35,11 +35,12 @@ import os
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from arrayscope.app.user_library import unique_name
 from arrayscope.display import colormap_library as library
 from arrayscope.display.colormap_policy import colormap_family
 from arrayscope.ui.file_dialogs import get_open_file_name, get_save_file_name
 from arrayscope.ui.icons import set_button_icon
-from arrayscope.ui.user_library_manager import ITEM_ROLE, UserLibraryManagerDialog, unique_name
+from arrayscope.ui.user_library_manager import ITEM_ROLE, UserLibraryManagerDialog
 
 _KIND_LABELS = (
     ("Sequential", library.SEQUENTIAL),
@@ -106,6 +107,16 @@ class ColormapManagerDialog(UserLibraryManagerDialog):
             "Cyclic maps wrap smoothly and are required for phase/complex display"
         )
         form.addRow("Kind", self.kind_combo)
+        # The colormap analogue of the operation editor's "Show in the Common
+        # (pinned) section", in the same place and with the same semantics: a
+        # checkbox that moves this definition into the section every picker
+        # shows first. Favorites is already a real drag target here, so the
+        # checkbox is a second way to the same arrangement rather than a
+        # separate concept.
+        self.common_check = QtWidgets.QCheckBox(
+            f"Show in the {library.FAVORITES_LABEL} (pinned) section", self
+        )
+        form.addRow("", self.common_check)
         right.addLayout(form)
 
         right.addWidget(
@@ -179,6 +190,7 @@ class ColormapManagerDialog(UserLibraryManagerDialog):
         right.addLayout(actions)
         root.addWidget(self.editor_scroll, 1)
 
+        self.common_check.toggled.connect(self._on_common_toggled)
         self.override_button.clicked.connect(self._override_builtin)
         self.raw_json_save_button.clicked.connect(self._save_raw_colormap)
         self.apply_button.clicked.connect(self._apply_and_close)
@@ -278,6 +290,7 @@ class ColormapManagerDialog(UserLibraryManagerDialog):
         try:
             self.name_edit.setText(info.name)
             self.kind_combo.setCurrentIndex(max(0, self.kind_combo.findData(info.kind)))
+            self.common_check.setChecked(library.effective_group(info) == library.FAVORITES_GROUP)
             self._set_gradient_stops(stops)
         finally:
             self._suppress = False
@@ -382,6 +395,22 @@ class ColormapManagerDialog(UserLibraryManagerDialog):
         self.refresh_tree()
         self.select_key(new_name)
 
+    def _on_common_toggled(self, checked):
+        if self._suppress or self._reloading:
+            return
+        name = self.selected_key()
+        if name is None:
+            return
+        group_order, groups, order = self.tree_layout()
+        target = library.FAVORITES_GROUP if checked else (library.builtin_group_for(name) or "User")
+        if groups.get(name) == target:
+            return
+        groups[name] = target
+        if target not in group_order:
+            group_order.insert(0, target)
+        library.apply_library_layout(group_order, groups, order)
+        self.select_key(name)
+
     def _override_builtin(self, _checked=False):
         """Make the read-only built-in an editable user copy under the same name."""
 
@@ -417,6 +446,10 @@ class ColormapManagerDialog(UserLibraryManagerDialog):
 
         for widget in (self.name_edit, self.kind_combo, self.gradient):
             widget.setEnabled(is_user)
+        # Pinning acts on a built-in too -- it is an arrangement, not a
+        # definition -- exactly as the operations side keeps its Common toggle
+        # live for a system operation.
+        self.common_check.setEnabled(info is not None and not info.unavailable_reason)
         self.override_button.setVisible(bool(is_builtin and not info.hidden))
         self.override_button.setEnabled(bool(is_builtin and not info.unavailable_reason))
 

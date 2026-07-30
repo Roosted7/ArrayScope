@@ -7,6 +7,7 @@ vocabulary itself is an assertion: if a button, an icon or a marker drifts on
 one side, this file fails rather than the drift shipping.
 """
 
+import functools
 import os
 
 import numpy as np
@@ -138,7 +139,7 @@ def test_marker_vocabulary_is_one_vocabulary():
 
 
 def test_duplicate_naming_is_one_convention():
-    from arrayscope.ui.user_library_manager import unique_name
+    from arrayscope.app.user_library import unique_name
 
     assert unique_name("viridis", []) == "viridis copy"
     assert unique_name("viridis", ["viridis copy"]) == "viridis copy 2"
@@ -358,6 +359,141 @@ def test_a_problems_row_survives_a_drag_that_touches_nothing_else(qtbot, tmp_pat
             assert dialog.select_problem_path(paths[0])
             assert dialog.remove_button.isEnabled()
             assert dialog.open_file_button.isEnabled()
+    finally:
+        for dialog in (colormaps, operations):
+            dialog.close()
+        win.close()
+
+
+def _pick_file(path, *_args, **_kwargs):
+    """Stand in for the platform file dialog, which cannot answer offscreen."""
+
+    return path, ""
+
+
+def test_new_and_duplicate_produce_an_editable_definition_on_both_sides(qtbot):
+    win = _window(qtbot)
+    colormaps, operations = _managers(qtbot, win)
+    try:
+        for dialog in (colormaps, operations):
+            before = set(_all_keys(dialog))
+            dialog.new_button.click()
+            process_events(qtbot)
+            created = dialog.selected_key()
+            assert created is not None
+            assert created not in before
+
+            dialog.duplicate_button.click()
+            process_events(qtbot)
+            duplicated = dialog.selected_key()
+            assert duplicated is not None
+            assert duplicated != created
+        # The one duplicate-suffix convention, on the surface a user reads.
+        assert colormaps.selected_key() == "custom copy"
+    finally:
+        for dialog in (colormaps, operations):
+            dialog.close()
+        win.close()
+
+
+def test_export_then_import_round_trips_on_both_sides(qtbot, tmp_path, monkeypatch):
+    from arrayscope.display import colormap_library
+    from arrayscope.ui import colormap_manager, operation_manager
+
+    colormap_library.save_user_colormap(
+        "mine", colormap_library.SEQUENTIAL, ((0.0, (1, 2, 3)), (1.0, (250, 240, 230)))
+    )
+    win = _window(qtbot)
+    colormaps, operations = _managers(qtbot, win)
+    try:
+        for dialog, module, name in (
+            (colormaps, colormap_manager, "mine.json"),
+            (operations, operation_manager, "operation.json"),
+        ):
+            target = str(tmp_path / name)
+            chosen = functools.partial(_pick_file, target)
+            monkeypatch.setattr(module, "get_save_file_name", chosen)
+            monkeypatch.setattr(module, "get_open_file_name", chosen)
+            if dialog is colormaps:
+                assert dialog.select_key("mine")
+            else:
+                dialog.new_button.click()
+                process_events(qtbot)
+            exported_from = dialog.selected_key()
+            dialog.export_button.click()
+            process_events(qtbot)
+            assert os.path.exists(target)
+
+            dialog.import_button.click()
+            process_events(qtbot)
+            imported = dialog.selected_key()
+            assert imported is not None
+            # A fresh identity, never an overwrite of what it came from.
+            assert imported != exported_from
+    finally:
+        for dialog in (colormaps, operations):
+            dialog.close()
+        win.close()
+
+
+def test_open_file_reaches_the_stored_definition_on_both_sides(qtbot, monkeypatch):
+    from arrayscope.display import colormap_library
+    from arrayscope.operations import library as operation_library
+
+    colormap_library.save_user_colormap(
+        "mine", colormap_library.SEQUENTIAL, ((0.0, (0, 0, 0)), (1.0, (255, 255, 255)))
+    )
+    operation_id = operation_library.create_empty_user_operation()
+
+    win = _window(qtbot)
+    colormaps, operations = _managers(qtbot, win)
+    opened = []
+    try:
+        for dialog, key in ((colormaps, "mine"), (operations, operation_id)):
+            monkeypatch.setattr(type(dialog), "open_path", lambda _self, path: opened.append(path))
+            assert dialog.select_key(key)
+            process_events(qtbot)
+            assert dialog.open_file_button.isEnabled()
+            dialog.open_file_button.click()
+            process_events(qtbot)
+        assert len(opened) == 2
+        assert all(os.path.exists(path) for path in opened)
+        # A colormap opens its stored JSON; an operation opens its code file --
+        # in both cases the file the user would edit by hand.
+        assert opened[0].endswith(".json")
+        assert opened[1].endswith(".py")
+    finally:
+        for dialog in (colormaps, operations):
+            dialog.close()
+        win.close()
+
+
+def test_the_pinned_section_is_one_checkbox_on_both_sides(qtbot):
+    from arrayscope.display import colormap_library
+    from arrayscope.operations import library as operation_library
+
+    win = _window(qtbot)
+    colormaps, operations = _managers(qtbot, win)
+    try:
+        # "Favorites" (a drag target) and "Common" (a checkbox) were the same
+        # concept reached two different ways. Both are a checkbox now, in the
+        # same place in the editor.
+        assert "pinned" in colormaps.common_check.text()
+        assert "pinned" in operations.common_check.text()
+
+        assert colormaps.select_key("turbo")
+        process_events(qtbot)
+        assert not colormaps.common_check.isChecked()
+        colormaps.common_check.setChecked(True)
+        process_events(qtbot)
+        info = colormap_library.find_colormap("turbo")
+        assert colormap_library.effective_group(info) == colormap_library.FAVORITES_GROUP
+
+        assert operations.select_key("crop")
+        process_events(qtbot)
+        operations.common_check.setChecked(True)
+        process_events(qtbot)
+        assert "crop" in operation_library.effective_common_ids()
     finally:
         for dialog in (colormaps, operations):
             dialog.close()

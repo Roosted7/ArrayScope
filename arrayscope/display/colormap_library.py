@@ -706,7 +706,7 @@ def import_colormap_file(
     lower = str(path).lower()
     if lower.endswith(".json"):
         info = _info_from_json_file(path)
-        return save_user_colormap(name or info.name, info.kind, info.stops)
+        return save_user_colormap(name or _free_import_name(info.name), info.kind, info.stops)
     if lower.endswith(".mat"):
         table = _table_from_mat(path)
     elif lower.endswith(".npy"):
@@ -718,7 +718,21 @@ def import_colormap_file(
         detected, confidence = detect_colormap_kind(stops)
         kind = detected if confidence >= 0.9 else SEQUENTIAL
     default_name = os.path.splitext(os.path.basename(path))[0]
-    return save_user_colormap(name or default_name, kind, stops)
+    return save_user_colormap(name or _free_import_name(default_name), kind, stops)
+
+
+def _free_import_name(base: str) -> str:
+    """A name the import will not silently land on top of.
+
+    Importing a definition that already exists used to overwrite the stored one
+    without a word, while the operations side has always re-minted the id into a
+    free slug.  Same convention on both sides now (ADR 0063): the caller can
+    still force a name, which is how a deliberate replacement is expressed.
+    """
+
+    return user_library.unique_name(
+        base, [info.name for info in user_colormaps()], copy_suffix=False
+    )
 
 
 def _table_from_mat(path: str) -> np.ndarray:

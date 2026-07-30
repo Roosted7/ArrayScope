@@ -61,6 +61,27 @@ class LibraryProblem(NamedTuple):
     item_id: str | None
 
 
+def unique_name(base: str, existing, *, copy_suffix: bool = True) -> str:
+    """``"<base> copy"``, then ``"<base> copy 2"``, … -- the one copy convention.
+
+    The operation library already spelled a duplicate this way
+    (``_unique_copy_label``) and the colormap designer spelled it
+    ``"<base>-2"``; a user who learns one should not have to learn the other.
+    ``copy_suffix=False`` is the *new*-item case: take the plain name when it is
+    free.
+    """
+
+    taken = {str(name).casefold() for name in existing}
+    root = str(base).strip()
+    candidate = f"{root} copy" if copy_suffix else root
+    if candidate.casefold() not in taken:
+        return candidate
+    suffix = 2
+    while f"{candidate} {suffix}".casefold() in taken:
+        suffix += 1
+    return f"{candidate} {suffix}"
+
+
 def problem_record(path: str, message: str, *, id_field: str = "id") -> LibraryProblem:
     """Build a :class:`LibraryProblem`, salvaging whatever of the payload survives."""
 

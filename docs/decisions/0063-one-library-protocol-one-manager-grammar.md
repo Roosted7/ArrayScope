@@ -119,6 +119,19 @@ user/system/hidden/unavailable narrowing that is the analogue of the colormap
 and an Apply that adds the selected operation to the window the manager was
 opened from.
 
+"Favorites" (a drag-target group) and "Common" (an editor checkbox) were the
+same concept reached two different ways. Both are a checkbox now, in the same
+place in the editor, over each side's existing mechanism — the colormap one
+moves the map into the unnamed top section the pickers already render first, so
+it is a second route to the same arrangement rather than a new concept. The two
+*words* still differ, because "Common" is `registry.COMMON_OPERATION_IDS` and
+`DEFAULT_GROUP_ORDER`, which this bundle does not own.
+
+Import stopped being destructive on the colormap side. Importing a definition
+whose name already existed silently overwrote the stored one, while operations
+have always re-minted the id into a free slug; both pick a free name now, and an
+explicit name is how a deliberate replacement is expressed.
+
 **A built-in colormap becomes read-only, with an explicit "Override built-in".**
 This is the one place where adopting the operations model *removes* an ability,
 and it is deliberate: editing a built-in used to store an override silently on
