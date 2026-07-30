@@ -20,6 +20,19 @@ DEFAULT_INTERNAL_TILE_SHAPE = (1024, 1024)
 # with camera-clipped windows lifts that in the next stage).
 ANCHORED_CHUNK_SHAPE = (256, 256)
 
+# Montage region reuse (see ``_MontageRegionSkeleton``).
+#
+# Skeletons are keyed on the identity of the ``MontagePlan``, which
+# ``make_montage_plan`` hands back from an ``lru_cache(maxsize=4)``
+# (``montage.py:209``). A fifth skeleton could never hit — the plan it was
+# keyed on is already gone — so the two bounds match deliberately.
+MONTAGE_REGION_CACHE_SIZE = 4
+# Per skeleton, distinct (active ids, near ids) pairs kept whole. A drag emits
+# many retargets whose *snapped* tile sets are identical, so a handful of
+# entries turns a sub-tile nudge into an O(visible) operation. Bounded per
+# skeleton, so the worst case is this times MONTAGE_REGION_CACHE_SIZE.
+MONTAGE_FLAG_SET_CACHE_SIZE = 8
+
 
 @dataclass(frozen=True)
 class FrameRegion:
@@ -62,41 +75,53 @@ class FramePlan:
     # Shift-invariant content identity shared by this plan's source-anchored
     # regions (ADR 0055 G3); None when the plan is window-relative.
     source_content_key: object | None = None
-    _active_region_ids: tuple[int, ...] = field(init=False, repr=False)
-    _planned_region_ids: tuple[int, ...] = field(init=False, repr=False)
-    _near_region_ids: tuple[int, ...] = field(init=False, repr=False)
-    scene_region_signature: tuple[
-        tuple[int, int | None, tuple[float, float, float, float]], ...
-    ] = field(init=False, repr=False)
+    # The four derived views below are a pure function of ``regions``, and
+    # ``__post_init__`` still derives any that arrive as None — that is the
+    # only path most callers take. A caller that already holds the answer
+    # (the montage planner, which reuses a pan-invariant skeleton) passes it
+    # in rather than paying four more full passes over every tile to
+    # reconstruct a value it did not change. Whatever is passed must equal
+    # what the fallback would have produced; ``test_frame_planner`` pins that
+    # against a cache-disabled planner.
+    _active_region_ids: tuple[int, ...] | None = field(default=None, repr=False)
+    _planned_region_ids: tuple[int, ...] | None = field(default=None, repr=False)
+    _near_region_ids: tuple[int, ...] | None = field(default=None, repr=False)
+    scene_region_signature: (
+        tuple[tuple[int, int | None, tuple[float, float, float, float]], ...] | None
+    ) = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "_active_region_ids",
-            tuple(region.region_id for region in self.regions if region.active),
-        )
-        object.__setattr__(
-            self,
-            "_planned_region_ids",
-            tuple(region.region_id for region in self.regions if region.planned),
-        )
-        object.__setattr__(
-            self,
-            "_near_region_ids",
-            tuple(region.region_id for region in self.regions if region.near),
-        )
-        object.__setattr__(
-            self,
-            "scene_region_signature",
-            tuple(
-                (
-                    int(region.region_id),
-                    None if region.source_index is None else int(region.source_index),
-                    tuple(float(value) for value in region.bounds),
-                )
-                for region in self.regions
-            ),
-        )
+        if self._active_region_ids is None:
+            object.__setattr__(
+                self,
+                "_active_region_ids",
+                tuple(region.region_id for region in self.regions if region.active),
+            )
+        if self._planned_region_ids is None:
+            object.__setattr__(
+                self,
+                "_planned_region_ids",
+                tuple(region.region_id for region in self.regions if region.planned),
+            )
+        if self._near_region_ids is None:
+            object.__setattr__(
+                self,
+                "_near_region_ids",
+                tuple(region.region_id for region in self.regions if region.near),
+            )
+        if self.scene_region_signature is None:
+            object.__setattr__(
+                self,
+                "scene_region_signature",
+                tuple(
+                    (
+                        int(region.region_id),
+                        None if region.source_index is None else int(region.source_index),
+                        tuple(float(value) for value in region.bounds),
+                    )
+                    for region in self.regions
+                ),
+            )
 
     @property
     def active_region_ids(self) -> tuple[int, ...]:
@@ -111,6 +136,111 @@ class FramePlan:
         return self._near_region_ids
 
 
+class _MontageRegionSkeleton:
+    """The part of a montage's regions a camera move cannot change.
+
+    A pan changes which tiles are ``active`` and ``near`` and nothing else:
+    ``region_id``, ``source_index``, ``bounds``, ``data_slices``,
+    ``view_state`` and ``materialization_key`` are all read off the
+    ``MontagePlan`` (plus the frame's semantic key and montage axis), none of
+    which a camera move touches. So they are built once here and handed back
+    to every later plan for the same montage.
+
+    ``plan`` is held by strong reference on purpose: the cache is keyed on
+    ``id(plan)``, and an id is only a sound identity for as long as the object
+    it names is alive. Keeping the plan pinned makes address reuse — a freed
+    plan's id landing on a different plan — impossible for a live entry.
+    """
+
+    __slots__ = (
+        "_dense",
+        "_flag_sets",
+        "_variants",
+        "plan",
+        "planned_region_ids",
+        "regions",
+        "set_hits",
+        "set_misses",
+        "signature",
+    )
+
+    def __init__(self, plan, regions: tuple[FrameRegion, ...]) -> None:
+        self.plan = plan
+        self.regions = regions
+        # Per tile, the FrameRegion for each (active, planned, near) triple
+        # already asked for. At most 8 per tile by construction, and in
+        # practice 2-3: ``planned`` is unconditionally True on this path and
+        # ``near`` is a superset of ``active``.
+        self._variants: tuple[dict[tuple[bool, bool, bool], FrameRegion], ...] = tuple(
+            {(region.active, region.planned, region.near): region} for region in regions
+        )
+        self.planned_region_ids = tuple(region.region_id for region in regions if region.planned)
+        self.signature = tuple(
+            (
+                int(region.region_id),
+                None if region.source_index is None else int(region.source_index),
+                tuple(float(value) for value in region.bounds),
+            )
+            for region in regions
+        )
+        self._flag_sets: dict[object, tuple[FrameRegion, ...]] = {}
+        self._dense = all(region.region_id == index for index, region in enumerate(regions))
+        self.set_hits = 0
+        self.set_misses = 0
+
+    def region_ids_in_order(self, members: set[int]) -> tuple[int, ...]:
+        """Region ids of ``members``, in region order.
+
+        ``_build_montage_plan`` enumerates tiles, so ``montage_index`` — and
+        therefore ``region_id`` — is the position in ``regions``; sorting the
+        membership set is then the same tuple the full filter would produce,
+        at O(len(members)) instead of O(len(regions)). The dense check below
+        is what licenses that shortcut, and the filter is still there for any
+        plan that ever stops being dense.
+        """
+
+        if self._dense:
+            return tuple(sorted(members))
+        return tuple(region.region_id for region in self.regions if region.region_id in members)
+
+    def regions_for(self, key: object, active: set[int], near: set[int]) -> tuple[FrameRegion, ...]:
+        """Regions carrying this pan's flags, reusing everything else."""
+
+        cached = self._flag_sets.get(key)
+        if cached is not None:
+            self.set_hits += 1
+            return cached
+        self.set_misses += 1
+        variants = self._variants
+        built = []
+        for index, region in enumerate(self.regions):
+            region_id = region.region_id
+            flags = (region_id in active, region.planned, region_id in near)
+            table = variants[index]
+            variant = table.get(flags)
+            if variant is None:
+                variant = FrameRegion(
+                    region_id=region.region_id,
+                    source_index=region.source_index,
+                    bounds=region.bounds,
+                    data_slices=region.data_slices,
+                    view_state=region.view_state,
+                    active=flags[0],
+                    planned=flags[1],
+                    near=flags[2],
+                    materialization_key=region.materialization_key,
+                    source_rect=region.source_rect,
+                )
+                table[flags] = variant
+            built.append(variant)
+        regions = tuple(built)
+        if MONTAGE_FLAG_SET_CACHE_SIZE > 0:
+            while len(self._flag_sets) >= MONTAGE_FLAG_SET_CACHE_SIZE:
+                del self._flag_sets[next(iter(self._flag_sets))]
+            self._flag_sets[key] = regions
+        return regions
+
+
 class FramePlanner:
     """Plan one semantic tiled surface for image frames."""
 
@@ -118,8 +248,27 @@ class FramePlanner:
         self,
         *,
         internal_tile_shape: tuple[int, int] = DEFAULT_INTERNAL_TILE_SHAPE,
+        montage_region_cache_size: int = MONTAGE_REGION_CACHE_SIZE,
     ) -> None:
         self.internal_tile_shape = _shape2(internal_tile_shape)
+        # Zero disables reuse and restores the rebuild-everything planner.
+        # That is not a production knob — it is what lets the tests compare a
+        # reusing planner against an otherwise identical one that cannot
+        # reuse, so a cache that silently never hits still fails the suite.
+        self.montage_region_cache_size = max(0, int(montage_region_cache_size))
+        self._montage_skeletons: dict[object, _MontageRegionSkeleton] = {}
+        self.montage_region_cache_hits = 0
+        self.montage_region_cache_misses = 0
+
+    @property
+    def montage_region_set_hits(self) -> int:
+        """Retargets that reused a previous pan's regions tuple whole."""
+
+        return sum(skeleton.set_hits for skeleton in self._montage_skeletons.values())
+
+    @property
+    def montage_region_set_misses(self) -> int:
+        return sum(skeleton.set_misses for skeleton in self._montage_skeletons.values())
 
     def plan(
         self,
@@ -280,26 +429,27 @@ class FramePlanner:
         }
         if view_range is None:
             near = active
-        planned = {int(tile.montage_index) for tile in montage_plan.tiles}
-        regions = tuple(
-            FrameRegion(
-                region_id=int(tile.montage_index),
-                source_index=int(tile.source_index),
-                bounds=(
-                    float(tile.x0),
-                    float(tile.y0),
-                    float(tile.x0 + tile.width - 1),
-                    float(tile.y0 + tile.height - 1),
-                ),
-                data_slices=(slice(0, int(tile.height)), slice(0, int(tile.width))),
-                view_state=tile.view_state,
-                active=int(tile.montage_index) in active,
-                planned=int(tile.montage_index) in planned,
-                near=int(tile.montage_index) in near,
-                materialization_key=(target.semantic_key, "montage", axis, int(tile.source_index)),
+        skeleton = self._montage_region_skeleton(montage_plan, target=target, axis=axis)
+        if skeleton is None:
+            planned = {int(tile.montage_index) for tile in montage_plan.tiles}
+            regions = tuple(
+                _montage_region(
+                    tile,
+                    target=target,
+                    axis=axis,
+                    active=int(tile.montage_index) in active,
+                    planned=int(tile.montage_index) in planned,
+                    near=int(tile.montage_index) in near,
+                )
+                for tile in montage_plan.tiles
             )
-            for tile in montage_plan.tiles
-        )
+            active_ids = planned_ids = near_ids = signature = None
+        else:
+            active_ids = skeleton.region_ids_in_order(active)
+            near_ids = skeleton.region_ids_in_order(near)
+            planned_ids = skeleton.planned_region_ids
+            signature = skeleton.signature
+            regions = skeleton.regions_for((active_ids, near_ids), active, near)
         return FramePlan(
             target=target,
             geometry=geometry,
@@ -308,7 +458,57 @@ class FramePlanner:
             regions=regions,
             semantic_key=target.semantic_key,
             materialization_key=(target.semantic_key, "montage", axis, indices, tile_shape),
+            _active_region_ids=active_ids,
+            _planned_region_ids=planned_ids,
+            _near_region_ids=near_ids,
+            scene_region_signature=signature,
         )
+
+    def _montage_region_skeleton(
+        self, montage_plan, *, target: FrameTarget, axis: int
+    ) -> _MontageRegionSkeleton | None:
+        """The pan-invariant regions for this montage, built at most once.
+
+        The key is ``(id(plan), semantic_key, axis)`` because those are
+        exactly the three inputs the invariant half of a ``FrameRegion``
+        reads: everything geometric comes off the plan's tiles, and the only
+        non-plan input is the ``materialization_key``, which is
+        ``(semantic_key, "montage", axis, source_index)``. Measured on a
+        272-tile montage driven through the real viewport machinery, all
+        three hold across a pan while ``target`` (a fresh object every
+        retarget) and ``view_range`` do not — see the branch's dated note.
+
+        Returns None when reuse is off or the key is unhashable (a test
+        double for the frame target), which puts the caller back on the
+        rebuild-everything path.
+        """
+
+        if self.montage_region_cache_size <= 0:
+            return None
+        try:
+            key = (id(montage_plan), target.semantic_key, axis)
+            cached = self._montage_skeletons.get(key)
+        except TypeError:
+            # An unhashable semantic key (test doubles) still gets a plan; it
+            # just does not get the reuse. Mirrors ``make_montage_plan``.
+            return None
+        if cached is not None and cached.plan is montage_plan:
+            self.montage_region_cache_hits += 1
+            return cached
+        self.montage_region_cache_misses += 1
+        skeleton = _MontageRegionSkeleton(
+            montage_plan,
+            tuple(
+                _montage_region(
+                    tile, target=target, axis=axis, active=True, planned=True, near=True
+                )
+                for tile in montage_plan.tiles
+            ),
+        )
+        if len(self._montage_skeletons) >= self.montage_region_cache_size:
+            del self._montage_skeletons[next(iter(self._montage_skeletons))]
+        self._montage_skeletons[key] = skeleton
+        return skeleton
 
     def _single_tile_shape(self, display_shape: tuple[int, int]) -> tuple[int, int]:
         return (
@@ -365,6 +565,27 @@ class FramePlanner:
                     source_rect=source_rect if anchored else None,
                 )
                 region_id += 1
+
+
+def _montage_region(
+    tile, *, target: FrameTarget, axis: int, active: bool, planned: bool, near: bool
+) -> FrameRegion:
+    return FrameRegion(
+        region_id=int(tile.montage_index),
+        source_index=int(tile.source_index),
+        bounds=(
+            float(tile.x0),
+            float(tile.y0),
+            float(tile.x0 + tile.width - 1),
+            float(tile.y0 + tile.height - 1),
+        ),
+        data_slices=(slice(0, int(tile.height)), slice(0, int(tile.width))),
+        view_state=tile.view_state,
+        active=active,
+        planned=planned,
+        near=near,
+        materialization_key=(target.semantic_key, "montage", axis, int(tile.source_index)),
+    )
 
 
 def _axis_origins(extent: int, tile: int, start: int | None) -> tuple[int, ...]:
