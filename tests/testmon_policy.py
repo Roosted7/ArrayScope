@@ -640,6 +640,168 @@ def resolve_environment(expression: str) -> str:
     return eval_environment(expression)
 
 
+# --------------------------------------------------------------------------- #
+# Module-block forgiveness
+# --------------------------------------------------------------------------- #
+#
+# testmon collapses to whole-file granularity the moment a module's top-level
+# statement list changes at all, because the entire module body is one AST block
+# spanning line 1 to EOF and that block is therefore in 100% of the file's
+# fingerprints. Adding one inert function to `arrayscope/window/frame_session.py`
+# selected 258 of 3933 tests and cost a measured 123.16 s of wall clock, with
+# zero tests whose executed code had changed. Editing a function *body* is
+# exactly precise (32 of 166 on `render/lod.py`), so this is not "testmon is
+# coarse" — it is one checksum, and it is the whole story.
+#
+# The fix appends provably-equivalent retired checksums to the list
+# `db.check_fingerprint_db` subset-tests each fingerprint against. That is the
+# safety floor: appending to the right-hand side of a subset test can only turn
+# "affected" into "unaffected", never the reverse, and it cannot change anything
+# else testmon does. The entire risk surface is "is each forgiven checksum
+# really equivalent?", one checksum at a time, and it is answered by
+# `coverage_map.forgives_module_block` (a pure insertion of statements nothing
+# already there can observe) and by the index-free body digest (identical digest
+# means byte-identical AST; only the block's ordinal moved).
+#
+# Everything degrades to today's behaviour: no sidecar, no retained revision, a
+# testmon upgrade that moved a name, an unparseable file — no forgiveness. The
+# failure mode stays "runs more tests than necessary", which is the invariant
+# `seed_map` already documents.
+
+
+def declared_whole_file_paths() -> frozenset[str]:
+    """Entry points whose honest dependency is the whole file, so never forgiven.
+
+    :data:`OUT_OF_PROCESS_DEPENDENCIES` re-attaches these by hand at whole-file
+    granularity precisely because *nothing* about the child process is traced.
+    Forgiveness rests on "no execution we recorded can observe the new name",
+    and for an untraced child there is no recording to reason from —
+    ``tests/app/test_qt_binding.py`` asserts on a fresh interpreter's
+    ``sys.modules`` after importing ``arrayscope/__init__.py``, which a new name
+    in that file can move.
+
+    Note this exclusion is load-bearing rather than decorative: the argument that
+    a whole-file fingerprint "contains every block, so any real change removes
+    one" does **not** hold for a pure addition, where every old block survives
+    and every one of them would be forgiven. ``tests/app/test_selection_forgiveness.py``
+    proves it.
+    """
+
+    return frozenset(path for paths in OUT_OF_PROCESS_DEPENDENCIES.values() for path in paths)
+
+
+def forgivable_checksums(rootdir, relative: str, revisions) -> list[int]:
+    """Retired checksums of ``relative`` that still describe its current revision.
+
+    Two rules, both against each retained previous revision:
+
+    * a block whose **index-free body digest** still exists in the current
+      revision — identical digest means the AST of the code a test executed is
+      byte-identical and only its ordinal within the file moved, which nothing
+      can observe;
+    * the **module block**, when the current revision is the previous one with
+      inert definitions inserted (see ``coverage_map.forgives_module_block``).
+
+    Skipped entirely for a file that mentions ``__all__``: adding a name there
+    changes an ``import *`` surface, and the check is textual because it costs
+    nothing and errs toward selecting. The residual hole — a test that
+    introspects the module with ``dir()`` or ``getattr()`` — is bounded by a
+    measured fact rather than argued away: this tree's introspective guards
+    (``tests/app/test_dead_code.py``, ``test_architecture_guards.py``) read
+    source as *data*, so selection never runs them for an ``arrayscope/`` edit
+    in the first place. See ``docs/testing/test-selection.md``.
+    """
+
+    from testmon.process_code import read_source_sha
+
+    from tests import coverage_map
+
+    if not relative.endswith(".py") or relative in declared_whole_file_paths():
+        return []
+    source, _ = read_source_sha(Path(rootdir) / relative)
+    if source is None or "__all__" in source:
+        return []
+    functions, _module, elements = coverage_map.revision_of(source, relative, rootdir)
+    if elements is None:
+        return []
+    current_digests = coverage_map.digests_of(elements)
+    bodies = {function.body for function in functions}
+
+    forgiven: list[int] = []
+    for entry in revisions:
+        if not isinstance(entry, dict):
+            continue
+        for record in entry.get("functions") or ():
+            # ``[checksum, …, body]``: the current revision keeps a line and a
+            # name for reporting, a retained one is stripped to the two ends.
+            if not isinstance(record, list | tuple) or len(record) < 2:
+                continue
+            if record[-1] in bodies:
+                forgiven.append(record[0])
+        module = entry.get("module")
+        retained = entry.get("elements")
+        if (
+            module is not None
+            and isinstance(retained, list)
+            and retained != current_digests  # identical: its checksum is already there
+            and coverage_map.forgives_module_block(retained, elements)
+        ):
+            forgiven.append(module)
+    return forgiven
+
+
+def install_forgiveness(rootdir: os.PathLike[str] | str) -> bool:
+    """Patch ``collect_mhashes`` to append the forgivable checksums. Idempotent.
+
+    One patch covers every caller: ``TestmonData.determine_stable`` reaches
+    ``collect_mhashes`` through the module global, so the pytest plugin,
+    :func:`peek` and ``tools/test_selection.py`` all go through it, and the
+    derivation of the affected set — which this module deliberately does not own
+    — is untouched.
+
+    Returns whether the patch is in place. ``False`` means there was no sidecar
+    to read yet, and the next call retries: a fresh checkout seeds one with its
+    map, and until then selection is exactly what it was.
+    """
+
+    try:
+        import testmon.testmon_core as core
+
+        from tests import coverage_map
+    except ImportError:
+        return False
+
+    original = core.collect_mhashes
+    # The marker is the function it replaced, so "already installed?" and "what
+    # was here before?" are one attribute.
+    if getattr(original, "arrayscope_forgiveness", None) is not None:
+        return True
+    payload = coverage_map.read_sidecar(map_path(rootdir))
+    if not coverage_map.cached_structure(payload):
+        return False
+
+    def collect_mhashes(source_tree, new_changed_file_data):
+        files_mhashes = original(source_tree, new_changed_file_data)
+        for relative, checksums in list(files_mhashes.items()):
+            if not checksums:
+                continue
+            try:
+                extra = forgivable_checksums(
+                    rootdir, relative, coverage_map.previous_revisions(payload, relative)
+                )
+            except Exception:  # never let this be the reason a run cannot start
+                continue
+            known = set(checksums)
+            addition = [checksum for checksum in extra if checksum not in known]
+            if addition:
+                files_mhashes[relative] = list(checksums) + addition
+        return files_mhashes
+
+    collect_mhashes.arrayscope_forgiveness = original
+    core.collect_mhashes = collect_mhashes
+    return True
+
+
 def peek(
     rootdir: os.PathLike[str] | str,
     environment: str,
@@ -657,6 +819,8 @@ def peek(
 
     if not testmon_installed() or not map_path(rootdir).exists():
         return None
+
+    install_forgiveness(rootdir)
 
     from testmon.common import get_system_packages
     from testmon.testmon_core import TestmonData
@@ -875,13 +1039,15 @@ def baseline_method_checksums(rootdir, merge_base: str) -> dict[str, list | None
             checksums[path] = None
             continue
         try:
-            checksums[path] = Module(
+            baseline = Module(
                 source_code=source.decode("utf-8", "replace"),
                 filename=path,
                 rootdir=str(rootdir),
             ).method_checksums
         except Exception:  # unparseable back there: treat as fully changed
             checksums[path] = None
+            continue
+        checksums[path] = baseline
     return checksums
 
 

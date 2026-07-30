@@ -252,7 +252,9 @@ def _coverage(args, *, with_changed_files: bool = False):
         peek = _read_map(environment, with_changed_files=True)
         provisional = len([name for name in peek.changed_files if name.endswith(".py")])
     sidecar = coverage_map.read_sidecar(map_path)
-    structure = coverage_map.Structure(coverage_map.cached_structure(sidecar))
+    structure = coverage_map.Structure(
+        coverage_map.cached_structure(sidecar), coverage_map.retained_revisions(sidecar)
+    )
     reach = coverage_map.measure(
         REPO_ROOT,
         map_path,
@@ -265,11 +267,16 @@ def _coverage(args, *, with_changed_files: bool = False):
             f"No readable selection map at {map_path}.\n"
             "Record one by running the suite once: pytest"
         )
+    # Retain a revision of every file the map depends on, not just the source
+    # roots — that history is what module-block forgiveness compares an edited
+    # file against. See `tests/testmon_policy.install_forgiveness`.
+    coverage_map.track_revisions(REPO_ROOT, map_path, environment, structure)
     if structure.parsed:
         coverage_map.write_sidecar(
             map_path,
             structure=structure.payload(),
             baselines=coverage_map.baselines(sidecar),
+            revisions=structure.retained(),
         )
     return coverage_map, environment, map_path, sidecar, structure, reach
 
@@ -427,7 +434,12 @@ def command_accept_coverage(args) -> int:
     recorded = coverage_map.baselines(sidecar)
     previous = recorded.get(environment)
     recorded[environment] = coverage_map.baseline_from(reach)
-    coverage_map.write_sidecar(map_path, structure=structure.payload(), baselines=recorded)
+    coverage_map.write_sidecar(
+        map_path,
+        structure=structure.payload(),
+        baselines=recorded,
+        revisions=structure.retained(),
+    )
     if previous:
         moved = reach.covered - int(previous.get("covered", 0))
         print(

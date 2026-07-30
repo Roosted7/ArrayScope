@@ -393,6 +393,9 @@ def pytest_configure(config):
     config.arrayscope_selection = decision
     if decision.active:
         _ensure_map_seeded(config)
+        # Before testmon's own configure, which is where it resolves the
+        # affected set through the module global this patches.
+        testmon_policy.install_forgiveness(config.rootdir)
     if decision.active and not decision.explicit:
         config.option.testmon = True
     if decision.active and not _XDIST_WORKER:
@@ -826,10 +829,17 @@ def _report_function_coverage(terminalreporter, config):
 
     map_path = testmon_policy.map_path(config.rootdir)
     sidecar = coverage_map.read_sidecar(map_path)
-    structure = coverage_map.Structure(coverage_map.cached_structure(sidecar))
+    structure = coverage_map.Structure(
+        coverage_map.cached_structure(sidecar), coverage_map.retained_revisions(sidecar)
+    )
     reach = coverage_map.measure(config.rootdir, map_path, environment, structure=structure)
     if reach is None or not reach.total:
         return
+    # Not for the figure — for selection. Every file the map depends on needs its
+    # revision retained here, because this is the moment the tree and the map
+    # agree, and the next edit is compared against it. See
+    # ``testmon_policy.install_forgiveness``.
+    coverage_map.track_revisions(config.rootdir, map_path, environment, structure)
 
     baselines = coverage_map.baselines(sidecar)
     drift = coverage_map.drift(reach, baselines.get(environment))
@@ -858,7 +868,12 @@ def _report_function_coverage(terminalreporter, config):
         _report_new_code_coverage(terminalreporter, config, environment, map_path, structure, since)
 
     if structure.parsed or environment not in coverage_map.baselines(sidecar):
-        coverage_map.write_sidecar(map_path, structure=structure.payload(), baselines=baselines)
+        coverage_map.write_sidecar(
+            map_path,
+            structure=structure.payload(),
+            baselines=baselines,
+            revisions=structure.retained(),
+        )
 
 
 def _report_new_code_coverage(terminalreporter, config, environment, map_path, structure, ref):
