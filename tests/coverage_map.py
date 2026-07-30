@@ -866,6 +866,65 @@ class Structure:
         return {relative: entries for relative, entries in self._retained.items() if entries}
 
 
+def revision_at(payload: dict, rootdir, relative: str) -> dict | None:
+    """The cached parse of ``relative``, if it still describes the file on disk.
+
+    Content-addressed, and that is the whole safety argument: the key is the same
+    ``read_source_sha`` fsha :class:`Structure` wrote the entry under, so a
+    stale entry cannot match. **A wrong answer here is not available — only a
+    miss.** Every failure mode (no sidecar, an entry from another revision, an
+    unreadable file) returns ``None``, and the caller then does exactly what it
+    did before.
+
+    Note the fsha is deliberately *not* testmon's ``Module.fs_fsha``. For an
+    unmodified tracked file ``get_source_sha`` returns the git *index* sha
+    instead of hashing the bytes, so the two spellings disagree on content they
+    both consider identical. Both sides here read through ``read_source_sha``,
+    which is the one that always hashes.
+    """
+
+    from testmon.process_code import read_source_sha
+
+    entry = cached_structure(payload).get(relative)
+    if not isinstance(entry, dict) or not entry.get("fsha"):
+        return None
+    try:
+        _source, fsha = read_source_sha(Path(rootdir) / relative)
+    except OSError:
+        return None
+    return entry if fsha == entry.get("fsha") else None
+
+
+def method_checksums_of(entry: dict) -> list[int] | None:
+    """testmon's own ``method_checksums`` for a cached revision, or ``None``.
+
+    The sidecar keeps a file's blocks because :func:`measure` needs their
+    identities; those blocks *are* testmon's, in testmon's order, with testmon's
+    checksums — :func:`revision_of` derives both from one ``dump_and_block``
+    walk. So the list testmon would re-derive by re-parsing the file is already
+    on disk, and re-parsing it is the largest single cost of a map read: 0.084 s
+    for the nine files that differ from the map on this tree, paid on every run
+    forever, because a file no affected test depends on is never re-recorded and
+    so never stops differing.
+
+    ``None`` for an entry that predates this shape. Verified against testmon on
+    all 574 cached files of this tree: identical lists, and the single
+    disagreement was a file whose content had moved on — which the fsha key
+    excludes.
+    """
+
+    if not isinstance(entry, dict):
+        return None
+    functions = entry.get("functions")
+    if functions is None:
+        return None
+    checksums = [record[0] for record in functions]
+    module = entry.get("module")
+    # An empty or unparseable file has no blocks at all, and testmon reports
+    # ``[]`` for it rather than ``[None]``.
+    return [*checksums, module] if module is not None else checksums
+
+
 def _slim(entry: dict) -> dict:
     """A retained revision, stripped to what forgiveness reads.
 

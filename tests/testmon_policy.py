@@ -725,7 +725,9 @@ def declared_whole_file_paths() -> frozenset[str]:
     return frozenset(path for paths in OUT_OF_PROCESS_DEPENDENCIES.values() for path in paths)
 
 
-def forgivable_checksums(rootdir, relative: str, revisions) -> list[int]:
+def forgivable_checksums(
+    rootdir, relative: str, revisions, parsed: dict | None = None
+) -> list[int]:
     """Retired checksums of ``relative`` that still describe its current revision.
 
     Two rules, both against each retained previous revision:
@@ -745,6 +747,13 @@ def forgivable_checksums(rootdir, relative: str, revisions) -> list[int]:
     (``tests/app/test_dead_code.py``, ``test_architecture_guards.py``) read
     source as *data*, so selection never runs them for an ``arrayscope/`` edit
     in the first place. See ``docs/testing/test-selection.md``.
+
+    ``parsed`` is the sidecar's cached decomposition of this same revision, when
+    the caller already had it. It carries the body digests and the element
+    digests, which is everything the first rule needs and the *cheap* half of the
+    second — so the AST parse is deferred to the one branch that genuinely needs
+    ``Element`` objects (a retained module block whose statements differ from the
+    current ones), and skipped entirely otherwise.
     """
 
     from testmon.process_code import read_source_sha
@@ -753,14 +762,25 @@ def forgivable_checksums(rootdir, relative: str, revisions) -> list[int]:
 
     if not relative.endswith(".py") or relative in declared_whole_file_paths():
         return []
+    # Read even when ``parsed`` was supplied: the ``__all__`` gate is textual,
+    # and a read is a thousandth of what a parse costs.
     source, _ = read_source_sha(Path(rootdir) / relative)
     if source is None or "__all__" in source:
         return []
-    functions, _module, elements = coverage_map.revision_of(source, relative, rootdir)
-    if elements is None:
-        return []
-    current_digests = coverage_map.digests_of(elements)
-    bodies = {function.body for function in functions}
+    elements = None
+    if parsed is not None and parsed.get("elements") is not None:
+        current_digests = list(parsed["elements"])
+        bodies = {
+            record[-1]
+            for record in parsed.get("functions") or ()
+            if isinstance(record, list | tuple) and len(record) >= 2
+        }
+    else:
+        functions, _module, elements = coverage_map.revision_of(source, relative, rootdir)
+        if elements is None:
+            return []
+        current_digests = coverage_map.digests_of(elements)
+        bodies = {function.body for function in functions}
 
     forgiven: list[int] = []
     for entry in revisions:
@@ -775,24 +795,45 @@ def forgivable_checksums(rootdir, relative: str, revisions) -> list[int]:
                 forgiven.append(record[0])
         module = entry.get("module")
         retained = entry.get("elements")
-        if (
-            module is not None
-            and isinstance(retained, list)
-            and retained != current_digests  # identical: its checksum is already there
-            and coverage_map.forgives_module_block(retained, elements)
-        ):
+        if module is None or not isinstance(retained, list) or retained == current_digests:
+            continue  # identical: its checksum is already there
+        if elements is None:
+            elements = coverage_map.elements_of(source, relative, rootdir)
+            if elements is None:
+                continue
+        if coverage_map.forgives_module_block(retained, elements):
             forgiven.append(module)
     return forgiven
 
 
 def install_forgiveness(rootdir: os.PathLike[str] | str) -> bool:
-    """Patch ``collect_mhashes`` to append the forgivable checksums. Idempotent.
+    """Patch ``collect_mhashes`` to serve from cache and forgive. Idempotent.
 
     One patch covers every caller: ``TestmonData.determine_stable`` reaches
     ``collect_mhashes`` through the module global, so the pytest plugin,
     :func:`peek` and ``tools/test_selection.py`` all go through it, and the
     derivation of the affected set — which this module deliberately does not own
     — is untouched.
+
+    Two things happen here, and they share one lookup.
+
+    **Serving the checksums from the sidecar.** testmon re-parses every file
+    whose recorded fsha row does not match, and on this tree that is a *standing*
+    set: a file no affected test depends on is never re-recorded, so it never
+    stops differing, and its AST is rebuilt on every run forever — 0.084 s for
+    nine files, growing linearly with the branch's diff. The sidecar already
+    holds that file's blocks, keyed by content, because the coverage figure needs
+    their identities; ``coverage_map.method_checksums_of`` reads testmon's own
+    list straight back out of it. Verified equal to testmon's on all 574 cached
+    files of this tree.
+
+    **Forgiveness**, unchanged in effect, now handed the same cached
+    decomposition so its own parse is skipped too.
+
+    Nothing here can produce a wrong answer, only a slower run. The cache key is
+    the file's content hash, so a stale entry cannot match; a miss, a sidecar
+    from an older shape, or any exception falls back to testmon parsing the file
+    exactly as it does today.
 
     Returns whether the patch is in place. ``False`` means there was no sidecar
     to read yet, and the next call retries: a fresh checkout seeds one with its
@@ -816,13 +857,28 @@ def install_forgiveness(rootdir: os.PathLike[str] | str) -> bool:
         return False
 
     def collect_mhashes(source_tree, new_changed_file_data):
-        files_mhashes = original(source_tree, new_changed_file_data)
+        cached: dict[str, dict] = {}
+        for relative in new_changed_file_data:
+            try:
+                entry = coverage_map.revision_at(payload, rootdir, relative)
+            except Exception:  # never let the cache be why a run cannot start
+                entry = None
+            if entry is not None and coverage_map.method_checksums_of(entry) is not None:
+                cached[relative] = entry
+        unparsed = [name for name in new_changed_file_data if name not in cached]
+        files_mhashes = original(source_tree, unparsed) if unparsed else {}
+        for relative, entry in cached.items():
+            files_mhashes[relative] = coverage_map.method_checksums_of(entry)
+
         for relative, checksums in list(files_mhashes.items()):
             if not checksums:
                 continue
             try:
                 extra = forgivable_checksums(
-                    rootdir, relative, coverage_map.previous_revisions(payload, relative)
+                    rootdir,
+                    relative,
+                    coverage_map.previous_revisions(payload, relative),
+                    parsed=cached.get(relative),
                 )
             except Exception:  # never let this be the reason a run cannot start
                 continue

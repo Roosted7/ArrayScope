@@ -1090,6 +1090,82 @@ def test_the_structure_cache_only_reparses_what_changed(tmp_path):
     assert again.parsed == 1, "changed content must be"
 
 
+def test_the_cached_blocks_are_testmons_own_method_checksums(tmp_path):
+    """The equivalence the mhash cache rests on, asserted against testmon itself.
+
+    The sidecar keeps a file's blocks for the coverage figure. They are the same
+    blocks testmon fingerprints with, in the same order — both come from one
+    ``dump_and_block`` walk — so the list testmon would re-derive by re-parsing
+    is already on disk. If this ever stops holding, selection would be handed
+    checksums that are not testmon's, which is the one way this cache could be
+    wrong rather than merely slow.
+    """
+
+    from testmon.testmon_core import SourceTree
+
+    coverage_map, relative = _sample_tree(tmp_path)
+    structure = coverage_map.Structure()
+    entry = structure.for_file(tmp_path, relative)
+
+    module = SourceTree(rootdir=str(tmp_path)).get_file(relative)
+    assert coverage_map.method_checksums_of(entry) == list(module.method_checksums)
+
+
+def test_an_empty_file_has_no_blocks_rather_than_one_empty_one(tmp_path):
+    """testmon reports ``[]`` for a file with nothing in it — every package
+    ``__init__.py`` in this tree — and ``[None]`` would be a checksum list
+    nothing can match."""
+
+    coverage_map, relative = _sample_tree(tmp_path, source="", name="pkg/__init__.py")
+    entry = coverage_map.Structure().for_file(tmp_path, relative)
+    assert coverage_map.method_checksums_of(entry) == []
+
+
+def test_a_cache_entry_from_another_revision_is_a_miss_not_an_answer(tmp_path):
+    """The safety property, stated as a test: the key is the file's content, so
+    a stale entry cannot be served. The worst this cache can do is a re-parse."""
+
+    coverage_map, relative = _sample_tree(tmp_path)
+    structure = coverage_map.Structure()
+    structure.for_file(tmp_path, relative)
+    payload = {"structure": structure.payload()}
+
+    assert coverage_map.revision_at(payload, tmp_path, relative) is not None
+    (tmp_path / relative).write_text(_SAMPLE + "\n\ndef added():\n    return 2\n")
+    assert coverage_map.revision_at(payload, tmp_path, relative) is None
+
+
+def test_a_sidecar_from_before_this_cache_existed_is_a_miss(tmp_path):
+    coverage_map, relative = _sample_tree(tmp_path)
+    assert coverage_map.method_checksums_of({"fsha": "x", "module": 1}) is None
+    assert coverage_map.revision_at({}, tmp_path, relative) is None
+
+
+def test_forgiveness_answers_the_same_from_the_cache_as_from_a_parse(tmp_path):
+    """The cached decomposition carries the body digests and the element digests,
+    which is everything the first forgiveness rule needs — so handing it over
+    must not change a single forgiven checksum."""
+
+    from tests import coverage_map as module
+
+    relative = "pkg/module.py"
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_SAMPLE, encoding="utf-8")
+
+    before = module.Structure()
+    previous = before.for_file(tmp_path, relative)
+    path.write_text(_SAMPLE + "\n\ndef inert():\n    return 3\n", encoding="utf-8")
+    after = module.Structure(before.payload())
+    current = after.for_file(tmp_path, relative)
+
+    revisions = [previous]
+    parsed = testmon_policy.forgivable_checksums(tmp_path, relative, revisions, parsed=current)
+    unparsed = testmon_policy.forgivable_checksums(tmp_path, relative, revisions)
+    assert parsed == unparsed
+    assert previous["module"] in parsed, "a purely inert addition is forgivable"
+
+
 def test_the_cache_forgets_a_deleted_file(tmp_path):
     """The payload is what this pass saw, so a removed file expires rather than
     propping the denominator up forever."""
