@@ -9,6 +9,7 @@ from arrayscope.operations.pipeline import (
     CenteredFFT,
     CenteredFFTN,
     CenteredIFFT,
+    CenteredIFFTN,
     CombineRealImagAxis,
     Crop,
     FFTShift,
@@ -277,6 +278,21 @@ def test_axis_set_transform_region_result_matches_the_whole_array_transform():
     # A POINT on a non-applied axis AND a slice on an applied one: the applied
     # axes must be transformed whole and only then cut down, and the point drop
     # must not shift the slab positions the later cuts use.
+    output_region = region_from_index_spec((4, 8, 6), (2, slice(2, 6), slice(None)))
+    input_region = operation.required_input_region((4, 8, 6), output_region)
+    slab = operation.apply_to_region(
+        data[2], input_region=input_region, output_region=output_region
+    )
+
+    np.testing.assert_array_equal(slab, whole[2, 2:6, :])
+
+
+def test_axis_set_inverse_transform_takes_the_same_region_path():
+    rng = np.random.default_rng(0x1FF7)
+    data = rng.standard_normal((4, 8, 6)).astype(np.float32)
+    operation = CenteredIFFTN(axes=(1, 2))
+    whole = operation.apply(data)
+
     output_region = region_from_index_spec((4, 8, 6), (2, slice(2, 6), slice(None)))
     input_region = operation.required_input_region((4, 8, 6), output_region)
     slab = operation.apply_to_region(
