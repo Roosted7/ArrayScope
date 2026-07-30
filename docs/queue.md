@@ -64,7 +64,11 @@ contract).
 Safe to pick up alongside the numbered queue; each is self-contained.
 
 - **ADR 0059 exclusive dynamic preview-first — RAW + WGPU FFT MEDIAN GATES DONE
-  2026-07-27; PyQtGraph complex preview correctness pass DONE, latency RED;
+  2026-07-27; PyQtGraph complex preview correctness pass DONE, latency RED
+  (the 272-tile post-FFT physical-union row is narrowly xfailed only for a
+  timeout at the unchanged 5 s interaction cap; measured 5.38 s serial but
+  straddles the cap offscreen, so the deterministic R5 harness remains the
+  latency authority);
   product default.**
   Root cause was the successor rule itself: a FLOOR-backed `DESIRED` task still
   used `DISPLAY_PREVIEW`, so phase-only experiments delayed ACK while target
