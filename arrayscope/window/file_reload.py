@@ -116,17 +116,16 @@ class FileReloadMixin:
             self._reload_base_data(new_data, preserve_steps=False)
 
         if self.data.ndim != old_ndim:
-            # Per-dimension widgets were built for old_ndim and cannot be rebuilt in-place.
-            # Open a fresh window with the new data and close this one.
-            win = type(self)(
+            # Per-dimension widgets were built for old_ndim and cannot be
+            # rebuilt in place, so the reloaded array moves to a fresh window
+            # (arrayscope.window.rank_handoff states what that carries and what
+            # it drops). The reloaded data replaces the base array, so the
+            # steps that survived the reload above travel with it.
+            self.open_window_at_new_rank(
                 new_data,
-                filepath=self._filepath,
-                dataset_path=self._dataset_path,
-                selector_class_name=self._selector_class_name,
+                steps=self.document.steps or None,
+                axes=self.document.base_axes,
             )
-            win.setWindowTitle(self.windowTitle())
-            win.show()
-            self.close()
             return
 
         self.singleton = [e == 1 for e in self.data.shape]

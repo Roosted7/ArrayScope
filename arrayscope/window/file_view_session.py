@@ -183,11 +183,27 @@ class FileViewSessionMixin:
                 current_metadata,
                 self.base_data.shape,
                 filename=str(filename),
+                base_data=self.base_data,
             )
         except Exception as exc:
             show_status_message(self, f"Skipped saved view: {exc}", timeout=7000)
             return False
         if session is None:
+            return False
+        # The saved stack may have grown a dimension since it was written (a
+        # rank-increasing step edited in, then saved). This window's
+        # per-dimension widgets were already built for the file's own rank and
+        # cannot grow, and the fresh-window handoff that fixes that in a live
+        # window cannot run from inside this constructor. Say so instead, and
+        # point at the surface that does work.
+        restored_ndim = int(session.recipe.view_state.ndim)
+        if not self.document_rank_fits_widgets(restored_ndim):
+            show_status_message(
+                self,
+                f"Saved view needs a {restored_ndim}-D window; "
+                "load its view recipe after opening to see it.",
+                timeout=7000,
+            )
             return False
         defaults = self._snapshot_file_session_defaults()
         previous_suspend_progressive = bool(getattr(self, "_suspend_progressive_dock_sync", False))

@@ -12,7 +12,6 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.app.errors import handle_ui_exception
-from arrayscope.core.array_metadata import derived_info_for
 from arrayscope.core.compute_policy import (
     ComputeLane,
     EvaluationContext,
@@ -42,6 +41,7 @@ from arrayscope.window.inspection import InspectionWorkflowMixin
 from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.operation_actions import OperationActionsMixin
 from arrayscope.window.operation_slots import OperationSlotSourcesMixin
+from arrayscope.window.rank_handoff import WindowRankHandoffMixin
 from arrayscope.window.render import RenderOrchestrator
 from arrayscope.window.render_coordinator import RenderCoordinator
 from arrayscope.window.state_sync import StateSyncMixin
@@ -59,6 +59,7 @@ class ArrayScopeWindow(
     DimensionControlMixin,
     ExportWorkflowMixin,
     FileReloadMixin,
+    WindowRankHandoffMixin,
     QtWidgets.QMainWindow,
 ):
     # Styling constants — use pt (point) units so font sizes are DPI-independent
@@ -88,7 +89,21 @@ class ArrayScopeWindow(
         dataset_path=None,
         selector_class_name=None,
         axes=None,
+        steps=None,
     ):
+        """Open a window over ``data``.
+
+        ``steps`` pre-populates the operation stack *before* any widget is
+        built. That matters because the per-dimension widget arrays are
+        allocated once from the rank the window is constructed at and cannot be
+        rebuilt in place (see :mod:`arrayscope.window.rank_handoff`): a stack
+        loaded afterwards can lower the rank (surplus widgets simply hide) but
+        cannot raise it. Handing the stack to the constructor is what lets a
+        rank-INCREASING operation be presented at all, and the steps arrive as
+        ordinary steps -- listed, editable and disableable in the operations
+        dock like any other.
+        """
+
         configure_gui_gc_latency()
         super().__init__()
         self._init_operation_slot_sources()
@@ -108,6 +123,7 @@ class ArrayScopeWindow(
 
         self.operation_coordinator = OperationCoordinator(
             data,
+            steps=steps,
             axes=axes,
             chunk_transport_codec=self.app_settings.chunk_transport_codec.value,
         )
@@ -214,7 +230,10 @@ class ArrayScopeWindow(
         self._apply_resource_governor_decisions(refresh_telemetry=False)
         self.render_coordinator = RenderCoordinator(self)
         self._deferred_side_panel_refresh_pending = False
-        self.data = derived_info_for(self.document)
+        # The DERIVED shape/dtype, not the base one: with pre-populated steps
+        # they differ, and everything below (widget arrays, view state, the
+        # complex controls) describes what is displayed.
+        self.data = self._derived_info()
         # The per-dimension legacy widgets are laid out for this shape as the UI
         # is built; seed the shape guard so the first shape-preserving operation
         # (e.g. an FFT) does not needlessly re-run those layout mutations and
@@ -245,12 +264,13 @@ class ArrayScopeWindow(
         self.statusBar()
 
         # If data is real-valued and has size-2 dimensions, arrayscope can combine them as complex (ISMRMD uses this for real/imag parts)
-        if np.iscomplexobj(data):
-            self.can_combine_as_complex = [False] * data.ndim
+        is_complex = self._current_is_complex()
+        if is_complex:
+            self.can_combine_as_complex = [False] * self.data.ndim
         else:
-            self.can_combine_as_complex = [data.shape[i] == 2 for i in range(data.ndim)]
+            self.can_combine_as_complex = [self.data.shape[i] == 2 for i in range(self.data.ndim)]
         self.combined_as_complex = [
-            np.iscomplexobj(data) and data.shape[i] == 1 for i in range(data.ndim)
+            is_complex and self.data.shape[i] == 1 for i in range(self.data.ndim)
         ]
 
         # Store complex_dim for later use (after widgets are created)
@@ -270,31 +290,37 @@ class ArrayScopeWindow(
         # Dropping supported files onto the viewer opens them in new windows.
         self.setAcceptDrops(True)
 
-        self._build_window_ui(data, filepath)
+        self._build_window_ui(self.data, filepath)
         self._update_array_info_label()
         from arrayscope.sync.controller import WindowSyncController
 
         self.sync_controller = WindowSyncController(self)
         self._apply_channel_colormap()
         try:
-            restored_file_view_session = self._restore_file_view_session_if_available()
+            # A caller-supplied stack IS this window's document (a sibling
+            # opened for a rank-increasing op, or a rank handoff). A saved
+            # session would replace it with a stack minted at the old rank,
+            # which this window's widgets were not built for.
+            restored_file_view_session = (
+                False if steps is not None else self._restore_file_view_session_if_available()
+            )
         finally:
             self._suspend_progressive_dock_sync = False
 
         if complex_dim is not None:  # user requested combining as complex
-            if complex_dim < 0 or complex_dim >= data.ndim:
+            if complex_dim < 0 or complex_dim >= self.data.ndim:
                 show_status_message(
                     self,
-                    f"complex_dim={complex_dim} is out of range for {data.ndim}D array. Ignoring.",
+                    f"complex_dim={complex_dim} is out of range for {self.data.ndim}D array. Ignoring.",
                 )
-            elif np.iscomplexobj(data):
+            elif self._current_is_complex():
                 show_status_message(
                     self, f"Data is already complex. Ignoring complex_dim={complex_dim}."
                 )
-            elif data.shape[complex_dim] != 2:
+            elif self.data.shape[complex_dim] != 2:
                 show_status_message(
                     self,
-                    f"Dimension {complex_dim} has shape {data.shape[complex_dim]}, not 2. Cannot combine as complex.",
+                    f"Dimension {complex_dim} has shape {self.data.shape[complex_dim]}, not 2. Cannot combine as complex.",
                 )
             else:
                 self.combineAsComplex(complex_dim)  # valid

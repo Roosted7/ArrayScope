@@ -23,9 +23,13 @@ from arrayscope.operations.stack import (
 
 
 class OperationCoordinator:
-    def __init__(self, base_data, operations=(), *, axes=None, chunk_transport_codec="raw"):
+    def __init__(
+        self, base_data, operations=(), *, steps=None, axes=None, chunk_transport_codec="raw"
+    ):
         self.base_data = base_data
-        self.document = ArrayDocument(base_data, operations=tuple(operations), axes=axes)
+        self.document = ArrayDocument(
+            base_data, operations=tuple(operations), steps=steps, axes=axes
+        )
         self.evaluator = OperationEvaluator(
             self.document, chunk_transport_codec=str(chunk_transport_codec)
         )
@@ -63,6 +67,18 @@ class OperationCoordinator:
             slot_bindings=slot_bindings,
             slot_resolver=slot_resolver,
         )
+        return self.append_created_operation(operation)
+
+    def append_created_operation(self, operation):
+        """Append an operation object that the caller already built.
+
+        Splitting this out of :meth:`append_operation` lets a caller that has to
+        *inspect* the operation first -- the UI predicts its output rank before
+        deciding which window the result belongs in -- build it exactly once. A
+        second ``create_operation`` would re-run every bound input slot's
+        resolver.
+        """
+
         return self.set_document(self.document.with_operation(operation))
 
     def undo(self):
@@ -182,9 +198,18 @@ class OperationCoordinator:
         )
 
     def _reject_scalar(self, document):
+        """Refuse a 0-D document, and only a 0-D one.
+
+        The floor is *rank zero*, not rank one: a 1-D result is displayable --
+        it is the line plot -- and the UI's own pre-guard agrees (a reduction is
+        offered only while ``ndim > 1``, which is what stops a 1-D array being
+        reduced to a scalar, not what stops a 2-D one becoming a line).
+        """
+
         if len(document.current_shape) < 1:
             raise ValueError(
-                "operation would produce a scalar, which this viewer cannot display yet"
+                "operation would reduce the array to a single value; the viewer "
+                "needs at least one axis (a 1-D result renders as a line plot)"
             )
 
     def _document(self, *, steps):

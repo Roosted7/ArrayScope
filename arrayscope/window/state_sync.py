@@ -245,6 +245,17 @@ class StateSyncMixin:
         self.render(reason="scale", force_autolevel=True)
 
     def _set_document(self, document):
+        # A document that outgrew the per-dimension widgets cannot be shown
+        # here at all -- the sync below would index past the widget arrays. The
+        # rank increase moves to a fresh window instead (see
+        # arrayscope.window.rank_handoff); this window keeps the document it
+        # was already showing so the close that follows is self-consistent.
+        # Reached by re-enabling an inherited rank-increasing step, loading a
+        # recipe with one, or editing one's parameters into a rank change.
+        if not self.document_rank_fits_widgets(len(document.current_shape)):
+            handed_off = self._hand_off_document_rank_change(document)
+            self.operation_coordinator.set_document(self.document)
+            return handed_off
         self.operation_coordinator.set_document(document)
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document
