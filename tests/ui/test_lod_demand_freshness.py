@@ -41,7 +41,19 @@ def test_zoom_in_rederives_lod_demand(qtbot):
     data = np.random.default_rng(5).normal(size=(256, 256, 24)).astype(np.float32)
     win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     try:
-        win.resize(900, 700)
+        # 450x350, not the 900x700 this gate was migrated onto: at that size the
+        # fit view lands on 2.09 source texels per screen pixel, which is inside
+        # the promotion hysteresis band ([2.0, 2.3) coming from native) rather
+        # than clear of it.  The demand owner then legitimately answered level 0
+        # and the `fit_desired > 0` PRECONDITION below failed, so this gate
+        # reported a threshold coincidence instead of the trajectory defect it
+        # exists for.  Halving the viewport doubles texels-per-pixel to ~4.2 --
+        # unambiguously a reduced level from any previous factor.  Do not "fix" a
+        # failure here by relaxing the demand owner's hysteresis: the cold fit
+        # and a zoom-out back to the same camera must agree, or the returning
+        # round targets a level its acknowledged pages do not carry and strands
+        # settlement (`test_wgpu_zoom_out_completes_finer_resident_montage`).
+        win.resize(450, 350)
         win.show()
         state = win.view_state.with_montage_axis(
             2, columns=None, indices=tuple(range(24)), text="0:24"
