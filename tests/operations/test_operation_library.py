@@ -398,11 +398,135 @@ def test_broken_code_file_is_skipped_and_recorded(tmp_path):
 
     assert "user:broken" not in {entry.id for entry in registry.all_operations()}
     problems = library.user_operation_problems()
-    assert any("broken.json" in path for path, _message in problems)
+    assert any("broken.json" in problem.path for problem in problems)
     # A good op alongside the broken one still loads.
     good = _write_source(tmp_path, "g.py", _DOUBLE_SRC)
     library.import_custom_operation(good, "double")
     assert "user:double" in {entry.id for entry in registry.all_operations()}
+
+    # Not registering it is only half the contract. The definition is still
+    # stored, so it must remain reachable and repairable through the
+    # path-keyed API -- "skipped" must never mean "unaddressable".
+    problem = next(p for p in problems if "broken.json" in p.path)
+    assert problem.payload["id"] == "user:broken"
+    assert problem.operation_id == "user:broken"
+
+    # Repairing the source file the wrapper points at resolves the problem.
+    (ops_dir / "broken.py").write_text("def oops(data):\n    return data\n")
+    library.refresh_user_operations()
+    assert "user:broken" in {entry.id for entry in registry.all_operations()}
+    assert not library.user_operation_problems()
+
+
+def test_unparseable_wrapper_is_still_editable_and_removable_by_path(tmp_path):
+    # The worst failure class: the payload does not parse, so there is no id to
+    # key anything on. _wrapper_path_for_id returns None for exactly this file,
+    # which is why the problems channel is keyed by path instead.
+    ops_dir = tmp_path / "operations"
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    (ops_dir / "garbled.json").write_text('{"format": "arrayscope-operation", "version":')
+    library.refresh_user_operations()
+
+    problems = library.user_operation_problems()
+    assert len(problems) == 1
+    problem = problems[0]
+    assert problem.payload is None
+    assert problem.operation_id is None
+    assert library._wrapper_path_for_id("user:garbled") is None
+
+    # Editable by path: writing a valid payload resolves the row outright.
+    (ops_dir / "garbled.py").write_text(_DOUBLE_SRC)
+    assert library.update_user_operation_file(
+        problem.path,
+        {
+            "format": "arrayscope-operation",
+            "version": 1,
+            "id": "user:garbled",
+            "label": "Garbled",
+            "source": {"mode": "import", "path": "garbled.py", "callable": "double"},
+        },
+    )
+    assert not library.user_operation_problems()
+    assert "user:garbled" in {entry.id for entry in registry.all_operations()}
+
+    # Removable by path too, code file and all.
+    library.refresh_user_operations()
+    assert library.remove_user_operation_file(str(ops_dir / "garbled.json"))
+    assert not os.path.exists(ops_dir / "garbled.json")
+    assert not os.path.exists(ops_dir / "garbled.py")
+    assert "user:garbled" not in {entry.id for entry in registry.all_operations()}
+
+
+def test_path_keyed_primitives_refuse_files_outside_the_ops_directory(tmp_path):
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text("{}")
+    assert library.remove_user_operation_file(str(outside)) is False
+    assert library.update_user_operation_file(str(outside), {"id": "user:x"}) is False
+    assert outside.exists()
+
+
+def test_duplicated_command_definition_survives_a_switch_to_python(tmp_path):
+    # The reported brick, at the library level: a command copy used to be
+    # written without a `source` block, so the very next thing the manager
+    # offers -- the runtime combo -- produced a wrapper the loader refuses.
+    ops_dir = tmp_path / "operations"
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    (ops_dir / "cmd.py").write_text(_DOUBLE_SRC)
+    (ops_dir / "cmd.json").write_text(
+        json.dumps(
+            {
+                "format": "arrayscope-operation",
+                "version": 1,
+                "id": "user:cmd",
+                "label": "Cmd",
+                "runtime": "command",
+                "command_template": "tool {in} {out}",
+                "source": {"mode": "import", "path": "cmd.py", "callable": "double"},
+            }
+        )
+    )
+    library.refresh_user_operations()
+
+    duplicate_id = library.duplicate_operation("user:cmd")
+    wrapper = library.user_operation_wrapper(duplicate_id)
+    assert wrapper["runtime"] == "command"
+    source = wrapper["source"]
+    assert source["mode"] == "import"
+    assert os.path.exists(os.path.join(library.user_operations_directory(), source["path"]))
+
+    # The toggle the manager performs, in library terms.
+    assert library.update_user_operation(duplicate_id, runtime="python")
+    assert not library.user_operation_problems()
+    assert duplicate_id in {entry.id for entry in registry.all_operations()}
+
+
+def test_ensure_user_operation_source_repairs_a_sourceless_wrapper(tmp_path):
+    ops_dir = tmp_path / "operations"
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    (ops_dir / "bare.json").write_text(
+        json.dumps(
+            {
+                "format": "arrayscope-operation",
+                "version": 1,
+                "id": "user:bare",
+                "label": "Bare",
+                "runtime": "command",
+                "command_template": "tool {in} {out}",
+            }
+        )
+    )
+    library.refresh_user_operations()
+    assert "user:bare" in {entry.id for entry in registry.all_operations()}
+
+    assert library.ensure_user_operation_source("user:bare") is True
+    wrapper = library.user_operation_wrapper("user:bare")
+    assert wrapper["source"] == {"mode": "import", "path": "bare.py", "callable": "bare"}
+    assert os.path.exists(ops_dir / "bare.py")
+    # Idempotent, and it never clobbers a source that already resolves.
+    assert library.ensure_user_operation_source("user:bare") is False
+
+    assert library.update_user_operation("user:bare", runtime="python")
+    assert not library.user_operation_problems()
 
 
 def test_create_operation_lazily_scans_user_ops(tmp_path):
@@ -447,6 +571,81 @@ def test_incomplete_runtime_registers_unavailable_rather_than_vanishing(tmp_path
     assert entries["user:jl"].unavailable_reason
 
 
+def _write_shell_plus_prefix_environment(ops_dir, monkeypatch):
+    """A command op whose availability() genuinely raises, without needing conda.
+
+    The real composition is a conda environment plus "Run through the system
+    shell" -- both reachable in the manager, and together they make
+    ``build_command`` raise "interpreter prefixes are not supported with shell
+    execution". Resolving a real conda env would make this test depend on a
+    machine's conda; substituting the resolver keeps the *same* raise on the
+    *same* code path.
+    """
+
+    from arrayscope.operations import environments
+
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    environments_path = ops_dir / environments.ENVIRONMENTS_FILE
+    environments_path.write_text(
+        json.dumps(
+            {
+                "format": environments.ENVIRONMENTS_FORMAT,
+                "version": environments.ENVIRONMENTS_VERSION,
+                "environments": [{"id": "recon", "name": "Recon", "conda_env": "recon-env"}],
+            }
+        )
+    )
+    (ops_dir / "shelled.json").write_text(
+        json.dumps(
+            {
+                "format": "arrayscope-operation",
+                "version": 1,
+                "id": "user:shelled",
+                "label": "Shelled",
+                "runtime": "command",
+                "command_template": "tool {in} {out}",
+                "shell": True,
+                "environment": "recon",
+            }
+        )
+    )
+
+    record = environments.ExecutionEnvironment(id="recon", name="Recon", conda_env="recon-env")
+    resolved = environments.ResolvedEnvironment(
+        record,
+        {},
+        None,
+        ("conda", "run", "--no-capture-output", "-n", "recon-env"),
+        interpreter="python",
+    )
+    monkeypatch.setattr(library, "resolve_execution_environment", lambda _id: (resolved, None))
+
+
+def test_availability_that_raises_becomes_unavailable_not_a_broken_listing(tmp_path, monkeypatch):
+    # The whole-listing failure. availability() is called from
+    # registry._pack_operation_entry, so an escaping exception does not
+    # disable one operation -- it takes down every enumeration of every
+    # operation, including the surfaces the user would repair it from.
+    _write_shell_plus_prefix_environment(tmp_path / "operations", monkeypatch)
+    library.refresh_user_operations()
+
+    entries = {entry.id: entry for entry in registry.all_operations()}
+    assert "user:shelled" in entries
+    # The definition explains itself rather than crashing its own listing. The
+    # exact text is pinned so this cannot start passing because some *other*
+    # check happened to mark the definition unavailable first.
+    reason = entries["user:shelled"].unavailable_reason
+    assert reason.startswith("Availability check failed: ")
+    assert "interpreter prefixes are not supported with shell execution" in reason
+    assert registry.get_operation_entry("user:shelled").id == "user:shelled"
+
+    # And the palette / add-popup enumeration built on top of it still works.
+    from arrayscope.ui.operation_listing import build_operation_listing
+
+    listed = {entry.id for section in build_operation_listing() for entry in section.entries}
+    assert "user:shelled" in listed
+
+
 def test_unsupported_parameter_kind_is_skipped_with_problem(tmp_path):
     # A parameter whose kind is neither "int" nor "float" would crash later in
     # form building / coercion, so the wrapper is skipped and recorded instead.
@@ -469,9 +668,20 @@ def test_unsupported_parameter_kind_is_skipped_with_problem(tmp_path):
     assert "user:named" not in {entry.id for entry in registry.all_operations()}
     problems = library.user_operation_problems()
     assert any(
-        "unsupported parameter kind" in message and "named.json" in path
-        for path, message in problems
+        "unsupported parameter kind" in problem.message and "named.json" in problem.path
+        for problem in problems
     )
+
+    # The wrapper parsed fine -- only one field is wrong -- so the record hands
+    # the repair surface the whole payload to drive an ordinary form from, and
+    # writing the corrected payload back by path resolves it.
+    problem = next(p for p in problems if "named.json" in p.path)
+    assert problem.payload["parameters"] == [{"name": "tag", "kind": "str"}]
+    repaired = dict(problem.payload)
+    repaired["parameters"] = [{"name": "tag", "kind": "int"}]
+    assert library.update_user_operation_file(problem.path, repaired)
+    assert "user:named" in {entry.id for entry in registry.all_operations()}
+    assert not library.user_operation_problems()
 
 
 def test_changes_shape_wrapper_is_registered_and_discovered(tmp_path):

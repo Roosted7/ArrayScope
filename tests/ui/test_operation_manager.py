@@ -367,6 +367,25 @@ def test_menu_entries_open_dialogs(qtbot):
         win.close()
 
 
+# Qt.ItemDataRole.UserRole + 3 -- the manager's problem-path role, in the same
+# raw-number style the tests above use for the id (0x0100) and group (0x0101).
+_PROBLEM_PATH_ROLE = 0x0103
+
+
+def _select_problem_row(dialog, basename):
+    for index in range(dialog.tree.topLevelItemCount()):
+        group = dialog.tree.topLevelItem(index)
+        if group.data(0, 0x0101) != "Problems":
+            continue
+        for child_index in range(group.childCount()):
+            child = group.child(child_index)
+            path = child.data(0, _PROBLEM_PATH_ROLE)
+            if path is not None and os.path.basename(str(path)) == basename:
+                dialog.tree.setCurrentItem(child)
+                return str(path)
+    return None
+
+
 def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path):
     import json
 
@@ -381,6 +400,7 @@ def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path):
                 "format": "arrayscope-operation",
                 "version": 1,
                 "id": "user:broken",
+                "label": "Broken",
                 "source": {"mode": "import", "path": "broken.py", "callable": "oops"},
             }
         )
@@ -395,6 +415,293 @@ def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path):
             for i in range(dialog.tree.topLevelItemCount())
         ]
         assert "Problems" in groups
+
+        # Appearing is not the point -- being actionable is. The row selects,
+        # reports the loader's message, and puts the ordinary form to work on
+        # the raw payload instead of blanking the editor.
+        path = _select_problem_row(dialog, "broken.json")
+        assert path is not None
+        process_events(qtbot)
+        assert dialog.selected_operation_id() is None
+        assert dialog.selected_problem_path() == path
+        assert dialog.repair_box.isVisible()
+        assert "syntax error" in dialog.problem_message_label.text()
+        assert dialog.label_edit.text() == "Broken"
+        assert dialog.label_edit.isEnabled() is True
+        assert dialog.remove_button.isEnabled() is True
+        assert dialog.open_file_button.isEnabled() is True
+        # The payload parses, so there is a form to drive; no raw text pane.
+        assert dialog.raw_json_edit.isHidden()
+
+        # An edit made here saves to the file by path.
+        dialog.label_edit.setText("Broken but editable")
+        dialog.label_edit.editingFinished.emit()
+        process_events(qtbot)
+        assert json.loads((ops_dir / "broken.json").read_text())["label"] == "Broken but editable"
+
+        # Fixing what the loader complained about takes the row out of
+        # Problems and lands the selection on the now-registered operation.
+        (ops_dir / "broken.py").write_text("def oops(data):\n    return data\n")
+        library.refresh_user_operations()
+        process_events(qtbot)
+        groups = [
+            dialog.tree.topLevelItem(i).data(0, 0x0101)
+            for i in range(dialog.tree.topLevelItemCount())
+        ]
+        assert "Problems" not in groups
+        assert dialog.selected_operation_id() == "user:broken"
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_repair_editor_retargets_a_missing_source_file(qtbot, tmp_path, monkeypatch):
+    import json
+
+    from arrayscope.operations import library
+    from arrayscope.ui import operation_manager
+
+    # "source file not found" is the single most likely way a stored definition
+    # stops loading: the file it pointed at moved. Pointing the ordinary source
+    # picker at the file's new home has to be the repair, in the manager.
+    ops_dir = tmp_path / "operations"
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    (ops_dir / "moved.json").write_text(
+        json.dumps(
+            {
+                "format": "arrayscope-operation",
+                "version": 1,
+                "id": "user:moved",
+                "label": "Moved",
+                "source": {"mode": "import", "path": "gone.py", "callable": "double"},
+            }
+        )
+    )
+    replacement = _write_source(tmp_path, "found.py", "def double(data):\n    return data * 2\n")
+    monkeypatch.setattr(operation_manager, "get_open_file_name", lambda *a, **k: (replacement, ""))
+    library.refresh_user_operations()
+
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        assert _select_problem_row(dialog, "moved.json") is not None
+        process_events(qtbot)
+        assert "source file not found" in dialog.problem_message_label.text()
+        assert dialog.source_box.isVisible()
+        assert dialog.source_browse_button.isEnabled() is True
+
+        dialog.copy_radio.setChecked(True)
+        dialog.source_browse_button.click()
+        process_events(qtbot)
+
+        assert not library.user_operation_problems()
+        assert dialog.selected_operation_id() == "user:moved"
+        # Copy mode really copied, exactly as it does for a loaded operation.
+        wrapper = library.user_operation_wrapper("user:moved")
+        assert wrapper["source"] == {"mode": "import", "path": "found.py", "callable": "double"}
+        assert (ops_dir / "found.py").exists()
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_unparseable_wrapper_gets_a_raw_json_editor_and_a_path_keyed_delete(
+    qtbot, tmp_path, monkeypatch
+):
+    import json
+
+    from arrayscope.operations import library
+
+    ops_dir = tmp_path / "operations"
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    (ops_dir / "garbled.py").write_text("def double(data):\n    return data * 2\n")
+    (ops_dir / "garbled.json").write_text('{"format": "arrayscope-operation", "version":')
+    library.refresh_user_operations()
+
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        path = _select_problem_row(dialog, "garbled.json")
+        assert path is not None
+        process_events(qtbot)
+        # No dict to fill a form from, so the text of the file is the editor.
+        assert dialog.repair_box.isVisible()
+        assert dialog.raw_json_edit.isVisible()
+        assert dialog.raw_json_edit.toPlainText().startswith('{"format"')
+        assert dialog.label_edit.isEnabled() is False
+
+        # Saving something that is still not JSON reports it and writes nothing.
+        dialog.raw_json_edit.setPlainText("{oops")
+        dialog.raw_json_save_button.click()
+        process_events(qtbot)
+        assert "Not valid JSON" in dialog.problem_message_label.text()
+        assert (ops_dir / "garbled.json").read_text().startswith('{"format"')
+
+        # Saving a valid wrapper resolves the row.
+        dialog.raw_json_edit.setPlainText(
+            json.dumps(
+                {
+                    "format": "arrayscope-operation",
+                    "version": 1,
+                    "id": "user:garbled",
+                    "label": "Garbled",
+                    "source": {"mode": "import", "path": "garbled.py", "callable": "double"},
+                }
+            )
+        )
+        dialog.raw_json_save_button.click()
+        process_events(qtbot)
+        assert not library.user_operation_problems()
+        assert dialog.selected_operation_id() == "user:garbled"
+
+        # And a broken definition is deletable from the manager, by path.
+        (ops_dir / "again.json").write_text("{not json at all")
+        library.refresh_user_operations()
+        process_events(qtbot)
+        assert _select_problem_row(dialog, "again.json") is not None
+        process_events(qtbot)
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "question",
+            lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes,
+        )
+        dialog.remove_button.click()
+        process_events(qtbot)
+        assert not (ops_dir / "again.json").exists()
+        assert not library.user_operation_problems()
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_command_copy_toggled_to_python_stays_in_the_tree(qtbot, tmp_path):
+    from arrayscope.operations import library
+
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        # Build a command operation the way the manager does, duplicate it, and
+        # then use the one control the copy invites: the Runtime combo. This is
+        # the reported brick -- the duplicate used to be written without a
+        # `source` block, so switching to Python produced a wrapper the loader
+        # refuses and the operation vanished into Problems.
+        dialog.new_button.click()
+        process_events(qtbot)
+        command_id = dialog.selected_operation_id()
+        dialog.runtime_combo.setCurrentIndex(dialog.runtime_combo.findData("command"))
+        dialog.command_template_edit.setText("tool {in} {out}")
+        dialog.command_template_edit.editingFinished.emit()
+        process_events(qtbot)
+
+        dialog.duplicate_button.click()
+        process_events(qtbot)
+        copy_id = dialog.selected_operation_id()
+        assert copy_id != command_id
+        assert library.user_operation_wrapper(copy_id)["runtime"] == "command"
+
+        dialog.runtime_combo.setCurrentIndex(dialog.runtime_combo.findData("python"))
+        process_events(qtbot)
+
+        assert not library.user_operation_problems()
+        assert dialog.select_operation(copy_id)
+        wrapper = library.user_operation_wrapper(copy_id)
+        assert wrapper["runtime"] == "python"
+        assert wrapper["source"]["callable"]
+        groups = [
+            dialog.tree.topLevelItem(i).data(0, 0x0101)
+            for i in range(dialog.tree.topLevelItemCount())
+        ]
+        assert "Problems" not in groups
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_shell_plus_environment_prefix_does_not_take_down_the_manager(qtbot, tmp_path, monkeypatch):
+    import json
+
+    from arrayscope.operations import environments, library
+
+    # Shell execution plus an environment that resolves to a conda prefix makes
+    # command_runtime.build_command raise from inside availability(). That call
+    # sits under every operation enumeration, so before the guard this did not
+    # disable one operation -- the manager could not be constructed at all.
+    ops_dir = tmp_path / "operations"
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    (ops_dir / environments.ENVIRONMENTS_FILE).write_text(
+        json.dumps(
+            {
+                "format": environments.ENVIRONMENTS_FORMAT,
+                "version": environments.ENVIRONMENTS_VERSION,
+                "environments": [{"id": "recon", "name": "Recon", "conda_env": "recon-env"}],
+            }
+        )
+    )
+    (ops_dir / "shelled.json").write_text(
+        json.dumps(
+            {
+                "format": "arrayscope-operation",
+                "version": 1,
+                "id": "user:shelled",
+                "label": "Shelled",
+                "runtime": "command",
+                "command_template": "tool {in} {out}",
+                "shell": True,
+                "environment": "recon",
+            }
+        )
+    )
+    record = environments.ExecutionEnvironment(id="recon", name="Recon", conda_env="recon-env")
+    resolved = environments.ResolvedEnvironment(
+        record, {}, None, ("conda", "run", "-n", "recon-env"), interpreter="python"
+    )
+    monkeypatch.setattr(library, "resolve_execution_environment", lambda _id: (resolved, None))
+    library.refresh_user_operations()
+
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        assert dialog.select_operation("user:shelled")
+        process_events(qtbot)
+        assert "Unavailable" in dialog.status_label.text()
+        assert "shell execution" in dialog.status_label.text()
+        # The whole listing still builds, which is the actual regression.
+        from arrayscope.ui.operation_listing import build_operation_listing
+
+        listed = {entry.id for section in build_operation_listing() for entry in section.entries}
+        assert "user:shelled" in listed
+    finally:
+        dialog.close()
+        win.close()
+
+
+def test_unresolvable_environment_reference_is_not_silently_cleared(qtbot, tmp_path):
+    from arrayscope.operations import library
+
+    win = _window(qtbot)
+    dialog = _manager(qtbot, win)
+    try:
+        dialog.new_button.click()
+        process_events(qtbot)
+        operation_id = dialog.selected_operation_id()
+        dialog.runtime_combo.setCurrentIndex(dialog.runtime_combo.findData("command"))
+        dialog.command_template_edit.setText("tool {in} {out}")
+        dialog.command_template_edit.editingFinished.emit()
+        process_events(qtbot)
+        # A reference to an environment that has no record: deleted, renamed,
+        # or arrived with an imported definition.
+        library.update_user_operation(operation_id, environment="ghost")
+        process_events(qtbot)
+
+        assert dialog.select_operation(operation_id)
+        process_events(qtbot)
+        assert dialog.environment_combo.currentData() == "ghost"
+        assert "missing" in dialog.environment_combo.currentText()
+
+        # The next unrelated runtime autosave must not persist it away.
+        dialog.handoff_combo.setCurrentText("cfl")
+        process_events(qtbot)
+        assert library.user_operation_wrapper(operation_id)["environment"] == "ghost"
     finally:
         dialog.close()
         win.close()
