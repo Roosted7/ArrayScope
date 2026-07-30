@@ -8,7 +8,7 @@ import warnings
 
 import numpy as np
 
-from arrayscope.app.qt_binding import prefer_pyside6
+from arrayscope.app.qt_binding import pin_wayland_appearance, prefer_pyside6
 
 prefer_pyside6()
 
@@ -51,6 +51,14 @@ def _prepare_qt_environment():
     # This must be set before QApplication / the QPA plugin is initialized.
     if "xcb" in (os.environ.get("QT_QPA_PLATFORM") or ""):
         os.environ.setdefault("QT_X11_NO_MITSHM", "1")
+
+    # After the platform block, so its offscreen/minimal guard reads the
+    # *resolved* platform. Here and not at module import: an import-time pin
+    # fired before the test harness could say "offscreen", so a desktop
+    # session's WAYLAND_DISPLAY leaked the portal theme into headless test
+    # processes — whose settle loops then paid real DBus round-trips
+    # (measured: 11.6 s -> 30.5 s on one settle-budget test, deterministic).
+    pin_wayland_appearance()
 
 
 def _qt_application_exists():
