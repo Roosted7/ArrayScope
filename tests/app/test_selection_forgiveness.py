@@ -706,3 +706,41 @@ def test_the_default_argument_whitelist(expression, inert):
 
     node = ast.parse(expression, mode="eval").body
     assert coverage_map._inert_expression(node) is inert
+
+
+# --------------------------------------------------------------------------- #
+# The sidecar carries more than one feature's state
+# --------------------------------------------------------------------------- #
+
+
+def test_a_sidecar_write_preserves_the_fields_it_was_not_given(tmp_path):
+    """``None`` means "keep what is on disk", never "clear".
+
+    The sidecar holds state for independent features — retained revisions for
+    forgiveness, the erosion canary's high-water mark — and each call site
+    updates only the slice it owns. When the two features were merged from
+    separate branches, every writer defaulted the other's field to empty, so
+    whichever ran last silently disabled the other. This pins the repaired
+    contract: an omitted field survives a rewrite, an explicit empty dict
+    still clears."""
+
+    map_path = tmp_path / ".testmondata"
+    coverage_map.write_sidecar(
+        map_path,
+        structure={},
+        baselines={},
+        revisions={"pkg/mod.py": [{"fsha": "a", "module": 1, "elements": [], "functions": []}]},
+        map_sizes={"offscreen": 3933},
+    )
+
+    coverage_map.write_sidecar(map_path, structure={}, baselines={})
+    payload = coverage_map.read_sidecar(map_path)
+    assert coverage_map.retained_revisions(payload) == {
+        "pkg/mod.py": [{"fsha": "a", "module": 1, "elements": [], "functions": []}]
+    }
+    assert coverage_map.map_sizes(payload) == {"offscreen": 3933}
+
+    coverage_map.write_sidecar(map_path, structure={}, baselines={}, revisions={}, map_sizes={})
+    payload = coverage_map.read_sidecar(map_path)
+    assert coverage_map.retained_revisions(payload) == {}
+    assert coverage_map.map_sizes(payload) == {}

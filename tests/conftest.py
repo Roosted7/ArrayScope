@@ -1747,6 +1747,9 @@ def _report_map_erosion(terminalreporter, config) -> None:
             map_path,
             structure=coverage_map.cached_structure(sidecar),
             baselines=coverage_map.baselines(sidecar),
+            # Preserved, not recomputed: dropping the key here would silently
+            # strip every retained revision and turn forgiveness off.
+            revisions=coverage_map.retained_revisions(sidecar),
             map_sizes={**sizes, environment: mark},
         )
 

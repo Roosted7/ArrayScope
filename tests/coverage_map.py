@@ -1041,16 +1041,34 @@ def write_sidecar(
     revisions: dict | None = None,
     map_sizes: dict | None = None,
 ) -> None:
+    """Rewrite the sidecar, preserving every field the caller did not pass.
+
+    ``None`` means "keep what is on disk", not "clear": the sidecar carries
+    state for more than one feature (parse cache, coverage baselines, retained
+    revisions for forgiveness, the erosion canary's high-water mark), and its
+    call sites each update the slice they own. A write that defaulted a missing
+    field to empty would silently strip another feature's state — retained
+    revisions turning forgiveness off, or a dropped high-water mark retiring
+    the canary — which is exactly how two features merged from separate
+    branches once collided. Passing an explicit empty dict still clears.
+    """
+
+    existing = read_sidecar(map_path)
+    preserved_sizes = existing.get("map_sizes")
     payload = {
         "version": _VERSION,
         "structure": structure,
         "baselines": baselines,
-        "revisions": revisions or {},
-        "map_sizes": dict(map_sizes or {}),
+        "revisions": retained_revisions(existing) if revisions is None else revisions,
+        "map_sizes": (
+            dict(map_sizes)
+            if map_sizes is not None
+            else (preserved_sizes if isinstance(preserved_sizes, dict) else {})
+        ),
     }
     # A lost sidecar costs one re-parse and one baseline, never a wrong result.
-    # ``revisions`` is optional for the same reason: a sidecar written before it
-    # existed reads back with none, and selection is then exactly what it was.
+    # A sidecar written before a field existed reads back without it, and the
+    # feature that field feeds is then exactly what it was.
     with contextlib.suppress(OSError, TypeError, ValueError):
         sidecar_path(map_path).write_text(json.dumps(payload), encoding="utf-8")
 

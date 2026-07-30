@@ -277,6 +277,9 @@ def _coverage(args, *, with_changed_files: bool = False):
             structure=structure.payload(),
             baselines=coverage_map.baselines(sidecar),
             revisions=structure.retained(),
+            # Preserved: a write without it would silently retire the erosion
+            # canary's high-water mark.
+            map_sizes=coverage_map.map_sizes(sidecar),
         )
     return coverage_map, environment, map_path, sidecar, structure, reach
 
@@ -439,6 +442,7 @@ def command_accept_coverage(args) -> int:
         structure=structure.payload(),
         baselines=recorded,
         revisions=structure.retained(),
+        map_sizes=coverage_map.map_sizes(sidecar),
     )
     if previous:
         moved = reach.covered - int(previous.get("covered", 0))
