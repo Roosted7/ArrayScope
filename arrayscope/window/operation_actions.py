@@ -16,8 +16,10 @@ from arrayscope.operations import fft_backend
 from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import LARGE_MATERIALIZE_BYTES
 from arrayscope.operations.parameter_forms import build_parameter_form
+from arrayscope.operations.pipeline import OperationStep, evaluate_shape
 from arrayscope.operations.recipes import dumps_recipe, load_recipe_steps, save_recipe
 from arrayscope.operations.registry import (
+    create_operation,
     get_operation_entry,
     operation_id_for,
     operation_parameter_value,
@@ -235,14 +237,33 @@ class OperationActionsMixin:
         *,
         slot_bindings=None,
     ):
+        """The single commit point for every "apply this operation" surface.
+
+        The chip menu, the dock's add popup, the command palette and the
+        parameter popup's confirm all arrive here (the first three through
+        :meth:`request_operation`), which is why the rank-increase routing lives
+        here and nowhere else.
+        """
+
         try:
-            self.operation_coordinator.append_operation(
+            operation = create_operation(
                 operation_id,
                 axis=dim,
                 parameters=parameters or {},
                 slot_bindings=slot_bindings,
                 slot_resolver=self._resolve_operation_slot,
             )
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Operation Error", f"Failed to apply operation:\n{e}"
+            )
+            return None
+
+        if self._operation_adds_a_dimension(operation):
+            return self._open_rank_increasing_sibling(operation, operation_id, axis=dim)
+
+        try:
+            self.operation_coordinator.append_created_operation(operation)
             if dim is not None:
                 self._last_operation_axis = int(dim)
             self._set_document(self.operation_coordinator.document)
@@ -254,6 +275,85 @@ class OperationActionsMixin:
 
         self.render(reason="operation", force_autolevel=True)
         return True
+
+    def _operation_adds_a_dimension(self, operation) -> bool:
+        """Whether appending ``operation`` would raise this document's rank.
+
+        Predicted BEFORE the live document is touched, through the same shape
+        funnel the document itself uses -- ``evaluate_shape`` with the base
+        data, so an operation whose output shape is *discovered* rather than
+        declared is discovered here too instead of being refused.
+
+        A prediction that fails is "unknown", never "no rank change": the
+        operation is then applied in-window exactly as before, so whatever it
+        raises is reported by the ordinary path with its own message rather
+        than being turned into a different failure here.
+        """
+
+        base_shape = tuple(int(size) for size in np.shape(self.base_data))
+        operations = (*self.document.enabled_operations, operation)
+        base_dtype = getattr(self.base_data, "dtype", None)
+        for base_data in (None, self.base_data):
+            # Declared shapes first: that answers for every built-in and every
+            # plugin op carrying a declared rule without reading a sample. Only
+            # an op whose output shape must be DISCOVERED falls through to the
+            # exact input, and only that op pays for it.
+            try:
+                predicted = evaluate_shape(
+                    base_shape, operations, base_dtype=base_dtype, base_data=base_data
+                )
+            except Exception:
+                continue
+            return len(predicted) > len(self.document.current_shape)
+        return False
+
+    def _open_rank_increasing_sibling(self, operation, operation_id, *, axis=None):
+        """Present a rank-INCREASING result in a compare-linked sibling window.
+
+        A live window's per-dimension widgets are fixed at construction (see
+        :mod:`arrayscope.window.rank_handoff`), so a rank-growing step never
+        enters this window's own stack. The sibling is an ordinary window over
+        the SAME base array whose document is this window's steps plus the new
+        one -- handed to its constructor, which is what sizes its widgets to the
+        new rank. They arrive as ordinary steps, so the sibling's operations
+        dock lists the whole inherited stack and every entry, the new one
+        included, can be edited, reordered or disabled there. This window is
+        left exactly as it was.
+
+        The sibling joins this window's compare group the way
+        ``open_difference_window`` does, but only the LEVELS facet starts
+        enabled. Dims and camera are per-axis and per-image-geometry, and the
+        sibling's axes are deliberately not this window's -- a synced slice
+        index would keep dragging the new axis back to whatever this window's
+        axis of the same number is sitting on, which is the one thing the
+        sibling exists to let you scrub. Levels describe the shared value
+        population, which the split really does preserve. Both remain ordinary
+        Sync toggles the user can turn on.
+
+        The sibling carries no file identity: it is a derived view, not a
+        second view of the file, so it neither watches the file nor writes a
+        saved view for it.
+        """
+
+        label = _operation_label(operation_id)
+        steps = (*self.document.steps, OperationStep(operation))
+        try:
+            sibling = type(self)(self.base_data, axes=self.document.base_axes, steps=steps)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Operation Error", f"Failed to apply operation:\n{e}"
+            )
+            return None
+        base_title = self.windowTitle() or "ArrayScope"
+        sibling.setWindowTitle(f"{base_title} — {label}")
+        self.link_compare_window(sibling, facets=("levels",))
+        self._retain_and_show_compare_window(sibling)
+        if axis is not None:
+            self._last_operation_axis = int(axis)
+        show_status_message(
+            self, f"{label} adds a dimension — opened in a new window.", timeout=6000
+        )
+        return sibling
 
     def open_operation_adder(self, search=False, anchor=None):
         if search:
@@ -832,9 +932,16 @@ class OperationActionsMixin:
         if not file_path:
             return None
         try:
-            recipe = load_view_recipe_file(file_path, self.base_data.shape)
+            recipe = load_view_recipe_file(
+                file_path, self.base_data.shape, base_data=self.base_data
+            )
             self.operation_coordinator.load_steps(recipe.steps)
-            self._set_document(self.operation_coordinator.document)
+            handed_off = self._set_document(self.operation_coordinator.document)
+            if handed_off is not None:
+                # The recipe's stack outgrew this window's per-dimension
+                # widgets, so it is now showing in a fresh one. Applying the
+                # rest to THIS (closing, old-rank) window would be noise.
+                return file_path
             self._set_view_state(recipe.view_state.for_shape(self.data.shape, preserve_flags=True))
             self._apply_display_settings(recipe.display)
         except Exception as e:
@@ -955,6 +1062,20 @@ def operation_parameter_values(operation, entry) -> dict:
         parameter.name: operation_parameter_value(operation, parameter.name)
         for parameter in entry.parameters
     }
+
+
+def _operation_label(operation_id):
+    """The catalogue label, with an authoring ellipsis trimmed for prose.
+
+    "Split axis into two..." names a menu item that opens a form; a toast
+    saying it "adds a dimension" is a sentence about the operation.
+    """
+
+    try:
+        label = get_operation_entry(operation_id).label
+    except ValueError:
+        label = str(operation_id)
+    return str(label).rstrip(". ").rstrip("…").strip() or str(operation_id)
 
 
 def _operation_icon_name(operation_id):

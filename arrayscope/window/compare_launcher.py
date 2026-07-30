@@ -250,9 +250,15 @@ class CompareLauncherMixin:
             _retain_window_reference(app, window)
         window.show()
 
-    def link_compare_window(self, other) -> CompareCursorGroup:
+    def link_compare_window(self, other, *, facets=None) -> CompareCursorGroup:
         """Join ``self`` and ``other`` into one compare group and enable the
-        shared sync facets (dims, camera, levels) on both."""
+        shared sync facets (dims, camera, levels by default) on both.
+
+        ``facets`` narrows that set for a sibling whose axes are not this
+        window's -- see :meth:`~arrayscope.window.operation_actions.
+        OperationActionsMixin._open_rank_increasing_sibling`. Every facet is a
+        user toggle either way; this only chooses which start on.
+        """
 
         group = getattr(self, "_compare_group", None)
         if group is None:
@@ -261,11 +267,12 @@ class CompareLauncherMixin:
             self._compare_group = group
         group.add(other)
         other._compare_group = group
+        facets = self._COMPARE_FACETS if facets is None else tuple(facets)
         for window in (self, other):
             controller = getattr(window, "sync_controller", None)
             if controller is None:
                 continue
-            for facet in self._COMPARE_FACETS:
+            for facet in facets:
                 controller.set_facet_enabled(facet, True)
         return group
 
