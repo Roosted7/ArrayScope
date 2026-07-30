@@ -258,8 +258,12 @@ def test_hidden_inspection_panel_uses_tiled_frame_payloads_and_opening_populates
         _process_events(qtbot, count=10)
         calls.clear()
         win.img_view.createRoi("rectangle", rect=(1, 1, 3, 3))
+        # Wait on the overlay, not on the snapshot count. The snapshot runs on
+        # a kernel worker thread; the overlay is written by its completion
+        # callback, which the Qt bridge delivers on a later main-thread turn.
+        # Polling the call count can therefore return between the two.
         qtbot.waitUntil(
-            lambda: len(calls) == 1,
+            lambda: win.img_view._roi_info_panel is not None,
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 

@@ -6,6 +6,23 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-07-30 — **WGPU hidden-ROI overlay on a tiled single image CLOSED, and its
+  PyQtGraph twin corrected:** the lifecycle-scope coverage fix (`d9ae625d`)
+  closed the phase that never reached `setRoiInfoRows`, the strict xfail was
+  retired in `b86a66ca`, and
+  `test_wgpu_hidden_inspection_panel_uses_tiled_frame_payloads` now passes as a
+  regression gate (3/3 serial `-n 0` under ~19 cores of external load). The
+  closed row cited the PyQtGraph twin passing as the bound on the gap; that
+  twin was itself flaky — 3 of 10 serial `-n 0` runs under load failed on
+  `_roi_info_panel is not None`, because it waited on
+  `_compute_roi_inspection_snapshot` (kernel worker thread) and then asserted an
+  overlay written by that snapshot's completion callback, which `QtKernelBridge`
+  delivers over a queued connection on a later main-thread turn. Deferring that
+  drain by 15 ms fails the old wait every time and the new one never. **Test
+  timing, not a production ordering defect** — production already orders the
+  overlay strictly after the snapshot, and the apply cannot leave the GUI
+  thread. The twin now waits on the overlay: 15/15 under the same load.
+
 - 2026-07-30 — **Page-backed crop-rebind R3 CLOSED:** source-anchored
   page-backed rebinds atomically clamp to their mapped complete-native-plane
   range; payloads without that exhaustive proof decline the rebind. Both axis

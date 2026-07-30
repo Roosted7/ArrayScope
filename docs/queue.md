@@ -438,17 +438,12 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   test_semantic_montage_transition_never_leaves_old_tiles_visible`
   (`channel-real-wgpu`, `complex-mode-wgpu`), `strict=True` so the fix un-xfails
   itself. Watch `render/effects.py:696`'s `ComplexWarning` while fixing.
-- **WGPU hidden-ROI overlay never fires on a tiled single image — one strict
-  xfail, ADR 0061 follow-up (2026-07-27).** With the inspection dock hidden, the
-  floating ROI stats panel never appears on WGPU for a tiled **single-image**
-  frame. Measured to be the **trigger, not the computation**:
-  `_hidden_roi_statistics` returns a row and `_committed_tiled_frame()` is
-  non-None on WGPU, yet `setRoiInfoRows` is never called, so `_roi_info_panel`
-  stays `None` after 240 event pumps *and* after invoking
-  `_refresh_hidden_roi_overlay_from_committed_frame` by hand. The montage twin
-  and the PyQtGraph twin both pass, which bounds the gap to the tiled
-  single-image WGPU path. Pinned by `tests/ui/test_roi_inspection_interactions.py::
-  test_wgpu_hidden_inspection_panel_uses_tiled_frame_payloads` (`strict=True`).
+- **WGPU hidden-ROI overlay never fires on a tiled single image — DONE
+  2026-07-30**, closed by the lifecycle-scope coverage fix (`d9ae625d`) with the
+  strict xfail retired in `b86a66ca`. Verified green here, 3/3 serial `-n 0`.
+  The row's supporting claim that the PyQtGraph twin passes was **half true** —
+  that twin carried a test-timing race of its own, now fixed; the bound on the
+  WGPU gap is unaffected. See the [Done ledger](queue-done.md).
 - **R8 continuity gate vs document-changing stages (adjudication needed).**
   With the fill stall and entry blackout fixed, `profile_montage_workflow`'s
   `fft_full_tiled_montage` historically failed `presentation_continuity` on
