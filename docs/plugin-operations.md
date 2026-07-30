@@ -580,11 +580,20 @@ A broken user op **never** breaks startup or any registry enumeration. A wrapper
 with bad JSON, a missing/`syntax-error` code file, or a missing callable is
 caught, logged, and **skipped** — the rest of the library loads normally. The
 reason it was skipped is retrievable via
-`user_operation_problems() -> list[(file, message)]`, so the manager UI can show
-the failure instead of the op silently vanishing. Because registry code never
-scans the ops directory itself (the library owns the scan and drives
-`register_user_operation`), one user's broken file can never fail an unrelated
-machine's `all_operations()` or the non-crash smoke harness.
+`user_operation_problems() -> list[OperationProblem]`, whose records carry
+`(path, message, payload, operation_id)` and are keyed by **file path** — the
+one identity a definition still has when its payload will not parse. The
+manager renders them as ordinary, selectable rows with a repair editor, and
+`remove_user_operation_file(path)` / `update_user_operation_file(path, payload)`
+are the path-keyed siblings of the id-keyed remove/update.
+
+Because registry code never scans the ops directory itself (the library owns
+the scan and drives `register_user_operation`), one user's broken file can
+never fail an unrelated machine's `all_operations()` or the non-crash smoke
+harness. Nor can one *loadable* definition fail it: an `availability()`
+callable that raises is caught at `current_unavailable_reason` and reported as
+the unavailable reason, so an operation can never take down the enumeration
+that lists it (ADR 0062).
 
 A structurally valid but non-runnable wrapper is different: it remains
 registered with `unavailable_reason`. This covers New's empty template, a

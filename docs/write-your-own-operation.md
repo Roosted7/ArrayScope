@@ -183,13 +183,29 @@ Common repairs are:
 - for a command operation encountered through an imported recipe, inspect the
   definition and choose **Mark imported command reviewed**.
 
-A **Problems** group means something different. It contains wrapper files that
-could not be registered at all, for example bad JSON, a syntax error, a missing
-source, a missing callable, or an unsupported parameter kind. Hover the item
-for the loader's message, use **Open the operations folder**, and repair the
-source or wrapper against the
-[wrapper schema](plugin-operations.md#wrapper-schema). One broken operation
-does not stop the rest of the library from loading.
+A **Problems** group means something different. It contains stored definitions
+that could not be registered at all — bad JSON, a syntax error, a missing
+source, a missing callable, an unsupported parameter kind. They are ordinary
+rows: select one and the editor becomes a **repair editor** with the loader's
+message at the top.
+
+- If the wrapper still parses, the usual form is filled in from what is stored.
+  Fix the field the message names — retarget the source file, correct the
+  callable, change a parameter kind — and it saves as you edit. When the fix
+  works the row leaves **Problems** and the operation appears in its group.
+- If the file is not valid JSON at all, there is nothing to fill a form from,
+  so you get the wrapper text with a **Save wrapper JSON** button. Saving text
+  that is still not a JSON object tells you so and writes nothing.
+- **Remove** deletes the stored definition and its files, whatever state it is
+  in, and the code-file button opens the wrapper itself.
+
+One broken operation does not stop the rest of the library from loading, and it
+never has to be repaired from outside the application.[^folder]
+
+[^folder]: **Open the operations folder** is still there, and an external
+    editor is still the fastest way to fix a wrapper whose `id` or `format` is
+    wrong — those two fields have no widget in the form. Everything else is
+    reachable in the manager.
 
 ## Let ArrayScope discover shape and dtype
 
