@@ -36,6 +36,47 @@ def _wait_for_committed_montage_tiles(win, qtbot, count, *, expected_shape=None)
     qtbot.waitUntil(_ready, timeout=min(8000, INTERACTION_SETTLE_HARD_LIMIT_MS))
 
 
+def test_dimension_export_menu_uses_production_actions(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5, 6), dtype=np.float32))
+    qtbot.addWidget(win)
+    requested_dimensions = []
+    monkeypatch.setattr(win, "_start_export", requested_dimensions.append)
+
+    menu = win._build_export_context_menu(2)
+
+    assert menu.actions()[0].menu().title() == "Operations"
+    export_action = next(
+        action for action in menu.actions() if action.text() == "Export along this dimension..."
+    )
+    export_action.trigger()
+    assert requested_dimensions == [2]
+
+
+def test_show_dimension_export_menu_positions_built_menu(qtbot, monkeypatch):
+    _clear_arrayscope_settings()
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((4, 5, 6), dtype=np.float32))
+    qtbot.addWidget(win)
+    chip = win.dimension_strip.chip(1)
+    local_position = QtCore.QPoint(3, 4)
+    shown_at = []
+
+    class MenuProbe:
+        def exec(self, global_position):
+            shown_at.append(global_position)
+
+    monkeypatch.setattr(win, "_build_export_context_menu", lambda dim: MenuProbe())
+    win._show_export_context_menu(local_position, chip.ops_button, 1)
+
+    assert shown_at == [chip.ops_button.mapToGlobal(local_position)]
+
+
 def test_tiled_dimension_x_y_buttons_promote_range_to_image_crop(qtbot):
     _clear_arrayscope_settings()
     from arrayscope.window import ArrayScopeWindow
