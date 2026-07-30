@@ -214,6 +214,55 @@ def mapped_scalar(data, mapping: ShaderMapping) -> np.ndarray:
     return apply_scale(component, mapping.scale, symlog_constant=mapping.symlog_constant)
 
 
+def display_value_plane(
+    *,
+    semantic_histogram_data=None,
+    histogram_data=None,
+    semantic_data=None,
+    image=None,
+    shader_mapping=None,
+) -> tuple[np.ndarray, str]:
+    """Interpret one payload's best available plane in display-value space.
+
+    Histogram planes are already display-space evidence.  Semantic and texture
+    planes still need the payload's component extraction and scale.  Without a
+    mapping, semantic data is intentionally not guessed: the rendered image is
+    the common fallback, with complex values interpreted as magnitude to match
+    the non-shader display path.
+    """
+
+    if semantic_histogram_data is not None:
+        return np.asarray(semantic_histogram_data), "semantic_histogram_data"
+    if histogram_data is not None:
+        return np.asarray(histogram_data), "histogram_data"
+    if shader_mapping is not None and semantic_data is not None:
+        return mapped_scalar(semantic_data, shader_mapping), "semantic_data-mapped"
+    if image is None:
+        return np.asarray((), dtype=np.float32), "unavailable"
+    values = np.asarray(image)
+    if not values.size or (values.ndim >= 3 and int(values.shape[-1]) in (3, 4)):
+        return np.asarray((), dtype=np.float32), "unavailable"
+    if shader_mapping is not None:
+        return mapped_scalar(values, shader_mapping), "image-mapped"
+    if np.iscomplexobj(values):
+        return np.abs(values).astype(np.float32, copy=False), "image-magnitude"
+    return values, "image"
+
+
+def finite_value_bounds(values) -> tuple[float, float] | None:
+    """Return finite extrema without allocating a compacted finite-value copy."""
+
+    array = np.asarray(values)
+    if not array.size or np.iscomplexobj(array):
+        return None
+    finite = np.isfinite(array)
+    if not bool(np.any(finite)):
+        return None
+    low = np.min(array, where=finite, initial=np.inf)
+    high = np.max(array, where=finite, initial=-np.inf)
+    return float(low), float(high)
+
+
 def window_intensity(data, levels: tuple[float, float]) -> np.ndarray:
     low, high = levels
     span = max(float(high) - float(low), 1e-12)

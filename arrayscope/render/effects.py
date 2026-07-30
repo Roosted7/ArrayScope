@@ -33,11 +33,8 @@ from arrayscope.display.shader_mapping import (
     ShaderComponent,
     ShaderScale,
     TexturePlaneKind,
-    extract_component,
+    display_value_plane,
     mapped_scalar,
-)
-from arrayscope.display.shader_mapping import (
-    apply_scale as apply_shader_scale,
 )
 from arrayscope.display.slice_engine import (
     make_image,
@@ -1968,28 +1965,14 @@ def _page_source_weights(page: MaterializedLodPage) -> np.ndarray:
 
 
 def montage_refined_level_values(rendered) -> np.ndarray:
-    semantic_histogram = getattr(rendered, "semantic_histogram_data", None)
-    if semantic_histogram is not None:
-        return np.asarray(semantic_histogram)
-    histogram = getattr(rendered, "histogram_data", None)
-    if histogram is not None:
-        return np.asarray(histogram)
-    mapping = getattr(rendered, "shader_mapping", None)
-    semantic = getattr(rendered, "semantic_data", None)
-    if mapping is not None and semantic is not None:
-        values = extract_component(np.asarray(semantic), getattr(mapping, "component", "real"))
-        return apply_shader_scale(
-            values,
-            getattr(mapping, "scale", "linear"),
-            symlog_constant=float(getattr(mapping, "symlog_constant", 0.0) or 0.0),
-        )
-    image = getattr(rendered, "image", None)
-    if image is None:
-        return np.asarray((), dtype=np.float32)
-    image = np.asarray(image)
-    if np.iscomplexobj(image):
-        return np.abs(image).astype(np.float32, copy=False)
-    return image
+    values, _source = display_value_plane(
+        semantic_histogram_data=getattr(rendered, "semantic_histogram_data", None),
+        histogram_data=getattr(rendered, "histogram_data", None),
+        semantic_data=getattr(rendered, "semantic_data", None),
+        image=getattr(rendered, "image", None),
+        shader_mapping=getattr(rendered, "shader_mapping", None),
+    )
+    return values
 
 
 def _preview_display_histogram(rendered, source, texture_kind, histogram):

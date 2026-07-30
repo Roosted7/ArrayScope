@@ -550,26 +550,7 @@ class FramePipelineEffects:
             # otherwise reuse the predecessor target once with the new-window
             # wrappers and only discover their exact bounds on the following
             # commit -- one physically clipped frame.
-            source = getattr(self.session, "applied_level_source", None)
-            if source is None:
-                source = getattr(
-                    getattr(self.session, "level_generation", None),
-                    "target_source",
-                    None,
-                )
-            clamped = _shader_level_source_covering_presented_payloads(
-                self.session,
-                source,
-                prospective_tiles=rebound,
-            )
-            if clamped is not None and normalize_bounds(
-                getattr(clamped, "levels", None)
-            ) != normalize_bounds(getattr(source, "levels", None)):
-                self.session.applied_level_source = clamped
-                self.session.begin_level_presentation_update(
-                    clamped.levels,
-                    source=clamped,
-                )
+            _arm_resident_crop_rebind_level_clamp(self.session, rebound)
             # A rebound window is presented without any evaluation sampling it,
             # so the only producer that can anchor its levels is the semantic
             # evidence owner.  Arm it here, at the seam that knows the window
@@ -609,6 +590,16 @@ class FramePipelineEffects:
         totals[f"gate:{gate}"] = int(totals.get(f"gate:{gate}", 0)) + 1
         for key, value in stats.items():
             totals[key] = int(totals.get(key, 0)) + int(value)
+        if int(rebound) == 50 and int(stats.get("value_bounds_scan_planes", 0)) > 0:
+            totals["value_bounds_scan_50_tile_transactions"] = (
+                int(totals.get("value_bounds_scan_50_tile_transactions", 0)) + 1
+            )
+            for metric in ("value_bounds_scan_ns", "value_bounds_scan_bytes"):
+                value = int(stats.get(metric, 0))
+                total_key = f"{metric}_50_tile_total"
+                max_key = f"{metric}_50_tile_max"
+                totals[total_key] = int(totals.get(total_key, 0)) + value
+                totals[max_key] = max(int(totals.get(max_key, 0)), value)
         previous_gate = getattr(renderer, "resident_crop_rebind_last_gate", None)
         renderer.resident_crop_rebind_last_gate = str(gate)
         if gate != "attempted" and previous_gate == gate:
@@ -4534,6 +4525,33 @@ def _shader_semantic_source_with_presented_clamp(session, semantic_source):
     ):
         return applied_source
     return semantic_source
+
+
+def _arm_resident_crop_rebind_level_clamp(session, rebound) -> bool:
+    """Publish a rebound's required widening before that transaction draws."""
+
+    source = getattr(session, "applied_level_source", None)
+    if source is None:
+        source = getattr(
+            getattr(session, "level_generation", None),
+            "target_source",
+            None,
+        )
+    clamped = _shader_level_source_covering_presented_payloads(
+        session,
+        source,
+        prospective_tiles=rebound,
+    )
+    if clamped is None or normalize_bounds(getattr(clamped, "levels", None)) == (
+        normalize_bounds(getattr(source, "levels", None))
+    ):
+        return False
+    session.applied_level_source = clamped
+    session.begin_level_presentation_update(
+        clamped.levels,
+        source=clamped,
+    )
+    return True
 
 
 def _shader_level_source_covering_presented_payloads(session, source, *, prospective_tiles=()):

@@ -1866,7 +1866,7 @@ def test_r3_rejects_only_stale_rebind_evidence_and_uses_current_plane():
     )
     assert _presented_payload_value_bounds(payload) == (
         (3.0, 4.0),
-        "stale-stats-rejected-plane-used",
+        "stale-stats-rejected-image-used",
     )
 
     page_backed = SimpleNamespace(
@@ -1876,13 +1876,121 @@ def test_r3_rejects_only_stale_rebind_evidence_and_uses_current_plane():
         semantic_data=None,
         semantic_histogram_data=None,
         histogram_data=None,
-        image=np.asarray((), dtype=np.float32),
+        image=np.asarray([[3.0, 4.0]], dtype=np.float32),
         page_backing=object(),
+        native_residency_data=None,
+        shader_mapping=None,
     )
     assert _presented_payload_value_bounds(page_backed) == (
         None,
         "page-backed-rebind-no-current-plane",
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "levels", "mapped_bounds", "raw_would_clip"),
+    [
+        ([10.0, 100.0], (0.99, 2.01), (1.0, 2.0), True),
+        ([0.01, 0.1], (0.0, 1.0), (-2.0, -1.0), False),
+    ],
+)
+def test_r3_oracle_compares_nonlinear_payloads_in_display_space(
+    raw,
+    levels,
+    mapped_bounds,
+    raw_would_clip,
+):
+    """Raw values can produce both false-red and false-green R3 verdicts."""
+
+    import numpy as np
+
+    from arrayscope.display.shader_mapping import (
+        ShaderComponent,
+        ShaderMapping,
+        ShaderScale,
+    )
+    from arrayscope.tools.profile_montage_workflow import _presented_payload_value_bounds
+
+    raw_plane = np.asarray(raw, dtype=np.float32)
+    payload = SimpleNamespace(
+        level_evidence_window_stale=True,
+        level_stats=None,
+        level_data=None,
+        semantic_histogram_data=None,
+        histogram_data=None,
+        semantic_data=raw_plane,
+        image=raw_plane,
+        shader_mapping=ShaderMapping(
+            component=ShaderComponent.REAL,
+            scale=ShaderScale.LOG,
+        ),
+        page_backing=None,
+        # The oracle must derive evidence independently of the clamp's claim.
+        rebind_current_value_bounds=(-1000.0, 1000.0),
+    )
+
+    bounds, source = _presented_payload_value_bounds(payload)
+    assert bounds == pytest.approx(mapped_bounds)
+    assert source == "stale-stats-rejected-semantic_data-mapped-used"
+    raw_bounds = (float(np.min(raw_plane)), float(np.max(raw_plane)))
+    assert (raw_bounds[0] < levels[0] or raw_bounds[1] > levels[1]) is raw_would_clip
+    assert (bounds[0] < levels[0] or bounds[1] > levels[1]) is (not raw_would_clip)
+
+
+@pytest.mark.parametrize(
+    ("semantic", "image", "expected", "expected_source"),
+    [
+        (
+            [100.0, 200.0],
+            [3.0 + 4.0j, 5.0 + 12.0j],
+            [5.0, 13.0],
+            "image-magnitude",
+        ),
+        ([100.0, 200.0], [3.0, 7.0], [3.0, 7.0], "image"),
+    ],
+)
+def test_payload_value_interpretation_matches_at_all_three_call_sites(
+    semantic,
+    image,
+    expected,
+    expected_source,
+):
+    """Complex and unmapped payloads use one explicit fallback rule."""
+
+    import numpy as np
+
+    from arrayscope.render.effects import montage_refined_level_values
+    from arrayscope.tools.profile_montage_workflow import _presented_payload_value_bounds
+    from arrayscope.window.frame_session import _rebind_current_plane_value_bounds
+
+    semantic_plane = np.asarray(semantic)
+    image_plane = np.asarray(image)
+    payload = SimpleNamespace(
+        level_evidence_window_stale=False,
+        level_stats=None,
+        level_data=None,
+        semantic_histogram_data=None,
+        histogram_data=None,
+        semantic_data=semantic_plane,
+        image=image_plane,
+        shader_mapping=None,
+        page_backing=None,
+    )
+
+    refined = montage_refined_level_values(payload)
+    rebind = _rebind_current_plane_value_bounds(
+        payload,
+        {
+            "semantic_data": semantic_plane,
+            "image": image_plane,
+        },
+    )
+    oracle, source = _presented_payload_value_bounds(payload)
+
+    np.testing.assert_allclose(refined, np.asarray(expected))
+    assert rebind == pytest.approx((min(expected), max(expected)))
+    assert oracle == pytest.approx((min(expected), max(expected)))
+    assert source == expected_source
 
 
 def test_progressive_invariant_gate_requires_pyqtgraph_tile_value_and_bake_evidence():

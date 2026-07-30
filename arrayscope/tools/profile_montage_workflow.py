@@ -28,6 +28,7 @@ import numpy as np
 
 from arrayscope.core.trace import TRACE, emit_trace
 from arrayscope.display.model.tile_identity import tile_ack_identity
+from arrayscope.display.shader_mapping import display_value_plane, finite_value_bounds
 from arrayscope.render.ladder import COARSE_RUNG_ENABLED_DEFAULT
 from arrayscope.tools.headless_display import (
     capture_output,
@@ -5833,33 +5834,26 @@ def _presented_payload_value_bounds(
         bounds = _finite_level_pair(getattr(stats, "bounds", None))
         if bounds is not None:
             return bounds, "payload-level-stats"
-    for name in (
-        *(() if window_stale else ("level_data",)),
-        "semantic_histogram_data",
-        "histogram_data",
-        "semantic_data",
-    ):
+    for name in () if window_stale else ("level_data",):
         value = getattr(payload, name, None)
         if value is None:
             continue
-        array = np.asarray(value)
-        if np.iscomplexobj(array):
-            continue
-        finite = array[np.isfinite(array)]
-        if finite.size:
-            source = "stale-stats-rejected-plane-used" if window_stale else name
-            return (float(np.min(finite)), float(np.max(finite))), source
-    image = np.asarray(getattr(payload, "image", ()))
-    if (
-        image.size
-        and not np.iscomplexobj(image)
-        and not (image.ndim >= 3 and int(image.shape[-1]) in (3, 4))
-    ):
-        finite = image[np.isfinite(image)]
-        if finite.size:
-            source = "stale-stats-rejected-plane-used" if window_stale else "image"
-            return (float(np.min(finite)), float(np.max(finite))), source
-    if window_stale and getattr(payload, "page_backing", None) is not None:
+        bounds = finite_value_bounds(value)
+        if bounds is not None:
+            return bounds, name
+    page_backed = getattr(payload, "page_backing", None) is not None
+    values, plane_source = display_value_plane(
+        semantic_histogram_data=getattr(payload, "semantic_histogram_data", None),
+        histogram_data=getattr(payload, "histogram_data", None),
+        semantic_data=getattr(payload, "semantic_data", None),
+        image=None if window_stale and page_backed else getattr(payload, "image", None),
+        shader_mapping=getattr(payload, "shader_mapping", None),
+    )
+    bounds = finite_value_bounds(values)
+    if bounds is not None:
+        source = f"stale-stats-rejected-{plane_source}-used" if window_stale else plane_source
+        return bounds, source
+    if window_stale and page_backed:
         return None, "page-backed-rebind-no-current-plane"
     if window_stale:
         return None, "stale-stats-rejected-no-current-plane"
@@ -7481,6 +7475,12 @@ def _phase_record(
         "montage_repeated_expensive_stage_per_tile": bool(
             montage.repeated_expensive_stage_per_tile
         ),
+        "resident_crop_rebind_totals": {
+            str(key): int(value)
+            for key, value in dict(
+                getattr(montage, "resident_crop_rebind_totals", {}) or {}
+            ).items()
+        },
         # Frame cadence, wgpu screen path only (absent on every other path).
         # Passed through wholesale rather than cherry-picked: this is the
         # readout the frame-pacing dossier's phase 2 exists to capture, and a

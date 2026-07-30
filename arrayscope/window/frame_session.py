@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
-from time import monotonic, perf_counter
+from time import monotonic, perf_counter, perf_counter_ns
 
 import numpy as np
 
@@ -58,10 +58,8 @@ from arrayscope.display.montage import (
 from arrayscope.display.pyramid import MaterializedLodPage
 from arrayscope.display.shader_mapping import (
     TexturePlaneKind,
-    extract_component,
-)
-from arrayscope.display.shader_mapping import (
-    apply_scale as apply_shader_scale,
+    display_value_plane,
+    finite_value_bounds,
 )
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import (
@@ -2647,15 +2645,29 @@ class FrameSession:
                 lod=previous.lod,
                 quality=previous.quality,
             )
+            # The scan is on the zero-upload fast path, so it reports its own
+            # cost rather than being taken on trust: these counters are what
+            # priced it at 4.30-5.33 ms per 50 rebound tiles (13.14 ms worst).
+            scan_work: dict[str, int] = {}
+            started_ns = perf_counter_ns()
+            current_bounds = _rebind_current_plane_value_bounds(
+                previous,
+                planes,
+                work=scan_work,
+            )
+            stats["value_bounds_scan_ns"] = stats.get("value_bounds_scan_ns", 0) + (
+                perf_counter_ns() - started_ns
+            )
+            stats["value_bounds_scan_bytes"] = stats.get("value_bounds_scan_bytes", 0) + int(
+                scan_work.get("bytes", 0)
+            )
+            stats["value_bounds_scan_planes"] = stats.get("value_bounds_scan_planes", 0) + 1
             candidate = replace(
                 previous,
                 source_anchor=new_anchor,
                 tile_identity=new_identity,
                 level_evidence_window_stale=True,
-                rebind_current_value_bounds=_rebind_current_plane_value_bounds(
-                    previous,
-                    planes,
-                ),
+                rebind_current_value_bounds=current_bounds,
                 **planes,
             )
             # The residency seam returns True only when the binding is
@@ -5307,44 +5319,24 @@ def plan_presentation_transition(
     return PresentationTransitionDecision(True, True, "montage-compatible")
 
 
-def _rebind_current_plane_value_bounds(previous, planes) -> tuple[float, float] | None:
+def _rebind_current_plane_value_bounds(
+    previous,
+    planes,
+    *,
+    work: dict[str, int] | None = None,
+) -> tuple[float, float] | None:
     """Exact display-value bounds for planes cut to a rebound window."""
 
-    values = planes.get("semantic_histogram_data")
-    if values is None:
-        values = planes.get("histogram_data")
-    if values is None:
-        semantic = planes.get("semantic_data")
-        mapping = getattr(previous, "shader_mapping", None)
-        if semantic is not None and mapping is not None:
-            values = extract_component(
-                np.asarray(semantic),
-                getattr(mapping, "component", "real"),
-            )
-            values = apply_shader_scale(
-                values,
-                getattr(mapping, "scale", "linear"),
-                symlog_constant=float(getattr(mapping, "symlog_constant", 0.0) or 0.0),
-            )
-        elif semantic is not None and not np.iscomplexobj(semantic):
-            values = semantic
-    if values is None:
-        image = np.asarray(planes.get("image", ()))
-        if (
-            image.size
-            and not np.iscomplexobj(image)
-            and not (image.ndim >= 3 and int(image.shape[-1]) in (3, 4))
-        ):
-            values = image
-    if values is None:
-        return None
-    array = np.asarray(values)
-    if np.iscomplexobj(array):
-        return None
-    finite = array[np.isfinite(array)]
-    if not finite.size:
-        return None
-    return float(np.min(finite)), float(np.max(finite))
+    values, _source = display_value_plane(
+        semantic_histogram_data=planes.get("semantic_histogram_data"),
+        histogram_data=planes.get("histogram_data"),
+        semantic_data=planes.get("semantic_data"),
+        image=planes.get("image"),
+        shader_mapping=getattr(previous, "shader_mapping", None),
+    )
+    if work is not None:
+        work["bytes"] = int(np.asarray(values).nbytes)
+    return finite_value_bounds(values)
 
 
 def _window_local_semantics_outlive_anchor(payload, new_anchor) -> bool:

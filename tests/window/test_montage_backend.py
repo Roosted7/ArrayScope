@@ -1914,7 +1914,10 @@ def test_shader_refinement_narrows_when_presented_payload_is_inside_true_range(m
 
     rebind_bounds = _rebind_current_plane_value_bounds(
         SimpleNamespace(shader_mapping=None),
-        {"semantic_data": np.asarray([[2.0, 5.0, 8.0]], dtype=np.float32)},
+        {
+            "semantic_data": np.asarray([[2.0, 5.0, 8.0]], dtype=np.float32),
+            "image": np.asarray([[2.0, 5.0, 8.0]], dtype=np.float32),
+        },
     )
     payload = SimpleNamespace(
         source_index=7,
@@ -2077,6 +2080,62 @@ def test_shader_refinement_covers_outlying_presented_payload_then_converges(monk
     )
     assert converged.levels == (1.0, 9.0)
     assert converged.evidence_quality == LevelEvidenceQuality.REFINED
+
+
+@pytest.mark.parametrize(
+    ("rebound_bounds", "expected_armed", "expected_levels"),
+    [
+        ((0.0, 10.0), True, (0.0, 10.0)),
+        ((2.0, 8.0), False, (1.0, 9.0)),
+    ],
+)
+def test_crop_rebind_arms_only_the_required_same_transaction_clamp(
+    rebound_bounds,
+    expected_armed,
+    expected_levels,
+):
+    """The zero-upload seam widens before draw and avoids fit-only republishes."""
+
+    from arrayscope.core.window_levels import LevelSource, LevelSourceRank
+    from arrayscope.display.model.montage_levels import LevelEvidenceQuality
+    from arrayscope.window import frame_effects
+
+    source = LevelSource(
+        levels=(1.0, 9.0),
+        histogram_range=(1.0, 9.0),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        source_count=1,
+        expected_count=1,
+        semantic_key=("levels", "crop-rebind"),
+        evidence_quality=LevelEvidenceQuality.REFINED,
+    )
+    payload = SimpleNamespace(
+        source_index=7,
+        quality="exact",
+        lod=SimpleNamespace(level=0),
+        level_evidence_window_stale=True,
+        rebind_current_value_bounds=rebound_bounds,
+    )
+    published = []
+    session = SimpleNamespace(
+        shader_display=True,
+        session_id=4,
+        applied_level_source=source,
+        lifecycle=SimpleNamespace(
+            presented_tiles=set(),
+            current_presentable_payload=lambda tile: payload if tile == 4 else None,
+        ),
+        display_tile_payloads={4: payload},
+        begin_level_presentation_update=lambda levels, *, source: published.append(
+            (levels, source)
+        ),
+    )
+
+    armed = frame_effects._arm_resident_crop_rebind_level_clamp(session, (4,))
+
+    assert armed is expected_armed
+    assert session.applied_level_source.levels == expected_levels
+    assert [row[0] for row in published] == ([expected_levels] if expected_armed else [])
 
 
 def test_shader_commit_holds_the_presented_clamp_then_releases_it():
