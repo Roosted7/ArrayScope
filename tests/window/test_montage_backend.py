@@ -6120,6 +6120,49 @@ def test_persistent_tile_residency_defers_tile_discovery_behind_camera_updates()
     assert montage_viewport_retarget_policy(direct_nonpersistent, "tile_layer").enabled is True
 
 
+def test_commit_policy_and_convergence_latch_are_different_questions():
+    """One predicate used to answer both, and the answers are not the same.
+
+    "Does a commit here upsert into a shader-sampled page store, so the
+    bounded GPU commit policy applies" and "can this backend move the camera
+    over retained tiles without the engine restating anything per tile" only
+    ever coincided because WGPU was the sole backend satisfying either.
+    PyQtGraph answers no to the first and yes to the second.
+    """
+
+    from arrayscope.window.frame_effects import (
+        persistent_gpu_tile_residency_backend,
+        viewport_convergence_latch_backend,
+    )
+
+    def window_for(capabilities):
+        return _window_ns(img_view=SimpleNamespace(rendering_capabilities=capabilities))
+
+    pyqtgraph = ImageViewBackendCapabilities(
+        name="pyqtgraph",
+        persistent_tile_residency=True,
+        tile_residency_kind="cpu_item",
+        shader_windowing=False,
+    )
+    wgpu = ImageViewBackendCapabilities(
+        name="wgpu",
+        persistent_tile_residency=True,
+        tile_residency_kind="gpu_atlas",
+        shader_windowing=True,
+    )
+    transient = ImageViewBackendCapabilities(name="transient", persistent_tile_residency=False)
+
+    assert persistent_gpu_tile_residency_backend(window_for(pyqtgraph), SimpleNamespace()) is False
+    assert viewport_convergence_latch_backend(window_for(pyqtgraph), SimpleNamespace()) is True
+
+    assert persistent_gpu_tile_residency_backend(window_for(wgpu), SimpleNamespace()) is True
+    assert viewport_convergence_latch_backend(window_for(wgpu), SimpleNamespace()) is True
+
+    # Without persistent residency, "the last pass submitted zero work" says
+    # nothing about the next frame: the pixels are gone when the tile leaves.
+    assert viewport_convergence_latch_backend(window_for(transient), SimpleNamespace()) is False
+
+
 def test_retained_payload_store_is_keyed_by_semantic_source_identity():
     from arrayscope.display.model.frame import DisplayTilePayload
     from arrayscope.display.shader_mapping import TexturePlaneKind

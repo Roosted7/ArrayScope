@@ -5329,12 +5329,51 @@ def persistent_tile_residency_backend(window, _session=None) -> bool:
 
 
 def persistent_gpu_tile_residency_backend(window, _session=None) -> bool:
+    """Whether the shared bounded GPU commit policy applies to this backend.
+
+    This is a *commit policy* question and nothing else: does a commit here
+    upsert into a shader-sampled page/atlas store, so that the item cap and
+    byte cap of ``_persistent_tile_upsert_limits`` are the right governor?
+
+    It used to answer a second, unrelated question as well -- may the viewport
+    retarget take the converged early-out -- and the two coincided only
+    because WGPU was the only backend that satisfied either. They are now
+    separate predicates; see
+    :func:`viewport_convergence_latch_backend`, which does not require shader
+    windowing, and the ``settled_payloads_are_known`` flag at
+    ``_try_update_montage_viewport_only``, which is a third question again
+    (whose map holds a settled tile) and stays on *this* predicate.
+    """
+
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
     kind = str(getattr(capabilities, "tile_residency_kind", "none") or "none")
     return bool(
         capabilities.persistent_tile_residency
         and capabilities.shader_windowing
         and kind in {"gpu_atlas", "none"}
+    )
+
+
+def viewport_convergence_latch_backend(window, _session=None) -> bool:
+    """Whether an unchanged viewport may skip the retarget entirely.
+
+    The requirement is that the backend can move the camera over *retained*
+    tiles without the engine restating anything per tile: WGPU pans by camera
+    uniform over world-rect instances, PyQtGraph pans by the ViewBox transform
+    over ``ImageItem`` scene positions. Both qualify, and neither needs shader
+    windowing to do it -- shader windowing is about who applies *levels*, which
+    is a different axis (see the §2.6 note in
+    ``docs/redesign/render-eagerness-2026-07-30.md``).
+
+    What the predicate does need is persistent residency: on a backend that
+    drops a tile's pixels when it leaves the viewport, "the last full pass
+    submitted zero work" is not a statement about the next frame.
+    """
+
+    capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
+    kind = str(getattr(capabilities, "tile_residency_kind", "none") or "none")
+    return bool(
+        capabilities.persistent_tile_residency and kind in {"gpu_atlas", "cpu_item", "none"}
     )
 
 
@@ -5981,5 +6020,6 @@ __all__ = [
     "tile_layer_upsert_limits",
     "tiled_payloads_can_commit_frame",
     "tiled_payloads_include_semantics",
+    "viewport_convergence_latch_backend",
     "viewport_interaction_active",
 ]

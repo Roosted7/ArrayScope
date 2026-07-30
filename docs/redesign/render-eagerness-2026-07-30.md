@@ -1,9 +1,11 @@
 # Render-side eagerness — what a viewport change costs today
 
-Dated 2026-07-30. **Map only.** Nothing here is a decision; every numbered
-finding is a citation of current `main` behaviour, written so the work that
-follows can be scoped without re-deriving it. Where a claim is an inference
-rather than a read line, it says so.
+Dated 2026-07-30. **Map, plus one adjudication.** Every numbered finding is a
+citation of current `main` behaviour, written so the work that follows can be
+scoped without re-deriving it. Where a claim is an inference rather than a read
+line, it says so. §2.6 is the exception: it was a question when this document
+was written and is now a decision with its evidence, so nobody has to
+re-derive that either.
 
 The compute/operations side is deliberately lazy: work happens when a result
 is demanded. The render side is the opposite in three distinct ways, and they
@@ -194,20 +196,143 @@ comes from the assembled payload rather than the one in `tile_payloads`.
   levels change pays `rgb_display_for_levels` over the whole tile plus a full
   `setImage` (`tiles.py:2409`).
 
-### 2.6 PyQtGraph never takes the converged early-out
+### 2.6 PyQtGraph never took the converged early-out — adjudicated, and now it does
 
 `viewport_invariant_key` (`frame_session.py:1532`) lets an unchanged viewport
-skip the entire retarget. It is gated on `persistent_gpu_tile_residency_backend`
-(`frame_effects.py:5300`), which requires `shader_windowing` **and**
-`tile_residency_kind in {"gpu_atlas", "none"}`. PyQtGraph is
-`shader_windowing=False`, `cpu_item` (`backend_contract.py:44`) and fails on
-both counts, so every camera nudge runs the full pass described in §4 — on the
+skip the entire retarget. It used to be gated on
+`persistent_gpu_tile_residency_backend`, which requires `shader_windowing`
+**and** `tile_residency_kind in {"gpu_atlas", "none"}`. PyQtGraph is
+`shader_windowing=False`, `cpu_item` (`backend_contract.py:44`) and failed on
+both counts, so every camera nudge ran the full pass described in §4 — on the
 backend that can least afford it.
 
-Whether the latch is *safe* on `cpu_item` is genuinely open (the CPU path
-re-windows on the CPU, so a level change is not viewport-invariant the way it
-is under shader windowing). It has not been adjudicated; it has only been
-excluded.
+**Adjudicated 2026-07-30: the latch is safe on `cpu_item`, and the key needs no
+additional captures.** The gate is now two predicates that answer two
+questions (`frame_effects.py`):
+
+- `persistent_gpu_tile_residency_backend` — *does a commit here upsert into a
+  shader-sampled page store, so the bounded GPU commit policy applies?*
+  Unchanged, and still what `settled_payloads_are_known` reads (a third
+  question again: whose map holds a settled tile).
+- `viewport_convergence_latch_backend` — *can this backend move the camera over
+  retained tiles without the engine restating anything per tile?* Persistent
+  residency, `kind in {"gpu_atlas", "cpu_item", "none"}`, no shader-windowing
+  requirement. WGPU pans by camera uniform over world-rect instances;
+  PyQtGraph pans by the ViewBox transform over retained `ImageItem` scene
+  positions. Shader windowing is about who applies *levels*, which is a
+  different axis.
+
+#### Why the CPU path is not the hazard it looked like
+
+The obvious candidate mechanism — under shader windowing a levels change is
+viewport-invariant because the GPU re-maps, whereas the CPU path re-windows
+pixels — **does not exist on the production path**:
+
+- `ImageView2D._update_montage_tile_levels` (`imageview2d.py:3139`) *raises*:
+  "PyQtGraph tiled level changes must use governed tiled presentation
+  commits". `MontageTileLayer.update_levels` (`tiles.py:1918`), whose loop
+  skips non-visible states, has **only test callers** — so "a levels change
+  skips the tiles that are not visible" cannot strand a PyQtGraph tile.
+- `set_lookup_table` (`tiles.py:1124`) iterates **all** states and is reached
+  from `_backend_display_lut_changed` (`imageview2d.py:3151`) without touching
+  the session at all, so no session-level early-out can skip it.
+
+More generally, every state change that can alter PyQtGraph's baked pixels
+either reborns the session — `window_mode`, `user_levels_override`, colormap
+LUT identity, dtype, rgb and geometry are all `_reject(...)` cases at
+`frame_controller.py:1050-1078`, and a reborn session starts with
+`_viewport_converged_key = None` — or owns its own commit:
+
+- user and automatic levels: `display_presenter.py:717-745` commits directly
+  through `apply_montage_presentation` / `commit_frame_session_presentation`;
+- refined level evidence, whose PyQtGraph branch is inside the code the latch
+  skips (`frame_controller.py:1857`): `retarget_frame_pipeline` calls
+  `_finish_frame_session_if_complete` itself (`frame_runtime.py:438`), so that
+  branch has an owner off the viewport path.
+
+And the latch cannot be *earned* while anything is outstanding:
+`mark_ladder_swaps_for_current_demand` dirties any visible tile whose payload
+is not `exact` (`lod.py:1175`), which sets `lod_swap_ready`, which is one of
+the three conditions at `frame_controller.py:1539`.
+
+#### Evidence
+
+A differential oracle — one scripted interaction run twice, once latched and
+once not, comparing baked pixels, LUT, levels, LOD scale and geometry per
+visible tile — is in
+[`tests/ui/test_viewport_convergence_latch.py`](../../tests/ui/test_viewport_convergence_latch.py).
+The script interleaves sub-tile pans with three levels changes, two colormap
+changes, an automatic window, a zoom-in and two boundary-crossing pans. It
+carries its own control (latch vs latch) and its own mutant (a key that forgets
+the visible tile set, which must be caught).
+
+Two measurement traps had to be cleared first, and both produced a confident
+wrong answer before the control did:
+
+- **Sampling mid-chunk is not a defect.** At 272 tiles the level re-bake is
+  chunked under the governor, so an immediate post-step sample catches the two
+  arms at different points in the same sequence. The latch-vs-latch control
+  diverges there too. The oracle therefore drains each step and excludes the
+  steps that never settle — which are the same three in both arms (both
+  explicit levels changes and the automatic window; a standing PyQtGraph
+  condition, not a latch effect).
+- **A physical capture of a second window in the same process measures the
+  first window's leftovers.** Arm two inherits arm one's QSettings, so its
+  colormap and levels differ; a latch-vs-latch control diverged on **58% of
+  pixels** that way. One arm per process fixes it.
+
+Physical truth, real Weston output (`arrayscope.tools.headless_display
+--exact-window`, 880×660, 272 tiles, one arm per process, three arms:
+latch, latch again as control, no latch):
+
+| Comparison | Settled steps compared | Worst differing pixels |
+|---|---:|---|
+| CONTROL: latch vs latch | 22 of 26 | **0** of 580 800 |
+| A/B: latch vs no latch | 22 of 26 | **0** of 580 800 |
+
+Byte-identical compositor output on every settled step. The four excluded
+steps are the ones at least one arm reported as never settling (both explicit
+levels changes, the automatic window, and — in the *unlatched* arm only — the
+nudge after the automatic window).
+
+An earlier sweep of the same harness showed 1093 differing pixels in both the
+control and the A/B, with a byte-identical diff mask confined to
+`y ∈ [643, 655]` — the 13-row status strip. Worth recording because it is the
+shape the answer takes when the harness itself is the source: the A/B number
+equalled the control's exactly.
+
+One asymmetry worth recording, because it points the opposite way from the
+suspicion: the *unlatched* build has **more** steps that never settle. Its
+retarget re-queues PyQtGraph's refined-level pass on every camera nudge
+(`frame_controller.py:1857`), which re-opens level work the latched build had
+already closed. The test's settle assertion is therefore one-sided — the latch
+may never *prevent* a settle; settling more often is not a defect.
+
+#### Cost removed
+
+272-tile PyQtGraph montage, fully settled and fully on screen, sub-tile pans.
+Both arms in one process, interleaved, block order ABBA-balanced, n=72 per arm
+per run, three runs:
+
+| | latch off | latch on |
+|---|---:|---:|
+| median retarget | 31.2 / 31.2 / 30.8 ms | 1.09 / 1.07 / 1.02 ms |
+
+**≈31 ms → ≈1.1 ms per camera nudge, −96.6%, ~29×.** The residual is the O(1)
+key check plus the prefetch schedule. The first nudge of each block pays a full
+pass to re-earn the latch (median ~30 ms unlatched, ~1.1 ms latched) and is
+excluded from both steady states.
+
+#### Two things the key still does not capture, and why that is fine
+
+- `viewport_invariant_key` accepts `viewport_shape` and ignores it. That is
+  redundancy rather than a hole: a resize rescales the span
+  (`_resize_preserving_screen_zoom_spans`, `montage_viewport.py:741`) *and*
+  re-keys `make_montage_plan`, so `id(plan)` and the span both move.
+- A sub-tile pan changes the R2b structural round key (it includes the exact
+  view range), so the latched pass never re-selects the round floors. Nothing
+  is produced under the latch, so no floor is used; the next unlatched pass
+  latches fresh floors.
 
 ---
 
@@ -298,7 +423,10 @@ republication; see §5 of the retention dossier.
 ## 4. Whole-montage work per camera move (both backends)
 
 Everything below runs on every non-short-circuited viewport change, regardless
-of how many tiles actually changed.
+of how many tiles actually changed. Since the §2.6 adjudication, a *settled*
+montage short-circuits all of it on both backends; what remains here is the
+cost of every camera move that crosses a tile boundary or a zoom threshold, and
+of every camera move at all while the montage is still filling.
 
 | Site | What it does per pan |
 |---|---|
@@ -457,6 +585,12 @@ adjudication belongs to [queue row 12](../queue.md).
 
 - `_discard_direct_reuse_pool` (`tiles.py:2560`) — tests only.
 - `_remove_tile` (`tiles.py:2324`) — no callers at all.
+- `MontageTileLayer.update_levels` (`tiles.py:1918`) — tests only. Its
+  production entry point `ImageView2D._update_montage_tile_levels`
+  (`imageview2d.py:3139`) raises on purpose, because PyQtGraph level changes go
+  through the governed commit instead. Worth naming because its visible-only
+  loop reads like the mechanism that would make the §2.6 latch unsafe, and it
+  is not reachable to be one.
 - `MontageTilePriorityQueue.prune` (`tile_priority.py:131`) — tests only;
   `discard` is reachable only through it.
 - `ChunkStore` / `SlotPool` (`gpu/chunk_store.py`) — re-exported by

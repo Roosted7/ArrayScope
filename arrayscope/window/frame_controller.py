@@ -1478,11 +1478,13 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         viewport_plan = self._retargeted_montage_viewport_plan(session, viewport_plan)
         self._remap_montage_rois_for_layout_reflow(previous_plan, viewport_plan.plan)
 
-        # Threshold gate (persistent-GPU-residency backends only). A pan or zoom
+        # Threshold gate (persistent-residency backends). A pan or zoom
         # only needs to replan when it crosses a tile boundary or a zoom
-        # threshold; between crossings the camera moves entirely in the shader
-        # (tile instances hold world rects since e9956846) and there is nothing
-        # to compute. ``viewport_invariant_key`` is that boundary, evaluated in
+        # threshold; between crossings the camera moves without the engine
+        # restating anything per tile -- on WGPU through the camera uniform
+        # (tile instances hold world rects since e9956846), on PyQtGraph
+        # through the ViewBox transform over retained ImageItem scene
+        # positions. ``viewport_invariant_key`` is that boundary, evaluated in
         # O(1); ``_viewport_converged_key`` records the key at which the last
         # full pass proved convergence by submitting zero work. When they match,
         # the retarget is provably a no-op, so skip it whole -- retarget_viewport,
@@ -1493,7 +1495,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             session.viewport_invariant_key(
                 viewport_plan.plan, viewport_plan.view_range, viewport_plan.viewport_shape
             )
-            if persistent_residency
+            if montage_commit.viewport_convergence_latch_backend(self, session)
             else None
         )
         if invariant_key is not None and session._viewport_converged_key == invariant_key:
