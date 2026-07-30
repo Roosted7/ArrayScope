@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
 RECORDER = ROOT / "tools" / "demo_recorder.py"
@@ -57,6 +58,12 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
     assert manifest["frame_count"] == len(frames)
     assert manifest["window_size"][0] > 0
     assert manifest["window_size"][1] > 0
+    assert manifest["capture_size"] == [
+        manifest["window_size"][0],
+        manifest["window_size"][1] + 78,
+    ]
+    with Image.open(frames[0]) as first_frame:
+        assert list(first_frame.size) == manifest["capture_size"]
     captions = [event for event in manifest["events"] if event["kind"] == "caption"]
     actions = [event for event in manifest["events"] if event["kind"] != "caption"]
     assert captions, f"{name} recorded no caption beats"
@@ -98,3 +105,21 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         assert not [
             event for event in actions if event["kind"] == "click" and event["target"] is None
         ], "ROI transitions must not imply a click at an unrelated cursor position"
+
+
+def test_caption_wrapping_is_bounded_to_two_readable_lines(qt_app):
+    from pyqtgraph.Qt import QtGui
+
+    namespace = runpy.run_path(str(RECORDER), run_name="arrayscope_demo_caption_test")
+    font = QtGui.QFont()
+    font.setPixelSize(namespace["CAPTION_FONT_PX"])
+    metrics = QtGui.QFontMetricsF(font)
+    max_width = 260.0
+    lines = namespace["_wrap_caption_lines"](
+        metrics,
+        "A deliberately long walkthrough caption that cannot fit on one narrow line",
+        max_width,
+    )
+
+    assert len(lines) == 2
+    assert all(metrics.horizontalAdvance(line) <= max_width for line in lines)

@@ -97,6 +97,13 @@ ripple. Drawing interactions are recorded as gestures with their own
 press-to-result frame range. A click is reserved for a live widget or
 composited action whose target contains the cursor.
 
+Captions are rendered in a dedicated 78 px band below the application capture,
+never over the dimension strip, status text, dock footer, or plotted data.
+They use a 22 px font, wrap or elide within two bounded lines, and receive a
+lead-in before the described action begins. The timeline distinguishes the
+application `window_size` from the final `capture_size`, so target checks
+remain in the application's coordinate system.
+
 ## Staying maintainable
 
 `tests/app/test_demo_recorder_smoke.py` records every scenario in `--smoke`

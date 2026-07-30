@@ -124,7 +124,10 @@ def _volume3d(nx=96, ny=96, nz=40):
 
 CURSOR_SCALE = 1.7
 RIPPLE_SECONDS = 0.45
-CAPTION_FADE_S = 0.25
+CAPTION_FADE_S = 0.2
+CAPTION_LEAD_S = 0.3
+CAPTION_BAND_HEIGHT = 78
+CAPTION_FONT_PX = 22
 
 # Classic arrow outline in a ~12x19 unit box, hotspot at (0, 0).
 _CURSOR_POLY = (
@@ -173,27 +176,55 @@ def _draw_ripple(painter, pos, age_fraction):
     painter.drawEllipse(pos, 3.5, 3.5)
 
 
-def _draw_caption(painter, width, height, text, alpha):
+def _wrap_caption_lines(metrics, text: str, max_width: float, max_lines: int = 2):
+    from pyqtgraph.Qt import QtCore
+
+    words = text.split()
+    elide_width = max(1, int(max_width))
+    if not words:
+        return []
+    lines: list[str] = []
+    current = words[0]
+    for index, word in enumerate(words[1:], start=1):
+        candidate = f"{current} {word}"
+        if metrics.horizontalAdvance(candidate) <= max_width:
+            current = candidate
+            continue
+        if len(lines) == max_lines - 1:
+            remainder = " ".join([current, *words[index:]])
+            lines.append(
+                metrics.elidedText(remainder, QtCore.Qt.TextElideMode.ElideRight, elide_width)
+            )
+            return lines
+        lines.append(metrics.elidedText(current, QtCore.Qt.TextElideMode.ElideRight, elide_width))
+        current = word
+    lines.append(metrics.elidedText(current, QtCore.Qt.TextElideMode.ElideRight, elide_width))
+    return lines
+
+
+def _draw_caption_band(painter, width, content_height, text, alpha):
     from pyqtgraph.Qt import QtCore, QtGui
 
+    band = QtCore.QRectF(0.0, float(content_height), float(width), float(CAPTION_BAND_HEIGHT))
+    painter.fillRect(band, QtGui.QColor(18, 18, 22, 255))
+    painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 42), 1.0))
+    painter.drawLine(band.topLeft(), band.topRight())
     if not text or alpha <= 0:
         return
     font = QtGui.QFont(painter.font())
-    font.setPointSizeF(11.5)
+    font.setPixelSize(CAPTION_FONT_PX)
     font.setWeight(QtGui.QFont.Weight.DemiBold)
     painter.setFont(font)
     metrics = QtGui.QFontMetricsF(font)
-    text_width = metrics.horizontalAdvance(text)
-    pad_x, pad_y = 16.0, 8.0
-    pill_w = text_width + 2 * pad_x
-    pill_h = metrics.height() + 2 * pad_y
-    rect = QtCore.QRectF((width - pill_w) / 2.0, height - pill_h - 14.0, pill_w, pill_h)
-    painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-    painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, int(38 * alpha)), 1.0))
-    painter.setBrush(QtGui.QColor(18, 18, 22, int(215 * alpha)))
-    painter.drawRoundedRect(rect, pill_h / 2.0, pill_h / 2.0)
+    lines = _wrap_caption_lines(metrics, text, width - 48.0)
+    line_height = metrics.height()
+    block_height = line_height * len(lines)
+    y = content_height + (CAPTION_BAND_HEIGHT - block_height) / 2.0
     painter.setPen(QtGui.QColor(245, 245, 245, int(255 * alpha)))
-    painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, text)
+    for line in lines:
+        rect = QtCore.QRectF(24.0, y, width - 48.0, line_height)
+        painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, line)
+        y += line_height
 
 
 def _ease(t: float) -> float:
@@ -320,9 +351,16 @@ class Recorder:
             # Let asynchronous evaluation advance roughly in video time so
             # progressive rendering shows up naturally in the recording.
             self._pump_events(1.0 / self.fps)
-        image = self.win.grab().toImage().convertToFormat(QtGui.QImage.Format.Format_RGB32)
+        window_image = self.win.grab().toImage().convertToFormat(QtGui.QImage.Format.Format_RGB32)
+        image = QtGui.QImage(
+            window_image.width(),
+            window_image.height() + CAPTION_BAND_HEIGHT,
+            QtGui.QImage.Format.Format_RGB32,
+        )
+        image.fill(QtGui.QColor(18, 18, 22))
         painter = QtGui.QPainter(image)
         try:
+            painter.drawImage(0, 0, window_image)
             if self._overlay_widget is not None:
                 overlay = (
                     self._overlay_widget.grab()
@@ -336,7 +374,13 @@ class Recorder:
                 painter.drawImage(self._overlay_top_left, overlay)
             caption_age = (self.frame_index - self._caption_born_frame) / self.fps
             alpha = min(1.0, caption_age / CAPTION_FADE_S) if self._caption else 0.0
-            _draw_caption(painter, image.width(), image.height(), self._caption, alpha)
+            _draw_caption_band(
+                painter,
+                image.width(),
+                window_image.height(),
+                self._caption,
+                alpha,
+            )
             live = []
             for born, pos in self._ripples:
                 age = (self.frame_index - born) / self.fps
@@ -383,6 +427,7 @@ class Recorder:
         }
         self._events.append(event)
         self._open_caption_event = event
+        self.hold(CAPTION_LEAD_S)
 
     def _widget_target(self, widget, rel) -> dict | None:
         if widget is None:
@@ -592,6 +637,9 @@ class Recorder:
             "speed": self.speed,
             "frame_count": self.frame_index,
             "window_size": [size.width(), size.height()] if size is not None else None,
+            "capture_size": (
+                [size.width(), size.height() + CAPTION_BAND_HEIGHT] if size is not None else None
+            ),
             "events": self._events,
         }
         path = self.frames_dir / "manifest.json"
