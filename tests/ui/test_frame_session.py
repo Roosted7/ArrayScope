@@ -529,6 +529,8 @@ def test_tile_presentation_delta_carries_lifecycle_owned_typed_targets():
 
 def test_backend_confirmed_current_payloads_do_not_trickle_through_upsert_cap():
     session = _session()
+    floor_probes = []
+    session._floor_can_progress = lambda tile_number: floor_probes.append(int(tile_number)) or False
     source_ids = {}
     for tile in session.plan.tiles[:3]:
         index = int(tile.montage_index)
@@ -555,7 +557,26 @@ def test_backend_confirmed_current_payloads_do_not_trickle_through_upsert_cap():
     assert set(state.active_payloads(delta)) == {0, 1, 2}
     assert session.pending_payload_upserts == {}
     assert session.dirty_payloads == {}
+    # Tile 3 is a semantic placeholder with no payload owner. It must never be
+    # fabricated as dirty debt that a later full-set cleanup has to discover.
+    assert floor_probes == []
     assert set(session.lifecycle.presented_tiles) >= {0, 1, 2}
+
+
+def test_ownerless_dirty_cleanup_drains_inside_the_upsert_cap():
+    session = _session()
+    # Model malformed/restored bookkeeping directly. A live pipeline would own
+    # real missing payloads; this test exercises only the defensive repair.
+    session.pipeline = object()
+    session.dirty_payloads.update((tile, None) for tile in range(4))
+    floor_probes = []
+    session._floor_can_progress = lambda tile_number: floor_probes.append(int(tile_number)) or False
+
+    for expected_remaining in (3, 2, 1, 0):
+        probes_before = len(floor_probes)
+        session.build_tile_presentation({}, max_upserts=1)
+        assert len(floor_probes) - probes_before == 1
+        assert len(session.dirty_payloads) == expected_remaining
 
 
 def test_montage_render_session_skipped_tile_leaves_required_scope():

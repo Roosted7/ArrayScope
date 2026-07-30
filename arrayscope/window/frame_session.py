@@ -3663,12 +3663,22 @@ class FrameSession:
         )
         for tile_number in preview_upgrade_tiles:
             self.dirty_payloads[int(tile_number)] = None
-        missing_payload_tiles = (
+        # Commit-only sessions have no worker pipeline to publish wrappers for
+        # already-rendered values, so repair those concrete payload obligations
+        # here. Do not mark every blank active slot dirty: a slot with neither a
+        # rendered value nor a resident floor has no upsert owner, and turning
+        # that semantic placeholder into presentation debt creates a promise no
+        # build can discharge. Resident floors enqueue their own upsert below.
+        missing_rendered_payload_tiles = (
             ()
             if self.pipeline is not None
-            else tuple(int(tile) for tile in active if int(tile) not in self.display_tile_payloads)
+            else tuple(
+                int(tile)
+                for tile in active
+                if int(tile) in self.rendered_tiles and int(tile) not in self.display_tile_payloads
+            )
         )
-        for tile_number in missing_payload_tiles:
+        for tile_number in missing_rendered_payload_tiles:
             self.dirty_payloads[int(tile_number)] = None
         unpresented_tiles = tuple(
             int(tile)
@@ -3716,7 +3726,7 @@ class FrameSession:
                     *(int(tile) for tile in self.dirty_payloads),
                     *(int(tile) for tile in self.pending_payload_upserts),
                     *lifecycle_change_tiles,
-                    *missing_payload_tiles,
+                    *missing_rendered_payload_tiles,
                     *preview_upgrade_tiles,
                     *stale_level_tiles,
                 )
@@ -3873,6 +3883,11 @@ class FrameSession:
         # included), no build can keep that promise — dropping the entry lets
         # the commit loop settle while the evaluation claim remains visible.
         # A later rendered result re-dirties the tile through mark_materialized.
+        # Keep the defensive repair bounded too: `_floor_can_progress` probes
+        # canonical page residency and is real GUI-thread work. Ownerless debt
+        # should no longer be manufactured above, but malformed/restored state
+        # drains through repeated governed builds rather than widening one
+        # callback beyond the render-pass cohort.
         dirty_cleanup_tiles = dirty_payload_tiles
         if build_limit is not None:
             dirty_cleanup_tiles = dirty_cleanup_tiles[:build_limit]
