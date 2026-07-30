@@ -705,6 +705,24 @@ def s_operation_params_popup(ctx: Ctx):
     ctx.pump(4)
     ctx.shot(kinds_popup, "params_every_kind")
 
+    # The axis-set checkbox row (R5): a parameterless multi-axis transform
+    # renders one labelled checkbox per dimension, defaulting to the
+    # displayed image axes.
+    fftn_entry = get_operation_entry("centered_fftn")
+    fftn_form = build_parameter_form(
+        fftn_entry,
+        shape=win.data.shape,
+        axis_choices=win._axis_choices(),
+        display_axes=win.view_state.display_axes(),
+    )
+    fftn_popup = OperationParamsPopup(
+        fftn_entry, fftn_form, lambda _values, _bindings: None, parent=win
+    )
+    fftn_popup.adjustSize()
+    fftn_popup.show()
+    ctx.pump(4)
+    ctx.shot(fftn_popup, "params_axis_set")
+
 
 @scenario("operation_manager")
 def s_operation_manager(ctx: Ctx):
