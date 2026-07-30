@@ -3,6 +3,13 @@
 Records live in ``operations/environments.json`` beside operation wrappers.
 Resolution is lazy and side-effect free apart from the bounded ``conda env
 list`` query needed to distinguish a real named env from a vanished one.
+
+A named conda environment resolves to its *prefix directory*, and the child is
+then launched with ``<prefix>/bin/python`` and ``<prefix>/bin`` prepended to
+``PATH``.  ``conda run`` remains only as the fallback for a prefix that holds no
+interpreter: it costs a measured ~1.55 s of conda start-up per call, and an
+operation pays that per characterization probe (7-9x for one new signature) as
+well as per apply.
 """
 
 from __future__ import annotations
@@ -161,7 +168,57 @@ def _expanded_directory(value: str) -> str:
     return os.path.abspath(os.path.expandvars(os.path.expanduser(value)))
 
 
-def _conda_environment_exists(conda: str, name_or_path: str) -> bool:
+def _interpreter_in(prefix: str) -> str:
+    return os.path.join(
+        prefix,
+        "Scripts" if os.name == "nt" else "bin",
+        "python.exe" if os.name == "nt" else "python",
+    )
+
+
+# Prefix directories keyed by (conda executable, requested name). Only *found*
+# prefixes are cached: a miss stays uncached so an environment created after the
+# first probe still resolves without restarting ArrayScope.
+_CONDA_PREFIX_CACHE: dict[tuple[str, str], str] = {}
+
+# Installation directories that hold an ``envs`` folder on a default install.
+_CONDA_INSTALLATIONS: tuple[str, ...] = (
+    "miniforge3",
+    "mambaforge",
+    "miniconda3",
+    "anaconda3",
+    ".conda",
+)
+
+
+def _conda_prefix_candidates(name_or_path: str, env: dict[str, str]) -> tuple[str, ...]:
+    """Conventional prefix directories for a named env, cheapest checks first."""
+
+    if os.path.sep in name_or_path or (os.path.altsep and os.path.altsep in name_or_path):
+        return (_expanded_directory(name_or_path),)
+    roots: list[str] = [
+        _expanded_directory(raw)
+        for raw in str(env.get("CONDA_ENVS_PATH") or "").split(os.pathsep)
+        if raw.strip()
+    ]
+    active = str(env.get("CONDA_PREFIX") or "").strip()
+    if active:
+        # An active env normally lives at ``<installation>/envs/<name>``; its
+        # siblings are the other environments of the same installation.
+        roots.append(os.path.dirname(_expanded_directory(active)))
+    home = os.path.expanduser("~")
+    roots.extend(os.path.join(home, installation, "envs") for installation in _CONDA_INSTALLATIONS)
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for root in roots:
+        candidate = os.path.join(root, name_or_path)
+        if candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+    return tuple(candidates)
+
+
+def _conda_environment_paths(conda: str) -> tuple[str, ...]:
     try:
         completed = subprocess.run(
             [conda, "env", "list", "--json"],
@@ -172,10 +229,34 @@ def _conda_environment_exists(conda: str, name_or_path: str) -> bool:
         )
         payload = json.loads(completed.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return False
-    paths = tuple(str(path) for path in payload.get("envs", ()))
+        return ()
+    return tuple(str(path) for path in payload.get("envs", ()))
+
+
+def _conda_environment_prefix(conda: str, name_or_path: str, env: dict[str, str]) -> str | None:
+    """The prefix directory for a conda environment, or ``None`` when it is gone.
+
+    Conventional locations are stat-ed first so the common case never spawns
+    conda at all; only an environment in an unusual envs directory falls through
+    to the bounded ``conda env list --json`` query.
+    """
+
+    key = (str(conda), str(name_or_path))
+    cached = _CONDA_PREFIX_CACHE.get(key)
+    if cached is not None:
+        if os.path.isdir(cached):
+            return cached
+        _CONDA_PREFIX_CACHE.pop(key, None)
+    for candidate in _conda_prefix_candidates(name_or_path, env):
+        if os.path.isfile(_interpreter_in(candidate)):
+            _CONDA_PREFIX_CACHE[key] = candidate
+            return candidate
     expanded = _expanded_directory(name_or_path)
-    return expanded in paths or any(Path(path).name == name_or_path for path in paths)
+    for path in _conda_environment_paths(conda):
+        if path == expanded or Path(path).name == name_or_path:
+            _CONDA_PREFIX_CACHE[key] = path
+            return path
+    return None
 
 
 def resolve_environment(
@@ -206,11 +287,7 @@ def resolve_environment(
 
     if record.venv_path:
         venv = _expanded_directory(record.venv_path)
-        interpreter = os.path.join(
-            venv,
-            "Scripts" if os.name == "nt" else "bin",
-            "python.exe" if os.name == "nt" else "python",
-        )
+        interpreter = _interpreter_in(venv)
         if not os.path.isfile(interpreter) or not os.access(interpreter, os.X_OK):
             return (
                 None,
@@ -226,9 +303,28 @@ def resolve_environment(
         conda = shutil.which("conda", path=child_env.get("PATH"))
         if conda is None:
             return None, f"Environment {record.name!r} requires conda, but conda is not on PATH."
-        if not _conda_environment_exists(conda, record.conda_env):
+        prefix = _conda_environment_prefix(conda, record.conda_env, child_env)
+        if prefix is None:
             return None, f"Conda environment {record.conda_env!r} no longer exists."
-        prefix = (conda, "run", "--no-capture-output", "-n", record.conda_env)
-        return ResolvedEnvironment(record, child_env, cwd, prefix, interpreter="python"), None
+        interpreter = _interpreter_in(prefix)
+        if os.path.isfile(interpreter) and os.access(interpreter, os.X_OK):
+            # Launch the environment's own interpreter instead of paying conda's
+            # start-up per call. Prepending the prefix's bin directory and
+            # exporting CONDA_PREFIX reproduces what activation gives a child
+            # that only needs to find the environment's executables.
+            bin_dir = os.path.dirname(interpreter)
+            child_env["PATH"] = os.pathsep.join(
+                part for part in (bin_dir, child_env.get("PATH", "")) if part
+            )
+            child_env["CONDA_PREFIX"] = prefix
+            child_env["CONDA_DEFAULT_ENV"] = Path(prefix).name
+            return ResolvedEnvironment(record, child_env, cwd, interpreter=interpreter), None
+        # No interpreter in the prefix (a tools-only environment, or a layout we
+        # do not recognize): keep the incumbent ``conda run`` path.
+        command_prefix = (conda, "run", "--no-capture-output", "-n", record.conda_env)
+        return (
+            ResolvedEnvironment(record, child_env, cwd, command_prefix, interpreter="python"),
+            None,
+        )
 
     return ResolvedEnvironment(record, child_env, cwd), None

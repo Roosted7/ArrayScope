@@ -699,14 +699,21 @@ def _resolve_runtime_environment(environment_id: str):
 
 
 def _runtime_prefix(runtime: str, resolved) -> tuple[str, ...]:
-    conda_prefix = tuple(getattr(resolved, "command_prefix", ()) or ())
+    command_prefix = tuple(getattr(resolved, "command_prefix", ()) or ())
     if runtime == "command":
-        return conda_prefix
+        return command_prefix
     default = "julia" if runtime == "julia" else "matlab"
+    # Only an explicitly named ``interpreter`` on the record is the interpreter
+    # for these runtimes. A conda / venv locator resolves to *Python*, which is
+    # not what a Julia or Matlab body should be launched with -- the locator's
+    # contribution is the bin directory it puts on PATH, so the plain name
+    # resolves inside the environment.
+    record = getattr(resolved, "record", None) if resolved is not None else None
+    explicit = str(getattr(record, "interpreter", "") or "").strip()
     interpreter = getattr(resolved, "interpreter", None) if resolved is not None else None
-    if interpreter == "python":
+    if not explicit:
         interpreter = default
-    return (*conda_prefix, str(interpreter or default))
+    return (*command_prefix, str(interpreter or default))
 
 
 def _availability_check(runtime: str, config: dict[str, object], *, environment_id: str):
