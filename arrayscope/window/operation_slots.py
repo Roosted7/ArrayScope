@@ -20,6 +20,8 @@ from arrayscope.operations.input_slots import (
     ResolvedSlot,
     SlotBinding,
     SlotSourceOption,
+    describe_dimension_set,
+    dimension_set_indices,
     inspect_saved_array,
 )
 from arrayscope.operations.plugins import PluginOperation
@@ -49,14 +51,7 @@ class OperationSlotSourcesMixin:
         for slot in entry.input_slots:
             choices: list[SlotSourceOption] = []
             if SLOT_DIMENSION_SET in slot.accepts:
-                binding = self._current_dimension_set_binding()
-                choices.append(
-                    SlotSourceOption(
-                        binding,
-                        binding.label,
-                        "The current fixed indices of this array; displayed axes remain whole.",
-                    )
-                )
+                choices.extend(self._dimension_set_slot_options())
             if SLOT_OPEN_DOCUMENT in slot.accepts:
                 choices.extend(self._open_document_slot_options())
             for selection in tuple(getattr(self.roi_store, "selections", ()) or ()):
@@ -81,28 +76,70 @@ class OperationSlotSourcesMixin:
             options[slot.name] = tuple(choices)
         return options
 
-    def _current_dimension_set_binding(self) -> SlotBinding:
-        shape = tuple(int(size) for size in np.shape(self.base_data))
-        image_axes = set(getattr(self.view_state, "image_axes", ()) or ())
-        slice_indices = tuple(getattr(self.view_state, "slice_indices", ()) or ())
-        indices = tuple(
-            None
-            if axis in image_axes
-            else min(
-                max(0, int(slice_indices[axis]) if axis < len(slice_indices) else 0),
-                max(0, size - 1),
-            )
-            for axis, size in enumerate(shape)
+    def _dimension_set_binding(self, whole_axes, label: str) -> SlotBinding:
+        """One named axis selection of this document, stored as explicit indices."""
+
+        indices = dimension_set_indices(
+            np.shape(self.base_data),
+            tuple(getattr(self.view_state, "slice_indices", ()) or ()),
+            whole_axes,
         )
-        fixed = ", ".join(
-            f"d{axis}={value}" for axis, value in enumerate(indices) if value is not None
-        )
+        fixed = describe_dimension_set(indices)
         return SlotBinding(
             SLOT_DIMENSION_SET,
             source_id=self._operation_source_id,
             indices=indices,
-            label=f"Current dimension set{f' ({fixed})' if fixed else ''}",
+            label=f"{label}{f' ({fixed})' if fixed else ''}",
         )
+
+    def _current_dimension_set_binding(self) -> SlotBinding:
+        image_axes = tuple(getattr(self.view_state, "image_axes", ()) or ())
+        return self._dimension_set_binding(image_axes, "Current dimension set")
+
+    def _dimension_set_slot_options(self) -> tuple[SlotSourceOption, ...]:
+        """The named axis selections of this document a slot may bind to.
+
+        Only "what the viewer currently shows" used to be offered, which made
+        the slot a snapshot of the display rather than a way to *name* a subset
+        of the dimensions. The whole array and each single axis are the two
+        selections an operation asks for that the display cannot express -- a
+        second volume to combine with, or a line along the coil / echo axis
+        through the current point.
+        """
+
+        rank = len(tuple(np.shape(self.base_data)))
+        image_axes = tuple(getattr(self.view_state, "image_axes", ()) or ())
+        named: list[tuple[tuple[int, ...], str, str]] = [
+            (
+                image_axes,
+                "Current dimension set",
+                "The current fixed indices of this array; displayed axes remain whole.",
+            ),
+            (
+                tuple(range(rank)),
+                "Whole array",
+                "Every dimension of this array, independent of what is displayed.",
+            ),
+        ]
+        named.extend(
+            (
+                (axis,),
+                f"Along dimension {axis}",
+                f"A line along dimension {axis} through the current point.",
+            )
+            for axis in range(rank)
+        )
+        options = []
+        seen: set[tuple[int | None, ...]] = set()
+        for whole_axes, label, description in named:
+            binding = self._dimension_set_binding(whole_axes, label)
+            if binding.indices in seen:
+                # A 1-D document's "whole array" and "along dimension 0" are the
+                # same selection; offering it twice is two names for one thing.
+                continue
+            seen.add(binding.indices)
+            options.append(SlotSourceOption(binding, binding.label, description))
+        return tuple(options)
 
     def _open_document_slot_options(self) -> tuple[SlotSourceOption, ...]:
         group = getattr(self, "_compare_group", None)

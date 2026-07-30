@@ -29,6 +29,8 @@ from arrayscope.operations.input_slots import (
     OperationInputSlot,
     ResolvedSlot,
     SlotBinding,
+    describe_dimension_set,
+    dimension_set_indices,
 )
 from arrayscope.operations.pipeline import ArrayDocument, OperationStep
 from arrayscope.operations.plugin_conformance import (
@@ -454,3 +456,47 @@ def test_roi_geometry_invalidates_only_the_dependent_operation_evaluation():
     assert window._refresh_operation_slot_bindings(roi_id="roi-a", render=False) is True
     assert window.document.steps[0].enabled is False
     assert "no longer exists" in window.document.steps[0].unavailable_reason
+
+
+def test_dimension_set_indices_names_the_whole_axes_explicitly():
+    # Whole axes are ``None``; every other axis is pinned and clamped into range,
+    # so a stale slice position cannot make a binding that raises on resolve.
+    assert dimension_set_indices((2, 3, 4), (1, 2, 9), (0, 1)) == (None, None, 3)
+    assert dimension_set_indices((2, 3, 4), (1, 2, 3), ()) == (1, 2, 3)
+    assert dimension_set_indices((2, 3, 4), (), (0, 1, 2)) == (None, None, None)
+    assert describe_dimension_set((None, None, 3)) == "d2=3"
+    assert describe_dimension_set((None, None, None)) == ""
+
+
+def test_a_slot_offers_named_axis_selections_beyond_the_current_display():
+    """The dimension-set slot names a subset of dimensions, not just the view."""
+
+    primary = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    window = _SlotWindow(primary, RoiStore(selections=()))
+    window.view_state = SimpleNamespace(image_axes=(0, 1), slice_indices=(0, 0, 2))
+    slot = SimpleNamespace(name="reference", accepts=(SLOT_DIMENSION_SET,))
+
+    options = window._slot_source_options(SimpleNamespace(input_slots=(slot,)))["reference"]
+
+    labels = [option.label for option in options]
+    assert labels[0] == "Current dimension set (d2=2)"
+    assert "Whole array" in labels
+    assert "Along dimension 2 (d0=0, d1=0)" in labels
+
+    # Each option is an explicit, display-independent selection that resolves.
+    by_label = {option.label: option.binding for option in options}
+    whole = window._resolve_operation_slot(slot, by_label["Whole array"])
+    np.testing.assert_array_equal(whole.materialize(), primary)
+    line = window._resolve_operation_slot(slot, by_label["Along dimension 2 (d0=0, d1=0)"])
+    np.testing.assert_array_equal(line.materialize(), primary[0, 0, :])
+
+
+def test_a_one_dimensional_document_does_not_offer_the_same_selection_twice():
+    window = _SlotWindow(np.arange(4, dtype=np.float32), RoiStore(selections=()))
+    window.view_state = SimpleNamespace(image_axes=(0,), slice_indices=(0,))
+    slot = SimpleNamespace(name="reference", accepts=(SLOT_DIMENSION_SET,))
+
+    options = window._slot_source_options(SimpleNamespace(input_slots=(slot,)))["reference"]
+
+    # "Current", "Whole array" and "Along dimension 0" are one selection here.
+    assert len(options) == 1

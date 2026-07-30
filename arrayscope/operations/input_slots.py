@@ -127,6 +127,43 @@ class SlotBinding:
         )
 
 
+def dimension_set_indices(shape, slice_indices, whole_axes) -> tuple[int | None, ...]:
+    """The explicit per-axis selection a ``dimension-set`` binding stores.
+
+    ``None`` means "this axis is taken whole"; an int pins that axis to one
+    index. The pinned indices are clamped into the axis, so a stale slice
+    position from a smaller shape cannot produce a binding that raises on
+    resolve.
+
+    This is deliberately a *pure* function of an explicit ``whole_axes`` set
+    rather than a reader of the view. The one dimension-set option a window
+    could offer was "whatever the viewer currently shows", which is a fine
+    default and a poor vocabulary: an operation wanting a coil line, a spectrum
+    along the echo axis, or the whole volume as a second input had no way to say
+    so. Naming the whole axes explicitly makes every such selection expressible,
+    and the resulting binding is display-independent once stored -- resolution
+    only checks the rank.
+    """
+
+    shape = tuple(int(size) for size in shape)
+    slice_indices = tuple(int(index) for index in slice_indices)
+    whole = {int(axis) for axis in tuple(whole_axes or ())}
+    return tuple(
+        None
+        if axis in whole
+        else min(max(0, slice_indices[axis] if axis < len(slice_indices) else 0), max(0, size - 1))
+        for axis, size in enumerate(shape)
+    )
+
+
+def describe_dimension_set(indices) -> str:
+    """``"d0=3, d2=1"`` -- the pinned axes of a selection, for a label."""
+
+    return ", ".join(
+        f"d{axis}={value}" for axis, value in enumerate(tuple(indices)) if value is not None
+    )
+
+
 @dataclass(frozen=True)
 class SlotSourceOption:
     """One source choice rendered by the Qt-free operation form."""
