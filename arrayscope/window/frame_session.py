@@ -1350,7 +1350,9 @@ class FrameSession:
         else:
             self.lifecycle.fallback_ready(int(ref.payload.tile_number), ref)
 
-    def _rebind_reslice_planes(self, previous, new_anchor, canonical) -> dict[str, object] | None:
+    def _rebind_reslice_planes(
+        self, previous, new_anchor, canonical, *, decline=None
+    ) -> dict[str, object] | None:
         """Window-shifted CPU planes for a rebind, or ``None`` to decline.
 
         A page-backed presentation carries no exact CPU planes (the montage
@@ -1372,6 +1374,13 @@ class FrameSession:
             # mapped full-plane bounds are a proven R3 superset. Without that
             # proof, decline and let ordinary evaluation produce the window.
             if getattr(previous, "native_residency_data", None) is None:
+                # Name this decline separately: it is the one that gives up the
+                # zero-upload path (102-143 ms/step) for ordinary evaluation
+                # (305-770 ms), so a workload where it starts firing must be
+                # visible in the counters rather than folded into a plane that
+                # merely could not be re-sliced.
+                if callable(decline):
+                    decline("page_backed_no_native_plane")
                 return None
             return {}
         if canonical is None:
@@ -2639,9 +2648,15 @@ class FrameSession:
                 # to be this window's own, so pinning its plane cannot pin a
                 # retired document/operation generation.
                 canonical = remember_canonical(tile_number, previous)
-            planes = self._rebind_reslice_planes(previous, new_anchor, canonical)
+            declined_reason: list[str] = []
+            planes = self._rebind_reslice_planes(
+                previous,
+                new_anchor,
+                canonical,
+                decline=declined_reason.append,
+            )
             if planes is None:
-                decline("no_reslicable_plane")
+                decline(declined_reason[0] if declined_reason else "no_reslicable_plane")
                 continue
             texture_data = planes.get("texture_data", previous.texture_data)
             new_identity = self.tile_payload_identity(

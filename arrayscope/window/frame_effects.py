@@ -590,16 +590,16 @@ class FramePipelineEffects:
         totals[f"gate:{gate}"] = int(totals.get(f"gate:{gate}", 0)) + 1
         for key, value in stats.items():
             totals[key] = int(totals.get(key, 0)) + int(value)
-        if int(rebound) == 50 and int(stats.get("value_bounds_scan_planes", 0)) > 0:
-            totals["value_bounds_scan_50_tile_transactions"] = (
-                int(totals.get("value_bounds_scan_50_tile_transactions", 0)) + 1
-            )
+        if int(stats.get("value_bounds_scan_planes", 0)) > 0:
+            # Per-transaction worst case, not a per-population special case: the
+            # scan's cost is proportional to the tiles it rebound, so the same
+            # counters answer the question at any population.
             for metric in ("value_bounds_scan_ns", "value_bounds_scan_bytes"):
-                value = int(stats.get(metric, 0))
-                total_key = f"{metric}_50_tile_total"
-                max_key = f"{metric}_50_tile_max"
-                totals[total_key] = int(totals.get(total_key, 0)) + value
-                totals[max_key] = max(int(totals.get(max_key, 0)), value)
+                max_key = f"{metric}_transaction_max"
+                totals[max_key] = max(int(totals.get(max_key, 0)), int(stats.get(metric, 0)))
+            totals["value_bounds_scan_transactions"] = (
+                int(totals.get("value_bounds_scan_transactions", 0)) + 1
+            )
         previous_gate = getattr(renderer, "resident_crop_rebind_last_gate", None)
         renderer.resident_crop_rebind_last_gate = str(gate)
         if gate != "attempted" and previous_gate == gate:
