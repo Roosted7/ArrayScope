@@ -12,6 +12,7 @@ import os
 
 import numpy as np
 import pytest
+from pyqtgraph.Qt import QtGui
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -309,6 +310,140 @@ def test_reset_all_restores_the_arrangement_and_everything_hidden(qtbot, monkeyp
         assert colormap_library.hidden_builtins() == frozenset()
         assert operation_library.hidden_operations() == frozenset()
         assert colormap_library.effective_group(colormap_library.find_colormap("viridis")) != "User"
+    finally:
+        for dialog in (colormaps, operations):
+            dialog.close()
+        win.close()
+
+
+def test_hiding_a_system_definition_marks_it_and_restore_brings_it_back(qtbot, monkeypatch):
+    from arrayscope.display import colormap_library
+    from arrayscope.operations import library as operation_library
+
+    auto_confirm_message_boxes(monkeypatch)
+    win = _window(qtbot)
+    colormaps, operations = _managers(qtbot, win)
+    try:
+        for dialog, key, listed in (
+            (colormaps, "turbo", lambda: {i.name for i in colormap_library.list_colormaps()}),
+            (
+                operations,
+                "mean",
+                lambda: {
+                    entry.id
+                    for _group, entries in operation_library.grouped_operations()
+                    for entry in entries
+                },
+            ),
+        ):
+            assert dialog.select_key(key)
+            process_events(qtbot)
+            dialog.remove_button.click()
+            process_events(qtbot)
+            assert key not in listed()
+            # Still listed *here* -- greyed and marked -- which is what makes
+            # the removal reversible rather than a disappearance.
+            assert dialog.select_key(key)
+            assert "(hidden)" in dialog.tree.currentItem().text(0)
+            assert dialog.tree.currentItem().font(0).italic()
+
+            dialog.unhide_button.click()
+            process_events(qtbot)
+            assert key in listed()
+    finally:
+        for dialog in (colormaps, operations):
+            dialog.close()
+        win.close()
+
+
+def test_a_drop_persists_the_arrangement_on_both_sides(qtbot):
+    from arrayscope.display import colormap_library
+    from arrayscope.operations import library as operation_library
+    from arrayscope.ui.user_library_manager import GROUP_ROLE, ITEM_ROLE
+
+    win = _window(qtbot)
+    colormaps, operations = _managers(qtbot, win)
+    try:
+        for dialog, key, target in ((colormaps, "turbo", ""), (operations, "mean", "Complex")):
+            tree = dialog.tree
+            moved = None
+            destination = None
+            for group_index in range(tree.topLevelItemCount()):
+                group_item = tree.topLevelItem(group_index)
+                if group_item.data(0, GROUP_ROLE) == target:
+                    destination = group_item
+                for child_index in range(group_item.childCount()):
+                    if group_item.child(child_index).data(0, ITEM_ROLE) == key:
+                        moved = group_item.takeChild(child_index)
+                        break
+            assert moved is not None
+            assert destination is not None
+            destination.insertChild(0, moved)
+            dialog.persist_layout()
+            process_events(qtbot)
+
+        assert colormap_library.grouped_colormaps()[0][1][0].name == "turbo"
+        assert "mean" in {
+            entry.id for entry in dict(operation_library.grouped_operations())["Complex"]
+        }
+    finally:
+        for dialog in (colormaps, operations):
+            dialog.close()
+        win.close()
+
+
+def test_apply_hands_the_selection_to_the_window_and_closes(qtbot, monkeypatch):
+    operation_id = "mean"
+    win = _window(qtbot)
+    colormaps, operations = _managers(qtbot, win)
+    applied = []
+    monkeypatch.setattr(
+        type(win), "request_operation", lambda _self, *args, **kwargs: applied.append(args)
+    )
+    monkeypatch.setattr(
+        type(win),
+        "_set_display_colormap",
+        lambda _self, name, **_kwargs: applied.append((name,)),
+    )
+    try:
+        assert colormaps.select_key("viridis")
+        process_events(qtbot)
+        assert colormaps.apply_button.isEnabled()
+        colormaps.apply_button.click()
+        process_events(qtbot)
+        assert applied[-1] == ("viridis",)
+        assert not colormaps.isVisible()
+
+        # The operation manager was a dead end you had to leave before you could
+        # use what you had just written.
+        assert operations.select_key(operation_id)
+        process_events(qtbot)
+        operations.apply_button.click()
+        process_events(qtbot)
+        assert applied[-1][0] == operation_id
+        assert not operations.isVisible()
+    finally:
+        for dialog in (colormaps, operations):
+            dialog.close()
+        win.close()
+
+
+def test_open_folder_reaches_each_library_directory(qtbot, monkeypatch):
+    win = _window(qtbot)
+    colormaps, operations = _managers(qtbot, win)
+    opened = []
+    monkeypatch.setattr(
+        QtGui.QDesktopServices,
+        "openUrl",
+        staticmethod(lambda url: opened.append(url.toLocalFile())),
+    )
+    try:
+        for dialog in (colormaps, operations):
+            dialog.open_folder_button.click()
+            process_events(qtbot)
+        assert len(opened) == 2
+        assert all(os.path.isdir(path) for path in opened)
+        assert opened[0] != opened[1]
     finally:
         for dialog in (colormaps, operations):
             dialog.close()

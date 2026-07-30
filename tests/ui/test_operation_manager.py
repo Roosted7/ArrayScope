@@ -82,68 +82,6 @@ def _write_source(tmp_path, name, body):
     return str(path)
 
 
-def test_tree_shows_system_ops_and_hide_unhide(qtbot):
-    from arrayscope.operations import library
-
-    win = _window(qtbot)
-    dialog = _manager(qtbot, win)
-    try:
-        # Groups are present with system ops beneath them.
-        groups = {
-            dialog.tree.topLevelItem(i).data(0, 0x0101)
-            for i in range(dialog.tree.topLevelItemCount())
-        }
-        assert "Reduce" in groups
-        assert dialog.select_operation("mean")
-
-        dialog.remove_button.click()
-        process_events(qtbot)
-        assert "mean" in library.hidden_operations()
-
-        # Still listed (hidden) so it can be restored; row is marked.
-        assert dialog.select_operation("mean")
-        item = dialog.tree.currentItem()
-        assert "(hidden)" in item.text(0)
-
-        dialog.unhide_button.click()
-        process_events(qtbot)
-        assert "mean" not in library.hidden_operations()
-    finally:
-        dialog.close()
-        win.close()
-
-
-def test_drag_persist_moves_op_between_groups(qtbot):
-    from arrayscope.operations import library
-
-    win = _window(qtbot)
-    dialog = _manager(qtbot, win)
-    try:
-        # Simulate a drop: move "mean" out of Reduce into Complex.
-        tree = dialog.tree
-        mean_item = None
-        complex_group = None
-        for gi in range(tree.topLevelItemCount()):
-            group_item = tree.topLevelItem(gi)
-            if group_item.data(0, 0x0101) == "Complex":
-                complex_group = group_item
-            for ci in range(group_item.childCount()):
-                if group_item.child(ci).data(0, 0x0100) == "mean":
-                    mean_item = group_item.takeChild(ci)
-                    break
-        assert mean_item is not None
-        assert complex_group is not None
-        complex_group.insertChild(0, mean_item)
-        dialog.persist_layout()
-        process_events(qtbot)
-
-        groups = dict(library.grouped_operations())
-        assert "mean" in {entry.id for entry in groups["Complex"]}
-    finally:
-        dialog.close()
-        win.close()
-
-
 def test_new_and_source_picker_stay_in_manager(qtbot, tmp_path, monkeypatch):
     from arrayscope.operations import library
     from arrayscope.operations.registry import get_operation_entry
@@ -320,26 +258,6 @@ def test_parameter_and_input_slot_tables_preserve_editable_schema(qtbot, tmp_pat
         dialog.slots_table.item(0, 1).setText("Reference data")
         process_events(qtbot)
         assert registry.get_operation_entry(blend_id).input_slots[0].label == "Reference data"
-    finally:
-        dialog.close()
-        win.close()
-
-
-def test_reset_all_clears_layout_and_unhides(qtbot, monkeypatch):
-    from arrayscope.operations import library
-
-    library.set_operation_hidden("mean", True)
-    library.apply_library_layout(group_order=["Complex", "Reduce"])
-
-    win = _window(qtbot)
-    dialog = _manager(qtbot, win)
-    try:
-        dialog.reset_all_button.click()
-        process_events(qtbot)
-        assert "mean" not in library.hidden_operations()
-        # Layout is back to the default taxonomy order.
-        order = [group for group, _entries in library.grouped_operations()]
-        assert order.index("Reduce") < order.index("Complex")
     finally:
         dialog.close()
         win.close()

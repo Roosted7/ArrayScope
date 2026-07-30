@@ -131,54 +131,6 @@ def test_apply_disabled_for_incompatible_kind(qtbot):
         win.close()
 
 
-def test_delete_builtin_hides_and_restore_brings_it_back(qtbot, monkeypatch):
-    from arrayscope.display import colormap_library as library
-
-    auto_confirm_message_boxes(monkeypatch)
-    win = _window(qtbot)
-    dialog = _manager(qtbot, win)
-    try:
-        assert dialog.select_key("turbo")
-        dialog.remove_button.click()
-        process_events(qtbot)
-        assert "turbo" not in {info.name for info in library.list_colormaps()}
-        assert dialog.select_key("turbo")  # still listed (greyed) in the manager
-        assert "(hidden)" in dialog.tree.currentItem().text(0)
-        dialog.unhide_button.click()
-        process_events(qtbot)
-        assert "turbo" in {info.name for info in library.list_colormaps()}
-    finally:
-        dialog.close()
-        win.close()
-
-
-def test_drag_layout_persists(qtbot):
-    from arrayscope.display import colormap_library as library
-    from arrayscope.ui.user_library_manager import ITEM_ROLE
-
-    win = _window(qtbot)
-    dialog = _manager(qtbot, win)
-    try:
-        # Simulate a drop result: move turbo into Favorites at the front.
-        tree = dialog.tree
-        turbo_item = None
-        for gi in range(tree.topLevelItemCount()):
-            group_item = tree.topLevelItem(gi)
-            for ci in range(group_item.childCount()):
-                if group_item.child(ci).data(0, ITEM_ROLE) == "turbo":
-                    turbo_item = group_item.takeChild(ci)
-                    break
-            if turbo_item is not None:
-                break
-        tree.topLevelItem(0).insertChild(0, turbo_item)
-        dialog.persist_layout()
-        groups = dict(library.grouped_colormaps())
-        assert groups[library.FAVORITES_GROUP][0].name == "turbo"
-    finally:
-        dialog.close()
-        win.close()
-
-
 def test_kind_filter_hides_non_matching(qtbot):
     from arrayscope.display import colormap_library as library
     from arrayscope.ui.user_library_manager import ITEM_ROLE
