@@ -495,6 +495,7 @@ class Recorder:
         return {
             "widget_type": "QMenuAction",
             "object_name": str(action.data() or ""),
+            "display_text": action.text().replace("&", ""),
             "rect": [
                 self._overlay_top_left.x() + geometry.x(),
                 self._overlay_top_left.y() + geometry.y(),
@@ -614,7 +615,14 @@ class Recorder:
         self._overlay_top_left = None
 
     def choose_combo_item(
-        self, combo, data, *, label: str, control_label: str, after_trigger=None
+        self,
+        combo,
+        data,
+        *,
+        label: str,
+        control_label: str,
+        item_labels: dict | None = None,
+        after_trigger=None,
     ) -> None:
         """Show a faithful composited choice list and activate the combo item."""
         from pyqtgraph.Qt import QtCore, QtWidgets
@@ -622,18 +630,27 @@ class Recorder:
         menu = QtWidgets.QMenu(self.win)
         chosen = None
         for index in range(combo.count()):
-            action = menu.addAction(combo.itemIcon(index), combo.itemText(index))
+            item_data = combo.itemData(index)
+            accessible_text = combo.itemData(index, QtCore.Qt.ItemDataRole.AccessibleTextRole)
+            tooltip = combo.itemData(index, QtCore.Qt.ItemDataRole.ToolTipRole)
+            display_text = (
+                (item_labels or {}).get(item_data)
+                or accessible_text
+                or tooltip
+                or combo.itemText(index)
+            )
+            action = menu.addAction(combo.itemIcon(index), str(display_text))
             action.setCheckable(True)
             action.setChecked(index == combo.currentIndex())
             model_index = combo.model().index(index, combo.modelColumn(), combo.rootModelIndex())
             action.setEnabled(
                 bool(combo.model().flags(model_index) & QtCore.Qt.ItemFlag.ItemIsEnabled)
             )
-            action.setData(combo.itemData(index))
+            action.setData(item_data)
             action.triggered.connect(
                 lambda checked=False, index=index: combo.setCurrentIndex(index)
             )
-            if combo.itemData(index) == data:
+            if item_data == data:
                 chosen = action
         if chosen is None:
             raise RuntimeError(f"combo item {data!r} not found")
@@ -1054,6 +1071,27 @@ def s_fft(rec: Recorder):
     rec.caption("A phantom image — let's look at its k-space")
     rec.hold(1.8)
 
+    combo = win.display_toolbar.channel_combo
+    scale = win.display_toolbar.scale_combo
+    channel_labels = {"real": "Real", "abs": "Magnitude", "angle": "Phase"}
+    scale_labels = {"linear": "Linear", "log": "Logarithmic"}
+    rec.caption("Choose logarithmic magnitude before transforming")
+    rec.choose_combo_item(
+        scale,
+        "log",
+        label="choose log scale",
+        control_label="scale",
+        item_labels=scale_labels,
+    )
+    rec.choose_combo_item(
+        combo,
+        "abs",
+        label="choose magnitude",
+        control_label="channel",
+        item_labels=channel_labels,
+    )
+    rec.hold(0.5)
+
     rec.caption("Add centered FFT steps — the source array is never modified")
     chip0 = win.dimension_strip.chip(0)
     anchor0 = chip0.ops_button.mapToGlobal(chip0.ops_button.rect().topLeft())
@@ -1078,17 +1116,16 @@ def s_fft(rec: Recorder):
         label="open axis 1 operation menu",
     )
     rec.choose_overlay_action(menu1, fft1, label="choose centered FFT on axis 1")
-    rec.hold_until_settled(2.5, tail_s=1.0)
-
-    rec.caption("Complex data: switch to magnitude on a log scale")
-    combo = win.display_toolbar.channel_combo
-    scale = win.display_toolbar.scale_combo
-    rec.choose_combo_item(scale, "log", label="choose log scale", control_label="scale")
-    rec.choose_combo_item(combo, "abs", label="choose magnitude", control_label="channel")
-    rec.hold_until_settled(2.0, tail_s=1.6)
+    rec.hold_until_settled(2.5, tail_s=1.4)
 
     rec.caption("…or phase")
-    rec.choose_combo_item(combo, "angle", label="choose phase", control_label="channel")
+    rec.choose_combo_item(
+        combo,
+        "angle",
+        label="choose phase",
+        control_label="channel",
+        item_labels=channel_labels,
+    )
     rec.hold_until_settled(2.0, tail_s=1.6)
 
     rec.caption("Every step is reversible — toggle it in the operation stack")
@@ -1098,6 +1135,7 @@ def s_fft(rec: Recorder):
         "abs",
         label="return to logarithmic magnitude",
         control_label="channel",
+        item_labels=channel_labels,
         after_trigger=lambda: scale.setCurrentIndex(scale.findData("log")),
     )
     rec.settle()

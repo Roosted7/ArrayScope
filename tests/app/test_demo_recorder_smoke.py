@@ -92,6 +92,18 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             assert y <= cursor_y <= y + height
         ordered_labels = [event["label"] for event in overlay_choices]
         assert ordered_labels.index("choose log scale") < ordered_labels.index("choose magnitude")
+        assert ordered_labels.index("choose magnitude") < ordered_labels.index(
+            "choose centered FFT on axis 0"
+        )
+        expected_choice_text = {
+            "choose log scale": "Logarithmic",
+            "choose magnitude": "Magnitude",
+            "choose phase": "Phase",
+        }
+        for label, display_text in expected_choice_text.items():
+            event = next(item for item in overlay_choices if item["label"] == label)
+            assert event["target"]["display_text"] == display_text
+            assert event["target"]["rect"][2] >= 80
         assert {"disable first FFT", "enable first FFT"} <= {
             event["label"] for event in actions if event["kind"] == "click"
         }
