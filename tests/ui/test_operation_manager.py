@@ -386,8 +386,10 @@ def _select_problem_row(dialog, basename):
     return None
 
 
-def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path):
+def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path, monkeypatch):
     import json
+
+    from pyqtgraph.Qt import QtGui
 
     from arrayscope.operations import library
 
@@ -402,6 +404,10 @@ def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path):
                 "id": "user:broken",
                 "label": "Broken",
                 "source": {"mode": "import", "path": "broken.py", "callable": "oops"},
+                "parameters": [{"name": "amount", "kind": "int", "default": 2}],
+                "input_slots": [
+                    {"name": "reference", "accepts": ["open-document"], "description": "A second."}
+                ],
             }
         )
     )
@@ -432,12 +438,51 @@ def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path):
         assert dialog.open_file_button.isEnabled() is True
         # The payload parses, so there is a form to drive; no raw text pane.
         assert dialog.raw_json_edit.isHidden()
+        # Including the parameter and slot tables, which read stored dicts here
+        # rather than registry objects.
+        assert dialog.params_table.rowCount() == 1
+        assert dialog.params_table.item(0, 0).text() == "amount"
+        assert dialog.params_table.item(0, 2).text() == "2"
+        assert dialog.slots_table.rowCount() == 1
+        assert dialog.slots_table.item(0, 0).text() == "reference"
+        assert "open-document" in dialog.slots_table.item(0, 2).text()
 
         # An edit made here saves to the file by path.
         dialog.label_edit.setText("Broken but editable")
         dialog.label_edit.editingFinished.emit()
         process_events(qtbot)
         assert json.loads((ops_dir / "broken.json").read_text())["label"] == "Broken but editable"
+
+        # Editing a stored parameter is an ordinary edit here too.
+        dialog.params_table.item(0, 0).setText("gain")
+        process_events(qtbot)
+        stored = json.loads((ops_dir / "broken.json").read_text())
+        assert [parameter["name"] for parameter in stored["parameters"]] == ["gain"]
+
+        # And the add buttons are gated on "may this dialog rewrite the
+        # selection", which a Problems row now satisfies -- they used to be
+        # gated on the selection having a registered user id, which it cannot.
+        assert dialog._editing_definition() is True
+        dialog.add_param_button.click()
+        dialog.add_slot_button.click()
+        process_events(qtbot)
+        assert dialog.selected_problem_path() == path
+
+        # Open-file reaches the wrapper -- the file that actually needs editing
+        # when the definition did not load.
+        opened = []
+        monkeypatch.setattr(
+            QtGui.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile())
+        )
+        dialog.open_file_button.click()
+        process_events(qtbot)
+        assert opened == [path]
+
+        # And a Problems row survives an unrelated drag: it has no operation id,
+        # so the tree's id-shaped normalization would otherwise evict it to the
+        # top level on the next drop.
+        dialog.tree._normalize()
+        assert _select_problem_row(dialog, "broken.json") is not None
 
         # Fixing what the loader complained about takes the row out of
         # Problems and lands the selection on the now-registered operation.
