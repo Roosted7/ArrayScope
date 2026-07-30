@@ -90,6 +90,11 @@ MAP_FILENAME = ".testmondata"
 OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     # `python tools/demo_recorder.py --smoke ...`
     "tests/app/test_demo_recorder_smoke.py": ("tools/demo_recorder.py",),
+    # `python tools/demo_inspector.py --strict ...`. The findings tests in the
+    # same file load the inspector in-process and trace normally; this covers
+    # what only the child reaches — argument handling, exit codes, and the
+    # ffmpeg decode of a real encoded file.
+    "tests/app/test_demo_inspector.py": ("tools/demo_inspector.py",),
     # `python -c "import arrayscope, pyqtgraph.Qt as Qt"` — the binding
     # preference has to hold on a *fresh* interpreter, which is the whole point
     # of the test and the reason it cannot be traced.
