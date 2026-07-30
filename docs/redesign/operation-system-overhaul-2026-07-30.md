@@ -131,10 +131,22 @@ editor pane. Dialog tests consolidate onto the base (net fewer tests).
 - **R3 — Parameter kinds**: `string`/`enum`/`bool`/`path` kinds +
   `file` slot kind through registry, wrapper schema, recipes, forms,
   palette; direct-interpreter resolution for `conda_env` environments.
-- **R4 — Manager convergence** (ADR 0063): shared protocol + dialog
-  base per the parity matrix "wins"; one icon vocabulary; one verb;
-  colormap storage scoping fix; colormap Problems surface; colormaps in
-  the palette; gallery parity for the colormap manager.
+- **R4 — Manager convergence** (ADR 0063): **LANDED.** `app/user_library.py`
+  is the one storage protocol (listeners, layout with a format header,
+  hidden set, path-keyed problems, atomic write) and
+  `ui/user_library_manager.py` the one dialog grammar; the button
+  vocabulary is a tested data structure rather than a convention, which
+  is what the previous "deliberately mirrors the colormap designer"
+  docstring was and was not enough. Colormap storage is install-scoped
+  with a one-time migration; a colormap file the loader rejects is
+  recorded and repairable; a built-in whose package is missing is
+  `(unavailable)`, not absent; built-ins are read-only behind an explicit
+  Override. Operations gained Revert, a filter, inline group rename,
+  Import/Export and Apply. Two dead buttons ("Add a parameter", "Add an
+  input slot", measured rowCount 0 → 0) fixed. Colormaps are palette
+  commands; the dialog has one name on every surface. The recurring trap:
+  a dialog that listens to a library it also writes re-enters its own
+  autosave through the rebuild.
 - **R5 — Subset-of-dims (gap B)**: axis-set parameter kind,
   `applied_axes` → blocking/expands/chunkable mapping, recipe field,
   multi-axis form widget; generalize the dimension-set slot to a named

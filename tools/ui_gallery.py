@@ -386,16 +386,98 @@ def s_diagnostics(ctx: Ctx):
     ctx.shot(dialog, "diagnostics_dialog")
 
 
-@scenario("colormap_designer")
-def s_colormap_designer(ctx: Ctx):
+@scenario("colormap_manager")
+def s_colormap_manager(ctx: Ctx):
+    """The colormap manager at the review surface its operations sibling has.
+
+    It used to be one shot of an untouched dialog -- roughly a sixth of the
+    operation manager's coverage -- which is why the states this bundle
+    converged (markers, filter, Problems, Revert, read-only built-ins) had
+    never been looked at side by side.
+    """
+
+    import tempfile
+    from pathlib import Path
+
+    from arrayscope.app import user_dirs
+    from arrayscope.display import colormap_library as library
+    from arrayscope.ui.colormap_manager import ColormapManagerDialog
+    from arrayscope.ui.user_library_manager import PROBLEM_PATH_ROLE
+
+    # Isolation, exactly as the operation manager scenario does it: pin both
+    # resolvers at a scenario-temp directory before the window is built, so
+    # there is no doubt about touching the real user's library.
+    maps_dir = Path(tempfile.mkdtemp(prefix="ui-gallery-colormaps-"))
+    user_dirs.user_config_directory = lambda *args, **kwargs: maps_dir.parent
+    library.user_colormap_directory = lambda: str(maps_dir)
+
+    library.save_user_colormap(
+        "Perfusion",
+        library.SEQUENTIAL,
+        (
+            (0.0, (5, 10, 40)),
+            (0.45, (30, 120, 190)),
+            (0.75, (240, 190, 60)),
+            (1.0, (255, 250, 230)),
+        ),
+    )
+    # A user file that shadows a built-in ("(modified)") and a hidden built-in.
+    library.save_user_colormap(
+        "turbo",
+        library.SEQUENTIAL,
+        ((0.0, (0, 0, 0)), (0.5, (200, 40, 40)), (1.0, (255, 255, 255))),
+    )
+    library.set_builtin_hidden("cividis", True)
+    # One unreadable file per repair shape is overkill here: the colormap repair
+    # surface has one shape (raw text), so one file is the whole story.
+    (maps_dir / "half-written.json").write_text('{"name": "half-written", "stops": [[0.0, [12,')
+    library.refresh_user_colormaps()
+
     win = ctx.window(_kspace(128), size=(1000, 700))
     ctx.shot(win, "complex_phase_picker")
-    from arrayscope.ui.colormap_designer import ColormapDesignerDialog
 
-    dialog = ColormapDesignerDialog(win)
+    dialog = ColormapManagerDialog(win)
     dialog.show()
     ctx.pump(6)
-    ctx.shot(dialog, "designer_dialog")
+    if not dialog.select_key("Perfusion"):
+        raise RuntimeError("user colormap missing from the manager tree")
+    ctx.pump(4)
+    ctx.shot(dialog, "user_map_and_markers")
+
+    if not dialog.select_key("viridis"):
+        raise RuntimeError("viridis missing from the manager tree")
+    ctx.pump(4)
+    ctx.shot(dialog, "builtin_read_only_with_override")
+
+    dialog.filter_combo.setCurrentIndex(dialog.filter_combo.findData(library.CYCLIC))
+    dialog.filter_edit.setText("c")
+    ctx.pump(4)
+    ctx.shot(dialog, "filter_active")
+    dialog.filter_combo.setCurrentIndex(0)
+    dialog.filter_edit.setText("")
+    ctx.pump(4)
+
+    problem_row = None
+    for index in range(dialog.tree.topLevelItemCount()):
+        group = dialog.tree.topLevelItem(index)
+        for child_index in range(group.childCount()):
+            child = group.child(child_index)
+            if child.data(0, PROBLEM_PATH_ROLE) is not None:
+                problem_row = child
+    if problem_row is None:
+        raise RuntimeError("Problems row for the unreadable colormap is missing")
+    dialog.tree.setCurrentItem(problem_row)
+    ctx.pump(6)
+    ctx.shot(dialog, "problems_raw_json")
+
+    # Revert appears only once there is something to undo -- here, a deletion.
+    if not dialog.select_key("Perfusion"):
+        raise RuntimeError("user colormap disappeared before the revert state")
+    dialog.snapshot_before_change("Perfusion")
+    library.delete_user_colormap("Perfusion")
+    ctx.pump(6)
+    ctx.shot(dialog, "revert_available")
+
     dialog.close()
 
 
@@ -572,6 +654,57 @@ def s_operation_params_popup(ctx: Ctx):
     ctx.pump(4)
     ctx.shot(pics_popup, "params_input_slot")
 
+    # One popup carrying every non-numeric parameter kind, so the widget each
+    # one produces (enum combo, bool checkbox, free text, path + browse) is
+    # reviewable next to the numeric spin boxes rather than only in a schema.
+    from arrayscope.operations.plugins import PluginOperationSpec
+    from arrayscope.operations.registry import OperationParameter
+
+    kinds_entry = get_operation_entry("smooth")
+    kinds_spec = PluginOperationSpec(
+        id="gallery:parameter-kinds",
+        label="Every parameter kind",
+        description="Review surface for the non-numeric parameter kinds.",
+        group="User",
+        icon="tune",
+        fn=lambda data, **_kwargs: data,
+        parameters=(
+            OperationParameter("width", "Width", "int", default=3, minimum=1, maximum=15, step=2),
+            OperationParameter(
+                "strength", "Strength", "float", default=0.5, minimum=0.0, maximum=1.0, step=0.05
+            ),
+            OperationParameter(
+                "boundary",
+                "Boundary",
+                "enum",
+                default="reflect",
+                choices=("reflect", "nearest", "wrap", "constant"),
+                description="How samples past the edge are supplied.",
+            ),
+            OperationParameter("normalize", "Normalize", "bool", default=True),
+            OperationParameter("label", "Label", "string", default="run-1"),
+            OperationParameter("weights", "Weights file", "path", default=""),
+        ),
+    )
+    kinds_entry = kinds_entry.__class__(
+        **{
+            **{field: getattr(kinds_entry, field) for field in kinds_entry.__dataclass_fields__},
+            "id": kinds_spec.id,
+            "label": kinds_spec.label,
+            "description": kinds_spec.description,
+            "parameters": kinds_spec.parameters,
+            "requires_axis": False,
+        }
+    )
+    kinds_form = build_parameter_form(kinds_entry, shape=win.data.shape)
+    kinds_popup = OperationParamsPopup(
+        kinds_entry, kinds_form, lambda _values, _bindings: None, parent=win
+    )
+    kinds_popup.adjustSize()
+    kinds_popup.show()
+    ctx.pump(4)
+    ctx.shot(kinds_popup, "params_every_kind")
+
 
 @scenario("operation_manager")
 def s_operation_manager(ctx: Ctx):
@@ -581,7 +714,8 @@ def s_operation_manager(ctx: Ctx):
 
     from arrayscope.app import user_dirs
     from arrayscope.operations import library
-    from arrayscope.ui.operation_manager import _PROBLEM_PATH_ROLE, OperationManagerDialog
+    from arrayscope.ui.operation_manager import OperationManagerDialog
+    from arrayscope.ui.user_library_manager import PROBLEM_PATH_ROLE
 
     # Isolation: the gallery's private QSettings name already nests the user
     # config (and thus the ops dir) under a per-scenario application name, but
@@ -742,7 +876,7 @@ def s_operation_manager(ctx: Ctx):
             continue
         for child_index in range(group.childCount()):
             child = group.child(child_index)
-            path = child.data(0, _PROBLEM_PATH_ROLE)
+            path = child.data(0, PROBLEM_PATH_ROLE)
             if path is not None:
                 problem_rows[os.path.basename(str(path))] = child
     for name in ("unfinished-denoise.json", "broken.json"):
