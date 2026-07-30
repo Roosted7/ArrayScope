@@ -86,8 +86,11 @@ is proven independent. Execution rows: [`queue.md`](queue.md) Next section.
    "Compare with…" launcher (second window linked on dims+camera+levels)
    → linked complex-aware cursor (mag *and* phase of A, B, A−B) →
    `CompositeArraySource(A, B, op)` difference as a derived *source*
-   through the unchanged unary pipeline. Rejected: multi-input pipeline
-   ops (invalidates region pull-back, stage keys, and recipes at once).
+   through the unchanged unary pipeline. Rejected *at the time*:
+   multi-input pipeline ops — later superseded by ADR 0060 §6, whose
+   declarative input slots landed multi-input operations (`bart:pics`
+   with k-space + sensitivity maps) while keeping the primary chain
+   linear; region pull-back stays protected by the OPAQUE-first rule.
    This is the highest-signal user feature and the arrShow/Slicer parity
    point where we can lead (complex-aware, progressive, values-exact).
 2. **C — Plugin operations v1 + toolbox bridges.** Entry-point group
@@ -97,9 +100,13 @@ is proven independent. Execution rows: [`queue.md`](queue.md) Next section.
    region algebra, honored only after a conformance harness proves
    region-path equivalence. **BART** as an optional subprocess pack (cfl
    handoff at the stage-materialization seam, cancellation → SIGTERM, honest
-   cost hints). No sigpy pack: `sigpy.fft` is `numpy.fft` underneath, so it
-   duplicates the built-in centered-FFT op + the `FFTBackendChoice` setting;
-   sigpy's additive value (nufft/espirit) awaits a multi-input op contract.
+   cost hints). No sigpy *FFT* pack: `sigpy.fft` is `numpy.fft`
+   underneath, so it duplicates the built-in centered-FFT op + the
+   `FFTBackendChoice` setting (a zero-op availability seam remains in
+   `packs/sigpy_pack.py`); sigpy's additive value (nufft/espirit) got
+   array-input slots from ADR 0060 Bundle E and now awaits structural
+   metadata + shape-constrained characterization (see
+   `redesign/operation-system-overhaul-2026-07-30.md`).
    Registry yes; marketplace remains a non-goal.
 3. **D — Ingestion breadth.** DataWrapper-style adapter behind the ADR
    0049 protocol: zarr/dask/cupy/torch/xarray without touching the
@@ -145,7 +152,8 @@ is proven independent. Execution rows: [`queue.md`](queue.md) Next section.
   C is the product; distribution stays pip); broad
   segmentation/registration/qMRI workbench; remote multi-user
   collaboration; destructive workspace operations.
-- Multi-input pipeline operations (compare uses composite *sources*).
+- ~~Multi-input pipeline operations~~ (landed 2026-07-26 as ADR 0060 §6
+  input slots; compare still uses composite *sources* for its own path).
 - Full PyQtGraph removal (interaction re-host + widget rewrite; only if
   a dedicated interaction layer is justified later).
 - Re-enabling the synchronous LOD pyramid path; refuse/degrade render
