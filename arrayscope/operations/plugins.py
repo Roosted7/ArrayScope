@@ -55,6 +55,7 @@ from arrayscope.operations.input_slots import (
 )
 from arrayscope.operations.plugin_conformance import (
     CharacterizationMismatch,
+    CharacterizationUnavailable,
     OperationCharacterization,
     characterization_stats,
     characterize_operation,
@@ -66,6 +67,9 @@ from arrayscope.operations.regions import (
     AxisRegionKind,
     RegionSpec,
     apply_region,
+    axis_in_region_result,
+    replace_region_axis,
+    take_axis_region,
 )
 from arrayscope.operations.registry import (
     OperationEntry,
@@ -295,6 +299,56 @@ class PluginOperationSpec:
 
 
 @dataclass(frozen=True)
+class _SlabSpec:
+    """Presents a slab-mapped spec's callable to the characterizer at SLAB rank.
+
+    The conformance harness is duck-typed on ``id`` / ``resolve_fn`` /
+    ``source_identity`` / ``region_capable`` precisely so a second caller can
+    reuse it, and this is that caller: a slab-mapped operation's contract is a
+    contract about *one slab*, so the probes must be slab-shaped. Probing the
+    broadcast wrapper instead would multiply every probe by the number of slabs
+    in the probe array and still tell us nothing the slab rule does not.
+
+    The id is namespaced apart from the operation's own so a slab
+    characterization and a whole-array one can never collide in the shared
+    cache. ``region_capable`` is False: a Tier-2 window claim is about the whole
+    array and is not something a slab rule can establish.
+    """
+
+    spec: PluginOperationSpec
+    region_capable: bool = False
+
+    @property
+    def id(self) -> str:
+        return f"{self.spec.id}#slab"
+
+    @property
+    def source_identity(self):
+        return self.spec.source_identity
+
+    def resolve_fn(self, axis, params, slots=None):
+        # The axis selection is deliberately dropped: a slab-mapped callable
+        # sees a slab and is not told which axes it spans (see the field note
+        # on ``maps_over_slabs``).
+        del axis
+        return self.spec.resolve_fn(None, params, slots)
+
+
+@dataclass(frozen=True)
+class SlabPlan:
+    """What a slab-mapped operation does to one input signature."""
+
+    axes: tuple[int, ...]
+    slab_shape: Shape
+    output_slab_shape: Shape
+    output_shape: Shape
+    output_dtype: np.dtype
+    #: True when the callable returns a slab of exactly the shape it was given.
+    #: Only then does the operation earn the broadcast-chunkable declaration.
+    shape_preserving: bool
+
+
+@dataclass(frozen=True)
 class PluginOperation:
     """A Tier-1 plugin operation bound to a namespaced id, axis, and params.
 
@@ -326,6 +380,19 @@ class PluginOperation:
 
     def _params(self) -> dict[str, object]:
         return dict(self.params)
+
+    def _axis_selection(self):
+        """What ``build`` receives: an ``int``, a sorted tuple, or ``None``.
+
+        ``None`` for a slab-mapped op even though it has an axis set: its
+        callable sees a slab, and telling it which axes that slab spans would
+        invite it to index by them -- against a slab whose numbering no longer
+        matches the array's.
+        """
+
+        if self._spec().maps_over_slabs:
+            return None
+        return self.axes if self.axes else self.axis
 
     def _slot_inputs(self) -> dict[str, ResolvedSlot]:
         return dict(self.resolved_slots)
@@ -361,7 +428,7 @@ class PluginOperation:
             self._spec(),
             tuple(shape),
             np.dtype(dtype),
-            axis=self.axis,
+            axis=self._axis_selection(),
             params=self._params(),
             slots=self._slot_inputs(),
             exact_input=exact_input,
@@ -372,14 +439,148 @@ class PluginOperation:
         object.__setattr__(self, "_characterization_hint", characterization)
         return characterization
 
+    # -- slab mapping ("apply me per slab, broadcast me over the rest") -------
+
+    def _maps_over_slabs(self) -> bool:
+        return bool(self._spec().maps_over_slabs)
+
+    def _slab_axes(self, ndim: int) -> tuple[int, ...]:
+        return normalize_axis_selection(
+            self.axes, ndim=int(ndim), label=f"operation {self.plugin_id!r} axes"
+        )
+
+    def slab_plan(self, input_shape: Shape, input_dtype=None) -> SlabPlan:
+        """Characterize the SLAB callable and project it onto the whole array.
+
+        The projection is the whole trick: the operation is a map from a slab to
+        a slab, so a rule fitted at slab rank predicts the whole-array output by
+        substituting the predicted slab sizes back into the applied axis
+        positions. Every other axis is untouched, which is exactly what
+        "broadcast over the rest" means.
+        """
+
+        input_shape = tuple(int(size) for size in input_shape)
+        dtype = np.dtype("float32" if input_dtype is None else input_dtype)
+        axes = self._slab_axes(len(input_shape))
+        slab_shape = tuple(input_shape[axis] for axis in axes)
+        characterization = characterize_operation(
+            _SlabSpec(self._spec()),
+            slab_shape,
+            dtype,
+            axis=None,
+            params=self._params(),
+            slots=self._slot_inputs(),
+        )
+        output_slab_shape = characterization.output_shape
+        if len(output_slab_shape) != len(axes):
+            # A slab-mapped callable that changes the slab's *rank* has no
+            # whole-array shape at all: there is no position to put the extra
+            # (or missing) axis in that every slab would agree on.
+            raise CharacterizationUnavailable(
+                f"operation {self.plugin_id!r} maps over slabs but changed the slab rank "
+                f"from {len(axes)} to {len(output_slab_shape)}"
+            )
+        output_shape = list(input_shape)
+        for axis, size in zip(axes, output_slab_shape, strict=True):
+            output_shape[axis] = int(size)
+        return SlabPlan(
+            axes=axes,
+            slab_shape=slab_shape,
+            output_slab_shape=tuple(int(size) for size in output_slab_shape),
+            output_shape=tuple(output_shape),
+            output_dtype=np.dtype(characterization.output_dtype),
+            shape_preserving=bool(
+                characterization.predictable and characterization.shape_rule.kind == "identity"
+            ),
+        )
+
+    def _apply_over_slabs(self, data, axes, *, cancellation_token=None):
+        """Run the callable once per slab and reassemble in the input's axis order."""
+
+        array = np.asarray(data)
+        fn = self._spec().resolve_fn(None, self._params(), self._slot_arrays())
+        rank = array.ndim
+        trailing = tuple(range(rank - len(axes), rank))
+        moved = np.moveaxis(array, axes, trailing)
+        broadcast_shape = moved.shape[: rank - len(axes)]
+        slabs = [
+            np.asarray(call_with_cancellation(fn, moved[index], cancellation_token))
+            for index in np.ndindex(*broadcast_shape)
+        ]
+        output_slab_shape = tuple(slabs[0].shape)
+        if any(tuple(slab.shape) != output_slab_shape for slab in slabs):
+            # Every slab must agree, or the results do not form an array -- and
+            # the shape rule fitted from one slab would be a lie for the others.
+            raise CharacterizationMismatch(
+                f"operation {self.plugin_id!r} returned differently shaped slabs; "
+                "a slab-mapped operation must map every slab the same way"
+            )
+        stacked = np.stack(slabs).reshape(broadcast_shape + output_slab_shape)
+        return np.moveaxis(stacked, trailing, axes)
+
+    def _slab_region_input_shape(self, array, input_region: RegionSpec) -> Shape:
+        """A stand-in input shape carrying the real size of every applied axis.
+
+        Only the applied axes' sizes reach ``slab_plan``, and those axes are
+        always ALL in the region we asked for, so their real sizes are readable
+        off the region result. The rest are placeholders -- they exist so the
+        rank matches, and nothing consults them.
+        """
+
+        ndim = len(input_region.axes)
+        shape = [1] * ndim
+        for axis in self._slab_axes(ndim):
+            shape[axis] = int(np.shape(array)[axis_in_region_result(input_region, axis)])
+        return tuple(shape)
+
+    def _apply_slab_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        """Run the slab map on the sub-region the planner chunked out for us.
+
+        This is where the broadcast pays: for a shape-preserving slab op the
+        planner asked only for the applied axes whole, so ``data`` is one chunk
+        of the complement -- often a single slab -- and the loop below runs the
+        callable that many times instead of once per slab in the volume.
+        """
+
+        cancellation_token = getattr(evaluation_context, "cancellation_token", None)
+        array = np.asarray(data)
+        plan = self.slab_plan(self._slab_region_input_shape(array, input_region), array.dtype)
+        if not plan.shape_preserving:
+            # Whole-array branch: we asked for everything, so ``data`` is the
+            # whole input and the requested output slab is taken afterwards.
+            return apply_region(
+                self.apply(array, evaluation_context=evaluation_context), output_region
+            )
+        axes = plan.axes
+        # Every applied axis is ALL in the region we asked for, so none of them
+        # is a POINT and each keeps a position in the region result.
+        slab_axes = tuple(axis_in_region_result(input_region, axis) for axis in axes)
+        result = self._apply_over_slabs(array, slab_axes, cancellation_token=cancellation_token)
+        # Descending: taking a POINT output region drops that axis and shifts
+        # every higher position down; the ones still to be used are all lower.
+        for axis, slab_axis in sorted(zip(axes, slab_axes, strict=True), reverse=True):
+            result = take_axis_region(
+                result, output_region.axes[axis], result.shape[slab_axis], axis=slab_axis
+            )
+        return result
+
     def characterize_output(
         self, shape: Shape, dtype, *, exact_input=None
     ) -> tuple[Shape, np.dtype]:
+        if self._maps_over_slabs():
+            plan = self.slab_plan(shape, dtype)
+            return plan.output_shape, plan.output_dtype
         characterization = self._characterize(shape, dtype, exact_input=exact_input)
         return characterization.output_shape, characterization.output_dtype
 
     def _region_honored(self, shape: Shape | None = None, dtype=None) -> bool:
-        if self.slot_bindings:
+        if self.slot_bindings or self._maps_over_slabs():
+            # A slab-mapped operation is never Tier-2 windowable: it is applied
+            # whole *within* each slab, so a sub-window of an applied axis is a
+            # different computation, not a subset of this one. It gets its own
+            # (stronger, declared rather than probed) region contract below.
             return False
         if shape is None:
             shape = self._shape_hint or _REGION_PROBE_SHAPE
@@ -405,10 +606,21 @@ class PluginOperation:
             # to be refused before it, not after.
             raise EvaluationCancelled()
         array = np.asarray(data)
+        if self._maps_over_slabs():
+            plan = self.slab_plan(array.shape, array.dtype)
+            result = self._apply_over_slabs(array, plan.axes, cancellation_token=cancellation_token)
+            if tuple(result.shape) != plan.output_shape or result.dtype != plan.output_dtype:
+                raise CharacterizationMismatch(
+                    f"operation {self.plugin_id!r} produced shape {tuple(result.shape)} / "
+                    f"dtype {result.dtype} over slabs, but its slab characterization "
+                    f"predicted {plan.output_shape} / {plan.output_dtype}; the result "
+                    "was withheld"
+                )
+            return result
         characterization = self._characterize(
             array.shape, array.dtype, cancellation_token=cancellation_token
         )
-        fn = self._spec().resolve_fn(self.axis, self._params(), self._slot_arrays())
+        fn = self._spec().resolve_fn(self._axis_selection(), self._params(), self._slot_arrays())
         result = np.asarray(call_with_cancellation(fn, data, cancellation_token))
         predicted_shape = characterization.output_shape
         predicted_dtype = characterization.output_dtype
@@ -428,10 +640,14 @@ class PluginOperation:
 
     def output_shape(self, shape: Shape) -> Shape:
         dtype = self._dtype_hint or np.dtype("float32")
+        if self._maps_over_slabs():
+            return self.slab_plan(shape, dtype).output_shape
         return self._characterize(shape, dtype).output_shape
 
     def output_dtype(self, input_dtype):
         shape = self._shape_hint or _REGION_PROBE_SHAPE
+        if self._maps_over_slabs():
+            return self.slab_plan(shape, input_dtype).output_dtype
         return self._characterize(shape, input_dtype).output_dtype
 
     def output_axis_sources(self, input_shape):
@@ -443,6 +659,10 @@ class PluginOperation:
         same source of truth the shape prediction does.
         """
 
+        if self._maps_over_slabs():
+            # Rank-preserving by construction: a slab-mapped operation may
+            # resize an applied axis but never adds or removes one.
+            return tuple(range(len(tuple(input_shape))))
         dtype = self._dtype_hint or np.dtype("float32")
         rule = self._characterize(tuple(input_shape), dtype).shape_rule
         return tuple(axis_rule.source_axis for axis_rule in rule.axes)
@@ -454,6 +674,17 @@ class PluginOperation:
 
         input_shape = tuple(axis.size for axis in axes)
         dtype = self._dtype_hint or np.dtype("float32")
+        if self._maps_over_slabs():
+            plan = self.slab_plan(input_shape, dtype)
+            applied = set(plan.axes)
+            return tuple(
+                replace(axis_info, size=size, spacing=None, origin=None)
+                if index in applied and size != axis_info.size
+                else replace(axis_info, size=size)
+                for index, (axis_info, size) in enumerate(
+                    zip(tuple(axes), plan.output_shape, strict=True)
+                )
+            )
         rule = self._characterize(input_shape, dtype).shape_rule
         output = []
         for output_axis, axis_rule in enumerate(rule.axes):
@@ -483,6 +714,41 @@ class PluginOperation:
     def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
         ndim = len(tuple(input_shape))
         all_axes = tuple(range(ndim))
+        if self._maps_over_slabs():
+            plan = self.slab_plan(input_shape, input_dtype)
+            if plan.shape_preserving:
+                # The declaration the whole feature exists for: only the applied
+                # axes block, so the complement stays chunkable and scrubbing a
+                # broadcast axis costs one slab instead of the volume.
+                #
+                # It is gated on the callable *preserving the slab shape*
+                # deliberately. Chunked evaluation assembles output chunks at
+                # positions derived from the input chunk's own extents; a
+                # callable that resizes its slab makes those positions a
+                # function of the shape rule, which is exactly the kind of
+                # silent misplacement this codebase refuses to risk for speed.
+                # A resizing slab op is still correct -- it just falls to the
+                # whole-array branch below.
+                return OperationCapabilities(
+                    kind=OperationKind.TRANSFORM,
+                    blocking_axes=plan.axes,
+                    chunkable_axes=default_chunkable_axes(
+                        OperationKind.TRANSFORM, ndim=ndim, blocking_axes=plan.axes
+                    ),
+                    expands_request_axes=plan.axes,
+                    cache_stage=True,
+                    can_fuse=False,
+                    notes=("Applied per slab; broadcast over every other axis.",),
+                )
+            return OperationCapabilities(
+                kind=OperationKind.TRANSFORM,
+                blocking_axes=all_axes,
+                chunkable_axes=(),
+                expands_request_axes=all_axes,
+                cache_stage=True,
+                can_fuse=False,
+                notes=("Slab-mapped but slab-resizing; evaluated whole-array.",),
+            )
         characterization = self._characterize(
             input_shape, np.dtype("float32") if input_dtype is None else input_dtype
         )
@@ -516,17 +782,34 @@ class PluginOperation:
         )
 
     def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        ndim = len(tuple(input_shape))
+        if self._maps_over_slabs():
+            plan = self.slab_plan(input_shape, self._dtype_hint)
+            if plan.shape_preserving:
+                # Whole applied axes, whatever was asked of the rest: exactly
+                # the built-in axis-set transforms' contract.
+                region = output_region
+                for axis in plan.axes:
+                    region = replace_region_axis(region, axis, AxisRegion(AxisRegionKind.ALL))
+                return region
+            return RegionSpec(tuple(AxisRegion(AxisRegionKind.ALL) for _ in range(ndim)))
         if self._region_honored(input_shape):
             # Windowable: producing the output sub-region needs exactly that
             # sub-region of the input (identity map, as elementwise ops declare).
             return output_region
         # Opaque whole-array: producing any output requires the whole input.
-        ndim = len(tuple(input_shape))
         return RegionSpec(tuple(AxisRegion(AxisRegionKind.ALL) for _ in range(ndim)))
 
     def apply_to_region(
         self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
     ):
+        if self._maps_over_slabs():
+            return self._apply_slab_region(
+                data,
+                input_region=input_region,
+                output_region=output_region,
+                evaluation_context=evaluation_context,
+            )
         del input_region
         if self._region_honored():
             # ``data`` is already the requested sub-region (identity input map);

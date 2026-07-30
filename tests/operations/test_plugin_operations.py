@@ -334,3 +334,190 @@ def test_un_namespaced_entry_point_is_rejected_loudly(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         assert plugins.plugin_operation_ids() == ()
     assert any("un-namespaced" in record.message for record in caplog.records)
+
+
+# --- slab-mapped operations ("apply per slab, broadcast over the rest") -------
+#
+# The specs are installed straight into the cache through the documented
+# ``_reset_plugin_cache`` seam: the subject here is execution and capability
+# declaration, not entry-point discovery, which the fixture above already owns.
+
+
+@pytest.fixture
+def spec_cache():
+    registry._reset_operation_packs()
+    plugins._reset_plugin_cache()
+    yield None
+    registry._reset_operation_packs()
+    plugins._reset_plugin_cache()
+
+
+def _install(spec_cache, spec):
+    """Register an in-process spec the way a first-party pack does."""
+
+    del spec_cache
+    registry.register_pack_operation(spec)
+    return spec
+
+
+def test_a_slab_mapped_op_runs_per_slab_and_broadcasts_over_the_rest(spec_cache):
+    seen = []
+
+    def build(axis, params, slots):
+        del axis, params, slots
+
+        def fn(slab):
+            # The callable sees a SLAB spanning exactly the selected axes -- a
+            # 2-D image here -- never the volume.
+            seen.append(tuple(slab.shape))
+            return slab - slab.mean()
+
+        return fn
+
+    _install(
+        spec_cache,
+        plugins.PluginOperationSpec(
+            id="demo-ops:demean_slab",
+            label="Demean each slab",
+            build=build,
+            requires_axes=True,
+            maps_over_slabs=True,
+        ),
+    )
+    operation = registry.create_operation("demo-ops:demean_slab", axes=(1, 2), ndim=3)
+
+    rng = np.random.default_rng(0x51AB)
+    data = rng.standard_normal((4, 5, 6)).astype(np.float32)
+    result = operation.apply(data)
+
+    assert operation.output_shape(data.shape) == (4, 5, 6)
+    expected = data - data.mean(axis=(1, 2), keepdims=True)
+    np.testing.assert_allclose(result, expected, rtol=1e-6)
+    # Four slabs of the two selected axes, each handed over whole.
+    assert seen[-4:] == [(5, 6)] * 4
+
+
+def test_a_slab_mapped_op_maps_non_adjacent_axes_in_the_arrays_own_order(spec_cache):
+    _install(
+        spec_cache,
+        plugins.PluginOperationSpec(
+            id="demo-ops:transpose_slab",
+            label="Transpose each slab",
+            # A slab operation that is *not* symmetric, so a lost or reversed
+            # moveaxis shows up as wrong values rather than a lucky pass.
+            fn=lambda slab: slab.T,
+            requires_axes=True,
+            maps_over_slabs=True,
+        ),
+    )
+    operation = registry.create_operation("demo-ops:transpose_slab", axes=(0, 2), ndim=3)
+
+    data = np.arange(3 * 4 * 3, dtype=np.float32).reshape(3, 4, 3)
+    result = operation.apply(data)
+
+    expected = np.stack([data[:, index, :].T for index in range(4)], axis=1)
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_a_shape_preserving_slab_op_blocks_only_its_own_axes(spec_cache):
+    _install(
+        spec_cache,
+        plugins.PluginOperationSpec(
+            id="demo-ops:slab_identity",
+            label="Slab identity",
+            fn=lambda slab: slab * 2.0,
+            requires_axes=True,
+            maps_over_slabs=True,
+        ),
+    )
+    operation = registry.create_operation("demo-ops:slab_identity", axes=(1, 2), ndim=3)
+
+    capabilities = operation.capabilities((4, 5, 6), np.float32)
+
+    assert capabilities.blocking_axes == (1, 2)
+    assert capabilities.expands_request_axes == (1, 2)
+    # The complement is chunkable -- this is the whole difference from the
+    # incumbent Tier-1 declaration, which blocked every axis.
+    assert capabilities.chunkable_axes == (0,)
+    assert capabilities.cache_stage is True
+
+
+def test_a_slab_resizing_op_falls_back_to_the_whole_array_declaration(spec_cache):
+    """The honest fallback branch: still correct, just not chunkable.
+
+    A callable that resizes its slab still produces a well-defined whole-array
+    result -- the applied axes change length and nothing else does -- so it
+    runs. What it does not get is the broadcast-chunkable declaration, because
+    chunk placement would then depend on the fitted shape rule.
+    """
+
+    _install(
+        spec_cache,
+        plugins.PluginOperationSpec(
+            id="demo-ops:crop_slab",
+            label="Crop each slab",
+            fn=lambda slab: slab[1:, 1:],
+            requires_axes=True,
+            maps_over_slabs=True,
+            changes_shape=True,
+        ),
+    )
+    operation = registry.create_operation("demo-ops:crop_slab", axes=(1, 2), ndim=3)
+
+    capabilities = operation.capabilities((4, 5, 6), np.float32)
+    assert capabilities.blocking_axes == (0, 1, 2)
+    assert capabilities.chunkable_axes == ()
+    assert capabilities.cache_stage is True
+
+    data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+    assert operation.output_shape((4, 5, 6)) == (4, 4, 5)
+    np.testing.assert_array_equal(operation.apply(data), data[:, 1:, 1:])
+
+
+def test_a_slab_mapped_op_that_changes_the_slab_rank_is_refused(spec_cache):
+    from arrayscope.operations.plugin_conformance import CharacterizationUnavailable
+
+    _install(
+        spec_cache,
+        plugins.PluginOperationSpec(
+            id="demo-ops:flatten_slab",
+            label="Flatten each slab",
+            fn=lambda slab: slab.reshape(-1),
+            requires_axes=True,
+            maps_over_slabs=True,
+            changes_shape=True,
+        ),
+    )
+    operation = registry.create_operation("demo-ops:flatten_slab", axes=(1, 2), ndim=3)
+
+    # There is no position in the array for a slab that lost an axis -- refuse
+    # rather than invent one.
+    with pytest.raises(CharacterizationUnavailable, match="slab rank"):
+        operation.output_shape((4, 5, 6))
+
+
+def test_maps_over_slabs_without_an_axis_set_is_an_authoring_error():
+    with pytest.raises(ValueError, match="maps_over_slabs without requires_axes"):
+        plugins.PluginOperationSpec(
+            id="demo-ops:bad_slab", label="Bad", fn=lambda a: a, maps_over_slabs=True
+        )
+
+
+def test_a_slab_mapped_op_round_trips_its_axis_set_through_a_recipe(spec_cache):
+    _install(
+        spec_cache,
+        plugins.PluginOperationSpec(
+            id="demo-ops:slab_recipe",
+            label="Slab recipe",
+            fn=lambda slab: slab + 1.0,
+            requires_axes=True,
+            maps_over_slabs=True,
+        ),
+    )
+    operation = registry.create_operation("demo-ops:slab_recipe", axes=(2, 0), ndim=3)
+
+    text = recipes.dumps_recipe([operation])
+
+    assert '"axes"' in text
+    assert recipes.loads_recipe(text, base_shape=(4, 5, 6)) == (operation,)
+    assert operation.axes == (0, 2)

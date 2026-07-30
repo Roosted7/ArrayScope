@@ -904,8 +904,13 @@ def _make_user_build(path: str, slug: str, callable_name: str):
                 for name, value in dict(params).items()
                 if name in accepted.names or accepted.var_keyword
             }
-            if axis is not None and ("axis" in accepted.names or accepted.var_keyword):
-                kwargs["axis"] = axis
+            # The axis *selection* arrives as one value: an int for a
+            # single-axis op, a tuple for an axis-set one. Pass it under the
+            # name that matches what it is, so ``f(data, axes)`` and
+            # ``f(data, axis)`` both read naturally.
+            selection_name = "axes" if isinstance(axis, tuple) else "axis"
+            if axis is not None and (selection_name in accepted.names or accepted.var_keyword):
+                kwargs[selection_name] = axis
             kwargs.update(
                 {
                     name: value
@@ -941,6 +946,11 @@ class CallableInfo:
     doc: str
     params: tuple[CallableParam, ...] = ()
     has_axis: bool = False
+    # An ``axes`` argument: the function wants an axis SET, not one axis.
+    # Without this it was inferred as an ordinary parameter, so the user was
+    # asked to type a number into a spin box for the thing the axis picker
+    # exists to choose.
+    has_axes: bool = False
 
 
 def introspect_python_source(path: str) -> list[CallableInfo]:
@@ -951,9 +961,10 @@ def introspect_python_source(path: str) -> list[CallableInfo]:
     a missing dependency) so the manager UI can still show its callables.
 
     For each function the first positional argument is treated as the array;
-    ``has_axis`` reports an ``axis`` parameter; ``params`` are the remaining
-    non-data, non-axis parameters (positional-or-keyword and keyword-only), with
-    ``kind`` guessed from annotation then default (fallback ``"float"``).
+    ``has_axis`` reports an ``axis`` parameter and ``has_axes`` an ``axes``
+    one; ``params`` are the remaining non-data, non-axis parameters
+    (positional-or-keyword and keyword-only), with ``kind`` guessed from
+    annotation then default (fallback ``"float"``).
     """
 
     with open(path) as handle:
@@ -984,6 +995,7 @@ def _callable_info_from_node(node) -> CallableInfo:
 
     all_args = positional + list(node.args.kwonlyargs)
     has_axis = any(arg.arg == "axis" for arg in all_args)
+    has_axes = any(arg.arg == "axes" for arg in all_args)
 
     params: list[CallableParam] = []
     for index, arg in enumerate(all_args):
@@ -991,7 +1003,7 @@ def _callable_info_from_node(node) -> CallableInfo:
         if index == 0 and arg in positional:
             # The array argument.
             continue
-        if name == "axis":
+        if name in ("axis", "axes"):
             continue
         default_node = default_by_arg.get(name)
         default_value = _literal_from_node(default_node)
@@ -1007,6 +1019,7 @@ def _callable_info_from_node(node) -> CallableInfo:
         doc=first_line,
         params=tuple(params),
         has_axis=has_axis,
+        has_axes=has_axes,
     )
 
 
@@ -1398,7 +1411,8 @@ def update_user_operation_source(
                 exclude_id=operation_id,
             ),
             description=info.doc,
-            requires_axis=info.has_axis,
+            requires_axis=info.has_axis and not info.has_axes,
+            requires_axes=info.has_axes,
             parameters=[_parameter_payload(parameter) for parameter in info.params],
         )
     _write_wrapper(wrapper_path, payload)
@@ -1460,7 +1474,8 @@ def import_custom_operation(
     edits to the original file are picked up live (mtime-keyed re-import).
 
     The wrapper is auto-filled from an ``ast`` introspection of the target
-    function: ``requires_axis`` from an ``axis`` parameter, ``parameters`` from
+    function: ``requires_axis`` from an ``axis`` parameter (``requires_axes``
+    from an ``axes`` one), ``parameters`` from
     the remaining non-data args (default + annotation-guessed kind), ``label``
     from the function name, ``description`` from the docstring.
     """
@@ -1500,7 +1515,8 @@ def import_custom_operation(
             "path": source_path,
             "callable": callable_name,
         },
-        "requires_axis": info.has_axis,
+        "requires_axis": info.has_axis and not info.has_axes,
+        "requires_axes": info.has_axes,
         "changes_shape": bool(changes_shape),
         "parameters": [_parameter_payload(param) for param in info.params],
         "input_slots": [],

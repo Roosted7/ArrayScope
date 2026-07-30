@@ -437,6 +437,53 @@ def test_rank_increasing_plugin_op_expands_every_output_axis(plugin_spec_cache):
     np.testing.assert_array_equal(np.asarray(evaluated.data), expected)
 
 
+def test_scrubbing_a_broadcast_axis_of_a_slab_mapped_op_runs_one_slab(plugin_spec_cache):
+    """The point of slab mapping, counted rather than asserted about.
+
+    A Tier-1 plugin op blocks every axis, so displaying slice ``i`` of a volume
+    runs the author's function over the WHOLE array -- every slab, every step.
+    Declaring ``maps_over_slabs`` moves the blocking to the selected axes only,
+    so the planner hands the operation one slab and the function runs once.
+    Five scrub steps: five slab calls, not five times six.
+    """
+
+    calls = {"n": 0}
+
+    def demean(slab):
+        calls["n"] += 1
+        return slab - slab.mean()
+
+    spec = PluginOperationSpec(
+        id="demo:demean-slab-counted",
+        label="Demean slab",
+        fn=demean,
+        requires_axes=True,
+        maps_over_slabs=True,
+    )
+    plugins._SPEC_CACHE[spec.id] = spec
+    operation = PluginOperation(plugin_id=spec.id, axes=(1, 2))
+
+    rng = np.random.default_rng(0x5CAB)
+    data = rng.standard_normal((6, 5, 4)).astype(np.float32)
+    evaluator = OperationEvaluator(ArrayDocument(data, operations=(operation,)))
+    state = ViewState.from_shape((6, 5, 4)).with_image_axes(1, 2)
+
+    # Characterization probes the SLAB callable, so let those calls land before
+    # the count that matters starts.
+    evaluator.image(state.with_slice(0, 0))
+
+    calls["n"] = 0
+    for index in range(1, 6):
+        evaluated = np.asarray(evaluator.image(state.with_slice(0, index)).data)
+        np.testing.assert_allclose(
+            evaluated, data[index] - data[index].mean(), rtol=1e-5, atol=1e-5
+        )
+
+    # One slab per step. Under the incumbent whole-array declaration this would
+    # have been six slabs per step -- thirty.
+    assert calls["n"] == 5
+
+
 def test_scrubbing_a_created_axis_reuses_the_cached_stage(plugin_spec_cache):
     calls = {"n": 0}
 

@@ -938,3 +938,74 @@ def test_duplicated_crop_matches_the_original_on_an_empty_selection():
 
     assert duplicate.output_shape(data.shape) == original.output_shape(data.shape)
     assert duplicate.apply(data).shape == original.apply(data).shape == (0, 3, 4)
+
+
+def test_a_user_operation_can_declare_itself_slab_mapped(tmp_path):
+    """The authoring end of gap B: one key turns a 2-D function into a 3-D op.
+
+    The user writes a function of one image. Declaring ``maps_over_slabs``
+    (which implies ``requires_axes``) is the whole difference between "you get
+    the volume, loop it yourself, and the whole volume is one cache stage" and
+    "you get an image, and the axes you did not pick stay chunkable".
+    """
+
+    source = tmp_path / "normalize_image.py"
+    source.write_text(
+        "def normalize_image(data):\n"
+        "    peak = float(abs(data).max())\n"
+        "    return data / peak if peak else data\n"
+    )
+    operation_id = library.import_custom_operation(str(source), "normalize_image")
+    library.update_user_operation(operation_id, maps_over_slabs=True)
+
+    entry = registry.get_operation_entry(operation_id)
+    assert entry.axis_selection == "set"
+    assert entry.requires_axis is False
+
+    operation = registry.create_operation(operation_id, axes=(1, 2), ndim=3)
+    data = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4) + 1.0
+
+    result = operation.apply(data)
+
+    expected = data / abs(data).max(axis=(1, 2), keepdims=True)
+    np.testing.assert_allclose(result, expected, rtol=1e-6)
+    capabilities = operation.capabilities(data.shape, data.dtype)
+    assert capabilities.blocking_axes == (1, 2)
+    assert capabilities.chunkable_axes == (0,)
+
+
+def test_a_user_operation_can_bound_how_many_axes_it_accepts(tmp_path):
+    source = tmp_path / "two_axis_only.py"
+    source.write_text("def two_axis_only(data):\n    return data * 2.0\n")
+    operation_id = library.import_custom_operation(str(source), "two_axis_only")
+    library.update_user_operation(operation_id, maps_over_slabs=True, axis_arity=[2, 2])
+
+    assert registry.get_operation_entry(operation_id).axis_arity == (2, 2)
+    assert registry.create_operation(operation_id, axes=(0, 2), ndim=3).axes == (0, 2)
+    with pytest.raises(ValueError, match="at most 2"):
+        registry.create_operation(operation_id, axes=(0, 1, 2), ndim=3)
+    with pytest.raises(ValueError, match="at least 2"):
+        registry.create_operation(operation_id, axes=(0,), ndim=3)
+
+
+def test_a_user_operation_may_ask_for_the_axis_set_itself(tmp_path):
+    """``requires_axes`` without slab mapping: the whole array plus the axes."""
+
+    source = tmp_path / "sum_axes.py"
+    source.write_text(
+        "import numpy as np\n\n\ndef sum_axes(data, axes):\n"
+        "    return np.sum(data, axis=tuple(axes), keepdims=True)\n"
+    )
+    operation_id = library.import_custom_operation(str(source), "sum_axes")
+    library.update_user_operation(operation_id, changes_shape=True)
+
+    # ``axes`` is inferred as the axis SET, not as one more parameter to type a
+    # number into.
+    entry = registry.get_operation_entry(operation_id)
+    assert entry.axis_selection == "set"
+    assert entry.parameters == ()
+
+    operation = registry.create_operation(operation_id, axes=(0, 2), ndim=3)
+    data = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+
+    np.testing.assert_array_equal(operation.apply(data), data.sum(axis=(0, 2), keepdims=True))
