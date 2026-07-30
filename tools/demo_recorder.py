@@ -533,7 +533,7 @@ class Recorder:
         self.hold(0.3)
         self._finish_action(event)
 
-    def choose_combo_item(self, combo, data, *, label: str) -> None:
+    def choose_combo_item(self, combo, data, *, label: str, after_trigger=None) -> None:
         """Show a faithful composited choice list and activate the combo item."""
         from pyqtgraph.Qt import QtCore, QtWidgets
 
@@ -555,6 +555,8 @@ class Recorder:
                 chosen = action
         if chosen is None:
             raise RuntimeError(f"combo item {data!r} not found")
+        if after_trigger is not None:
+            chosen.triggered.connect(lambda _checked=False: after_trigger())
         self.open_overlay_menu(
             combo,
             menu,
@@ -979,11 +981,8 @@ def s_fft(rec: Recorder):
     rec.caption("Complex data: switch to magnitude on a log scale")
     combo = win.display_toolbar.channel_combo
     scale = win.display_toolbar.scale_combo
-    # Magnitude on a linear scale is a single bright DC pixel (near-black
-    # frame); make that beat brief and get to the log view quickly.
-    rec.choose_combo_item(combo, "abs", label="choose magnitude")
-    rec.hold_until_settled(1.5, tail_s=0.15)
     rec.choose_combo_item(scale, "log", label="choose log scale")
+    rec.choose_combo_item(combo, "abs", label="choose magnitude")
     rec.hold_until_settled(2.0, tail_s=1.6)
 
     rec.caption("…or phase")
@@ -992,16 +991,12 @@ def s_fft(rec: Recorder):
 
     rec.caption("Every step is reversible — toggle it in the operation stack")
 
-    def _back_to_log_magnitude():
-        # The phase channel auto-switches the scale to linear; restore both
-        # so the toggle contrast is star-pattern vs one-axis stripes.
-        combo.setCurrentIndex(combo.findData("abs"))
-        scale.setCurrentIndex(scale.findData("log"))
-
-    rec.choose_combo_item(combo, "abs", label="return to magnitude")
-    if scale.currentData() != "log":
-        rec.choose_combo_item(scale, "log", label="restore log scale")
-    _back_to_log_magnitude()
+    rec.choose_combo_item(
+        combo,
+        "abs",
+        label="return to logarithmic magnitude",
+        after_trigger=lambda: scale.setCurrentIndex(scale.findData("log")),
+    )
     rec.settle()
     operation_list = win.operation_dock.operation_list
     first_item = operation_list.item(0)

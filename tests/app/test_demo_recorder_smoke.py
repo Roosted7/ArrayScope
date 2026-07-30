@@ -90,6 +90,8 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             cursor_x, cursor_y = event["cursor_at_press"]
             assert x <= cursor_x <= x + width
             assert y <= cursor_y <= y + height
+        ordered_labels = [event["label"] for event in overlay_choices]
+        assert ordered_labels.index("choose log scale") < ordered_labels.index("choose magnitude")
         assert {"disable first FFT", "enable first FFT"} <= {
             event["label"] for event in actions if event["kind"] == "click"
         }
