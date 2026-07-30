@@ -74,6 +74,7 @@ from arrayscope.operations.regions import (
 from arrayscope.operations.registry import (
     OperationEntry,
     OperationParameter,
+    _lift_axes_from_parameters,
     coerce_parameter_value,
 )
 
@@ -952,6 +953,9 @@ def create_plugin_operation(
     """Build a bound :class:`PluginOperation` (loads the plugin spec)."""
 
     spec = load_plugin_spec(operation_id)
+    # A form-built mapping may carry the axis set under the reserved key; the
+    # explicit keyword wins. See ``registry.AXES_VALUE_KEY``.
+    parameters, axes = _lift_axes_from_parameters(parameters, axes)
     parameters = dict(parameters or {})
 
     resolved_axis: int | None = None

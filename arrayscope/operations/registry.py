@@ -74,6 +74,24 @@ PARAMETER_KINDS: tuple[str, ...] = ("int", "float", "string", "enum", "bool", "p
 # so declaring them there is an authoring error rather than something to ignore.
 NUMERIC_PARAMETER_KINDS: frozenset[str] = frozenset({"int", "float"})
 
+# The axis selection is the operation's *subject*, not one of its parameters,
+# and these two names carry it everywhere: as ``create_operation`` keywords, as
+# recipe keys, as the argument name a user callable receives. A declared
+# parameter may not take them -- which is also what makes ``AXES_VALUE_KEY``
+# below a safe reservation inside a parameter mapping.
+RESERVED_PARAMETER_NAMES: frozenset[str] = frozenset({"axis", "axes"})
+
+# How a built parameter mapping carries an axis SET.
+#
+# ``ParameterForm.values()`` is documented as "the mapping to hand to
+# ``create_operation``", and for an axis-set operation the selection is part of
+# what ``create_operation`` needs. Putting it in the mapping means every surface
+# that already forwards ``form.values()`` -- the add flow, the edit flow, the
+# palette, the smoke harness -- carries the selection with no new argument
+# threaded through each of them. ``create_operation`` lifts it back out into the
+# real ``axes`` keyword, which stays the explicit way to pass one.
+AXES_VALUE_KEY = "axes"
+
 _TRUE_TOKENS = frozenset({"true", "yes", "on", "1"})
 _FALSE_TOKENS = frozenset({"false", "no", "off", "0"})
 
@@ -136,6 +154,11 @@ class OperationParameter:
     choices: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.name in RESERVED_PARAMETER_NAMES:
+            raise ValueError(
+                f"{self.name!r} is not a parameter name: it is how an operation is told "
+                "which axes to work on (see requires_axis / requires_axes)"
+            )
         if self.kind not in PARAMETER_KINDS:
             raise ValueError(
                 f"parameter {self.name!r} has unsupported kind {self.kind!r} "
@@ -1061,6 +1084,20 @@ def get_operation_entry(operation_id: str) -> OperationEntry:
     raise ValueError(f"unknown operation id: {operation_id}")
 
 
+def _lift_axes_from_parameters(parameters, axes):
+    """Split :data:`AXES_VALUE_KEY` back out of a parameter mapping.
+
+    A no-op for every operation that does not take an axis set, because no
+    declared parameter may be called ``axes`` (``RESERVED_PARAMETER_NAMES``).
+    """
+
+    if parameters is None or AXES_VALUE_KEY not in parameters:
+        return parameters, axes
+    remaining = dict(parameters)
+    carried = remaining.pop(AXES_VALUE_KEY)
+    return remaining, axes if axes is not None else carried
+
+
 def create_operation(
     operation_id: str,
     axis=None,
@@ -1078,8 +1115,14 @@ def create_operation(
     that declares ``requires_axes``. ``ndim``, when the caller knows it, moves
     axis-set range checking forward to here instead of leaving it to the
     operation's own ``output_shape``.
+
+    A ``parameters`` mapping may also carry the selection under
+    :data:`AXES_VALUE_KEY`; the explicit ``axes`` keyword wins. That is how a
+    built :class:`~arrayscope.operations.parameter_forms.ParameterForm` hands
+    over what the user picked -- see the note on the constant.
     """
 
+    parameters, axes = _lift_axes_from_parameters(parameters, axes)
     if operation_id not in OPERATION_REGISTRY:
         from arrayscope.operations import plugins
 

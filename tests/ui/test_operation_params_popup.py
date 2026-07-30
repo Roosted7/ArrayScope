@@ -23,6 +23,7 @@ from arrayscope.operations.parameter_forms import build_parameter_form
 from arrayscope.operations.registry import (
     OperationEntry,
     OperationParameter,
+    create_operation,
     get_operation_entry,
 )
 from arrayscope.ui.operation_params_popup import OperationParamsPopup
@@ -248,3 +249,80 @@ def test_browsing_binds_a_file_backed_slot(
     assert binding.path == "/tmp/r.npy"
     assert binding.label == expected_label
     assert popup._slot_combos["reference"].currentText() == expected_label
+
+
+# --- axis-set selector -------------------------------------------------------
+
+
+def _axes_popup(qtbot, operation_id, on_accept, **form_kwargs):
+    entry = get_operation_entry(operation_id)
+    form = build_parameter_form(
+        entry,
+        shape=(4, 10, 6),
+        axis_choices=(("dim 0 [4]", 0), ("dim 1 [10] Y", 1), ("dim 2 [6] X", 2)),
+        display_axes=(1, 2),
+        **form_kwargs,
+    )
+    popup = OperationParamsPopup(entry, form, on_accept)
+    qtbot.addWidget(popup)
+    return popup, form
+
+
+def test_axis_set_operation_renders_one_checkbox_per_dimension(qtbot):
+    popup, form = _axes_popup(qtbot, "centered_fftn", on_accept=lambda values, bindings: None)
+
+    checks = popup.findChildren(QtWidgets.QCheckBox)
+    assert [check.text() for check in checks] == [
+        "dim 0 [4]",
+        "dim 1 [10] Y",
+        "dim 2 [6] X",
+    ]
+    # Defaults to the displayed image, labelled the same way the single-axis
+    # combo labels its entries.
+    assert [check.isChecked() for check in checks] == [False, True, True]
+    assert form.selected_axes() == (1, 2)
+
+
+def test_toggling_an_axis_checkbox_updates_the_form(qtbot):
+    popup, form = _axes_popup(qtbot, "centered_fftn", on_accept=lambda values, bindings: None)
+
+    popup._axis_checks[0].setChecked(True)
+    popup._axis_checks[2].setChecked(False)
+    process_events(qtbot, count=2)
+
+    assert form.selected_axes() == (0, 1)
+
+
+def test_clearing_every_axis_disables_confirm(qtbot):
+    popup, _form = _axes_popup(qtbot, "mean_axes", on_accept=lambda values, bindings: None)
+
+    for check in popup._axis_checks.values():
+        check.setChecked(False)
+    process_events(qtbot, count=2)
+
+    assert popup._confirm.isEnabled() is False
+    assert "at least 1" in popup._warning.text()
+
+    popup._axis_checks[1].setChecked(True)
+    process_events(qtbot, count=2)
+    assert popup._confirm.isEnabled() is True
+
+
+def test_confirming_carries_the_axis_set_into_the_committed_values(qtbot):
+    committed = []
+    popup, _form = _axes_popup(
+        qtbot,
+        "mean_axes",
+        on_accept=lambda values, bindings: committed.append(values),
+    )
+
+    popup._axis_checks[0].setChecked(True)
+    popup._axis_checks[2].setChecked(False)
+    process_events(qtbot, count=2)
+    popup._accept()
+
+    # The committed mapping is exactly what ``create_operation`` takes, axis set
+    # included -- no separate channel for the selection.
+    assert committed == [{"axes": (0, 1)}]
+    operation = create_operation("mean_axes", parameters=committed[0], ndim=3)
+    assert operation.axes == (0, 1)

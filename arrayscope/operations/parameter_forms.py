@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 from arrayscope.operations.input_slots import SlotBinding, SlotSourceOption
 from arrayscope.operations.registry import (
+    AXES_VALUE_KEY,
     OperationEntry,
     OperationParameter,
     coerce_parameter_value,
@@ -142,9 +143,20 @@ class ParameterForm:
         raise KeyError(name)
 
     def values(self) -> dict[str, int | float | str | bool]:
-        """The parameter mapping to hand to ``create_operation``."""
+        """The parameter mapping to hand to ``create_operation``.
 
-        return {candidate.name: candidate.value for candidate in self.fields}
+        For an axis-set operation this also carries the selection under
+        ``registry.AXES_VALUE_KEY``. That is what makes every surface which
+        already forwards ``form.values()`` -- add flow, edit flow, palette,
+        smoke harness -- carry the axis set for free; ``create_operation``
+        lifts it back into its own ``axes`` argument. No declared parameter can
+        be called ``axes``, so the key is unambiguous.
+        """
+
+        values = {candidate.name: candidate.value for candidate in self.fields}
+        if self.axes_field is not None:
+            values[AXES_VALUE_KEY] = self.selected_axes()
+        return values
 
     def bindings(self) -> dict[str, SlotBinding]:
         return {candidate.name: candidate.binding for candidate in self.slot_fields}
@@ -504,6 +516,7 @@ def _axes_field(
     entry: OperationEntry,
     *,
     shape: Shape | None,
+    axis: int | None,
     axes,
     axis_choices,
     display_axes,
@@ -511,24 +524,32 @@ def _axes_field(
     """The axis-set field, seeded from the caller's context.
 
     The default selection is, in order: what the caller already chose (an edit,
-    or a recipe being re-opened); the axes currently on display, trimmed to the
-    declared arity -- a 2-slab operation should arrive pointing at the image the
-    user is looking at; and finally the leading axes, which is all that is left
-    when nothing about the view is known.
+    or a recipe being re-opened); the axis the caller fixed, if any (the
+    dimension-chip flow arrives with one, and it should be in the set); the axes
+    currently on display, so a 2-slab operation arrives pointing at the image
+    the user is looking at; and finally the leading axes, which is all that is
+    left when nothing about the view is known.
     """
 
     ndim = None if shape is None else len(tuple(shape))
     choices = tuple((str(label), int(value)) for label, value in tuple(axis_choices or ()))
     if not choices and ndim is not None:
-        choices = tuple((f"d{axis}", axis) for axis in range(ndim))
+        choices = tuple((f"d{axis_index}", axis_index) for axis_index in range(ndim))
     minimum, maximum = entry.axis_arity
     limit = min(int(maximum), len(choices)) if maximum is not None else len(choices)
     if axes:
-        selected = tuple(int(axis) for axis in axes)
+        selected = tuple(int(axis_index) for axis_index in axes)
     else:
-        candidates = [int(axis) for axis in tuple(display_axes or ())]
+        candidates = [] if axis is None else [int(axis)]
+        candidates.extend(
+            int(axis_index)
+            for axis_index in tuple(display_axes or ())
+            if int(axis_index) not in candidates
+        )
         if len(candidates) < max(int(minimum), 2):
-            candidates.extend(axis for _label, axis in choices if axis not in candidates)
+            candidates.extend(
+                axis_index for _label, axis_index in choices if axis_index not in candidates
+            )
         # Two is the natural default for an op with no upper bound: the image
         # the user is looking at. A narrower arity wins over it.
         target = max(int(minimum), min(2, limit) if limit else int(minimum))
@@ -576,6 +597,7 @@ def build_parameter_form(
         form.axes_field = _axes_field(
             entry,
             shape=shape,
+            axis=axis,
             axes=axes,
             axis_choices=axis_choices,
             display_axes=display_axes,

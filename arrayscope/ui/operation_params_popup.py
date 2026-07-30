@@ -9,6 +9,10 @@ One widget per parameter kind: a spinbox for ``int``/``float``, a combo box for
 ``enum``, a check box for ``bool``, a line edit for ``string``, and a line edit
 plus a browse button for ``path``.
 
+An operation that takes an axis SET renders one checkbox per dimension above
+its parameters -- the add popup's inline combo cannot express a set, so
+axis-set operations are routed here even when they have no parameters at all.
+
 Editing any field routes through :meth:`ParameterForm.set_value`, which may
 adjust *other* fields (crop ``start`` nudging ``stop``); every widget is then
 re-synced from the form so the popup always mirrors the model. Validation
@@ -83,6 +87,9 @@ class OperationParamsPopup(EditBubble):
         self._fields_layout = QtWidgets.QFormLayout()
         self._fields_layout.setContentsMargins(0, 0, 0, 0)
         self._fields_layout.setSpacing(4)
+        self._axis_checks: dict[int, QtWidgets.QCheckBox] = {}
+        if form.axes_field is not None:
+            self._fields_layout.addRow(form.axes_field.label, self._build_axes_row(form.axes_field))
         for slot in form.slot_fields:
             row = QtWidgets.QWidget(self)
             row_layout = QtWidgets.QHBoxLayout(row)
@@ -178,6 +185,41 @@ class OperationParamsPopup(EditBubble):
             subtitle.setStyleSheet("QLabel { color: palette(mid); font-size: 8pt; }")
             header.addWidget(subtitle)
         return header
+
+    def _build_axes_row(self, axes_field) -> QtWidgets.QWidget:
+        """One checkbox per dimension: the axis-SET counterpart of the axis combo.
+
+        A row of checkboxes rather than a checkable combo box, deliberately.
+        Every axis and its state is visible at once -- which matters when the
+        thing being chosen is "which two of these five dimensions" -- and it
+        avoids styling ``QComboBox`` internals, which is how this codebase last
+        lost the native drop-down arrow application-wide.
+        """
+
+        row = QtWidgets.QWidget(self)
+        row.setObjectName("OperationAxesRow")
+        layout = QtWidgets.QVBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        selected = set(axes_field.selected)
+        for label, axis in axes_field.choices:
+            check = QtWidgets.QCheckBox(str(label), row)
+            check.setChecked(int(axis) in selected)
+            if axes_field.description:
+                check.setToolTip(axes_field.description)
+            check.toggled.connect(lambda _checked, axis=int(axis): self._on_axis_toggled(axis))
+            self._axis_checks[int(axis)] = check
+            layout.addWidget(check)
+        return row
+
+    def _on_axis_toggled(self, axis: int) -> None:
+        if self._syncing:
+            return
+        self._form.set_selected_axes(
+            [value for value, check in self._axis_checks.items() if check.isChecked()]
+        )
+        self._refresh_derived()
+        self._refresh_validation()
 
     def _make_editor(self, field) -> tuple[QtWidgets.QWidget, QtWidgets.QWidget]:
         """The value widget for one field, plus the widget to put in the row.
@@ -317,6 +359,11 @@ class OperationParamsPopup(EditBubble):
 
         self._syncing = True
         try:
+            selected = set(self._form.selected_axes())
+            for axis, check in self._axis_checks.items():
+                check.blockSignals(True)
+                check.setChecked(axis in selected)
+                check.blockSignals(False)
             for field in self._form.fields:
                 editor = self._editors[field.name]
                 editor.blockSignals(True)

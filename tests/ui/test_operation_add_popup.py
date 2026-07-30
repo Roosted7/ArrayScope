@@ -150,3 +150,29 @@ def test_disabled_op_is_unselectable(qtbot):
     )
     # The disabled item is present but cannot become the current selection.
     assert not popup.select_operation("mean")
+
+
+def test_an_axis_set_operation_hides_the_inline_axis_combo(qtbot):
+    """A set does not fit a one-line picker, so stage 1 does not pretend to offer one."""
+
+    popup, _accepted, _needs, _searched = _make_popup(qtbot)
+
+    assert popup.select_operation("centered_fftn")
+    assert popup._axis_row.isVisibleTo(popup) is False
+
+    # ...and a single-axis operation still gets it.
+    assert popup.select_operation("centered_fft")
+    assert popup._axis_row.isVisibleTo(popup) is True
+
+
+def test_an_axis_set_operation_is_routed_to_the_params_popup_with_no_parameters(qtbot):
+    popup, accepted, needs, _searched = _make_popup(qtbot)
+
+    assert popup.select_operation("mean_axes")
+    popup.activate_current()
+
+    # ``mean_axes`` declares no parameters, so the incumbent rule ("no
+    # parameters -> accept immediately") would have committed it with no axes
+    # at all. The axis set is itself something to confirm.
+    assert accepted == []
+    assert needs == [("mean_axes", None)]

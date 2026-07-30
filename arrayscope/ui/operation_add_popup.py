@@ -11,12 +11,15 @@ Search stays owned by the command palette and is linked from the first row.
 
 When the selected op takes an axis, an axis dropdown appears below the list so
 op *and* dimension are chosen in the same popup. For the dimension-chip flow the
-axis is fixed by the chip, so the dropdown is hidden entirely.
+axis is fixed by the chip, so the dropdown is hidden entirely. An op that takes
+an axis *set* shows no dropdown at all -- a set needs a labelled row per
+dimension, which does not fit an anchored one-line picker, so it is chosen in
+the stage-2 params popup instead.
 
-Activation splits by whether the op has parameters: a parameterless op is
-confirmed immediately via ``on_accept``; a parameterized op hands off to
-``on_needs_parameters`` so the caller can open the stage-2 params popup anchored
-at the same point.
+Activation splits by whether the op needs a stage 2: a parameterless op with at
+most one axis is confirmed immediately via ``on_accept``; a parameterized op, or
+one taking an axis set, hands off to ``on_needs_parameters`` so the caller can
+open the stage-2 params popup anchored at the same point.
 """
 
 from __future__ import annotations
@@ -316,6 +319,8 @@ class OperationAddPopup(EditBubble):
 
     def _selected_axis(self, entry: OperationEntry) -> int | None:
         if not entry.requires_axis:
+            # An axis-SET operation deliberately reports no axis here: its
+            # selection is made in the params popup (see _activate_operation).
             return None
         if self._fixed_axis is not None:
             return int(self._fixed_axis)
@@ -339,7 +344,13 @@ class OperationAddPopup(EditBubble):
             return
         axis = self._selected_axis(entry)
         self.close()
-        if entry.parameters:
+        # An axis SET does not fit this popup's one-line inline picker: it needs
+        # a labelled row per dimension, which would turn an anchored bubble into
+        # a panel that grows with the array's rank. Stage 2 already exists and
+        # already has room, so an axis-set operation always goes there -- even
+        # with no parameters, because the selection is itself something to
+        # confirm.
+        if entry.parameters or entry.requires_axes:
             self._on_needs_parameters(entry.id, axis)
         else:
             self._on_accept(entry.id, axis)

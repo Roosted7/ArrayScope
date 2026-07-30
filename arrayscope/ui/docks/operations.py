@@ -438,12 +438,22 @@ class OperationStackDock(StandardDockWidget):
         left_col.setContentsMargins(0, 0, 0, 0)
         left_col.setSpacing(1)
         axis = getattr(operation, "axis", None)
+        axes = tuple(int(value) for value in (getattr(operation, "axes", None) or ()))
         axis_button = QtWidgets.QToolButton()
         axis_button.setObjectName("OperationAxisButton")
-        axis_button.setText("" if axis is None else f"d{int(axis)}")
-        axis_button.setToolTip("Change the dimension this operation applies to")
-        axis_button.setVisible(axis is not None)
-        if axis is not None:
+        if axes:
+            # An axis-SET step shows every dimension it covers. The chip is
+            # read-only here: retargeting a set is a multi-select, which is the
+            # params popup's job, not a flat menu of single axes.
+            axis_button.setText("d" + ",".join(str(value) for value in axes))
+            axis_button.setToolTip("Dimensions this operation is applied over")
+            axis_button.setEnabled(False)
+            axis_button.setVisible(True)
+        else:
+            axis_button.setText("" if axis is None else f"d{int(axis)}")
+            axis_button.setToolTip("Change the dimension this operation applies to")
+            axis_button.setVisible(axis is not None)
+        if axis is not None and not axes:
             axis_button.clicked.connect(
                 lambda _checked=False, index=index: self._show_axis_menu(index)
             )
