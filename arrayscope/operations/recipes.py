@@ -46,6 +46,12 @@ def operation_to_recipe_item(operation_or_step):
 
     if entry.requires_axis:
         item["axis"] = int(operation.axis)
+    elif entry.requires_axes:
+        # An axis SET serializes as a JSON list under ``axes``, exactly parallel
+        # to the single ``axis`` int. A recipe written before axis sets existed
+        # simply has neither key for its (single-axis or axis-less) operations,
+        # so both versions load unchanged.
+        item["axes"] = [int(axis) for axis in operation.axes]
 
     parameters = {}
     for parameter in entry.parameters:
@@ -54,7 +60,7 @@ def operation_to_recipe_item(operation_or_step):
         item["parameters"] = parameters
     item["enabled"] = bool(enabled)
 
-    known_names = {"axis", *(parameter.name for parameter in entry.parameters)}
+    known_names = {"axis", "axes", *(parameter.name for parameter in entry.parameters)}
     extra_names = {field.name for field in fields(operation)} - known_names
     if extra_names:
         raise ValueError(f"operation has unsupported recipe fields: {sorted(extra_names)}")
@@ -101,6 +107,12 @@ def steps_from_recipe(recipe, base_shape, *, imported: bool = False, slot_resolv
                 operation_id,
                 axis=item.get("axis"),
                 parameters=item.get("parameters", {}),
+                axes=item.get("axes"),
+                # ``shape`` is the shape entering *this* step (a disabled step
+                # does not advance it), so it is the right rank to range-check
+                # an axis set against -- and doing it here names the bad axis
+                # instead of letting it surface as a shape error later.
+                ndim=len(shape),
                 slot_bindings=item.get("inputs", {}),
                 slot_resolver=slot_resolver,
             )

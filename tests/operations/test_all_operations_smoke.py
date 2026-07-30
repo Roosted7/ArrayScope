@@ -30,6 +30,11 @@ from arrayscope.operations.parameter_forms import build_parameter_form
 # Generic context used unless an op overrides it below.
 _DEFAULT_SHAPE = (6, 8, 10)
 _DEFAULT_AXIS = 1
+# The axis SET handed to an operation that declares ``requires_axes``. Two axes
+# is the canonical case (a 2-D transform, a two-axis reduction) and leaves a
+# surviving axis on the rank-reducing ones, so a predicted output shape is still
+# a shape rather than a scalar.
+_DEFAULT_AXES = (0, 1)
 _DEFAULT_DTYPES = (np.dtype(np.float32), np.dtype(np.complex64))
 
 
@@ -105,8 +110,9 @@ def _context_for(operation_id: str):
     override = _EXPECTATIONS.get(operation_id, {})
     shape = override.get("shape", _DEFAULT_SHAPE)
     axis = override.get("axis", _DEFAULT_AXIS)
+    axes = override.get("axes", _DEFAULT_AXES)
     dtypes = override.get("dtypes", _DEFAULT_DTYPES)
-    return shape, axis, dtypes
+    return shape, axis, axes, dtypes
 
 
 def _sample_array(shape, dtype) -> np.ndarray:
@@ -143,8 +149,9 @@ def test_every_operation_builds_and_applies_without_crashing(
             continue
         if entry.unavailable_reason:
             continue
-        shape, axis, dtypes = _context_for(entry.id)
+        shape, axis, axes, dtypes = _context_for(entry.id)
         op_axis = axis if entry.requires_axis else None
+        op_axes = axes if entry.requires_axes else None
 
         slot_bindings = {}
         resolved_slots = {}
@@ -169,17 +176,27 @@ def test_every_operation_builds_and_applies_without_crashing(
             entry,
             shape=shape,
             axis=op_axis,
+            axes=op_axes,
             slot_bindings=slot_bindings,
         )
         parameters = form.values() if form is not None else {}
         if form is not None:
             assert form.validate() is None, f"{entry.id}: default form failed validation"
+            if entry.requires_axes:
+                # An axis-set op renders its selection in the form, so the form
+                # -- not the caller -- is what the UI reads back. Prove the two
+                # agree rather than quietly using the caller's copy.
+                assert form.selected_axes() == tuple(op_axes), (
+                    f"{entry.id}: form axis selection disagrees with the context"
+                )
 
         try:
             operation = registry.create_operation(
                 entry.id,
                 axis=op_axis,
                 parameters=parameters,
+                axes=op_axes,
+                ndim=len(shape),
                 slot_bindings=slot_bindings,
                 resolved_slots=resolved_slots,
             )

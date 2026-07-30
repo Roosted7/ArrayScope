@@ -294,6 +294,7 @@ class OperationSlotSourcesMixin:
                     operation.plugin_id,
                     axis=operation.axis,
                     parameters=dict(operation.params),
+                    axes=operation.axes or None,
                     slot_bindings=bindings,
                     slot_resolver=self._resolve_operation_slot,
                 )

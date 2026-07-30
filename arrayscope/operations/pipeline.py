@@ -9,7 +9,7 @@ from uuid import uuid4
 import numpy as np
 
 from arrayscope.core.axis_info import axes_for_shape, output_axes_for_operations
-from arrayscope.core.axis_utils import validate_axis
+from arrayscope.core.axis_utils import normalize_axis_selection, validate_axis
 from arrayscope.operations import _numba_native_ops, _numba_reductions, dim_ops
 from arrayscope.operations.cancellation import (
     EvaluationCancelled,
@@ -1300,6 +1300,190 @@ class CenteredIFFT:
 
 
 @dataclass(frozen=True)
+class _CenteredFFTNBase:
+    """Shared body of the multi-axis centered transforms.
+
+    Rank-preserving, so the input-space capability axes and the output-space
+    region axes coincide and no ``output_axis_sources`` hook is needed (see
+    :class:`~arrayscope.operations.capabilities.OperationCapabilities`). The
+    axis set is what the whole class exists for: an MRI k-space transform is
+    2-D or 3-D, and expressing it as N stacked single-axis stages made the
+    montage axis blocking N times over, once per stage, instead of once.
+    """
+
+    axes: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        # Normalized at construction so two operations that name the same set in
+        # different orders are the same dataclass -- and therefore the same
+        # stage-cache key, the same recipe item, and the same optimizer subject.
+        object.__setattr__(self, "axes", normalize_axis_selection(self.axes))
+
+    def output_shape(self, shape: Shape) -> Shape:
+        self._axes(shape)
+        return tuple(shape)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        return np.result_type(np.dtype(input_dtype), np.complex64)
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axes = self._axes(input_shape)
+        # Same declaration the single-axis transform makes, over a set: every
+        # selected axis is needed whole and may not be chunked, and everything
+        # else -- the complement -- stays chunkable. That complement IS the
+        # broadcast: chunked evaluation walks it while each chunk carries whole
+        # selected axes.
+        return _capabilities(
+            OperationKind.TRANSFORM,
+            ndim=len(input_shape),
+            blocking_axes=axes,
+            expands_request_axes=axes,
+            temp_multiplier=6.0,
+            cache_stage=True,
+            real_linear=True,
+        )
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        region = output_region
+        for axis in self._axes(input_shape):
+            region = replace_region_axis(region, axis, AxisRegion(AxisRegionKind.ALL))
+        return region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        axes = self._axes(input_region.axes)
+        # ``input_region`` holds ALL on every selected axis (we asked for it
+        # above), so none of them is a POINT and each keeps a slab position.
+        slab_axes = tuple(axis_in_region_result(input_region, axis) for axis in axes)
+        workers = None if evaluation_context is None else int(evaluation_context.fft_workers)
+        transformed = data
+        for slab_axis in slab_axes:
+            transformed = type(self)._per_axis(transformed, slab_axis, workers)
+        # Descending, because taking a POINT output region DROPS that axis and
+        # shifts every higher slab position down; the positions still to be used
+        # are all lower, so they are untouched.
+        for axis, slab_axis in sorted(zip(axes, slab_axes, strict=True), reverse=True):
+            transformed = take_axis_region(
+                transformed, output_region.axes[axis], transformed.shape[slab_axis], axis=slab_axis
+            )
+        return transformed
+
+    def output_axes(self, axes):
+        applied = self._axes(tuple(axis.size for axis in axes))
+        return tuple(
+            replace(axis_info, unit=None, spacing=None, origin=None)
+            if index in applied
+            else axis_info
+            for index, axis_info in enumerate(tuple(axes))
+        )
+
+    def _axes(self, shape_or_axes) -> tuple[int, ...]:
+        return normalize_axis_selection(self.axes, ndim=len(tuple(shape_or_axes)))
+
+
+@dataclass(frozen=True)
+class CenteredFFTN(_CenteredFFTNBase):
+    # ``apply`` deliberately calls one module-level function on ``self.axes``
+    # and nothing else: ``operation_definitions.native_editable_source`` copies
+    # this body into a standalone user function, qualifying module globals and
+    # turning dataclass fields into arguments. A call through ``self`` or a
+    # helper *method* would copy into code with an undefined name.
+    def apply(self, data):
+        return dim_ops.centered_fftn(data, self.axes)
+
+    @staticmethod
+    def _per_axis(data, axis, workers):
+        if workers is None:
+            return dim_ops.centered_fft(data, axis)
+        return dim_ops.centered_fft(data, axis, workers=workers)
+
+
+@dataclass(frozen=True)
+class CenteredIFFTN(_CenteredFFTNBase):
+    def apply(self, data):
+        return dim_ops.centered_ifftn(data, self.axes)
+
+    @staticmethod
+    def _per_axis(data, axis, workers):
+        if workers is None:
+            return dim_ops.centered_ifft(data, axis)
+        return dim_ops.centered_ifft(data, axis, workers=workers)
+
+
+@dataclass(frozen=True)
+class MeanOverAxes:
+    """Average over an axis SET; the rank drops by ``len(axes)``.
+
+    The rank-changing counterpart of the multi-axis transform above, and the
+    one that exercises R2's output-space bridge: the capability axes are input
+    axes that no longer exist downstream, so ``output_axis_sources`` has to say
+    which input axis each surviving output axis came from.
+    """
+
+    axes: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "axes", normalize_axis_selection(self.axes))
+
+    def apply(self, data):
+        # Module-level helpers only -- see the note on ``CenteredFFTN.apply``.
+        return _mean(data, _validate_axes(data.shape, self.axes))
+
+    def output_shape(self, shape: Shape) -> Shape:
+        axes = set(self._axes(shape))
+        return tuple(size for index, size in enumerate(shape) if index not in axes)
+
+    def output_dtype(self, input_dtype):
+        if input_dtype is None:
+            return None
+        if _is_integer_dtype(input_dtype):
+            return np.dtype(np.float32)
+        return np.mean(np.empty((1,), dtype=np.dtype(input_dtype))).dtype
+
+    def capabilities(self, input_shape: Shape, input_dtype=None) -> OperationCapabilities:
+        axes = self._axes(input_shape)
+        return _capabilities(
+            OperationKind.REDUCTION,
+            ndim=len(input_shape),
+            blocking_axes=axes,
+            expands_request_axes=axes,
+        )
+
+    def output_axis_sources(self, input_shape):
+        """Each surviving input axis, in order -- the reduced ones have no output."""
+
+        axes = set(self._axes(input_shape))
+        return tuple(axis for axis in range(len(tuple(input_shape))) if axis not in axes)
+
+    def required_input_region(self, input_shape: Shape, output_region: RegionSpec) -> RegionSpec:
+        region = output_region
+        # Ascending: inserting at index ``axis`` after every lower reduced axis
+        # is already back in place puts each one at its own input position.
+        for axis in self._axes(input_shape):
+            region = insert_region_axis(region, axis, AxisRegion(AxisRegionKind.ALL))
+        return region
+
+    def apply_to_region(
+        self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
+    ):
+        del output_region
+        axes = self._axes(input_region.axes)
+        return _mean(data, tuple(axis_in_region_result(input_region, axis) for axis in axes))
+
+    def output_axes(self, axes):
+        applied = set(self._axes(tuple(axis.size for axis in axes)))
+        return tuple(
+            axis_info for index, axis_info in enumerate(tuple(axes)) if index not in applied
+        )
+
+    def _axes(self, shape_or_axes) -> tuple[int, ...]:
+        return normalize_axis_selection(self.axes, ndim=len(tuple(shape_or_axes)))
+
+
+@dataclass(frozen=True)
 class FFTShift:
     axis: int
     native_magnitude_envelope_role = "fft_shift"
@@ -1602,6 +1786,10 @@ def _validate_step_index(index, steps):
 
 def _validate_axis(shape, axis) -> int:
     return validate_axis(shape, axis)
+
+
+def _validate_axes(shape, axes) -> tuple[int, ...]:
+    return normalize_axis_selection(axes, ndim=len(tuple(shape)))
 
 
 def _root_sum_squares(data, axis: int):

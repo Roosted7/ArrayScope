@@ -6,7 +6,9 @@ import pytest
 from arrayscope.operations.capabilities import OperationCapabilities, OperationKind
 from arrayscope.operations.pipeline import (
     CenteredFFT,
+    CenteredFFTN,
     CenteredIFFT,
+    CenteredIFFTN,
     Clip,
     CombineRealImagAxis,
     Conjugate,
@@ -21,6 +23,7 @@ from arrayscope.operations.pipeline import (
     Magnitude,
     Maximum,
     Mean,
+    MeanOverAxes,
     Median,
     Minimum,
     Normalize,
@@ -86,6 +89,9 @@ def test_every_registered_operation_declares_dtype_and_capabilities():
         "min": Minimum(axis=1),
         "centered_fft": CenteredFFT(axis=1),
         "centered_ifft": CenteredIFFT(axis=1),
+        "centered_fftn": CenteredFFTN(axes=(1, 2)),
+        "centered_ifftn": CenteredIFFTN(axes=(1, 2)),
+        "mean_axes": MeanOverAxes(axes=(1, 2)),
         "fftshift": FFTShift(axis=1),
         "combine_real_imag": CombineRealImagAxis(axis=2),
         "split_complex": SplitComplexAxis(axis=2),

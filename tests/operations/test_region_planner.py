@@ -7,11 +7,13 @@ from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import (
     ArrayDocument,
     CenteredFFT,
+    CenteredFFTN,
     CenteredIFFT,
     CombineRealImagAxis,
     Crop,
     FFTShift,
     Mean,
+    MeanOverAxes,
     ReverseAxis,
     SplitComplexAxis,
 )
@@ -237,6 +239,132 @@ def test_region_plan_uses_composed_crop_and_removed_reverse_pair():
 
     assert reverse_plan.transitions == ()
     assert reverse_plan.optimized_operation_count == 0
+
+
+# --- axis-set operations: blocking = the set, chunkable = the complement -----
+
+
+def test_axis_set_transform_blocks_only_its_own_axes_and_expands_them_together():
+    capabilities = CenteredFFTN(axes=(1, 2)).capabilities((4, 8, 16), np.float32)
+
+    assert capabilities.blocking_axes == (1, 2)
+    assert capabilities.expands_request_axes == (1, 2)
+    # The complement is what "broadcast over the rest" means at the engine
+    # level: chunked evaluation walks axis 0 while each chunk carries whole
+    # transformed axes.
+    assert capabilities.chunkable_axes == (0,)
+    assert capabilities.cache_stage is True
+
+
+def test_axis_set_transform_asks_for_whole_applied_axes_and_slices_the_rest():
+    output_region = region_from_index_spec((4, 8, 16), (2, slice(1, 5), slice(None)))
+
+    required = CenteredFFTN(axes=(1, 2)).required_input_region((4, 8, 16), output_region)
+
+    assert [axis.kind for axis in required.axes] == [
+        AxisRegionKind.POINT,
+        AxisRegionKind.ALL,
+        AxisRegionKind.ALL,
+    ]
+
+
+def test_axis_set_transform_region_result_matches_the_whole_array_transform():
+    rng = np.random.default_rng(0x5A1E)
+    data = rng.standard_normal((4, 8, 6)).astype(np.float32)
+    operation = CenteredFFTN(axes=(1, 2))
+    whole = operation.apply(data)
+
+    # A POINT on a non-applied axis AND a slice on an applied one: the applied
+    # axes must be transformed whole and only then cut down, and the point drop
+    # must not shift the slab positions the later cuts use.
+    output_region = region_from_index_spec((4, 8, 6), (2, slice(2, 6), slice(None)))
+    input_region = operation.required_input_region((4, 8, 6), output_region)
+    slab = operation.apply_to_region(
+        data[2], input_region=input_region, output_region=output_region
+    )
+
+    np.testing.assert_array_equal(slab, whole[2, 2:6, :])
+
+
+def test_axis_set_transform_survives_a_point_on_an_applied_axis():
+    rng = np.random.default_rng(0xBEEF)
+    data = rng.standard_normal((4, 8, 6)).astype(np.float32)
+    operation = CenteredFFTN(axes=(0, 2))
+    whole = operation.apply(data)
+
+    # Points on BOTH applied axes: taking them drops axes, so the takes have to
+    # run from the highest axis down or the second one indexes the wrong slab.
+    output_region = region_from_index_spec((4, 8, 6), (1, slice(None), 3))
+    input_region = operation.required_input_region((4, 8, 6), output_region)
+    slab = operation.apply_to_region(data, input_region=input_region, output_region=output_region)
+
+    np.testing.assert_array_equal(slab, whole[1, :, 3])
+
+
+def test_axis_set_reduction_plans_and_evaluates_a_multi_axis_mean():
+    rng = np.random.default_rng(0xD15C)
+    data = rng.standard_normal((4, 5, 6, 3)).astype(np.float32)
+    operation = MeanOverAxes(axes=(1, 3))
+    document = ArrayDocument(data, operations=(operation,))
+
+    assert document.current_shape == (4, 6)
+    # Two reduced input axes with no output counterpart: the R2 bridge has to
+    # translate the capability set, not hand it to the two-axis output region.
+    assert operation.output_axis_sources((4, 5, 6, 3)) == (0, 2)
+
+    output_region = region_from_index_spec((4, 6), (slice(None), slice(None)))
+    input_region = operation.required_input_region((4, 5, 6, 3), output_region)
+    assert [axis.kind for axis in input_region.axes] == [
+        AxisRegionKind.ALL,
+        AxisRegionKind.ALL,
+        AxisRegionKind.ALL,
+        AxisRegionKind.ALL,
+    ]
+    # Byte-identical, not merely close: the whole region is present, so the
+    # region path is the same single ``np.mean`` over the same axis tuple.
+    np.testing.assert_array_equal(
+        operation.apply_to_region(data, input_region=input_region, output_region=output_region),
+        data.mean(axis=(1, 3)),
+    )
+
+    state = ViewState.from_shape(document.current_shape)
+    evaluated = OperationEvaluator(document).image(state)
+    np.testing.assert_allclose(np.asarray(evaluated.data), data.mean(axis=(1, 3)), rtol=1e-6)
+
+
+def test_scrubbing_a_broadcast_axis_of_an_axis_set_transform_reads_one_slab():
+    """The broadcast half: an un-applied axis stays a POINT all the way down.
+
+    This is what "apply over a subset of dims" has to buy. The plan for one
+    displayed slice widens only the two transformed axes; the scrubbed axis is
+    never expanded, so each step reads and transforms one slab rather than the
+    volume -- and the values agree, step for step, with the single-axis chain
+    the multi-axis op replaces.
+    """
+
+    rng = np.random.default_rng(0xC0FFEE)
+    data = rng.standard_normal((6, 5, 4)).astype(np.float32)
+    document = ArrayDocument(data, operations=(CenteredFFTN(axes=(1, 2)),))
+    control = ArrayDocument(data, operations=(CenteredFFT(axis=1), CenteredFFT(axis=2)))
+    state = ViewState.from_shape(document.current_shape).with_image_axes(1, 2)
+
+    plan = plan_region_request(document, request_for_image(state.with_slice(0, 3)))
+    assert [axis.kind for axis in plan.required_input_region.axes] == [
+        AxisRegionKind.POINT,
+        AxisRegionKind.ALL,
+        AxisRegionKind.ALL,
+    ]
+    assert plan.transitions[0].expanded_axes == (1, 2)
+
+    evaluator = OperationEvaluator(document)
+    control_evaluator = OperationEvaluator(control)
+    for index in range(6):
+        np.testing.assert_allclose(
+            np.asarray(evaluator.image(state.with_slice(0, index)).data),
+            np.asarray(control_evaluator.image(state.with_slice(0, index)).data),
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
 # --- rank-changing operations at the capability/region axis-space boundary ---

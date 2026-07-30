@@ -68,6 +68,30 @@ class SlotField:
     binding: SlotBinding = field(default_factory=lambda: SlotBinding(""))
 
 
+@dataclass
+class AxesField:
+    """The axis SET of a ``requires_axes`` operation, as a form field.
+
+    An axis set is not a parameter -- it is the operation's *subject*, the same
+    role a single ``axis`` plays -- so it does not live in ``fields``. It lives
+    here because the alternative was an inline multi-select in the add popup,
+    and an axis set with a labelled row per dimension does not fit an anchored
+    one-line picker the way a single combo box does. Routing axis-set ops
+    through the params popup gives the selection room, and gives every op one
+    place where its subject and its parameters are confirmed together.
+
+    ``choices`` are ``(label, axis)`` pairs in axis order, the same pairs the
+    single-axis combo renders, so both selectors name a dimension identically.
+    """
+
+    label: str = "Axes"
+    description: str = ""
+    choices: tuple[tuple[str, int], ...] = ()
+    selected: tuple[int, ...] = ()
+    minimum: int = 1
+    maximum: int | None = None
+
+
 def _coerce(kind: str, value, choices: tuple[str, ...] = ()) -> int | float | str | bool:
     return coerce_parameter_value(kind, value, choices=choices)
 
@@ -87,15 +111,29 @@ class ParameterForm:
         fields: list[ParameterField],
         *,
         slot_fields: list[SlotField] | None = None,
+        axes_field: AxesField | None = None,
         adjust: Callable[[ParameterForm, str], None] | None = None,
         derive: Callable[[ParameterForm], list[DerivedValue]] | None = None,
         validate: Callable[[ParameterForm], str | None] | None = None,
     ) -> None:
         self.fields = fields
         self.slot_fields = list(slot_fields or ())
+        self.axes_field = axes_field
         self._adjust = adjust
         self._derive = derive
         self._validate = validate
+
+    def selected_axes(self) -> tuple[int, ...]:
+        """The axis set to hand to ``create_operation`` (``()`` when there is none)."""
+
+        if self.axes_field is None:
+            return ()
+        return tuple(sorted(dict.fromkeys(int(axis) for axis in self.axes_field.selected)))
+
+    def set_selected_axes(self, axes) -> None:
+        if self.axes_field is None:
+            raise KeyError("this operation does not take an axis set")
+        self.axes_field.selected = tuple(sorted(dict.fromkeys(int(axis) for axis in axes)))
 
     def field(self, name: str) -> ParameterField:
         for candidate in self.fields:
@@ -155,8 +193,26 @@ class ParameterForm:
             )
             if selected is not None and not selected.available:
                 return selected.unavailable_reason or f"{candidate.label} is unavailable."
+        axes_message = self._validate_axes()
+        if axes_message is not None:
+            return axes_message
         if self._validate is not None:
             return self._validate(self)
+        return None
+
+    def _validate_axes(self) -> str | None:
+        axes_field = self.axes_field
+        if axes_field is None:
+            return None
+        count = len(self.selected_axes())
+        minimum = int(axes_field.minimum)
+        maximum = axes_field.maximum
+        if count < minimum:
+            noun = "axis" if minimum == 1 else "axes"
+            return f"Choose at least {minimum} {noun}."
+        if maximum is not None and count > int(maximum):
+            noun = "axis" if int(maximum) == 1 else "axes"
+            return f"Choose at most {int(maximum)} {noun}."
         return None
 
 
@@ -444,11 +500,57 @@ _FORM_PROVIDERS: dict[str, Callable[..., ParameterForm]] = {
 }
 
 
+def _axes_field(
+    entry: OperationEntry,
+    *,
+    shape: Shape | None,
+    axes,
+    axis_choices,
+    display_axes,
+) -> AxesField:
+    """The axis-set field, seeded from the caller's context.
+
+    The default selection is, in order: what the caller already chose (an edit,
+    or a recipe being re-opened); the axes currently on display, trimmed to the
+    declared arity -- a 2-slab operation should arrive pointing at the image the
+    user is looking at; and finally the leading axes, which is all that is left
+    when nothing about the view is known.
+    """
+
+    ndim = None if shape is None else len(tuple(shape))
+    choices = tuple((str(label), int(value)) for label, value in tuple(axis_choices or ()))
+    if not choices and ndim is not None:
+        choices = tuple((f"d{axis}", axis) for axis in range(ndim))
+    minimum, maximum = entry.axis_arity
+    limit = min(int(maximum), len(choices)) if maximum is not None else len(choices)
+    if axes:
+        selected = tuple(int(axis) for axis in axes)
+    else:
+        candidates = [int(axis) for axis in tuple(display_axes or ())]
+        if len(candidates) < max(int(minimum), 2):
+            candidates.extend(axis for _label, axis in choices if axis not in candidates)
+        # Two is the natural default for an op with no upper bound: the image
+        # the user is looking at. A narrower arity wins over it.
+        target = max(int(minimum), min(2, limit) if limit else int(minimum))
+        selected = tuple(candidates[:target])
+    return AxesField(
+        label="Axes",
+        description="The axes this operation is applied over; every other axis is broadcast.",
+        choices=choices,
+        selected=tuple(sorted(dict.fromkeys(selected))),
+        minimum=int(minimum),
+        maximum=None if maximum is None else int(maximum),
+    )
+
+
 def build_parameter_form(
     entry: OperationEntry,
     *,
     shape: Shape | None = None,
     axis: int | None = None,
+    axes=None,
+    axis_choices=(),
+    display_axes=(),
     slot_options: dict[str, tuple[SlotSourceOption, ...]] | None = None,
     slot_bindings: dict[str, SlotBinding] | None = None,
 ) -> ParameterForm | None:
@@ -457,9 +559,12 @@ def build_parameter_form(
     Returns ``None`` for a parameterless op (nothing to render). Ops with a
     registered provider get context/interdependence-aware fields; every other
     parameterized op gets the metadata-driven default form.
+
+    An operation that declares ``requires_axes`` always gets a form even with no
+    parameters: its axis set has to be chosen somewhere, and this is where.
     """
 
-    if not entry.parameters and not entry.input_slots:
+    if not entry.parameters and not entry.input_slots and not entry.requires_axes:
         return None
     provider = _FORM_PROVIDERS.get(entry.id) if entry.parameters else None
     form = (
@@ -467,6 +572,14 @@ def build_parameter_form(
         if provider is not None
         else _default_form(entry, shape=shape, axis=axis)
     )
+    if entry.requires_axes:
+        form.axes_field = _axes_field(
+            entry,
+            shape=shape,
+            axes=axes,
+            axis_choices=axis_choices,
+            display_axes=display_axes,
+        )
     options_by_name = dict(slot_options or {})
     bindings_by_name = dict(slot_bindings or {})
     form.slot_fields = [

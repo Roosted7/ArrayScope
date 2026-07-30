@@ -34,6 +34,12 @@ Each user op is a wrapper JSON ``<slug>.json`` in
             "callable": "function_name",
         },
         "requires_axis": true,
+        # An axis SET instead of one axis. ``maps_over_slabs`` implies it, and
+        # additionally means: hand my callable each SLAB spanning exactly those
+        # axes and broadcast me over every other axis.
+        "requires_axes": false,
+        "axis_arity": [1, null],  # [minimum, maximum]; null maximum = unbounded
+        "maps_over_slabs": false,
         "changes_shape": false,
         "parameters": [
             {
@@ -80,6 +86,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from arrayscope.app import user_dirs, user_library
+from arrayscope.core.axis_utils import DEFAULT_AXIS_ARITY, normalize_axis_arity
 from arrayscope.operations import command_runtime, environments, registry
 from arrayscope.operations.cancellation import cancellable
 from arrayscope.operations.input_slots import OperationInputSlot
@@ -410,6 +417,22 @@ def user_operation_problems() -> list[OperationProblem]:
     return list(_user_problems)
 
 
+def _axis_arity_from_payload(value) -> tuple[int, int | None]:
+    """Read an authored ``[minimum, maximum]`` pair; ``null`` maximum = unbounded.
+
+    A malformed arity is an authoring error the loader must *name*, not silently
+    widen: an operation that says it needs exactly two axes and is handed five
+    would run on the wrong data rather than fail.
+    """
+
+    if value is None:
+        return DEFAULT_AXIS_ARITY
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("axis_arity must be a [minimum, maximum] pair")
+    minimum, maximum = value
+    return normalize_axis_arity((minimum, None if maximum is None else maximum))
+
+
 def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
     """Build a :class:`PluginOperationSpec` from one wrapper JSON (validates)."""
 
@@ -431,7 +454,14 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
     slug = operation_id[len("user:") :]
     parameters = _parameters_from_payload(payload.get("parameters", ()))
     input_slots = _input_slots_from_payload(payload.get("input_slots", ()))
-    requires_axis = bool(payload.get("requires_axis", False))
+    # An axis SET, and the "map me over the rest" declaration built on it.
+    # ``maps_over_slabs`` implies ``requires_axes`` -- a slab is defined by the
+    # axes it spans -- so the loader is forgiving here (one key to author) while
+    # the spec stays strict (see ``PluginOperationSpec.__post_init__``).
+    maps_over_slabs = bool(payload.get("maps_over_slabs", False))
+    requires_axes = bool(payload.get("requires_axes", False)) or maps_over_slabs
+    requires_axis = bool(payload.get("requires_axis", False)) and not requires_axes
+    axis_arity = _axis_arity_from_payload(payload.get("axis_arity"))
     changes_shape = bool(payload.get("changes_shape", False))
 
     template = payload.get("template")
@@ -508,6 +538,9 @@ def _spec_from_wrapper_file(path: str) -> PluginOperationSpec:
         parameters=parameters,
         input_slots=input_slots,
         requires_axis=requires_axis,
+        requires_axes=requires_axes,
+        axis_arity=axis_arity,
+        maps_over_slabs=maps_over_slabs,
         changes_shape=changes_shape,
         group=str(payload.get("group") or "User"),
         description=str(payload.get("description") or ""),
@@ -1217,6 +1250,9 @@ def duplicate_operation(operation_id: str) -> str:
                 "shell",
                 "environment",
                 "requires_axis",
+                "requires_axes",
+                "axis_arity",
+                "maps_over_slabs",
                 "parameters",
                 "input_slots",
             }
@@ -1300,6 +1336,9 @@ def duplicate_operation(operation_id: str) -> str:
         "runtime": SUPPORTED_RUNTIME,
         "source": {"mode": "import", "path": source_name, "callable": callable_name},
         "requires_axis": bool(definition.get("requires_axis", False)),
+        "requires_axes": bool(definition.get("requires_axes", False)),
+        "axis_arity": list(definition.get("axis_arity") or DEFAULT_AXIS_ARITY),
+        "maps_over_slabs": bool(definition.get("maps_over_slabs", False)),
         "changes_shape": bool(definition.get("changes_shape", False)),
         "parameters": list(definition.get("parameters") or ()),
         "input_slots": list(definition.get("input_slots") or ()),

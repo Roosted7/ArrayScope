@@ -21,6 +21,53 @@ def test_centered_fft_and_ifft_match_existing_viewer_transform():
     assert transformed.shape == data.shape
 
 
+def test_centered_fftn_is_byte_identical_to_the_composed_single_axis_transform():
+    """The oracle for the multi-axis transform is the chain it replaces.
+
+    Not ``allclose``: the whole reason the N-D transform is a composition
+    rather than one ``fftn`` call is that a user must never have to wonder
+    whether "FFT over axes 0 and 2" and "FFT over axis 0 then axis 2" gave the
+    same array. Composition order is ascending, which is the order the sorted
+    axis set fixes -- a float sum is not associative, so the order has to be
+    pinned rather than assumed irrelevant.
+    """
+
+    rng = np.random.default_rng(0x5A1E)
+    data = (rng.standard_normal((4, 5, 6)) + 1j * rng.standard_normal((4, 5, 6))).astype(
+        np.complex64
+    )
+
+    composed = data
+    for axis in (0, 2):
+        composed = dim_ops.centered_fft(composed, axis)
+
+    np.testing.assert_array_equal(dim_ops.centered_fftn(data, (0, 2)), composed)
+    # The set has no order of its own; naming it backwards names the same op.
+    np.testing.assert_array_equal(
+        dim_ops.centered_fftn(data, (2, 0)), dim_ops.centered_fftn(data, (0, 2))
+    )
+
+
+def test_centered_ifftn_inverts_centered_fftn_over_the_same_axis_set():
+    rng = np.random.default_rng(0xB0A7)
+    data = rng.standard_normal((4, 5, 6)).astype(np.float32)
+
+    restored = dim_ops.centered_ifftn(dim_ops.centered_fftn(data, (1, 2)), (1, 2))
+
+    np.testing.assert_allclose(restored.real, data, atol=1e-5)
+
+
+def test_centered_fftn_refuses_an_empty_duplicated_or_out_of_range_axis_set():
+    data = np.zeros((3, 4, 5))
+
+    with pytest.raises(ValueError, match="at least 1"):
+        dim_ops.centered_fftn(data, ())
+    with pytest.raises(ValueError, match="more than once"):
+        dim_ops.centered_fftn(data, (1, 1))
+    with pytest.raises(ValueError, match="out of bounds"):
+        dim_ops.centered_fftn(data, (0, 3))
+
+
 def test_fftshift_round_trip_preserves_shape_and_values():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
 

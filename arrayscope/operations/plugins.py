@@ -35,6 +35,11 @@ from inspect import signature
 
 import numpy as np
 
+from arrayscope.core.axis_utils import (
+    DEFAULT_AXIS_ARITY,
+    normalize_axis_arity,
+    normalize_axis_selection,
+)
 from arrayscope.operations.cancellation import EvaluationCancelled, call_with_cancellation
 from arrayscope.operations.capabilities import (
     OperationCapabilities,
@@ -109,8 +114,12 @@ class PluginOperationSpec:
 
     The factory named by the entry point takes no arguments and returns one of
     these.  ``fn`` covers the common stateless case; ``build`` covers the
-    parametric case (it receives the resolved axis and parameter mapping and
-    returns the bound ``fn``).  Exactly one of ``fn``/``build`` must be given.
+    parametric case (it receives the resolved axis *selection* and parameter
+    mapping and returns the bound ``fn``).  Exactly one of ``fn``/``build`` must
+    be given.  The selection is an ``int`` for a ``requires_axis`` spec and a
+    sorted tuple for a ``requires_axes`` one; it is ``None`` for a spec that
+    takes neither, and also for a ``maps_over_slabs`` spec, whose callable sees
+    one slab at a time and never needs to know which axes that slab spans.
     ``output_shape``/``output_dtype`` are compatibility adapters; observed
     characterization is authoritative and both adapters default to identity.
     """
@@ -130,6 +139,24 @@ class PluginOperationSpec:
     parameters: tuple[OperationParameter, ...] = ()
     input_slots: tuple[OperationInputSlot, ...] = ()
     requires_axis: bool = False
+    # The axis-SET counterpart of ``requires_axis`` (see
+    # ``registry.OperationEntry``): the resolved selection reaches ``build`` as
+    # the ``axes`` keyword and a plain ``fn`` through ``functools.partial``-free
+    # wrapping below. Mutually exclusive with ``requires_axis``.
+    requires_axes: bool = False
+    axis_arity: tuple[int, int | None] = DEFAULT_AXIS_ARITY
+    # "Map me over the rest." The callable is handed each SLAB spanning exactly
+    # the selected axes -- a 2-D image when two axes are chosen -- and the
+    # runtime broadcasts it over every other axis. Implies ``requires_axes``:
+    # there is no slab without an axis set to define it.
+    #
+    # This is the half of subset-of-dims that an author cannot write themselves
+    # today: a Tier-1 plugin receives the whole array and must loop by hand,
+    # which also makes the whole array one indivisible cache stage. Declaring it
+    # here instead lets the capability layer say blocking = the selected axes,
+    # chunkable = the complement, so scrubbing a broadcast axis re-runs one slab
+    # rather than the volume.
+    maps_over_slabs: bool = False
     changes_shape: bool = False
     # Presentation metadata mirrored onto the synthesized OperationEntry so pack
     # / entry-point ops carry the same group / description / icon the built-ins
@@ -167,6 +194,21 @@ class PluginOperationSpec:
     def __post_init__(self) -> None:
         if (self.fn is None) == (self.build is None):
             raise ValueError(f"plugin operation {self.id!r} must declare exactly one of fn / build")
+        if self.requires_axis and self.requires_axes:
+            raise ValueError(
+                f"plugin operation {self.id!r} declares both requires_axis and requires_axes; "
+                "an operation takes one axis or an axis set, not both"
+            )
+        if self.maps_over_slabs and not self.requires_axes:
+            raise ValueError(
+                f"plugin operation {self.id!r} declares maps_over_slabs without requires_axes; "
+                "a slab is defined by the axis set it spans"
+            )
+        object.__setattr__(
+            self,
+            "axis_arity",
+            normalize_axis_arity(self.axis_arity) if self.requires_axes else DEFAULT_AXIS_ARITY,
+        )
         slot_names = [slot.name for slot in self.input_slots]
         if len(slot_names) != len(set(slot_names)):
             raise ValueError(f"plugin operation {self.id!r} has duplicate input-slot names")
@@ -265,6 +307,11 @@ class PluginOperation:
 
     plugin_id: str
     axis: int | None = None
+    # The axis SET, for a ``requires_axes`` spec. Sorted and unique by
+    # construction (``normalize_axis_selection``), which is what lets two
+    # reconstructions of the same recipe compare equal even if one wrote the
+    # axes in the other order.
+    axes: tuple[int, ...] = ()
     params: tuple[tuple[str, object], ...] = ()
     slot_bindings: tuple[tuple[str, SlotBinding], ...] = ()
     resolved_slots: tuple[tuple[str, ResolvedSlot], ...] = ()
@@ -598,6 +645,8 @@ def plugin_operation_entry(operation_id: str) -> OperationEntry:
         parameters=tuple(spec.parameters),
         changes_shape=bool(spec.changes_shape),
         requires_axis=bool(spec.requires_axis),
+        requires_axes=bool(spec.requires_axes),
+        axis_arity=spec.axis_arity if spec.requires_axes else DEFAULT_AXIS_ARITY,
         group=spec.group,
         description=spec.description,
         icon=spec.icon,
@@ -611,6 +660,8 @@ def create_plugin_operation(
     axis=None,
     parameters: Mapping[str, object] | None = None,
     *,
+    axes=None,
+    ndim: int | None = None,
     slot_bindings: Mapping[str, SlotBinding | Mapping[str, object]] | None = None,
     slot_resolver=None,
     resolved_slots: Mapping[str, ResolvedSlot] | None = None,
@@ -621,10 +672,20 @@ def create_plugin_operation(
     parameters = dict(parameters or {})
 
     resolved_axis: int | None = None
+    resolved_axes: tuple[int, ...] = ()
     if spec.requires_axis:
         if axis is None:
             raise ValueError(f"plugin operation {operation_id} requires an axis")
         resolved_axis = int(axis)
+    elif spec.requires_axes:
+        if axes is None:
+            raise ValueError(f"plugin operation {operation_id} requires an axis set")
+        resolved_axes = normalize_axis_selection(
+            axes,
+            ndim=ndim,
+            arity=spec.axis_arity,
+            label=f"plugin operation {operation_id} axes",
+        )
 
     bound_params: list[tuple[str, object]] = []
     for parameter in spec.parameters:
@@ -682,6 +743,7 @@ def create_plugin_operation(
     return PluginOperation(
         plugin_id=operation_id,
         axis=resolved_axis,
+        axes=resolved_axes,
         params=tuple(bound_params),
         slot_bindings=tuple(bound_slots),
         resolved_slots=tuple(sources),
@@ -694,6 +756,8 @@ def recipe_item_for_plugin_operation(operation: PluginOperation, *, enabled: boo
     item: dict[str, object] = {"id": operation.plugin_id}
     if operation.axis is not None:
         item["axis"] = int(operation.axis)
+    if operation.axes:
+        item["axes"] = [int(axis) for axis in operation.axes]
     if operation.params:
         item["parameters"] = dict(operation.params)
     if operation.slot_bindings:

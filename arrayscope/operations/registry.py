@@ -8,11 +8,18 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from arrayscope.core.axis_utils import (
+    DEFAULT_AXIS_ARITY,
+    normalize_axis_arity,
+    normalize_axis_selection,
+)
 from arrayscope.operations.input_slots import OperationInputSlot, ResolvedSlot, SlotBinding
 from arrayscope.operations.pipeline import (
     SMOOTH_BOUNDARIES,
     CenteredFFT,
+    CenteredFFTN,
     CenteredIFFT,
+    CenteredIFFTN,
     Clip,
     CombineRealImagAxis,
     Conjugate,
@@ -27,6 +34,7 @@ from arrayscope.operations.pipeline import (
     Magnitude,
     Maximum,
     Mean,
+    MeanOverAxes,
     Median,
     Minimum,
     Normalize,
@@ -186,6 +194,16 @@ COMMON_OPERATION_IDS: tuple[str, ...] = (
 )
 
 
+# How an operation is told which axes to work on. Every surface that has to
+# branch on it -- the add popup, the params popup, the palette, recipes,
+# ``create_operation``, ``describe_operation`` -- reads
+# :attr:`OperationEntry.axis_selection` and switches on one of these three
+# values rather than combining two booleans of its own.
+AXIS_SELECTION_NONE = "none"
+AXIS_SELECTION_ONE = "one"
+AXIS_SELECTION_SET = "set"
+
+
 @dataclass(frozen=True)
 class OperationEntry:
     id: str
@@ -193,7 +211,22 @@ class OperationEntry:
     operation_type: type
     parameters: tuple[OperationParameter, ...] = ()
     changes_shape: bool = False
+    # Exactly one axis, passed to the operation as ``axis`` (the incumbent
+    # vocabulary; 37 built-ins rely on the ``True`` default).
     requires_axis: bool = True
+    # An axis SET, passed to the operation as ``axes``: a sorted tuple of
+    # unique axes. Mutually exclusive with ``requires_axis`` -- an operation is
+    # given one axis or a set of them, never both -- and ``axis_arity`` bounds
+    # how many the set may hold (``(2, 2)`` for a strictly 2-D transform,
+    # ``(1, None)`` for "one or more").
+    #
+    # This is deliberately a parallel declaration rather than a widening of
+    # ``requires_axis``: an axis and an axis set differ in what the operation
+    # receives, what a recipe stores, and what the UI must render, so a single
+    # boolean that sometimes means "one int" and sometimes "a tuple" would push
+    # that fork into every one of those surfaces instead of naming it once.
+    requires_axes: bool = False
+    axis_arity: tuple[int, int | None] = DEFAULT_AXIS_ARITY
     # Presentation metadata (all defaulted so pack/plugin entries built without
     # these fields keep working). ``group`` places the op in the taxonomy above,
     # ``icon`` is the Material icon name the UI renders, ``description`` is a
@@ -203,6 +236,32 @@ class OperationEntry:
     icon: str = "data_array"
     unavailable_reason: str = ""
     input_slots: tuple[OperationInputSlot, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.requires_axes:
+            if self.requires_axis:
+                # ``requires_axis`` defaults to True, so an entry that declares
+                # an axis set almost always means to clear it. Silently
+                # preferring one over the other would make the entry disagree
+                # with itself the moment a surface read the other field.
+                raise ValueError(
+                    f"operation {self.id!r} declares both requires_axis and requires_axes; "
+                    "an operation takes one axis or an axis set, not both"
+                )
+            object.__setattr__(self, "axis_arity", normalize_axis_arity(self.axis_arity))
+        elif tuple(self.axis_arity) != DEFAULT_AXIS_ARITY:
+            raise ValueError(
+                f"operation {self.id!r} declares axis_arity without requires_axes; "
+                "arity only bounds an axis SET"
+            )
+
+    @property
+    def axis_selection(self) -> str:
+        """``"none"`` / ``"one"`` / ``"set"`` -- the one thing surfaces branch on."""
+
+        if self.requires_axes:
+            return AXIS_SELECTION_SET
+        return AXIS_SELECTION_ONE if self.requires_axis else AXIS_SELECTION_NONE
 
 
 OPERATION_REGISTRY = {
@@ -736,6 +795,37 @@ OPERATION_REGISTRY = {
         description="Centered inverse FFT along one axis (k-space to image).",
         icon="waves",
     ),
+    "centered_fftn": OperationEntry(
+        id="centered_fftn",
+        label="Centered FFT over axes",
+        operation_type=CenteredFFTN,
+        requires_axis=False,
+        requires_axes=True,
+        group="Transform",
+        description="Centered forward FFT over two or more axes (2-D / 3-D k-space).",
+        icon="waves",
+    ),
+    "centered_ifftn": OperationEntry(
+        id="centered_ifftn",
+        label="Centered iFFT over axes",
+        operation_type=CenteredIFFTN,
+        requires_axis=False,
+        requires_axes=True,
+        group="Transform",
+        description="Centered inverse FFT over two or more axes (k-space to image).",
+        icon="waves",
+    ),
+    "mean_axes": OperationEntry(
+        id="mean_axes",
+        label="Mean over axes",
+        operation_type=MeanOverAxes,
+        requires_axis=False,
+        requires_axes=True,
+        changes_shape=True,
+        group="Reduce",
+        description="Average all samples over a set of axes; the rank drops by that many.",
+        icon="functions",
+    ),
     "fftshift": OperationEntry(
         id="fftshift",
         label="FFT shift",
@@ -908,7 +998,11 @@ def _pack_operation_entry(spec) -> OperationEntry:
         operation_type=PluginOperation,
         parameters=tuple(spec.parameters),
         changes_shape=bool(spec.changes_shape),
-        requires_axis=bool(spec.requires_axis),
+        requires_axis=bool(spec.requires_axis) and not bool(getattr(spec, "requires_axes", False)),
+        requires_axes=bool(getattr(spec, "requires_axes", False)),
+        axis_arity=normalize_axis_arity(getattr(spec, "axis_arity", None))
+        if getattr(spec, "requires_axes", False)
+        else DEFAULT_AXIS_ARITY,
         group=getattr(spec, "group", "Other"),
         description=getattr(spec, "description", ""),
         icon=getattr(spec, "icon", "data_array"),
@@ -972,10 +1066,20 @@ def create_operation(
     axis=None,
     parameters: Mapping[str, object] | None = None,
     *,
+    axes=None,
+    ndim: int | None = None,
     slot_bindings: Mapping[str, SlotBinding | Mapping[str, object]] | None = None,
     slot_resolver=None,
     resolved_slots: Mapping[str, ResolvedSlot] | None = None,
 ):
+    """Build one operation from its registered id.
+
+    ``axis`` names a single axis; ``axes`` names an axis SET for an operation
+    that declares ``requires_axes``. ``ndim``, when the caller knows it, moves
+    axis-set range checking forward to here instead of leaving it to the
+    operation's own ``output_shape``.
+    """
+
     if operation_id not in OPERATION_REGISTRY:
         from arrayscope.operations import plugins
 
@@ -991,6 +1095,8 @@ def create_operation(
                 operation_id,
                 axis=axis,
                 parameters=parameters,
+                axes=axes,
+                ndim=ndim,
                 slot_bindings=slot_bindings,
                 slot_resolver=slot_resolver,
                 resolved_slots=resolved_slots,
@@ -1001,6 +1107,8 @@ def create_operation(
                 operation_id,
                 axis=axis,
                 parameters=parameters,
+                axes=axes,
+                ndim=ndim,
                 slot_bindings=slot_bindings,
                 slot_resolver=slot_resolver,
                 resolved_slots=resolved_slots,
@@ -1016,6 +1124,15 @@ def create_operation(
         if axis is None:
             raise ValueError(f"operation {operation_id} requires an axis")
         kwargs["axis"] = int(axis)
+    elif entry.requires_axes:
+        if axes is None:
+            raise ValueError(f"operation {operation_id} requires an axis set")
+        kwargs["axes"] = normalize_axis_selection(
+            axes,
+            ndim=ndim,
+            arity=entry.axis_arity,
+            label=f"operation {operation_id} axes",
+        )
 
     for parameter in entry.parameters:
         if parameter.name not in parameters:
@@ -1071,6 +1188,21 @@ def operation_parameter_value(operation, name):
     return getattr(operation, name, None)
 
 
+def operation_axis_selection(operation) -> tuple[int, ...]:
+    """The axis set an axis-set operation was built with (``()`` when it has none).
+
+    Built-in axis-set operations store the tuple as ``axes``; a
+    :class:`~arrayscope.operations.plugins.PluginOperation` stores it under the
+    same name, so one reader covers both tiers -- the same service
+    :func:`operation_parameter_value` performs for parameters.
+    """
+
+    axes = getattr(operation, "axes", None)
+    if axes is None:
+        return ()
+    return tuple(int(axis) for axis in axes)
+
+
 def operation_slot_bindings(operation) -> dict[str, SlotBinding]:
     """Read bound auxiliary sources without exposing process-local slot data."""
 
@@ -1090,6 +1222,9 @@ def describe_operation(operation) -> str:
         axis = operation.axis
         # "Mean over axis" + 2 -> "Mean over axis 2", not "... axis axis 2".
         parts = [f"{label} {axis}"] if label.endswith(" over axis") else [f"{label} · axis {axis}"]
+    elif entry.requires_axes:
+        axes = ", ".join(str(int(axis)) for axis in operation_axis_selection(operation))
+        parts = [f"{label} {axes}"] if label.endswith(" over axes") else [f"{label} · axes {axes}"]
     for parameter in entry.parameters:
         parts.append(f"{parameter.name}={operation_parameter_value(operation, parameter.name)}")
     for slot in entry.input_slots:

@@ -118,6 +118,11 @@ def native_editable_source(entry: OperationEntry, callable_name: str) -> str:
     arguments = [ast.arg(arg="data")]
     if entry.requires_axis:
         arguments.append(ast.arg(arg="axis"))
+    elif entry.requires_axes:
+        # The dataclass field is ``axes``, so the rewriter turns ``self.axes``
+        # into a bare ``axes`` -- which has to be an argument or the copy names
+        # something undefined.
+        arguments.append(ast.arg(arg="axes"))
     arguments.extend(ast.arg(arg=parameter.name) for parameter in entry.parameters)
     defaults = [_literal_default(parameter) for parameter in entry.parameters]
     original.name = callable_name
@@ -152,6 +157,8 @@ def adapter_template_source(entry: OperationEntry, callable_name: str) -> str:
     args = ["data"]
     if entry.requires_axis:
         args.append("axis")
+    elif entry.requires_axes:
+        args.append("axes")
     for parameter in entry.parameters:
         if parameter.default is None:
             args.append(parameter.name)
@@ -162,6 +169,7 @@ def adapter_template_source(entry: OperationEntry, callable_name: str) -> str:
         f"{parameter.name!r}: {parameter.name}" for parameter in entry.parameters
     )
     axis_expr = "axis" if entry.requires_axis else "None"
+    axes_expr = "axes" if entry.requires_axes else "None"
     return (
         '"""Editable adapter for an externally provided ArrayScope operation.\n\n'
         f"The starting implementation still depends on {entry.id!r}. Replace the\n"
@@ -171,7 +179,7 @@ def adapter_template_source(entry: OperationEntry, callable_name: str) -> str:
         f"def {callable_name}({', '.join(args)}):\n"
         f"    parameters = {{{parameter_pairs}}}\n"
         f"    operation = _create_operation({entry.id!r}, axis={axis_expr}, "
-        "parameters=parameters)\n"
+        f"parameters=parameters, axes={axes_expr})\n"
         "    return operation.apply(data)\n"
     )
 
@@ -201,6 +209,8 @@ def _definition_from_entry(
         "runtime": runtime,
         "source": source,
         "requires_axis": bool(entry.requires_axis),
+        "requires_axes": bool(entry.requires_axes),
+        "axis_arity": list(entry.axis_arity),
         "changes_shape": bool(entry.changes_shape),
         "parameters": _parameter_payloads(entry.parameters),
         "input_slots": _input_slot_payloads(entry.input_slots),

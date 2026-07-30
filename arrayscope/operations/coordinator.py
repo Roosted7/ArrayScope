@@ -48,6 +48,7 @@ class OperationCoordinator:
         axis=None,
         parameters=None,
         *,
+        axes=None,
         slot_bindings=None,
         slot_resolver=None,
     ):
@@ -55,6 +56,10 @@ class OperationCoordinator:
             operation_id,
             axis=axis,
             parameters=parameters or {},
+            axes=axes,
+            # The current derived shape is what the new step will see, so an
+            # out-of-range axis set is named here rather than at first evaluate.
+            ndim=len(self.document.current_shape),
             slot_bindings=slot_bindings,
             slot_resolver=slot_resolver,
         )
@@ -89,6 +94,7 @@ class OperationCoordinator:
         axis=None,
         parameters=None,
         *,
+        axes=None,
         slot_bindings=None,
         slot_resolver=None,
     ):
@@ -96,6 +102,7 @@ class OperationCoordinator:
             operation_id,
             axis=axis,
             parameters=parameters or {},
+            axes=axes,
             slot_bindings=slot_bindings,
             slot_resolver=slot_resolver,
         )

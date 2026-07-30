@@ -239,3 +239,62 @@ def test_bounds_and_choices_are_refused_where_they_mean_nothing():
         OperationParameter("mode", "Mode", kind="enum", choices=("a",), default="b")
     with pytest.raises(ValueError, match="unsupported kind"):
         OperationParameter("tag", "Tag", kind="str")
+
+
+# --- axis-set field (an operation's subject, not one of its parameters) -------
+
+
+def test_an_axis_set_op_gets_a_form_even_with_no_parameters():
+    """Parameterless is not selectionless: the axis set still needs choosing."""
+
+    entry = get_operation_entry("centered_fftn")
+    form = build_parameter_form(
+        entry,
+        shape=(4, 5, 6),
+        axis_choices=(("d0", 0), ("d1 (Y)", 1), ("d2 (X)", 2)),
+        display_axes=(1, 2),
+    )
+
+    assert form is not None
+    assert form.fields == []
+    assert form.axes_field is not None
+    # Defaults to what the user is looking at, so a 2-slab op arrives pointing
+    # at the displayed image rather than at axes 0 and 1 by accident.
+    assert form.selected_axes() == (1, 2)
+    assert [label for label, _axis in form.axes_field.choices] == ["d0", "d1 (Y)", "d2 (X)"]
+    assert form.validate() is None
+
+
+def test_an_axis_set_form_prefers_an_explicit_selection_over_the_display():
+    entry = get_operation_entry("mean_axes")
+    form = build_parameter_form(entry, shape=(4, 5, 6), axes=(2, 0), display_axes=(1, 2))
+
+    assert form.selected_axes() == (0, 2)
+
+
+def test_an_axis_set_form_falls_back_to_the_leading_axes_without_a_view():
+    entry = get_operation_entry("mean_axes")
+    form = build_parameter_form(entry, shape=(4, 5, 6))
+
+    assert form.selected_axes() == (0, 1)
+    assert [label for label, _axis in form.axes_field.choices] == ["d0", "d1", "d2"]
+
+
+def test_an_axis_set_form_refuses_an_empty_selection():
+    entry = get_operation_entry("centered_fftn")
+    form = build_parameter_form(entry, shape=(4, 5, 6), display_axes=(1, 2))
+
+    form.set_selected_axes(())
+    message = form.validate()
+
+    assert message is not None
+    assert "at least 1" in message
+
+
+def test_a_single_axis_op_has_no_axis_set_field():
+    form = build_parameter_form(get_operation_entry("crop"), shape=(4, 5, 6), axis=1)
+
+    assert form.axes_field is None
+    assert form.selected_axes() == ()
+    with pytest.raises(KeyError):
+        form.set_selected_axes((0,))

@@ -80,6 +80,8 @@ operation_evaluator = load_module("operation_evaluator")
 
 ArrayDocument = operation_pipeline.ArrayDocument
 CenteredFFT = operation_pipeline.CenteredFFT
+CenteredFFTN = operation_pipeline.CenteredFFTN
+MeanOverAxes = operation_pipeline.MeanOverAxes
 CombineRealImagAxis = operation_pipeline.CombineRealImagAxis
 Conjugate = operation_pipeline.Conjugate
 Crop = operation_pipeline.Crop
@@ -160,6 +162,104 @@ def test_recipe_v2_preserves_disabled_steps():
     assert tuple(step.enabled for step in loaded_steps) == (True, False)
     assert operation_recipes.loads_recipe(text, base_shape=(3, 4)) == (
         Crop(axis=1, start=1, stop=3),
+    )
+
+
+def test_axis_set_operations_round_trip_through_a_recipe():
+    operations = (
+        CenteredFFTN(axes=(0, 2)),
+        MeanOverAxes(axes=(0, 1)),
+    )
+
+    text = operation_recipes.dumps_recipe(operations)
+
+    # The set serializes under its own key, parallel to a single ``axis``.
+    assert '"axes"' in text
+    assert operation_recipes.loads_recipe(text, base_shape=(3, 4, 2)) == operations
+
+
+def test_an_axis_set_recipe_is_read_back_as_a_set_whatever_order_it_names():
+    recipe = {
+        "version": operation_recipes.RECIPE_VERSION,
+        "operations": [{"id": "centered_fftn", "axes": [2, 0]}],
+    }
+
+    loaded = operation_recipes.operations_from_recipe(recipe, base_shape=(3, 4, 2))
+
+    # Written backwards, loaded as the same operation -- otherwise two identical
+    # pipelines would miss each other's stage-cache entries.
+    assert loaded == (CenteredFFTN(axes=(0, 2)),)
+
+
+def test_a_recipe_written_before_axis_sets_existed_still_loads_unchanged():
+    """The compatibility direction: no ``axes`` key anywhere, nothing changes."""
+
+    legacy = {
+        "version": operation_recipes.LEGACY_RECIPE_VERSION,
+        "operations": [
+            {"id": "crop", "axis": 1, "parameters": {"start": 1, "stop": 3}},
+            {"id": "conjugate"},
+            {"id": "mean", "axis": 0},
+        ],
+    }
+
+    assert operation_recipes.operations_from_recipe(legacy, base_shape=(3, 4, 2)) == (
+        Crop(axis=1, start=1, stop=3),
+        Conjugate(),
+        Mean(axis=0),
+    )
+
+
+def test_an_axis_set_recipe_names_a_bad_selection_instead_of_a_shape_error():
+    for axes, message in (
+        ([], "at least 1"),
+        ([1, 1], "more than once"),
+        ([0, 5], "out of bounds"),
+    ):
+        recipe = {
+            "version": operation_recipes.RECIPE_VERSION,
+            "operations": [{"id": "centered_fftn", "axes": axes}],
+        }
+        with pytest.raises(ValueError, match=message):
+            operation_recipes.operations_from_recipe(recipe, base_shape=(3, 4, 2))
+
+    # ...and the rank it is checked against is the shape entering THAT step, not
+    # the base shape: axis 2 is legal at the start and gone after the reduction.
+    after_reduction = {
+        "version": operation_recipes.RECIPE_VERSION,
+        "operations": [{"id": "mean", "axis": 0}, {"id": "centered_fftn", "axes": [0, 2]}],
+    }
+    with pytest.raises(ValueError, match=r"operation 1 \(centered_fftn\) is incompatible"):
+        operation_recipes.operations_from_recipe(after_reduction, base_shape=(3, 4, 2))
+
+
+def test_axis_set_entries_declare_one_selection_kind_and_reject_the_other():
+    entries = {entry.id: entry for entry in operation_registry.operation_entries()}
+
+    assert entries["centered_fftn"].axis_selection == "set"
+    assert entries["centered_fft"].axis_selection == "one"
+    assert entries["conjugate"].axis_selection == "none"
+
+    with pytest.raises(ValueError, match="requires an axis set"):
+        operation_registry.create_operation("centered_fftn")
+    with pytest.raises(ValueError, match="requires an axis"):
+        operation_registry.create_operation("centered_fft")
+
+    with pytest.raises(ValueError, match="not both"):
+        operation_registry.OperationEntry(
+            id="broken",
+            label="Broken",
+            operation_type=CenteredFFTN,
+            requires_axis=True,
+            requires_axes=True,
+        )
+
+
+def test_describing_an_axis_set_operation_names_every_axis():
+    assert operation_registry.describe_operation(MeanOverAxes(axes=(0, 2))) == "Mean over axes 0, 2"
+    assert (
+        operation_registry.describe_operation(CenteredFFTN(axes=(1, 2)))
+        == "Centered FFT over axes 1, 2"
     )
 
 

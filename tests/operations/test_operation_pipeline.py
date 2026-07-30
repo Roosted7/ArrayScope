@@ -75,7 +75,10 @@ operation_pipeline = load_module("operation_pipeline")
 
 ArrayDocument = operation_pipeline.ArrayDocument
 CenteredFFT = operation_pipeline.CenteredFFT
+CenteredFFTN = operation_pipeline.CenteredFFTN
 CenteredIFFT = operation_pipeline.CenteredIFFT
+CenteredIFFTN = operation_pipeline.CenteredIFFTN
+MeanOverAxes = operation_pipeline.MeanOverAxes
 CombineRealImagAxis = operation_pipeline.CombineRealImagAxis
 Conjugate = operation_pipeline.Conjugate
 Crop = operation_pipeline.Crop
@@ -167,6 +170,73 @@ def test_centered_fft_and_ifft_operations_wrap_existing_dim_ops():
         CenteredFFT(axis=1).apply(data),
         dim_ops.centered_fft(data, axis=1),
     )
+
+
+def test_multi_axis_transforms_equal_the_single_axis_chain_they_replace():
+    """One stage, same array: the multi-axis op is not a new transform.
+
+    ``assert_array_equal`` on purpose -- see ``test_dim_ops``: composition,
+    not a single ``fftn``, is what makes this exact rather than close.
+    """
+
+    rng = np.random.default_rng(0xF17)
+    data = rng.standard_normal((3, 4, 5)).astype(np.float32)
+
+    chained = (
+        ArrayDocument(data).with_operation(CenteredFFT(axis=0)).with_operation(CenteredFFT(axis=2))
+    )
+    multi = ArrayDocument(data).with_operation(CenteredFFTN(axes=(0, 2)))
+
+    assert multi.current_shape == data.shape
+    assert multi.base_axes == ArrayDocument(data).base_axes
+    np.testing.assert_array_equal(multi.materialize(), chained.materialize())
+    assert CenteredFFTN(axes=(0, 2)).output_dtype(np.float32) == np.dtype(np.complex64)
+
+    restored = (
+        ArrayDocument(data)
+        .with_operation(CenteredFFTN(axes=(0, 2)))
+        .with_operation(CenteredIFFTN(axes=(0, 2)))
+    )
+    np.testing.assert_allclose(restored.materialize().real, data, atol=1e-5)
+
+
+def test_multi_axis_mean_matches_numpy_and_drops_one_rank_per_axis():
+    rng = np.random.default_rng(0xEA1)
+    data = rng.standard_normal((3, 4, 5, 2)).astype(np.float32)
+    document = ArrayDocument(data).with_operation(MeanOverAxes(axes=(1, 3)))
+
+    assert document.current_shape == (3, 5)
+    # Byte-identical to the numpy call it stands for: one reduction over the
+    # whole axis tuple, not a chain of per-axis means (which would divide
+    # twice and accumulate differently).
+    np.testing.assert_array_equal(document.materialize(), data.mean(axis=(1, 3)))
+    assert MeanOverAxes(axes=(1, 3)).output_dtype(np.uint16) == np.dtype(np.float32)
+
+
+def test_multi_axis_mean_keeps_the_axis_metadata_of_the_axes_that_survive():
+    data = np.zeros((3, 4, 5, 2), dtype=np.float32)
+    base = ArrayDocument(data)
+    reduced = base.with_operation(MeanOverAxes(axes=(1, 3)))
+
+    assert [axis.id for axis in reduced.current_axes] == [
+        base.base_axes[0].id,
+        base.base_axes[2].id,
+    ]
+
+
+def test_axis_set_operations_normalize_their_selection_at_construction():
+    # A set has no order, and two spellings of the same set must be the same
+    # dataclass -- equal, equally hashed, and therefore one stage-cache key.
+    assert CenteredFFTN(axes=(2, 0)) == CenteredFFTN(axes=(0, 2))
+    assert hash(MeanOverAxes(axes=[2, 0])) == hash(MeanOverAxes(axes=(0, 2)))
+    assert MeanOverAxes(axes=[2, 0]).axes == (0, 2)
+
+    with pytest.raises(ValueError, match="more than once"):
+        CenteredFFTN(axes=(1, 1))
+    with pytest.raises(ValueError, match="at least 1"):
+        MeanOverAxes(axes=())
+    with pytest.raises(ValueError, match="out of bounds"):
+        CenteredFFTN(axes=(0, 3)).output_shape((2, 3, 4))
 
 
 def test_fftshift_operation_wraps_existing_dim_ops():
