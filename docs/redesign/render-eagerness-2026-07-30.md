@@ -25,6 +25,12 @@ must clear.
 
 ---
 
+> **Superseded in part, same day.** §1's halo inconsistency and §5's
+> "prefetch is not a halo-filler" have both been acted on; see
+> [retention-halo-2026-07-30.md](retention-halo-2026-07-30.md) for the unified
+> halo, two corrections to what is written below, and the measured **rejection**
+> of warming the halo from prefetch. §2, §3, §4, §6 and §7 stand as written.
+
 ## 1. The three tile sets, and their three inconsistent halos
 
 `MontagePlan.tiles_intersecting(view_range, margin_tiles=N)`
@@ -45,6 +51,19 @@ means "every tile with any overlap".
 Two different things are called `near` (margin 2 in the session, margin 1 in
 the planner), and the resize path silently uses no halo at all. Whatever the
 right retention radius is, it is currently three numbers.
+
+> Two corrections found while unifying them. **The margin is not the whole
+> difference**: the session derives its set from a rect that
+> `montage_rect_for_viewport` has snapped outward to whole-tile bounds and
+> clipped to the montage, while the planner passes the raw camera rect
+> straight through. On the 272-tile montage zoomed to a few tiles that made
+> the planner's *margin-0* set 6 tiles where the session's was 15 — a
+> discrepancy this table cannot show. (`near` is now unified; `active` is
+> not.) **And the halo was never conditional on `persistent_tile_residency`**
+> as the policy in `montage_viewport.py` implies: `PYQTGRAPH_CAPABILITIES`
+> declares that flag `True`, so both shipped backends were already on the
+> margin-1/2 policy. The halo-less branch is what a *failed capability probe*
+> returns.
 
 **Neither backend's eviction predicate consults any of them.** `near_tiles` /
 `near_tile_source_ids` reach the PyQtGraph layer and are used for exactly one
@@ -354,6 +373,17 @@ different candidate set and has no memo at all.
 *display payload* into the evaluator cache and optionally warms backend
 residency (`_warm_prefetched_tiled_residency`, `montage_prefetch.py:664`) —
 one tile at a time, each immediately hidden again (`tiles.py:2134`).
+
+> Correction: the hide is real, the drop into the reuse pool is not.
+> `tiles.py` calls `_remove_from_direct_reuse_pool(item_state)` and
+> `_touch_resident_state(item_state)` immediately after, with a comment saying
+> warm residency is deliberately kept out of the generic pool so the next warm
+> batch cannot pop and retarget it. The sharper defect is that the walk's
+> display-cache `hit` branch returns before ever reaching the warm, so on a
+> montage that opened fit-to-window — every tile already evaluated — prefetch
+> warms backend residency for nothing at all. Closing that gap was
+> **measured and rejected**: see
+> [retention-halo-2026-07-30.md](retention-halo-2026-07-30.md) §3.
 
 Candidates are **all plan tiles minus visible/rendered/loading/skipped**
 (`montage_prefetch.py:465`) — the whole montage, priority-ordered, not the
