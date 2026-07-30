@@ -168,3 +168,71 @@ def test_cfl_reader_floor_never_invents_axes_a_tool_did_not_write(tmp_path):
     assert read_cfl(stem).shape == (2, 3)
 
 
+# --- cancellation reaches the child through the builder path -----------------
+
+
+def _sleeping_command_spec(operation_id: str, executable: Path):
+    """A plugin spec whose bound fn is the real command-runtime builder."""
+
+    from arrayscope.operations import library
+    from arrayscope.operations.plugins import PluginOperationSpec
+
+    build = library._make_command_build(
+        "command",
+        {
+            "command_template": f'"{executable}" --sleep 5 {{in}} {{out}}',
+            "handoff": "npy",
+            "shell": False,
+            "timeout_s": None,
+        },
+        environment_id="",
+    )
+    return PluginOperationSpec(id=operation_id, label=operation_id, build=build)
+
+
+def test_builder_bound_command_is_cancellable_mid_flight(tmp_path):
+    executable = _fake_npy_command(tmp_path)
+    spec = _sleeping_command_spec("demo:sleepy-command", executable)
+    bound = spec.resolve_fn(None, {})
+    token = SimpleNamespace(cancelled=False)
+    outcome = {}
+
+    def run():
+        try:
+            bound(np.ones(2), cancellation_token=token)
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    time.sleep(0.05)
+    token.cancelled = True
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert isinstance(outcome.get("error"), EvaluationCancelled)
+
+
+def test_pipeline_evaluation_stops_a_command_op_on_a_pre_cancelled_token(tmp_path):
+    from arrayscope.operations import plugins
+    from arrayscope.operations.pipeline import evaluate
+
+    executable = _fake_npy_command(tmp_path)
+    plugins._reset_plugin_cache()
+    try:
+        spec = _sleeping_command_spec("demo:sleepy-pipeline", executable)
+        plugins._SPEC_CACHE[spec.id] = spec
+        operation = plugins.PluginOperation(plugin_id=spec.id)
+        context = SimpleNamespace(cancellation_token=SimpleNamespace(cancelled=True))
+
+        started = time.monotonic()
+        with pytest.raises(EvaluationCancelled):
+            evaluate(np.ones((2, 2), dtype=np.float32), (operation,), evaluation_context=context)
+        elapsed = time.monotonic() - started
+    finally:
+        plugins._reset_plugin_cache()
+
+    # The token used to be dropped on the floor: apply() took no context and
+    # apply_to_region deleted the one it was handed, so this waited out the
+    # full 5 s sleep instead of refusing before the child was even spawned.
+    assert elapsed < 2.0

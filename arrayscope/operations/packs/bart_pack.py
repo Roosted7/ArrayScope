@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from arrayscope.operations import command_runtime
+from arrayscope.operations.cancellation import cancellable
 
 BART_ENVIRONMENT_ID = "bart"
 BART_TIMEOUT_ENV = "ARRAYSCOPE_BART_TIMEOUT_S"
@@ -164,7 +165,7 @@ def pack_specs() -> tuple:
         _runtime, reason = _pack_runtime()
         return reason
 
-    def invoke(argv, data, *, inputs=None):
+    def invoke(argv, data, *, inputs=None, cancellation_token=None):
         runtime, reason = _pack_runtime()
         if reason or runtime is None:
             raise RuntimeError(reason or "BART execution environment is unavailable.")
@@ -172,6 +173,7 @@ def pack_specs() -> tuple:
             argv,
             data,
             inputs=inputs,
+            cancellation_token=cancellation_token,
             env=runtime.env,
             executable=runtime.executable,
             cwd=runtime.cwd,
@@ -181,13 +183,23 @@ def pack_specs() -> tuple:
     def build(argv):
         def factory(_axis, params, _slots):
             tokens = [str(token).format_map(dict(params)) for token in argv]
-            return lambda data: invoke(tokens, data)
+
+            @cancellable
+            def bound(data, *, cancellation_token=None):
+                return invoke(tokens, data, cancellation_token=cancellation_token)
+
+            return bound
 
         return factory
 
     def build_pics(_axis, params, slots):
         tokens = ["pics", "-S", "-i", str(int(params["iterations"]))]
-        return lambda data: invoke(tokens, data, inputs=slots)
+
+        @cancellable
+        def bound(data, *, cancellation_token=None):
+            return invoke(tokens, data, inputs=slots, cancellation_token=cancellation_token)
+
+        return bound
 
     return (
         PluginOperationSpec(

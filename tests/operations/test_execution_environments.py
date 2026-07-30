@@ -112,3 +112,24 @@ def test_python_environment_cfl_handoff_hands_the_callable_the_rank_it_was_given
     assert np.array_equal(result, data.astype(np.complex64))
 
 
+def test_python_environment_operation_round_trips_and_takes_a_cancellation_token(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    import numpy as np
+    import pytest
+
+    from arrayscope.operations.cancellation import EvaluationCancelled
+
+    bound = _python_environment_operation(
+        tmp_path, monkeypatch, handoff="npy", body="def run(array):\n    return array * 3\n"
+    )
+    data = np.arange(6, dtype=np.float32).reshape(2, 3)
+
+    assert np.array_equal(bound(data), data * 3)
+
+    # The out-of-process runtime is exactly what a token exists for; this
+    # builder omitted `cancellation_token=` entirely.
+    with pytest.raises(EvaluationCancelled):
+        bound(data, cancellation_token=SimpleNamespace(cancelled=True))

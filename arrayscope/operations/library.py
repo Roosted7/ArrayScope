@@ -82,6 +82,7 @@ from typing import NamedTuple
 
 from arrayscope.app import user_dirs
 from arrayscope.operations import command_runtime, environments, registry
+from arrayscope.operations.cancellation import cancellable
 from arrayscope.operations.input_slots import OperationInputSlot
 from arrayscope.operations.plugins import PluginOperationSpec
 from arrayscope.operations.registry import (
@@ -752,7 +753,8 @@ def _make_command_build(
         if axis is not None:
             values["axis"] = axis
 
-        def bound(data):
+        @cancellable
+        def bound(data, *, cancellation_token=None):
             resolved, reason = _resolve_runtime_environment(environment_id)
             if reason:
                 raise RuntimeError(reason)
@@ -764,6 +766,7 @@ def _make_command_build(
                 handoff=str(config["handoff"]),
                 shell=bool(config["shell"]),
                 prefix=_runtime_prefix(runtime, resolved),
+                cancellation_token=cancellation_token,
                 env=None if resolved is None else resolved.env,
                 cwd=None if resolved is None else resolved.cwd,
                 timeout=config["timeout_s"],
@@ -793,7 +796,8 @@ def _make_python_environment_build(
         parameters_json = json.dumps(dict(params), separators=(",", ":"))
         axis_json = json.dumps(axis)
 
-        def bound(data):
+        @cancellable
+        def bound(data, *, cancellation_token=None):
             resolved, reason = resolve_execution_environment(environment_id)
             if reason:
                 raise RuntimeError(reason)
@@ -823,6 +827,7 @@ def _make_python_environment_build(
                 command,
                 data,
                 handoff=handoff,
+                cancellation_token=cancellation_token,
                 env=resolved.env,
                 cwd=resolved.cwd,
                 timeout=timeout,

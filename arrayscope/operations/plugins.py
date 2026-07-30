@@ -35,6 +35,7 @@ from inspect import signature
 
 import numpy as np
 
+from arrayscope.operations.cancellation import EvaluationCancelled, call_with_cancellation
 from arrayscope.operations.capabilities import (
     OperationCapabilities,
     OperationClass,
@@ -296,7 +297,9 @@ class PluginOperation:
                 return source.unavailable_reason
         return ""
 
-    def _characterize(self, shape: Shape, dtype, *, exact_input=None) -> OperationCharacterization:
+    def _characterize(
+        self, shape: Shape, dtype, *, exact_input=None, cancellation_token=None
+    ) -> OperationCharacterization:
         characterization = characterize_operation(
             self._spec(),
             tuple(shape),
@@ -305,6 +308,7 @@ class PluginOperation:
             params=self._params(),
             slots=self._slot_inputs(),
             exact_input=exact_input,
+            cancellation_token=cancellation_token,
         )
         object.__setattr__(self, "_shape_hint", tuple(shape))
         object.__setattr__(self, "_dtype_hint", np.dtype(dtype))
@@ -332,11 +336,23 @@ class PluginOperation:
         # (or downgraded) op always CPU-materializes the whole array.
         return OperationClass.SHADER_ON_READ if self._region_honored() else OperationClass.OPAQUE
 
-    def apply(self, data):
+    def apply(self, data, *, evaluation_context=None):
+        # The evaluation context is where a cancellation token lives, and an
+        # out-of-process runtime is the one thing here that can run long enough
+        # to need one. The token reaches the runtime wrapper only; the author's
+        # own ``fn(array)`` never sees it (see ``call_with_cancellation``).
+        cancellation_token = getattr(evaluation_context, "cancellation_token", None)
+        if cancellation_token is not None and getattr(cancellation_token, "cancelled", False):
+            # Characterization below runs the operation too -- five to nine
+            # probes for a new signature -- so an already-cancelled request has
+            # to be refused before it, not after.
+            raise EvaluationCancelled()
         array = np.asarray(data)
-        characterization = self._characterize(array.shape, array.dtype)
+        characterization = self._characterize(
+            array.shape, array.dtype, cancellation_token=cancellation_token
+        )
         fn = self._spec().resolve_fn(self.axis, self._params(), self._slot_arrays())
-        result = np.asarray(fn(data))
+        result = np.asarray(call_with_cancellation(fn, data, cancellation_token))
         predicted_shape = characterization.output_shape
         predicted_dtype = characterization.output_dtype
         if tuple(result.shape) != predicted_shape or result.dtype != predicted_dtype:
@@ -454,14 +470,14 @@ class PluginOperation:
     def apply_to_region(
         self, data, *, input_region: RegionSpec, output_region: RegionSpec, evaluation_context=None
     ):
-        del input_region, evaluation_context
+        del input_region
         if self._region_honored():
             # ``data`` is already the requested sub-region (identity input map);
             # the verified windowable fn produces exactly that output sub-region.
-            return self.apply(data)
+            return self.apply(data, evaluation_context=evaluation_context)
         # ``data`` is the whole input (we requested ALL on every axis); apply
         # the opaque fn to the whole array, then take the requested output slab.
-        return apply_region(self.apply(data), output_region)
+        return apply_region(self.apply(data, evaluation_context=evaluation_context), output_region)
 
 
 def _builtin_operation_ids() -> frozenset[str]:

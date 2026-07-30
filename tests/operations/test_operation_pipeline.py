@@ -281,6 +281,42 @@ def test_axis_and_crop_validation_use_current_derived_shape():
         ArrayDocument(np.zeros((2, 3))).with_operation(Crop(axis=1, start=2, stop=4))
 
 
+def test_evaluate_hands_the_context_only_to_operations_that_accept_one():
+    from types import SimpleNamespace
+
+    from arrayscope.operations.pipeline import evaluate
+
+    seen = {}
+
+    class ContextAware:
+        def apply(self, data, *, evaluation_context=None):
+            seen["context"] = evaluation_context
+            return np.asarray(data) + 1
+
+        def output_shape(self, shape):
+            return tuple(shape)
+
+        def output_dtype(self, input_dtype):
+            return input_dtype
+
+    data = np.zeros((2, 3), dtype=np.float32)
+    context = SimpleNamespace(cancellation_token=None)
+
+    # A built-in takes ``apply(data)`` and always will: handing it a context it
+    # never declared must not raise, and inspecting the signature (rather than
+    # retrying on TypeError) is what keeps a real TypeError from inside a
+    # working apply from being swallowed.
+    np.testing.assert_array_equal(evaluate(data, (Conjugate(),), evaluation_context=context), data)
+    np.testing.assert_array_equal(
+        evaluate(data, (ContextAware(),), evaluation_context=context), data + 1
+    )
+    assert seen["context"] is context
+
+    seen.clear()
+    evaluate(data, (ContextAware(),))
+    assert seen["context"] is None
+
+
 def test_operation_pipeline_module_has_no_qt_or_pyqtgraph_imports():
     tree = ast.parse((ROOT / "arrayscope" / "operations" / "pipeline.py").read_text())
 

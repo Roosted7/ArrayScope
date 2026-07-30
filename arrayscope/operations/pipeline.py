@@ -11,6 +11,10 @@ import numpy as np
 from arrayscope.core.axis_info import axes_for_shape, output_axes_for_operations
 from arrayscope.core.axis_utils import validate_axis
 from arrayscope.operations import _numba_native_ops, _numba_reductions, dim_ops
+from arrayscope.operations.cancellation import (
+    EvaluationCancelled,
+    apply_with_evaluation_context,
+)
 from arrayscope.operations.capabilities import (
     OperationCapabilities,
     OperationKind,
@@ -1459,19 +1463,38 @@ class ArrayDocument:
             return self.mark_base_data_changed()
         return self.replace_base_and_clear_steps(base_data)
 
-    def materialize(self):
-        return evaluate(self.base_data, self.enabled_operations)
+    def materialize(self, *, evaluation_context=None):
+        return evaluate(
+            self.base_data, self.enabled_operations, evaluation_context=evaluation_context
+        )
 
 
-def evaluate(base_data, operations):
+def evaluate(base_data, operations, *, evaluation_context=None):
     from arrayscope.operations.optimizer import optimize_operations
 
+    cancellation_token = getattr(evaluation_context, "cancellation_token", None)
+    if cancellation_token is not None and getattr(cancellation_token, "cancelled", False):
+        # Refuse at the door. Shape optimization below already runs the
+        # operation -- an uncharacterized out-of-process op costs five to nine
+        # probe children there, before any ``apply`` -- so a request that is
+        # already cancelled must not get that far.
+        #
+        # Cancellation *arriving during* that optimization is still not
+        # honored: the token would have to be threaded through
+        # ``optimize_operations`` -> ``evaluate_shape`` ->
+        # ``operation_output_signature`` -> ``characterize_output``, widening
+        # the cost API for a path the interactive engine does not take (it
+        # plans first, then calls ``apply_to_region``, which does carry the
+        # token all the way into ``run_array_command``'s poll loop).
+        raise EvaluationCancelled()
     optimized = optimize_operations(
         np.shape(base_data), getattr(base_data, "dtype", None), operations
     )
     data = base_data
     for operation in optimized.operations:
-        data = operation.apply(data)
+        # Whole-array evaluation is the path an out-of-process operation
+        # actually takes, so it is the path its cancellation token has to reach.
+        data = apply_with_evaluation_context(operation, data, evaluation_context)
     return data
 
 

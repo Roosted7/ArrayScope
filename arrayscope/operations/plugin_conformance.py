@@ -33,6 +33,7 @@ from time import perf_counter_ns
 
 import numpy as np
 
+from arrayscope.operations.cancellation import EvaluationCancelled, call_with_cancellation
 from arrayscope.operations.regions import (
     RegionSpec,
     apply_region,
@@ -161,6 +162,7 @@ def characterize_operation(
     params=None,
     slots=None,
     exact_input=None,
+    cancellation_token=None,
 ) -> OperationCharacterization:
     """Jointly adjudicate shape, dtype, and windowability with one cache."""
 
@@ -210,7 +212,12 @@ def characterize_operation(
             np.random.default_rng(_SHAPE_PROBE_SEED + index), probe_shape, input_dtype
         )
         try:
-            probe_output = np.asarray(fn(probe_input))
+            # Probing an out-of-process operation runs the same child an apply
+            # does -- 5 to 9 of them for a new signature -- so the token has to
+            # reach here too, not only the apply that follows.
+            probe_output = np.asarray(call_with_cancellation(fn, probe_input, cancellation_token))
+        except EvaluationCancelled:
+            raise
         except Exception as exc:
             failure = exc
             break
@@ -251,7 +258,7 @@ def characterize_operation(
             if tuple(whole.shape) != input_shape or whole.dtype != input_dtype:
                 raise ValueError("exact characterization input does not match its signature")
             exact_started = perf_counter_ns()
-            exact_output = np.asarray(fn(whole))
+            exact_output = np.asarray(call_with_cancellation(fn, whole, cancellation_token))
             whole_array_calls = 1
             whole_array_elements = int(whole.size)
             whole_array_ns = perf_counter_ns() - exact_started
