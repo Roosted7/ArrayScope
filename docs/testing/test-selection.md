@@ -613,6 +613,12 @@ differs is invalidated. A seeded map can only cause more tests to run, never
 fewer. A map recorded under a different package set or Python version reads as
 empty, because both are part of the environment key.
 
+That last sentence has a visible consequence worth naming: **the first `pytest`
+after a checkout moves to a different interpreter is a full traced run** (~4 min).
+The 2026-07-30 conda→`uv`/`.venv` migration did exactly that to every checkout.
+It is the machinery working — a map recorded against other binaries must not be
+allowed to mark anything unaffected — and it costs once, per checkout.
+
 **Copy, never link.** Two checkouts sharing one map would fight: each run
 records its own tree's fingerprints over the other's and vacuums what the other
 still references, so both would end up seeing everything as changed — with

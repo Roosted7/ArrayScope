@@ -34,9 +34,17 @@ evidence, not live direction.
 
 ## Environment
 
-The maintained environment is the `arrayscope` conda env. How you enter it depends on who you are:
+The maintained environment is **uv plus a per-checkout `.venv`**, built from `pyproject.toml` and pinned by the committed `uv.lock`. One command creates it:
 
-- **Interactive shell**: direnv, as before — it activates once per `cd` and costs nothing afterwards.
+```bash
+uv sync
+```
+
+Every checkout — every worktree — gets its own `.venv`, on purpose. An editable install is a pointer, and a single shared environment means one pointer decides which checkout *every* process imports; re-pointing it silently redirected the other party's runs (see `docs/testing/README.md`). From uv's warm cache a full 100-package rebuild costs **~0.2 s** and near-zero disk (hardlinks), so the isolation is free.
+
+How you enter it depends on who you are:
+
+- **Interactive shell**: direnv, as before — `.envrc` puts `.venv/bin` on PATH, and runs `uv sync` for you if the venv is missing.
 - **Scripts, agents, anything that runs commands one at a time**: `tools/env <command>`.
 
 ```bash
@@ -46,13 +54,19 @@ tools/env ruff check .
 tools/env git commit ...      # puts ruff+python on PATH for the pre-commit hook
 ```
 
-Do **not** wrap per-command invocations in `direnv exec .`: it re-evaluates the conda hook every call — measured **1.56 s before the command starts**, which is 3× the suite's entire no-op fast path. `tools/env` execs the env's binaries directly (~80 ms), which is all activation was buying (verified against a Qt/offscreen test in a process that never saw conda). A non-standard install location is stated once with `ARRAYSCOPE_ENV_PREFIX=/path/to/envs/arrayscope`.
+`tools/env` finds `.venv` by walking up from **its own location**, never from the caller's cwd — harnesses reset cwd between commands, and the point of a per-checkout venv is that `tools/env` in *this* tree uses *this* tree's install. It costs ~5 ms. A non-standard layout is stated once with `ARRAYSCOPE_ENV_PREFIX=/path/to/.venv`.
 
-When dependencies change:
+`direnv exec .` is now cheap too (**24 ms**, down from 3.2 s under the conda hook it replaced), so it is no longer a trap — but `tools/env` is still the shorter path and does not depend on `direnv allow`.
+
+When dependencies change: edit `pyproject.toml`, then
 
 ```bash
-tools/env conda env update -f environment.yml --prune
+uv sync          # re-resolves, updates uv.lock, prunes what left
 ```
+
+Commit `uv.lock` with the `pyproject.toml` change. The lock is the only reason two checkouts agree on versions; `environment.yml` never pinned anything.
+
+**One-time cost after migrating a checkout (expected, not a defect):** testmon keys its recorded map by environment, and the interpreter's identity is part of that key. Switching from the conda interpreter to `.venv` invalidates the map, so the **first `pytest` in a migrated checkout is a full traced run (~4 min)** that re-records everything. It happens once per checkout. The map seeding/adoption machinery is package-set-aware by design and handles it; nothing needs deleting by hand.
 
 Headless GUI tests normally use `QT_QPA_PLATFORM=offscreen`. WGPU/Vulkan tests still need separate real-hardware runs before performance or Wayland claims are accepted.
 

@@ -74,7 +74,13 @@ def test_pyfftw_backend_unavailable_does_not_require_dependency(monkeypatch):
     assert fft_backend.resolve_fft_backend("pyfftw").name == "numpy"
 
 
-def test_pyfftw_backend_available_in_conda_environment():
+def test_pyfftw_backend_available_in_maintained_environment():
+    # The maintained environment installs pyfftw (the `fftw` extra, enabled by
+    # default in `uv sync`), so this asserts the optional backend actually works
+    # where it is present rather than only that it degrades where it is not --
+    # that is the previous test. The importorskip keeps a bare `pip install -e .`
+    # green; it is not a licence for the maintained env to drop the extra, which
+    # would silently turn this coverage into a skip.
     pytest.importorskip("pyfftw")
     assert "pyfftw" in fft_backend.available_fft_backends()
     data = np.arange(4 * 4, dtype=np.float32).reshape(4, 4)

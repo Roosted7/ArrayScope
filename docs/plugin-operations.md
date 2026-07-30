@@ -310,7 +310,7 @@ timeout, and cleanup. It is not numeric evidence. Run the real-toolbox gate
 from the repository root with:
 
 ```bash
-conda run -n arrayscope python tools/validate_bart_numerics.py \
+tools/env python tools/validate_bart_numerics.py \
     --bart-toolbox-path /path/to/bart
 ```
 

@@ -33,7 +33,7 @@ larger than AVIF at comparable quality.)
 ## Regenerating
 
 ```bash
-PATH=~/miniconda3/bin:$PATH direnv exec . python tools/demo_recorder.py
+tools/env python tools/demo_recorder.py
 ```
 
 Useful flags: `--list`, `--only <substring>`, `--formats gif,avif,mp4`,

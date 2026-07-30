@@ -308,18 +308,25 @@ empty.
 
 ## Environment facts (hard-won; trust these)
 
-- Python: `~/miniconda3/envs/arrayscope/bin/python` (conda env, PySide6,
-  editable install). **The editable-install pointer decides which checkout
-  the live app AND every test run import — check it before interpreting any
-  field report or gate result:**
-  `python -c "import arrayscope; print(arrayscope.__file__)"`.
-  Re-pointing it (`pip install -e <checkout>`) is a deliberate, announced
-  act: it silently redirects the *other* party's runs too (a branch agent's
-  live gates would import `main`, or the user's field session imports WIP).
-  Field reports must name the checkout + commit they ran. As of 2026-07-17
-  the pointer is at `.worktrees/g5-sparse-pyramid` (the G5 program's live
-  verification channel) — the user's field sessions currently test that
-  branch, not `main`.
+- Python: `<checkout>/.venv/bin/python` — **one venv per checkout**, built by
+  `uv sync` from `pyproject.toml` + `uv.lock` on the system CPython 3.14.
+  Enter it with `tools/env <command>` or direnv; never assume a global
+  interpreter. Field reports still name the checkout + commit they ran.
+- **Historical (through 2026-07-30): the shared-environment pointer trap.**
+  A single conda env served every checkout, so one editable-install pointer
+  decided what the live app *and* every test run imported. Re-pointing it
+  (`pip install -e <checkout>`) silently redirected the *other* party's runs —
+  a branch agent's live gates would import `main`, or the user's field session
+  imported WIP — and for a stretch in July 2026 the pointer sat at
+  `.worktrees/g5-sparse-pyramid`, so field sessions were testing that branch
+  while everyone believed they were testing `main`. Per-checkout venvs remove
+  the class: there is no shared pointer left to mis-set, and a worktree's venv
+  can only point at itself. The check is still worth one line when a result
+  looks impossible:
+  `tools/env python -c "import arrayscope; print(arrayscope.__file__)"`.
+- Migrating a checkout to `.venv` changes testmon's environment identity, so
+  the **first `pytest` there is a full traced re-record (~4 min)**. Once per
+  checkout, expected, not a defect.
 - Real display works from the harness (`QT_QPA_PLATFORM=wayland`). Real
   rendering/Wayland claims must never use `offscreen`. Hybrid GPU: Intel
   default; NVIDIA offload is *slower* to first frame — don't default to it.

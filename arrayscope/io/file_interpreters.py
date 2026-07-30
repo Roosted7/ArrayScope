@@ -486,7 +486,7 @@ def _run_dcm2niix(directory_path, output_dir):
     if dcm2niix_path is None:
         raise RuntimeError(
             "dcm2niix is required to load DICOM directories. Install it, for example, with "
-            "'conda install -c conda-forge dcm2niix', and ensure it is on PATH."
+            "'pip install dcm2niix' (or your system package manager), and ensure it is on PATH."
         )
 
     command = [

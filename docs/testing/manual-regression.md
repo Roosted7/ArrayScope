@@ -53,7 +53,7 @@ case:
    be repeated, for example:
 
    ```bash
-   PATH=~/miniconda3/bin:$PATH direnv exec . python -m arrayscope data/example.nii
+   tools/env python -m arrayscope data/example.nii
    ```
 
 2. Add a temporary, narrowly scoped trace at the ownership boundary that should
@@ -95,7 +95,7 @@ pacing and swap behavior are actually visible.
 
 ```bash
 mkdir -p tests/artifacts
-PATH=~/miniconda3/bin:$PATH direnv exec . python -m arrayscope.tools.profile_montage_workflow \
+tools/env python -m arrayscope.tools.profile_montage_workflow \
   --backend all \
   --jsonl tests/artifacts/montage-workflow-profile.jsonl
 ```
@@ -121,7 +121,7 @@ nonblocking `py-spy` sample. Treat the JSONL from the same run as timing
 evidence and the raw stack file as attribution evidence:
 
 ```bash
-PATH=~/miniconda3/bin:$PATH direnv exec . py-spy record \
+tools/env py-spy record \
   --format raw \
   --rate 50 \
   --nonblocking \

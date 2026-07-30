@@ -9,7 +9,7 @@ invariants.
 
 Example:
 
-    conda run -n arrayscope python tools/validate_bart_numerics.py \
+    tools/env python tools/validate_bart_numerics.py \
         --bart-toolbox-path ~/projects/bart
 
 Use ``--library-path`` when a locally built BART needs runtime libraries that

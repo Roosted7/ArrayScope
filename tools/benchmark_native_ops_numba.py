@@ -7,7 +7,7 @@ accelerator module.
 
 Example:
 
-    conda run -n arrayscope python tools/benchmark_native_ops_numba.py \
+    tools/env python tools/benchmark_native_ops_numba.py \
         --repeats 5 --json /tmp/native-ops-numba.json
 """
 

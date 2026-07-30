@@ -182,11 +182,14 @@ python -m pip install -e ".[dev,wgpu]"
 python -m arrayscope path/to/data.npy
 ```
 
-The project’s maintained environment is described by `environment.yml` and activated locally through `.envrc`/direnv:
+The project’s maintained development environment is [uv](https://docs.astral.sh/uv/) plus a per-checkout `.venv`, described by `pyproject.toml` and pinned by the committed `uv.lock`. One command builds it, and `.envrc`/direnv puts it on PATH:
 
 ```bash
-PATH=~/miniconda3/bin:$PATH direnv exec . pytest -q tests/core
+uv sync                       # creates .venv with every maintained extra
+tools/env pytest -q tests/core
 ```
+
+`tools/env <command>` runs one command against `.venv` without needing direnv or an activated shell — useful for scripts and CI-like invocations. Each checkout gets its own venv deliberately: a shared editable install lets one checkout’s pointer decide what every other process imports.
 
 `pytest` runs the tests your working tree affects and skips the ones it provably does not — pytest-testmon records which source lines each test executed, so a change selects the tests that reach it wherever they live. `pytest --no-testmon` runs the whole suite, which is what to run before merging. `python tools/test_selection.py` reports the blast radius without running anything. See [change-driven test selection](docs/testing/test-selection.md).
 
@@ -195,7 +198,7 @@ The suite runs in parallel by default (`pytest-xdist`); append `-n 0` to run ser
 Pull requests run a dedicated coverage job in CI. To reproduce it locally:
 
 ```bash
-PATH=~/miniconda3/bin:$PATH direnv exec . pytest tests/ -q --cov=arrayscope --cov-report=term-missing:skip-covered --cov-report=xml
+tools/env pytest tests/ -q --cov=arrayscope --cov-report=term-missing:skip-covered --cov-report=xml
 ```
 
 Core runtime dependencies include NumPy, PySide6, PyQtGraph, SciPy, h5py, pydicom, nibabel, imageio, Pillow, and psutil. WGPU support is available through the optional `wgpu` extra.

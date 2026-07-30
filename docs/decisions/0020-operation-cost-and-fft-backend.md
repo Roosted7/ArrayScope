@@ -16,9 +16,9 @@ and tests. It is advisory only in this phase.
 Runtime FFT work goes through `arrayscope.operations.fft_backend`. The default `auto` backend resolves to
 SciPy when available and falls back to NumPy if needed. FFT worker count is configurable and defaults to
 `min(4, max(1, os.cpu_count() // 2))`; `all_minus_one` resolves to all but one CPU. pyFFTW is
-import-guarded and only used when explicitly selected and importable. The project conda environment
-includes pyFFTW so the backend can be tested, but pyFFTW is not a hard package dependency in
-`pyproject.toml`.
+import-guarded and only used when explicitly selected and importable. The maintained development
+environment installs pyFFTW (the `fftw` extra, on by default in `uv sync`) so the backend can be
+tested, but pyFFTW is not a hard package dependency.
 
 ArrayScope keeps its existing MRI/k-space centered transform convention: `CenteredFFT` uses an inverse
 FFT internally and `CenteredIFFT` uses a forward FFT internally.

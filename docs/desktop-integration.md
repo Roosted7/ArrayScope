@@ -63,8 +63,8 @@ get "Open with" entries.
 
 The launch command is resolved at install time (`launcher_cmd.py`):
 the `arrayscope` console script next to `sys.executable` if present, else
-`<python> -m arrayscope` — so associations work from login shells without
-conda/venv activation.
+`<python> -m arrayscope` — so associations work from login shells without any
+virtualenv activation.
 
 Related entry points:
 
