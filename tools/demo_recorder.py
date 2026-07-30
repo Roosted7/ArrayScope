@@ -530,7 +530,10 @@ class Recorder:
             return False
         point_x, point_y = (float(value) for value in target["point"])
         _, _, width, height = (float(value) for value in target["rect"])
-        context_width = min(float(self.win.width() - 8), max(200.0, width + 36.0))
+        context_width = min(
+            float(self.win.width() - 8),
+            max(200.0, min(width + 36.0, 280.0)),
+        )
         context_height = min(float(self.win.height() - 8), max(120.0, min(height + 36.0, 180.0)))
         left = max(4.0, min(point_x - context_width / 2.0, self.win.width() - context_width - 4.0))
         top = max(
@@ -1388,8 +1391,8 @@ def s_roi(rec: Recorder):
         "open inspection panel",
         win._show_inspection_dock,
         hold_s=1.2,
-        focus_widget=win.inspection_dock,
-        focus_rel=(0.5, 0.3),
+        focus_widget=win.inspection_dock.stats_table,
+        focus_rel=(0.35, 0.5),
     )
     rec.hold_until_settled(2.5, tail_s=1.8)
 
