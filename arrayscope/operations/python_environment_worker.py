@@ -16,11 +16,13 @@ import numpy as np
 
 
 def _read_cfl(stem: str) -> np.ndarray:
+    # The only cfl this worker ever reads is the input the runtime just wrote,
+    # whose header carries the exact rank. Dropping trailing singletons here
+    # (BART's convention, needed when reading BART's fixed 16-dim headers) would
+    # hand the user's callable a (4, 3) array where the document holds (4, 3, 1).
     with open(stem + ".hdr", encoding="utf-8") as handle:
         next(handle)
         dims = [int(token) for token in next(handle).split()]
-    while len(dims) > 1 and dims[-1] == 1:
-        dims.pop()
     return np.reshape(
         np.fromfile(stem + ".cfl", dtype=np.complex64)[: int(np.prod(dims))],
         dims,

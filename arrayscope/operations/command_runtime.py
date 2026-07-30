@@ -33,17 +33,28 @@ TERM_GRACE_S = 0.25
 
 @dataclass(frozen=True)
 class ArrayHandoff:
-    """Filesystem representation used for one array subprocess round trip."""
+    """Filesystem representation used for one array subprocess round trip.
+
+    ``rank_floor_aware`` marks a ``read`` that accepts a ``min_rank`` keyword.
+    A handoff registered without it keeps the plain ``read(path)`` contract, so
+    a third-party entry in :data:`ARRAY_HANDOFFS` is unaffected.
+    """
 
     name: str
     input_name: str
     output_name: str
     write: Callable[[str, np.ndarray], None]
-    read: Callable[[str], np.ndarray]
+    read: Callable[..., np.ndarray]
+    rank_floor_aware: bool = False
 
 
 def write_cfl(stem: str, array: np.ndarray) -> None:
-    """Write BART's complex64, Fortran-ordered ``.hdr``/``.cfl`` pair."""
+    """Write BART's complex64, Fortran-ordered ``.hdr``/``.cfl`` pair.
+
+    The cast to complex64 is lossy and unconditional because that is the only
+    thing BART's format stores: a float64 or int array loses precision here and
+    comes back complex. See ``docs/plugin-operations.md``.
+    """
 
     value = np.asarray(array)
     if value.dtype != np.complex64:
@@ -56,13 +67,27 @@ def write_cfl(stem: str, array: np.ndarray) -> None:
         handle.write(np.ascontiguousarray(value.T))
 
 
-def read_cfl(stem: str) -> np.ndarray:
-    """Read BART's ``.hdr``/``.cfl`` pair into a complex64 array."""
+def read_cfl(stem: str, *, min_rank: int = 1) -> np.ndarray:
+    """Read BART's ``.hdr``/``.cfl`` pair into a complex64 array.
+
+    Trailing singleton dimensions are dropped down to ``min_rank`` because BART
+    writes a fixed 16-dimension header and reading that literally would return
+    rank-16 arrays. Dropping them *unconditionally*, however, silently changes
+    an operation's rank: ``(4, 3, 1)`` round-tripped to ``(4, 3)``. Probe shapes
+    preserve size-1 axes, so a cfl-handoff operation was then characterized as
+    rank-reducing when it was the transport, not the operation, that reduced.
+
+    ``min_rank`` is therefore a floor, not a promise: the runtime passes the
+    rank of the array it just *wrote*, so a rank-preserving tool round-trips
+    exactly, while a tool that genuinely returns fewer meaningful axes keeps
+    them as explicit singletons -- which is BART's own convention anyway.
+    """
 
     with open(stem + ".hdr", encoding="utf-8") as handle:
         next(handle)
         dims = [int(token) for token in next(handle).split()]
-    while len(dims) > 1 and dims[-1] == 1:
+    floor = max(1, int(min_rank))
+    while len(dims) > floor and dims[-1] == 1:
         dims.pop()
     with open(stem + ".cfl", "rb") as handle:
         data = np.frombuffer(handle.read(), dtype=np.complex64)
@@ -78,7 +103,7 @@ def _read_npy(path: str) -> np.ndarray:
 
 
 ARRAY_HANDOFFS: dict[str, ArrayHandoff] = {
-    "cfl": ArrayHandoff("cfl", "input", "output", write_cfl, read_cfl),
+    "cfl": ArrayHandoff("cfl", "input", "output", write_cfl, read_cfl, rank_floor_aware=True),
     "npy": ArrayHandoff("npy", "input.npy", "output.npy", _write_npy, _read_npy),
 }
 
@@ -216,7 +241,12 @@ def run_array_command(
     with tempfile.TemporaryDirectory(prefix="arrayscope-command-", dir=temp_dir) as scratch:
         input_path = os.path.join(scratch, format_spec.input_name)
         output_path = os.path.join(scratch, format_spec.output_name)
-        format_spec.write(input_path, np.asarray(array))
+        written = np.asarray(array)
+        format_spec.write(input_path, written)
+        # The runtime is the only layer that knows the rank it handed over, so
+        # it is the only one that can stop a transport-level rank drop from
+        # being read back as an operation's shape rule (see ``read_cfl``).
+        read_options = {"min_rank": written.ndim} if format_spec.rank_floor_aware else {}
         slot_paths: dict[str, str] = {}
         for name, value in sorted(dict(inputs or {}).items()):
             safe_name = "".join(
@@ -295,7 +325,7 @@ def run_array_command(
             if proc.returncode != 0:
                 label = child_command if isinstance(child_command, str) else " ".join(child_command)
                 raise RuntimeError(f"command {label!r} failed (exit {proc.returncode}): {stderr}")
-            return format_spec.read(output_path)
+            return format_spec.read(output_path, **read_options)
         finally:
             if proc.poll() is None:
                 _terminate_child(proc, grace)

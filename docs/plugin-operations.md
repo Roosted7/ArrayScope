@@ -302,6 +302,28 @@ what the BART command returns: packed Hermitian coil-covariance matrices for a
 subsequent `ecaltwo`, not sensitivity maps. The cfl handoff remains complex64
 because that is BART's format.
 
+#### What the cfl handoff changes about your array
+
+Two transport effects apply to **every** operation using `handoff: "cfl"`, not
+only the BART pack, and neither is the operation's own doing:
+
+- **dtype is narrowed, unconditionally and lossily.** `write_cfl` casts to
+  `complex64` because that is the only thing the format stores. A `float64`
+  input loses ~29 bits of mantissa on the way out and comes back *complex*; an
+  integer input comes back complex too. Characterization observes the returned
+  dtype, so this shows up honestly in the operation's cost and output signature
+  — but it is transport loss, not arithmetic. Use the `npy` handoff for
+  anything where input precision or a real dtype matters.
+- **rank is preserved to the rank you sent, no further.** BART writes a fixed
+  16-dimension header, so the reader drops trailing singleton dimensions;
+  unconditionally, that turned a `(4, 3, 1)` round trip into `(4, 3)` and got
+  the *transport's* rank drop fitted as the *operation's* shape rule (probe
+  shapes preserve size-1 axes, so the misfit was systematic). The runtime now
+  passes the rank it wrote as a floor: a rank-preserving tool round-trips
+  exactly, and a tool returning fewer meaningful axes keeps them as explicit
+  singletons. A tool that genuinely *raises* rank is unaffected — the floor
+  never removes a dimension the header actually claims.
+
 ### Real-toolbox numeric validation
 
 The fake executable in `tests/operations/test_bart_pack.py` remains the oracle

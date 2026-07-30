@@ -73,3 +73,42 @@ def test_conda_environment_resolution_is_bounded_and_checks_membership(tmp_path,
     resolved, reason = resolve_environment(tmp_path, "named")
     assert resolved is None
     assert "no longer exists" in reason
+
+
+def _python_environment_operation(tmp_path, monkeypatch, *, handoff, body):
+    from arrayscope.operations import library
+
+    monkeypatch.setattr(library, "user_operations_directory", lambda: str(tmp_path))
+    upsert_environment(
+        tmp_path, ExecutionEnvironment(id="here", name="Here", interpreter=sys.executable)
+    )
+    source = tmp_path / f"op_{handoff}.py"
+    source.write_text(body)
+    build = library._make_python_environment_build(
+        str(source), "run", environment_id="here", handoff=handoff, timeout=60.0
+    )
+    return build(None, {}, {})
+
+
+def test_python_environment_cfl_handoff_hands_the_callable_the_rank_it_was_given(
+    tmp_path, monkeypatch
+):
+    import numpy as np
+
+    # Both cfl readers dropped trailing singletons: the worker's, so the user's
+    # callable saw (2, 3) where the document holds (2, 3, 1), and the runtime's,
+    # so the result came back a rank lower again.
+    bound = _python_environment_operation(
+        tmp_path,
+        monkeypatch,
+        handoff="cfl",
+        body="def run(array):\n    assert array.shape == (2, 3, 1), array.shape\n    return array\n",
+    )
+    data = np.arange(6, dtype=np.float32).reshape(2, 3, 1)
+
+    result = bound(data)
+
+    assert result.shape == (2, 3, 1)
+    assert np.array_equal(result, data.astype(np.complex64))
+
+

@@ -10,7 +10,12 @@ import numpy as np
 import pytest
 
 from arrayscope.operations.cancellation import EvaluationCancelled
-from arrayscope.operations.command_runtime import build_command, run_command_template
+from arrayscope.operations.command_runtime import (
+    build_command,
+    read_cfl,
+    run_command_template,
+    write_cfl,
+)
 
 
 def _fake_npy_command(tmp_path: Path) -> Path:
@@ -125,3 +130,41 @@ def test_array_handoff_round_trip(tmp_path, handoff):
 
     expected = source.astype(np.complex64) if handoff == "cfl" else source
     assert np.array_equal(result, expected)
+
+
+def _cfl_copy_tool(tmp_path: Path) -> Path:
+    executable = tmp_path / "cfl_copy_tool.py"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import shutil, sys\n"
+        "for suffix in ('.hdr', '.cfl'):\n"
+        "    shutil.copyfile(sys.argv[1] + suffix, sys.argv[2] + suffix)\n"
+    )
+    executable.chmod(0o755)
+    return executable
+
+
+def test_cfl_round_trip_preserves_trailing_singleton_axes(tmp_path):
+    # read_cfl drops trailing singletons so BART's fixed 16-dimension header
+    # reads back sanely; unconditionally, that turned the *transport* into a
+    # rank reduction -- (4, 3, 1) came back (4, 3) -- and probe shapes preserve
+    # size-1 axes, so a cfl operation was systematically mischaracterized.
+    executable = _cfl_copy_tool(tmp_path)
+    source = np.arange(12, dtype=np.float32).reshape(4, 3, 1)
+
+    result = run_command_template(f'"{executable}" {{in}} {{out}}', source, handoff="cfl")
+
+    assert result.shape == (4, 3, 1)
+    assert np.array_equal(result, source.astype(np.complex64))
+
+
+def test_cfl_reader_floor_never_invents_axes_a_tool_did_not_write(tmp_path):
+    # A tool that genuinely returns a lower rank writes a shorter header; the
+    # floor only stops *popping*, it never pads back to the input rank.
+    stem = str(tmp_path / "array")
+    write_cfl(stem, np.arange(6, dtype=np.complex64).reshape(2, 3))
+
+    assert read_cfl(stem, min_rank=5).shape == (2, 3)
+    assert read_cfl(stem).shape == (2, 3)
+
+
