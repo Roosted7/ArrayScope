@@ -1,6 +1,9 @@
 import numpy as np
+import pytest
 
 from arrayscope.core.view_state import ViewState
+from arrayscope.operations import plugins
+from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.pipeline import (
     ArrayDocument,
     CenteredFFT,
@@ -15,10 +18,12 @@ from arrayscope.operations.pipeline import (
 from arrayscope.operations.planner import (
     build_operation_stages,
     candidate_stage_cache_points,
+    expanded_axes_for_transition,
     final_region_for_request,
     plan_region_request,
     required_input_region_for_operation,
 )
+from arrayscope.operations.plugins import PluginOperation, PluginOperationSpec
 from arrayscope.operations.regions import (
     AxisRegion,
     AxisRegionKind,
@@ -232,3 +237,120 @@ def test_region_plan_uses_composed_crop_and_removed_reverse_pair():
 
     assert reverse_plan.transitions == ()
     assert reverse_plan.optimized_operation_count == 0
+
+
+# --- rank-changing operations at the capability/region axis-space boundary ---
+#
+# A capability declares axis sets in INPUT space; a region indexes OUTPUT axes.
+# The two coincide for every rank-preserving operation, which is exactly why the
+# conflation survived. These pin both directions of a rank change.
+
+
+def _plugin_operation(operation_id, fn):
+    """Install a spec directly (the documented ``_reset_plugin_cache`` seam)."""
+
+    spec = PluginOperationSpec(id=operation_id, label=operation_id, fn=fn, changes_shape=True)
+    plugins._SPEC_CACHE[spec.id] = spec
+    return PluginOperation(plugin_id=spec.id)
+
+
+@pytest.fixture
+def plugin_spec_cache():
+    plugins._reset_plugin_cache()
+    yield
+    plugins._reset_plugin_cache()
+
+
+def test_rank_reducing_plugin_op_plans_and_evaluates(plugin_spec_cache):
+    # ``expands_request_axes`` used to reach ``expand_region_axes`` verbatim, so
+    # an input-space axis 2 met a two-axis output region and plan_slab raised
+    # "axis 2 is out of range for region with 2 axes".
+    operation = _plugin_operation("demo:mean-axis-1", lambda a: a.mean(axis=1))
+    data = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+    document = ArrayDocument(data, operations=(operation,))
+    assert document.current_shape == (4, 6)
+
+    state = ViewState.from_shape(document.current_shape)
+    plan = plan_region_request(document, request_for_image(state))
+
+    # The reduced input axis has no output counterpart, so it expands nothing;
+    # the two surviving axes are already demanded whole here.
+    assert len(plan.cache_candidates) == 1
+    assert len(plan.cache_candidates[0].region.axes) == 2
+
+    evaluated = OperationEvaluator(document).image(state)
+    np.testing.assert_array_equal(np.asarray(evaluated.data), data.mean(axis=1))
+
+
+def test_rank_increasing_plugin_op_expands_every_output_axis(plugin_spec_cache):
+    operation = _plugin_operation(
+        "demo:stack-4", lambda a: np.stack([a, a + 1, a + 2, a + 3], axis=0)
+    )
+    data = np.arange(5 * 6, dtype=np.float32).reshape(5, 6)
+    document = ArrayDocument(data, operations=(operation,))
+    assert document.current_shape == (4, 5, 6)
+
+    state = ViewState.from_shape(document.current_shape).with_image_axes(0, 1).with_slice(2, 3)
+    plan = plan_region_request(document, request_for_image(state))
+
+    # Opaque whole-array op: it computed the entire output, so every output axis
+    # -- including the created one, which has no input axis at all -- is a
+    # legitimate expansion. Declaring only the two INPUT axes left output axis 2
+    # pinned to the requested slice.
+    assert plan.transitions[0].expanded_axes == (0, 1, 2)
+    assert [axis.kind for axis in plan.cache_candidates[0].region.axes] == [
+        AxisRegionKind.ALL,
+        AxisRegionKind.ALL,
+        AxisRegionKind.ALL,
+    ]
+
+    evaluated = OperationEvaluator(document).image(state)
+    expected = np.stack([data, data + 1, data + 2, data + 3], axis=0)[:, :, 3]
+    np.testing.assert_array_equal(np.asarray(evaluated.data), expected)
+
+
+def test_scrubbing_a_created_axis_reuses_the_cached_stage(plugin_spec_cache):
+    calls = {"n": 0}
+
+    def stack_four(array):
+        calls["n"] += 1
+        return np.stack([array, array + 1, array + 2, array + 3], axis=0)
+
+    operation = _plugin_operation("demo:stack-4-counted", stack_four)
+    data = np.arange(5 * 6, dtype=np.float32).reshape(5, 6)
+    evaluator = OperationEvaluator(ArrayDocument(data, operations=(operation,)))
+    state = ViewState.from_shape(evaluator.document.current_shape).with_image_axes(0, 1)
+
+    calls["n"] = 0
+    for index in range(6):
+        evaluator.image(state.with_slice(2, index))
+
+    # Six scrub steps used to mean six whole-array invocations of an OPAQUE op:
+    # the cache candidate pinned the untranslated last output axis, so every
+    # step missed. One invocation is the entire point of ``cache_stage``.
+    assert calls["n"] == 1
+
+
+def test_expanded_axes_for_transition_pairs_output_axes_with_their_input_axes():
+    # The fallback for an operation that declares no capabilities. It used to
+    # zip the two regions positionally, which pairs an output axis with
+    # whichever input axis shares its index -- only the same axis when the rank
+    # and the order both happen to match.
+    class Unmapped:
+        """No capabilities and no axis map: nothing can be paired."""
+
+    class Mapped(Unmapped):
+        def output_axis_sources(self, input_shape):
+            del input_shape
+            return (0, 2)
+
+    output_region = region_from_index_spec((4, 6), (slice(None), 3))
+    required = region_from_index_spec((4, 5, 6), (slice(None), slice(None), 3))
+
+    assert expanded_axes_for_transition(output_region, required, Mapped(), (4, 5, 6)) == ()
+    assert expanded_axes_for_transition(output_region, required, Unmapped(), (4, 5, 6)) == ()
+
+    # Output axis 1 derives from input axis 2, which the input region demands
+    # whole; the positional read would have looked at input axis 1 instead.
+    whole_last = region_from_index_spec((4, 5, 6), (slice(None), 2, slice(None)))
+    assert expanded_axes_for_transition(output_region, whole_last, Mapped(), (4, 5, 6)) == (1,)

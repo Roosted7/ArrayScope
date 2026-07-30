@@ -7,7 +7,11 @@ from typing import Literal
 
 import numpy as np
 
-from arrayscope.operations.capabilities import OperationCapabilities, normalize_capabilities
+from arrayscope.operations.capabilities import (
+    OperationCapabilities,
+    normalize_capabilities,
+    operation_output_axis_sources,
+)
 from arrayscope.operations.capabilities import OperationKind as DeclaredOperationKind
 
 OperationKind = Literal["view", "elementwise", "reduction", "transform", "reshape"]
@@ -245,6 +249,22 @@ def _estimate_peak_bytes(
 
 
 def _output_axis_labels(axis_labels, operation, cost: OperationCost):
+    """Carry per-axis labels across one stage, in that stage's own axis spaces.
+
+    ``axis_labels`` is indexed by the stage's INPUT axes (capability axis sets
+    are input-space; see ``OperationCapabilities``); the result is indexed by
+    its OUTPUT axes. An operation that states its axis map answers this exactly.
+    """
+
+    sources = operation_output_axis_sources(operation, cost.input_shape, len(cost.output_shape))
+    if sources is not None and len(cost.input_shape) != len(cost.output_shape):
+        return tuple(
+            axis_labels[int(source)]
+            if source is not None and 0 <= int(source) < len(axis_labels)
+            # A created axis inherits no label, and must not collide with one.
+            else object()
+            for source in sources
+        )
     labels = list(axis_labels)
     removed = len(cost.input_shape) - len(cost.output_shape)
     if removed == 1 and cost.blocking_axes:

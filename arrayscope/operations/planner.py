@@ -6,7 +6,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from arrayscope.operations.capabilities import OperationCapabilities, OperationKind
+from arrayscope.operations.capabilities import (
+    OperationCapabilities,
+    OperationKind,
+    expanded_output_axes,
+    operation_output_axis_sources,
+)
 from arrayscope.operations.cost import (
     OperationCost,
     estimate_operation_cost,
@@ -45,6 +50,9 @@ class StageRegionTransition:
     output_shape: tuple[int, ...]
     output_region: RegionSpec
     required_input_region: RegionSpec
+    # OUTPUT-space axes (they index ``output_region``, the only thing they are
+    # ever applied to). Capabilities declare input space; the translation
+    # happens once, here, when the transition is built.
     expanded_axes: tuple[int, ...] = ()
     reason: str = ""
 
@@ -108,11 +116,18 @@ def candidate_stage_cache_points(
         capabilities = stage.capabilities
         if capabilities is None:
             continue
+        # Legacy helper: it threads one region backwards without ever changing
+        # its rank, so it only describes a rank-preserving chain faithfully.
+        # ``plan_region_request`` (via the transition-based function below) is
+        # the load-bearing path. The clamp stays so a mismatched chain still
+        # under-expands rather than raising.
         candidate_region = expand_region_axes(
             current_region,
             tuple(
                 axis
-                for axis in capabilities.expands_request_axes
+                for axis in expanded_output_axes(
+                    stage.operation, stage.input_shape, capabilities, len(current_region.axes)
+                )
                 if axis < len(current_region.axes)
             ),
         )
@@ -228,9 +243,16 @@ def plan_region_request(document, request) -> RegionPlan:
             output_region=current_region,
             required_input_region=required,
             expanded_axes=(
-                tuple(stage.capabilities.expands_request_axes)
+                expanded_output_axes(
+                    operation,
+                    stage.input_shape,
+                    stage.capabilities,
+                    len(current_region.axes),
+                )
                 if stage.capabilities is not None
-                else expanded_axes_for_transition(current_region, required, operation)
+                else expanded_axes_for_transition(
+                    current_region, required, operation, stage.input_shape
+                )
             ),
             reason=_transition_reason(operation, current_region, required),
         )
@@ -327,13 +349,35 @@ def apply_operation_to_region(
 
 
 def expanded_axes_for_transition(
-    output_region: RegionSpec, required_input_region: RegionSpec, operation
+    output_region: RegionSpec, required_input_region: RegionSpec, operation, input_shape=None
 ) -> tuple[int, ...]:
-    del operation
+    """Output-space expanded axes inferred from the two regions themselves.
+
+    The fallback for an operation that declares no capabilities. The two
+    regions live in different spaces, so each output axis is compared against
+    the *input* axis it derives from; a created output axis has no input to
+    compare with and is left unexpanded (fail closed, as in
+    :func:`expanded_output_axes`). Without an axis map across a rank change no
+    axis can be paired at all, and the answer is empty.
+    """
+
+    if input_shape is None:
+        # A region carries one entry per array axis, so the input region's
+        # length is the input rank -- enough for a positional-identity map.
+        input_shape = tuple(1 for _ in required_input_region.axes)
+    sources = operation_output_axis_sources(
+        operation,
+        input_shape,
+        len(output_region.axes),
+    )
+    if sources is None:
+        return ()
     expanded = []
-    for axis, required_axis in enumerate(required_input_region.axes[: len(output_region.axes)]):
+    for axis, source in enumerate(sources):
+        if source is None or not 0 <= int(source) < len(required_input_region.axes):
+            continue
         if (
-            axis_region_kind(required_axis.kind) == AxisRegionKind.ALL
+            axis_region_kind(required_input_region.axes[int(source)].kind) == AxisRegionKind.ALL
             and axis_region_kind(output_region.axes[axis].kind) != AxisRegionKind.ALL
         ):
             expanded.append(axis)

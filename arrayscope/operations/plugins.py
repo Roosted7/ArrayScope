@@ -361,6 +361,19 @@ class PluginOperation:
         shape = self._shape_hint or _REGION_PROBE_SHAPE
         return self._characterize(shape, input_dtype).output_dtype
 
+    def output_axis_sources(self, input_shape):
+        """Per output axis, the input axis it derives from (``None`` if new).
+
+        The characterized shape rule already answers this per output axis, so
+        the planner's input-space -> output-space capability translation (see
+        ``arrayscope.operations.capabilities.expanded_output_axes``) reads the
+        same source of truth the shape prediction does.
+        """
+
+        dtype = self._dtype_hint or np.dtype("float32")
+        rule = self._characterize(tuple(input_shape), dtype).shape_rule
+        return tuple(axis_rule.source_axis for axis_rule in rule.axes)
+
     def output_axes(self, axes):
         from dataclasses import replace
 

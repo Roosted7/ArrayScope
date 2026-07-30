@@ -197,6 +197,15 @@ def materialize_stage_candidate_chunked(
 
 
 def _blocking_axes_through_candidate(region_plan, stage_index: int) -> tuple[int, ...]:
+    # KNOWN AXIS-SPACE CONFLATION, deliberately left: each stage declares
+    # ``blocking_axes`` in its OWN input space (see OperationCapabilities), so
+    # unioning them across stages is only exact while every stage preserves
+    # rank. It is exact today because no rank-changing operation reaches here
+    # with a chunkable candidate, and the union is used to *refuse* chunking --
+    # a stale axis over-blocks, costing parallelism, never correctness. The fix
+    # when a rank-changing chunkable stage appears is to translate each stage's
+    # axes forward with ``capabilities.operation_output_axis_sources`` before
+    # the union, exactly as the planner does at the region boundary.
     axes = set()
     for stage in tuple(getattr(region_plan, "stages", ())):
         if int(getattr(stage, "stage_index", 0)) > int(stage_index):

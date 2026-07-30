@@ -39,9 +39,34 @@ class OperationClass(Enum):
 
 @dataclass(frozen=True)
 class OperationCapabilities:
+    """What one operation needs and permits, declared in INPUT-AXIS SPACE.
+
+    **Axis-space convention (single, load-bearing).** Every axis set below --
+    ``blocking_axes``, ``chunkable_axes``, ``expands_request_axes`` -- indexes
+    the axes of the ``input_shape`` the declaration was made for. This is the
+    only convention: :func:`normalize_capabilities` is called with the *input*
+    ndim by both :mod:`arrayscope.operations.cost` and
+    :mod:`arrayscope.operations.planner`, and an out-of-range axis raises there
+    rather than being silently reinterpreted.
+
+    A *region*, by contrast, is output-space: a planner walks demand backwards
+    from the final output, so ``transition.output_region`` indexes the axes of
+    the stage's output. For a rank-preserving operation the two spaces coincide
+    and the distinction never showed; for a rank-changing one it is the
+    difference between a correct stage-cache candidate and either a crash or a
+    silently pinned axis. Capability axes therefore must be **translated** into
+    output space before meeting a region -- see :func:`expanded_output_axes`,
+    which is the only sanctioned bridge, and the ``output_axis_sources`` hook it
+    consults.
+    """
+
     kind: OperationKind
+    # Input axes the operation may not be chunked along.
     blocking_axes: tuple[int, ...] = ()
+    # Input axes the operation may be chunked along.
     chunkable_axes: tuple[int, ...] = ()
+    # Input axes the operation needs in full to answer any request. Translate
+    # with :func:`expanded_output_axes` before applying to an output region.
     expands_request_axes: tuple[int, ...] = ()
     cache_stage: bool = False
     temp_multiplier: float = 1.0
@@ -101,6 +126,79 @@ def default_chunkable_axes(kind: OperationKind, *, ndim: int, blocking_axes=()) 
     }:
         return tuple(axis for axis in range(ndim) if axis not in blocked)
     return ()
+
+
+def operation_output_axis_sources(operation, input_shape, output_rank):
+    """Per OUTPUT axis, the INPUT axis it derives from -- or ``None``.
+
+    ``None`` in a slot means that output axis was *created* by the operation
+    and has no input counterpart. A ``None`` return (rather than a tuple) means
+    the mapping is unknown and no caller may guess one.
+
+    Resolution order:
+
+    1. the operation's own ``output_axis_sources(input_shape)`` hook, which is
+       how a rank-changing operation states its mapping (``PluginOperation``
+       derives it from its characterized shape rule);
+    2. otherwise, when the rank is unchanged, positional identity -- the
+       incumbent assumption, now stated rather than implied;
+    3. otherwise unknown.
+
+    Step 2 assumes a rank-preserving operation keeps axis order. An operation
+    that *permutes* axes must implement the hook to be described exactly;
+    ``Transpose`` is exempt only because it declares both swapped axes
+    together, making its declared set symmetric under its own permutation.
+    """
+
+    input_shape = tuple(int(size) for size in input_shape)
+    output_rank = int(output_rank)
+    hook = getattr(operation, "output_axis_sources", None)
+    if callable(hook):
+        try:
+            sources = tuple(hook(input_shape))
+        except Exception:
+            return None
+        if len(sources) != output_rank:
+            return None
+        return tuple(None if source is None else int(source) for source in sources)
+    if output_rank == len(input_shape):
+        return tuple(range(output_rank))
+    return None
+
+
+def expanded_output_axes(operation, input_shape, capabilities, output_rank) -> tuple[int, ...]:
+    """Translate input-space ``expands_request_axes`` into output-space axes.
+
+    This is the only sanctioned bridge between a capability declaration and a
+    region (see :class:`OperationCapabilities`). An output axis is expanded
+    when either
+
+    - the input axis it derives from is one the operation needs in full, or
+    - it has no input axis at all: an operation cannot produce a *slice* of an
+      axis its input does not contain, so a created axis is always produced
+      whole.
+
+    When the rank changed and no axis map is available the result **fails
+    closed to no expansion**, except for the one case that needs no map: an
+    operation that expands every input axis has provably computed its entire
+    output, so every output axis is expanded. Failing closed is safe by
+    direction -- expansion only ever *widens* a cache candidate beyond the
+    demanded region, so under-expanding costs reuse and never correctness.
+    """
+
+    expanded = {int(axis) for axis in tuple(capabilities.expands_request_axes)}
+    output_rank = int(output_rank)
+    if not expanded:
+        return ()
+    input_shape = tuple(int(size) for size in input_shape)
+    sources = operation_output_axis_sources(operation, input_shape, output_rank)
+    if sources is None:
+        if expanded == set(range(len(input_shape))):
+            return tuple(range(output_rank))
+        return ()
+    return tuple(
+        axis for axis, source in enumerate(sources) if source is None or int(source) in expanded
+    )
 
 
 def pipeline_commutes_for_display_lod(

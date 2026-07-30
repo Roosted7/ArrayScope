@@ -258,6 +258,13 @@ class RenderPrefetchMixin:
             return True
         image_axes = set(view_state.image_axes or ())
         for operation in operations:
+            # KNOWN AXIS-SPACE CONFLATION, deliberately left: ``operation.axis``
+            # indexes that operation's INPUT axes while ``image_axes`` indexes
+            # the document's final OUTPUT axes. The two agree only while every
+            # earlier step preserves rank -- true for this name list, since a
+            # reduction is the only rank-changing built-in and a second one
+            # would have to precede it. This gates a prefetch, so a mismatch
+            # would prefetch something expensive, never show wrong pixels.
             if (
                 type(operation).__name__ in {"Mean", "Sum", "Maximum", "Minimum", "RootSumSquares"}
                 and int(operation.axis) in image_axes
