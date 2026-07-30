@@ -118,26 +118,28 @@ class MontageViewportPlan:
     def candidate_tiles(
         self, *, margin_tiles: int = VISIBLE_MARGIN_TILES, prioritize: bool = False
     ):
-        rect = montage_rect_for_viewport(
-            self.plan,
-            view_range=self.view_range,
-            viewport_shape=self.viewport_shape,
-        )
         tiles = viewport_tiles(
             self.plan,
             view_range=self.view_range,
             viewport_shape=self.viewport_shape,
             margin_tiles=margin_tiles,
         )
-        if prioritize:
-            return prioritize_tiles(
-                tiles,
-                context=TilePriorityContext.from_tiles(
-                    view_range=((rect[0], rect[2]), (rect[1], rect[3])),
-                    focus=self.priority_focus,
-                ),
-            )
-        return tiles
+        if not prioritize:
+            return tiles
+        # Only the ordering needs the rect as a value; the tile set already
+        # went through it inside ``viewport_tiles``.
+        rect = montage_rect_for_viewport(
+            self.plan,
+            view_range=self.view_range,
+            viewport_shape=self.viewport_shape,
+        )
+        return prioritize_tiles(
+            tiles,
+            context=TilePriorityContext.from_tiles(
+                view_range=((rect[0], rect[2]), (rect[1], rect[3])),
+                focus=self.priority_focus,
+            ),
+        )
 
     def prioritize_tiles(self, tiles):
         rect = montage_rect_for_viewport(
