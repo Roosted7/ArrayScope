@@ -1,6 +1,6 @@
 """``--since`` as a verification report, not a re-run.
 
-Ring 0 — no Qt, no rendering. Two features meet here and they are one idea:
+Ring 0 — no Qt, no rendering. Three features meet here and they are one idea:
 
 * **The partition.** The map is an evidence ledger. A test whose fingerprint is
   stable executed byte-identical code last time it ran, so a recorded green is
@@ -8,6 +8,8 @@ Ring 0 — no Qt, no rendering. Two features meet here and they are one idea:
   set, which on a faithfully-iterated branch is ~95% re-confirmation.
 * **The flake ledger.** The one case where a stable green is not evidence: a
   test observed to flip outcome with no code change at all.
+* **The cadence nudge.** Selection's blind spots were documented as CI's
+  problem. CI has run seven times ever, so they had no owner.
 
 Every test here is written to fail if the behaviour reverts to un-deselecting
 everything, or to trusting a green it should not.
@@ -20,8 +22,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests import red_ledger, testmon_policy
-from tests.conftest import _refuse_fresh_without_since
+from tests import coverage_map, red_ledger, testmon_policy
+from tests.conftest import (
+    _refuse_fresh_without_since,
+    _run_swept_exhaustively,
+    cadence_nudge,
+)
 
 REPO_ROOT = testmon_policy.REPO_ROOT
 
@@ -383,3 +389,95 @@ def test_the_two_ledgers_do_not_share_a_file(tmp_path):
     """Separate writers, separate files — no merge, so no field to drop."""
 
     assert red_ledger.flake_path(tmp_path / "themap") != red_ledger.ledger_path(tmp_path / "themap")
+
+
+# --------------------------------------------------------------------------- #
+# The cadence nudge
+# --------------------------------------------------------------------------- #
+
+
+def test_a_fresh_record_says_nothing():
+    record = {"sha": "abc", "at": "x", "swept": True}
+
+    assert cadence_nudge(record, days=3.0, commits=5) == ""
+    assert cadence_nudge({}, days=900.0, commits=900) == ""
+
+
+def test_either_clock_running_out_is_enough():
+    """A checkout can sit for three weeks, or take forty commits in an afternoon."""
+
+    record = {"sha": "abc", "at": "x", "swept": True}
+
+    assert "27 days ago" in cadence_nudge(record, days=27.0, commits=5)
+    assert "63 commits" in cadence_nudge(record, days=3.0, commits=63)
+    assert "--testmon-noselect" in cadence_nudge(record, days=27.0, commits=63)
+
+
+def test_an_anchor_is_not_reported_as_a_sweep():
+    """A checkout that has never swept must not be told when it last did."""
+
+    anchor = {"sha": "abc", "at": "x", "swept": False}
+    line = cadence_nudge(anchor, days=27.0, commits=63)
+
+    assert "never been swept" in line
+    assert "last swept" not in line
+
+
+def test_a_sha_git_no_longer_knows_still_reports_the_days():
+    """A rebase can orphan the recorded commit; the clock keeps running."""
+
+    record = {"sha": "gone", "at": "x", "swept": True}
+    line = cadence_nudge(record, days=27.0, commits=None)
+
+    assert "27 days ago" in line
+    assert "commits" not in line
+
+
+def _sweep_config(**options):
+    defaults = {"testmon_noselect": False, "keyword": "", "markexpr": "", "lf": False}
+    return SimpleNamespace(
+        option=SimpleNamespace(**{**defaults, **options}),
+        rootdir=REPO_ROOT,
+        args=[],
+        invocation_params=SimpleNamespace(dir=str(REPO_ROOT)),
+        getini=lambda name: ["tests"] if name == "testpaths" else [],
+        arrayscope_selection=testmon_policy.Decision(True, "default"),
+    )
+
+
+def test_only_a_run_that_really_executed_everything_counts_as_a_sweep():
+    noselect = _sweep_config(testmon_noselect=True)
+
+    assert _run_swept_exhaustively(noselect, ran=3941) is True
+    # Nothing ran: --collect-only, or an aborted session.
+    assert _run_swept_exhaustively(noselect, ran=0) is False
+    # A manual selector narrows the run without narrowing its path arguments.
+    assert _run_swept_exhaustively(
+        _sweep_config(testmon_noselect=True, keyword="render"), 3941
+    ) is (False)
+    # A selected run is exactly the one that did not sweep.
+    assert _run_swept_exhaustively(_sweep_config(), ran=3941) is False
+
+
+def test_a_run_with_selection_switched_off_counts_too():
+    """`--no-testmon`, `--cov` and CI all execute the whole suite."""
+
+    config = _sweep_config()
+    config.arrayscope_selection = testmon_policy.Decision(False, "--no-testmon")
+
+    assert _run_swept_exhaustively(config, ran=3941) is True
+
+
+def test_the_sweep_record_survives_another_feature_writing_the_sidecar(tmp_path):
+    """The preservation contract, in the direction this field cares about."""
+
+    map_path = tmp_path / "themap"
+    coverage_map.write_sidecar(
+        map_path,
+        structure={},
+        baselines={},
+        sweep={"sha": "abc", "at": "2026-07-01T00:00:00+00:00", "swept": True},
+    )
+    coverage_map.write_sidecar(map_path, structure={"a": 1}, baselines={"env": {}})
+
+    assert coverage_map.last_sweep(coverage_map.read_sidecar(map_path))["sha"] == "abc"

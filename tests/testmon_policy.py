@@ -36,15 +36,20 @@ testmon traces Python lines executed **in the pytest process**. So:
 1. **Child processes.** A test that shells out gets nothing from the child.
    The tests that really do spawn one are declared in
    :data:`OUT_OF_PROCESS_DEPENDENCIES`, which puts the entry point back in the
-   map; the modules that entry point *imports* remain invisible, and an
-   exhaustive sweep is what covers them.
+   map; the modules that entry point *imports* remain invisible.
 2. **Non-Python inputs.** Icons and fixture arrays have no fingerprint.
 3. **Real rendering.** Rings 3–4 (``docs/testing/README.md``) prove things
    about pixels a compositor drew. Selection has nothing to say there and the
    ring rules are unchanged.
 
-Blind spots 1 and 2 are swept exhaustively by CI; blind spot 3 has no offscreen
-answer at all and belongs to rings 3–4.
+Blind spots 1 and 2 used to be handed to CI, "swept exhaustively on every
+push". Measured on 2026-07-30 that was false: CI has run seven times in this
+repository's life, most recently with ``main`` 247 commits ahead of it, and
+there is no required check. The local backstop is an occasional
+``pytest --testmon-noselect`` and the cadence line in ``tests/conftest.py``
+that asks for one when the last is over three weeks or forty commits old. CI,
+when it runs, is a bonus. Blind spot 3 has no offscreen answer at all and
+belongs to rings 3–4.
 
 ``pytest --since`` is the pre-merge command: it asks what the whole *branch*
 changed rather than what moved since the last run, and reports the answer as
@@ -980,6 +985,31 @@ def _git(rootdir, *arguments, binary: bool = False):
     if finished.returncode != 0:
         return None
     return finished.stdout if binary else finished.stdout.decode("utf-8", "replace")
+
+
+def head_sha(rootdir) -> str:
+    """The current commit, or ``""``. For pinning a record to a point in history."""
+
+    return (_git(rootdir, "rev-parse", "HEAD") or "").strip()
+
+
+def commits_since(rootdir, sha: str) -> int | None:
+    """How far ``HEAD`` has moved past ``sha``. ``None`` if git cannot say.
+
+    ``None`` is a real answer and not a zero: a rebase or a fresh clone can
+    leave a recorded sha that no longer exists, and reporting "0 commits" for a
+    commit git has never heard of would be a confident lie about distance.
+    """
+
+    if not sha:
+        return None
+    counted = _git(rootdir, "rev-list", "--count", f"{sha}..HEAD")
+    if counted is None:
+        return None
+    try:
+        return int(counted.strip())
+    except ValueError:
+        return None
 
 
 def resolve_baseline(rootdir, explicit: str | None) -> tuple[str, str]:

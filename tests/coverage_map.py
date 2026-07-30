@@ -1040,6 +1040,7 @@ def write_sidecar(
     baselines: dict,
     revisions: dict | None = None,
     map_sizes: dict | None = None,
+    sweep: dict | None = None,
 ) -> None:
     """Rewrite the sidecar, preserving every field the caller did not pass.
 
@@ -1065,6 +1066,7 @@ def write_sidecar(
             if map_sizes is not None
             else (preserved_sizes if isinstance(preserved_sizes, dict) else {})
         ),
+        "sweep": last_sweep(existing) if sweep is None else dict(sweep),
     }
     # A lost sidecar costs one re-parse and one baseline, never a wrong result.
     # A sidecar written before a field existed reads back without it, and the
@@ -1103,6 +1105,24 @@ def map_sizes(payload: dict) -> dict:
         if isinstance(recorded, dict)
         else {}
     )
+
+
+def last_sweep(payload: dict) -> dict:
+    """When this checkout last ran every test, and at which commit.
+
+    ``{"sha": ..., "at": ISO-8601, "swept": bool}``, or ``{}`` if nothing has
+    ever been recorded. ``swept`` is false for the anchor a checkout writes the
+    first time it notices there is no record — that one marks the start of the
+    clock, not a sweep, and the two must never be printed as the same claim.
+
+    Kept here rather than in the map because the map cannot hold it: an
+    exhaustive run's whole point is the blind spots selection has no fingerprint
+    for (child processes, non-Python inputs, source read as data), so the record
+    of *having done one* is exactly the kind of fact the map is blind to.
+    """
+
+    recorded = payload.get("sweep")
+    return dict(recorded) if isinstance(recorded, dict) else {}
 
 
 def baseline_from(reach: Reach) -> dict:

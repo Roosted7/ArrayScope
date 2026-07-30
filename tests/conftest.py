@@ -1604,6 +1604,7 @@ def pytest_terminal_summary(terminalreporter, config):
     # Before the coverage report, which re-reads the sidecar this may write.
     _report_map_erosion(terminalreporter, config)
     _report_function_coverage(terminalreporter, config)
+    _report_sweep_cadence(terminalreporter, config)
     _report_gate_run_cost(terminalreporter, config)
 
     if not _selection_is_narrowing(config):
@@ -1855,6 +1856,130 @@ def _report_map_erosion(terminalreporter, config) -> None:
             revisions=coverage_map.retained_revisions(sidecar),
             map_sizes={**sizes, environment: mark},
         )
+
+
+#: How stale an exhaustive sweep may get before the loop mentions it. Two
+#: clocks, because either one can run out on its own: a checkout can sit for
+#: three weeks with four commits, or take forty in an afternoon.
+_SWEEP_STALE_DAYS = 21
+_SWEEP_STALE_COMMITS = 40
+
+
+def cadence_nudge(record: dict, days: float | None, commits: int | None) -> str:
+    """One quiet line when the blind spots have gone unowned too long, else ``""``.
+
+    Selection is honest about what it cannot see — child processes, non-Python
+    inputs, Python read as data rather than executed — and the documentation
+    used to hand all three to CI, "swept exhaustively on every push". Measured
+    on 2026-07-30: CI has run **seven times in the life of this repository**,
+    last on 2026-07-25 with ``main`` 247 commits ahead of it. There is no branch
+    protection and no required check. So those blind spots have had no owner at
+    all, and nothing anywhere said so.
+
+    This is the local backstop, and it is deliberately the smallest one that
+    works: no gate, no refusal, no colour. A sweep is four minutes and the
+    person reading this is mid-loop — the line has to be droppable, or it
+    becomes noise and then becomes invisible. It states a fact and a command,
+    once the fact is worth stating.
+
+    An anchor with ``swept`` false says a different thing from a real record and
+    is worded as such: the checkout has never swept, and the clock runs from
+    when it first looked rather than from a sweep that never happened.
+    """
+
+    if not record:
+        return ""
+    stale_days = days is not None and days > _SWEEP_STALE_DAYS
+    stale_commits = commits is not None and commits > _SWEEP_STALE_COMMITS
+    if not (stale_days or stale_commits):
+        return ""
+    age = f"{days:.0f} days" if days is not None else "an unknown time"
+    distance = f", {commits} commits" if commits is not None else ""
+    if record.get("swept"):
+        what = f"blind spots last swept exhaustively {age} ago{distance}"
+    else:
+        what = f"blind spots have never been swept exhaustively here ({age}{distance})"
+    return f"{what} — pytest --testmon-noselect (~4 min) when convenient."
+
+
+def _run_swept_exhaustively(config, ran: int) -> bool:
+    """Whether this run really did execute every test there is.
+
+    Both shapes count and nothing else does: ``--testmon-noselect`` (which runs
+    everything *and* re-records) and a run where the policy turned selection off
+    altogether (``--no-testmon``, ``--cov``, CI). A manual selector narrows the
+    run without narrowing its path arguments, so it is excluded explicitly —
+    ``pytest -k render`` collects the whole suite and runs a handful of it.
+    """
+
+    if not ran or not testmon_policy.collected_the_whole_suite(config):
+        return False
+    options = vars(config.option)
+    if options.get("keyword") or options.get("markexpr") or options.get("lf"):
+        return False
+    if options.get("testmon_noselect"):
+        return True
+    decision = getattr(config, "arrayscope_selection", None)
+    return decision is not None and not decision.active
+
+
+def _report_sweep_cadence(terminalreporter, config) -> None:
+    """Record every exhaustive run, and mention it when the last one aged out."""
+
+    if _XDIST_WORKER:
+        return
+    map_path = testmon_policy.map_path(config.rootdir)
+    sidecar = coverage_map.read_sidecar(map_path)
+    record = coverage_map.last_sweep(sidecar)
+
+    def remember(swept: bool) -> None:
+        # Every other field passed through: this writer owns one key, and a
+        # write that dropped another feature's state is the defect cbf3f254
+        # fixed. See ``coverage_map.write_sidecar``.
+        coverage_map.write_sidecar(
+            map_path,
+            structure=coverage_map.cached_structure(sidecar),
+            baselines=coverage_map.baselines(sidecar),
+            revisions=coverage_map.retained_revisions(sidecar),
+            map_sizes=coverage_map.map_sizes(sidecar),
+            sweep={
+                "sha": testmon_policy.head_sha(config.rootdir),
+                "at": _now_iso(),
+                "swept": swept,
+            },
+        )
+
+    if _run_swept_exhaustively(config, tests_executed(terminalreporter)):
+        remember(swept=True)
+        return
+    # Only the inner loop nags. --since is already the wider question, and a
+    # bypassed run has its own closing paragraph.
+    if config.getoption("since", None) is not None or not _selection_is_narrowing(config):
+        return
+    if not record:
+        # A new checkout must not open with a nag, so its first bare run starts
+        # the clock instead of complaining about a sweep it never had time for.
+        remember(swept=False)
+        return
+    line = cadence_nudge(
+        record,
+        _days_since(record.get("at")),
+        testmon_policy.commits_since(config.rootdir, str(record.get("sha") or "")),
+    )
+    if line:
+        terminalreporter.write_line(line)
+
+
+def _days_since(when) -> float | None:
+    from datetime import datetime, timezone
+
+    try:
+        recorded = datetime.fromisoformat(str(when))
+    except (TypeError, ValueError):
+        return None
+    if recorded.tzinfo is None:
+        recorded = recorded.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - recorded).total_seconds() / 86400.0
 
 
 def _report_function_coverage(terminalreporter, config):

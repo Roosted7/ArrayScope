@@ -212,6 +212,14 @@ An explicit `--testmon`, `--testmon-noselect`, `--testmon-nocollect` or
 
 ### In CI
 
+**Read this first: CI is not a gate here.** It has run seven times in the life
+of this repository, most recently 2026-07-25 against a `main` that was already
+247 commits ahead, and no branch protection or required check exists. The rest
+of this section describes how the workflow behaves *when somebody runs it* — it
+is not a backstop anything else on this page may lean on. The tracked
+`.githooks/pre-commit` and the [cadence nudge](#the-cadence-nudge) are the ones
+that actually fire.
+
 Selection is off by default in CI because Actions sets `CI`, so no map — stale,
 absent, or restored from another branch — can narrow a gate.
 
@@ -251,18 +259,45 @@ so it stays fast. It is equally the right call after a rebase, or in a checkout
 somebody else was iterating in, where "since the last run" is simply the wrong
 window.
 
-Nor is a local sweep the thing standing between a mistake and `main`:
+But a routine sweep is not the same thing as *never* sweeping:
 
-- CI sets `CI`, which turns selection off, so **every push is already swept
-  exhaustively** whether or not anyone did it by hand.
 - The map-erosion hole that once made this the only trustworthy run is closed
   (`protect_map_outside_the_scope`, below).
 - To repair a map, `pytest --testmon-noselect` runs the same tests *and*
   re-records them, which `--no-testmon` does not.
+- The [blind spots](#what-it-cannot-see) are real and only an exhaustive run
+  covers them. That is what the cadence nudge below is for — occasionally, not
+  every loop.
 
-That leaves narrow, real uses. And if you do suspect the map, **report it**: a
-wrong map is worth fixing once for everybody, and quietly sweeping past it is how
-it stays wrong.
+And if you do suspect the map, **report it**: a wrong map is worth fixing once
+for everybody, and quietly sweeping past it is how it stays wrong.
+
+### The cadence nudge
+
+This page used to say CI swept every push, and hand the blind spots to it.
+Measured on 2026-07-30: **CI has run seven times in the life of this
+repository**, most recently 2026-07-25 with `main` 247 commits ahead of it.
+There is no branch protection, no ruleset and no required check. So the blind
+spots had no owner at all, and nothing said so.
+
+They have a local one now. Every run that really did execute the whole suite —
+`--testmon-noselect`, or any run where the policy turned selection off — records
+its HEAD sha and the date beside the map. When that record is more than **21
+days or 40 commits** old, a bare `pytest` prints one quiet line:
+
+```
+blind spots last swept exhaustively 27 days ago, 63 commits — pytest --testmon-noselect (~4 min) when convenient.
+```
+
+That is the whole mechanism: no gate, no refusal, no colour. A sweep is four
+minutes and the reader is mid-loop, so the line has to be droppable or it
+becomes noise and then becomes invisible. A checkout with no record yet starts
+the clock on its first run rather than opening with a nag, and says "never been
+swept exhaustively here" if it later ages out — a different claim from a stale
+sweep, and worded as one.
+
+CI, when it runs, is a bonus on top of this rather than the thing being relied
+on.
 
 ### Why `--no-testmon` is refused
 
@@ -761,7 +796,8 @@ do a changed body and a new import.
 `--since` is the pre-merge command precisely because it is still a *selected*
 run: the branch-sized answer at map speed. It does not pretend to be a sweep —
 it still cannot see [the blind spots above](#what-it-cannot-see), which is what
-CI's exhaustive jobs are for, and rings 3–4 for real pixels.
+the occasional `--testmon-noselect` is for (see [the cadence
+nudge](#the-cadence-nudge)), and rings 3–4 for real pixels.
 
 ## Coverage, for free
 

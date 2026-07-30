@@ -56,7 +56,10 @@ pytest --since         # before merging, after a rebase, in a borrowed checkout
 pytest --rerun-reds    # when the red you are fixing is one you inherited
 ```
 
-`--no-testmon` is not the gate and is not a routine sweep; CI sweeps every push.
+`--no-testmon` is not the gate and is not a routine sweep. Nor is CI: it has run
+seven times in this repository's life and nothing requires it, so the occasional
+`pytest --testmon-noselect` is what covers what selection cannot see — the run
+asks for one when the last is over three weeks or forty commits old.
 The rules, and the reasoning behind them, are in
 [test-selection.md](test-selection.md) — which also names what selection cannot
 see. Read it before trusting a green selected run.
