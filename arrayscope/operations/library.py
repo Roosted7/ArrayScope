@@ -78,6 +78,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from arrayscope.app import user_dirs
 from arrayscope.operations import command_runtime, environments, registry
@@ -132,6 +133,38 @@ _USER_MODULE_NAMESPACE = "arrayscope_user_ops"
 
 
 # ---------------------------------------------------------------------------
+# The problems channel
+# ---------------------------------------------------------------------------
+
+
+class OperationProblem(NamedTuple):
+    """One stored wrapper the loader could not register, and enough to repair it.
+
+    **Keyed by ``path``, deliberately.**  The obvious key is the operation id,
+    and it is the wrong one: the id lives *inside* the payload, so every
+    failure class that stops the payload parsing (malformed JSON, a non-object
+    document) has no id at all, and the classes that reject the id itself (a
+    non-``user:`` namespace, a shadowed built-in) have one that cannot be
+    looked up.  :func:`_wrapper_path_for_id` returns ``None`` for exactly those
+    files, so an id-keyed remove or edit fails on the very definitions that
+    need it most.  The file path is the one identity every stored definition
+    always has.
+
+    ``payload`` is the raw JSON document when it parsed as an object, so a
+    repair surface can drive its ordinary form from the stored fields instead
+    of asking the user to hand-edit JSON.  It is ``None`` only when the file is
+    not parseable JSON or is not a JSON object -- the cases where hand-editing
+    text is the *only* honest repair.  ``operation_id`` is whatever the payload
+    claims, unvalidated, for display.
+    """
+
+    path: str
+    message: str
+    payload: dict | None
+    operation_id: str | None
+
+
+# ---------------------------------------------------------------------------
 # Module state
 # ---------------------------------------------------------------------------
 
@@ -140,9 +173,9 @@ _listeners: list = []
 
 # Whether the on-disk user ops have been scanned + registered this session.
 _user_loaded = False
-# (file, message) for every wrapper the loader skipped -- surfaced to the future
-# manager UI so a broken user op is *visible*, not silently missing.
-_user_problems: list[tuple[str, str]] = []
+# One record per wrapper the loader skipped -- surfaced to the manager UI so a
+# broken user op is *addressable*, not merely visible.  See OperationProblem.
+_user_problems: list[OperationProblem] = []
 # Imported user modules cached by (abspath, mtime) so a "link"-mode edit is
 # picked up (a bumped mtime is a fresh key -> re-import) while an unchanged file
 # imports once.
@@ -429,7 +462,7 @@ def _load_user_operations() -> None:
 
     global _user_loaded, _user_problems
     registry._reset_user_operations()
-    problems: list[tuple[str, str]] = []
+    problems: list[OperationProblem] = []
     directory = user_operations_directory()
     if os.path.isdir(directory):
         for file_name in sorted(os.listdir(directory)):
@@ -447,9 +480,27 @@ def _load_user_operations() -> None:
                 registry.register_user_operation(spec)
             except Exception as exc:  # a broken user op must not break the app
                 _LOGGER.warning("skipping user operation %s: %s", path, exc)
-                problems.append((path, str(exc)))
+                problems.append(_problem_record(path, str(exc)))
     _user_problems = problems
     _user_loaded = True
+
+
+def _problem_record(path: str, message: str) -> OperationProblem:
+    """Attach whatever of the stored payload survives, for the repair surface."""
+
+    payload: dict | None = None
+    operation_id: str | None = None
+    try:
+        with open(path) as handle:
+            raw = json.load(handle)
+    except Exception:
+        raw = None
+    if isinstance(raw, dict):
+        payload = dict(raw)
+        claimed = raw.get("id")
+        if isinstance(claimed, str) and claimed:
+            operation_id = claimed
+    return OperationProblem(path, message, payload, operation_id)
 
 
 def _ensure_user_operations() -> None:
@@ -464,8 +515,8 @@ def refresh_user_operations() -> None:
     _notify()
 
 
-def user_operation_problems() -> list[tuple[str, str]]:
-    """``(file, message)`` for every wrapper the loader skipped this session."""
+def user_operation_problems() -> list[OperationProblem]:
+    """One :class:`OperationProblem` per wrapper the loader skipped this session."""
 
     _ensure_user_operations()
     return list(_user_problems)
@@ -1175,6 +1226,7 @@ def duplicate_operation(operation_id: str) -> str:
 
     from arrayscope.operations.operation_definitions import (
         adapter_template_source,
+        empty_template_source,
         export_operation_definition,
         native_editable_source,
     )
@@ -1211,6 +1263,15 @@ def duplicate_operation(operation_id: str) -> str:
                 "input_slots",
             }
         }
+        # A command copy carries a Python source block it does not use. That
+        # looks redundant and is the opposite: `source` is what the *Python*
+        # runtime requires, and the runtime is a combo box one click away in
+        # the manager. Emitting it here means switching this copy to Python
+        # produces an empty-but-loadable operation instead of a wrapper the
+        # loader refuses -- a definition that vanishes from the tree the moment
+        # the user explores the control that was offered to them.
+        with open(os.path.join(directory, source_name), "w") as handle:
+            handle.write(empty_template_source(callable_name))
         wrapper.update(
             {
                 "format": WRAPPER_FORMAT,
@@ -1219,6 +1280,7 @@ def duplicate_operation(operation_id: str) -> str:
                 "label": label,
                 "group": effective_group(entry),
                 "changes_shape": False,
+                "source": {"mode": "import", "path": source_name, "callable": callable_name},
                 "template": {
                     "kind": "command-copy",
                     "source_id": entry.id,
@@ -1374,8 +1436,16 @@ def _callable_name(slug: str) -> str:
 
 
 def _write_wrapper(path: str, payload: dict) -> None:
-    with open(path, "w") as handle:
+    """Serialize a wrapper, replacing the file only once it is fully written.
+
+    Write-in-place would turn an interrupted save into a *new* broken wrapper,
+    which is the failure class this module is supposed to be shrinking.
+    """
+
+    temporary = f"{path}.tmp"
+    with open(temporary, "w") as handle:
         json.dump(payload, handle, indent=2)
+    os.replace(temporary, path)
 
 
 def import_custom_operation(
@@ -1500,6 +1570,114 @@ def update_user_operation(operation_id: str, **wrapper_fields) -> bool:
         merged_source.update(source_update)
         payload["source"] = merged_source
     payload.update(wrapper_fields)
+    _write_wrapper(path, payload)
+    refresh_user_operations()
+    return True
+
+
+def remove_user_operation_file(path: str) -> bool:
+    """Delete one stored wrapper by *file path*, however broken it is.
+
+    The path-keyed sibling of :func:`remove_user_operation`.  A definition that
+    cannot be loaded has no usable id, so this is the only delete that reaches
+    the wrapper the loader is complaining about.  Import-mode code files are
+    removed with it when the payload still says where they are.
+    """
+
+    path = os.path.abspath(path)
+    directory = os.path.abspath(user_operations_directory())
+    if os.path.dirname(path) != directory or not os.path.isfile(path):
+        return False
+    try:
+        with open(path) as handle:
+            payload = json.load(handle)
+    except Exception:
+        payload = {}
+    source = payload.get("source") if isinstance(payload, dict) else None
+    os.remove(path)
+    if isinstance(source, dict) and source.get("mode") == "import":
+        rel = str(source.get("path") or "")
+        if rel and not os.path.isabs(rel):
+            code_path = os.path.join(directory, rel)
+            if os.path.exists(code_path):
+                os.remove(code_path)
+    refresh_user_operations()
+    return True
+
+
+def update_user_operation_file(path: str, payload: dict) -> bool:
+    """Replace one stored wrapper's whole payload by *file path*, then rescan.
+
+    The path-keyed sibling of :func:`update_user_operation`.  It is a whole
+    replacement rather than a merge: a repair surface owns the entire document
+    (that is the point of editing a definition the loader rejected), and
+    merging into a payload the loader could not understand would preserve
+    exactly the keys the user is trying to remove.  The rescan decides whether
+    the repair worked -- a resolved wrapper simply stops being a problem.
+    """
+
+    path = os.path.abspath(path)
+    directory = os.path.abspath(user_operations_directory())
+    if os.path.dirname(path) != directory or not os.path.isfile(path):
+        return False
+    if not isinstance(payload, dict):
+        raise TypeError("wrapper payload must be a JSON object")
+    _write_wrapper(path, payload)
+    refresh_user_operations()
+    return True
+
+
+def ensure_user_operation_source(operation_id: str) -> bool:
+    """Guarantee a user operation has a Python ``source`` block and a file.
+
+    The Python runtime is the only one that *requires* ``source``, so a wrapper
+    written by a non-Python path can be one combo-box change away from a
+    definition the loader refuses.  Rather than making the toggle refuse the
+    change (which strands the user on the runtime they wanted to leave), the
+    toggle calls this first and the wrapper is always loadable afterwards.
+
+    Returns True when a source block had to be created.
+    """
+
+    path = _wrapper_path_for_id(operation_id)
+    if path is None:
+        return False
+    with open(path) as handle:
+        payload = json.load(handle)
+    source = payload.get("source")
+    directory = user_operations_directory()
+    if isinstance(source, dict):
+        stored = str(source.get("path") or "")
+        resolved = stored if os.path.isabs(stored) else os.path.join(directory, stored)
+        if stored and str(source.get("callable") or "") and os.path.exists(resolved):
+            return False
+
+    from arrayscope.operations.operation_definitions import empty_template_source
+
+    slug = operation_id[len("user:") :] or _safe_slug(operation_id)
+    callable_name = _callable_name(slug)
+    source_name = f"{slug}.py"
+    source_path = os.path.join(directory, source_name)
+    os.makedirs(directory, exist_ok=True)
+    if os.path.exists(source_path):
+        # A file already at the conventional name is somebody's code. Adopt a
+        # callable it actually declares rather than naming one it does not
+        # (that would be a fresh "no top-level function" refusal), and if it
+        # declares none, write the stub beside it instead of over it.
+        try:
+            available = [info.name for info in introspect_python_source(source_path)]
+        except Exception:
+            available = []
+        if callable_name not in available:
+            if available:
+                callable_name = available[0]
+            else:
+                source_name = f"{slug}-operation.py"
+                source_path = os.path.join(directory, source_name)
+    if not os.path.exists(source_path):
+        with open(source_path, "w") as handle:
+            handle.write(empty_template_source(callable_name))
+    payload["source"] = {"mode": "import", "path": source_name, "callable": callable_name}
     _write_wrapper(path, payload)
     refresh_user_operations()
     return True
