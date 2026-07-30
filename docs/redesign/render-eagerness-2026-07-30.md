@@ -583,6 +583,20 @@ Blunt teardown, for contrast: `hide_all()` (`tiles.py:1152`) via
 (`frame_controller.py:886`) on a rejected session transition — it does not
 distinguish visible from out-of-view.
 
+> **Acted on, and one correction to the target.** See
+> [data-change-invalidation-2026-07-30.md](data-change-invalidation-2026-07-30.md).
+> The blunt teardown named above is *not* where a montage data change goes: a
+> slice step, an index-window move, an axis-range crop and a canonical-orientation
+> transpose all take `retarget_index_window`, an in-place rebirth that never
+> reaches `invalidate_tiled_presentation` at all — so nothing told the surface to
+> stop drawing the predecessor, and a pure camera move reproduced the previous
+> slice **100 % pixel-identical** on `gpu_atlas`. Superseded tiles are now hidden
+> at that seam (`hide_superseded_tiled_presentation`, hide-only, proportional to
+> what changed) and their removals deferred behind `visible_plan_complete()`:
+> out-of-view removals riding the commits before first visible pixels go 992 → 0
+> (WGPU) and 744 → 0 (PyQtGraph) at 272 tiles, with first-pixel latency unchanged
+> within noise.
+
 ---
 
 ## 7. Render-area code with no production caller

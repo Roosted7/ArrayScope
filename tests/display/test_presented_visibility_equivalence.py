@@ -183,6 +183,45 @@ def test_hide_all_leaves_nothing_presented(view):
     assert _check(view) == set()
 
 
+def test_hide_tiles_hides_the_named_tiles_and_keeps_their_residency(view):
+    """The per-tile half of ``hide_all``, split off for a data change.
+
+    Two properties in one: the tiles NOT named keep drawing (a data change
+    hides what it superseded and nothing else, which is what leaves out-of-view
+    retention intact for an ordinary camera move), and the hidden ones keep
+    their state (that is what makes it a hide rather than a removal, so the way
+    back is a re-show).
+    """
+
+    _present(view, _payloads(6))
+    layer = view._montage_tile_layer
+
+    hidden = layer.hide_tiles({0, 3, 4, 5})
+
+    assert hidden == 4
+    assert _check(view) == {1, 2}
+    assert set(layer.states) == set(range(6)), "hiding must not discard tile states"
+    assert all(getattr(layer.states[tile].item, "image", None) is not None for tile in range(6)), (
+        "hiding must not discard pixels"
+    )
+
+
+def test_hide_tiles_is_a_no_op_for_an_empty_superseded_set(view):
+    _present(view, _payloads(6))
+    layer = view._montage_tile_layer
+
+    assert layer.hide_tiles(set()) == 0
+    assert _check(view) == set(range(6))
+
+
+def test_showing_again_after_hide_tiles_agrees(view):
+    _present(view, _payloads(6))
+    view._montage_tile_layer.hide_tiles({1, 2, 3, 4, 5})
+    _present(view, _payloads(6), revision=2)
+
+    assert _check(view) == set(range(6))
+
+
 def test_showing_again_after_hide_all_agrees(view):
     _present(view, _payloads(6))
     view._montage_tile_layer.hide_all()

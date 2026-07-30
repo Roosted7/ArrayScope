@@ -64,7 +64,10 @@ from arrayscope.window.montage_payload_cache import (
 from arrayscope.window.montage_payload_cache import (
     previous_tiled_payloads_by_base_source as _previous_tiled_payloads_by_base_source,
 )
-from arrayscope.window.montage_prefetch import schedule_near_viewport_montage_prefetch
+from arrayscope.window.montage_prefetch import (
+    drain_deferred_out_of_view_invalidation,
+    schedule_near_viewport_montage_prefetch,
+)
 from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
     effective_montage_columns,
@@ -180,6 +183,54 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             capabilities.persistent_tile_residency
             and str(getattr(capabilities, "tile_residency_kind", "none") or "none") == "gpu_atlas"
         )
+
+    def _hide_superseded_presentation(self, session, reason: str, tiles) -> int:
+        """Stop drawing tiles a data change superseded.
+
+        The one seam behind the product rule "a quick pan must never reveal
+        stale tiles".  It is deliberately the cheap half of invalidation: it
+        hides, and runs on the path that owes the screen new pixels, while the
+        removals — which re-enter the ``removals`` tuple of every commit until
+        the backend acknowledges them — wait in
+        ``deferred_out_of_view_invalidations`` for the visible set to finish.
+
+        The caller names the superseded tiles.  Passing "everything outside the
+        viewport" instead looked equivalent and is not: a camera move can reach
+        the index-window retarget with every source unchanged, and hiding on
+        that would undo the whole point of out-of-view retention — caught by
+        ``test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope``,
+        which went from 0 to 1 republication per pan leg.
+
+        Nothing here is a new staleness notion.  A tile hidden by this seam
+        returns only through the ordinary identity-checked upsert path, and the
+        payload-level guards (``acknowledged_identity_satisfies_target`` on
+        ``cpu_item``, ``payload_compatible_with_tile``'s
+        ``semantic_generation`` on both) are what refuse the superseded pixels
+        if anything asks for them in the meantime.
+        """
+
+        superseded = frozenset(int(tile) for tile in tiles or ())
+        if not superseded or session is None:
+            return 0
+        if not bool(getattr(session, "defer_out_of_view_removals", True)):
+            return 0
+        surface = surface_for_view(self.win.img_view)
+        hide = getattr(surface, "hide_superseded_tiled_presentation", None)
+        if not callable(hide):
+            return 0
+        hidden = int(hide(str(reason), tiles=superseded) or 0)
+        if hidden:
+            emit_trace(
+                "superseded_presentation_hidden",
+                session_id=int(session.session_id),
+                reason=str(reason),
+                hidden=int(hidden),
+                superseded=len(superseded),
+            )
+        self._superseded_tiles_hidden = (
+            int(getattr(self, "_superseded_tiles_hidden", 0) or 0) + hidden
+        )
+        return hidden
 
     def _session_source_anchoring(self, document, view_state, axis):
         """ADR 0055 G3: window-invariant payload anchoring for the session.
@@ -928,6 +979,22 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             "frame-session-transition",
             hide_pixels=not retain_stale_pixels,
         )
+        if retain_stale_pixels:
+            # The bridge is honest only where the camera is.  A rebirth starts
+            # a cold lifecycle, so nothing the surface is still drawing belongs
+            # to the successor; everything outside its viewport is superseded
+            # and a pan is a camera uniform with no per-tile predicate in the
+            # path to refuse it.  The viewport itself keeps its stale-but-
+            # honest pixels, which is what the bridge is for.
+            self._hide_superseded_presentation(
+                session,
+                "frame-session-transition",
+                {
+                    int(tile.montage_index)
+                    for tile in tuple(getattr(session.plan, "tiles", ()) or ())
+                    if int(tile.montage_index) not in session.visible_tile_numbers
+                },
+            )
         self._frame_session = session
         # A live session can receive cached/refined level evidence as soon as
         # its level work is queued below.  Attach its one effects owner first
@@ -1231,6 +1298,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._frame_session_id = session_id
         setup_start = perf_counter()
         model_start = perf_counter()
+        deferred_before = frozenset(session.deferred_out_of_view_invalidations)
         stats = session.retarget_index_window(
             session_id=session_id,
             key=session_key,
@@ -1247,6 +1315,20 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             visible_tiles=tuple(display_tiles),
         )
         self._last_montage_retarget_model_ms = (perf_counter() - model_start) * 1000.0
+        # An index-window retarget is a data change that never reaches
+        # ``invalidate_tiled_presentation``: the session object survives, so
+        # nothing tells the surface to stop drawing the predecessor.  Exactly
+        # the tiles this retarget just deferred are the superseded out-of-view
+        # ones — the tiles a quick pan would reveal — so hide those and nothing
+        # else.  A camera move that reaches this path with every source
+        # unchanged defers nothing and therefore hides nothing.
+        hide_start = perf_counter()
+        self._hide_superseded_presentation(
+            session,
+            "index-window-retarget",
+            frozenset(session.deferred_out_of_view_invalidations) - deferred_before,
+        )
+        self._last_montage_retarget_hide_superseded_ms = (perf_counter() - hide_start) * 1000.0
         session.tile_residency_budget_bytes = tile_residency_budget_bytes(policy)
         session.force_auto = bool(force_auto)
         session.user_levels_override = user_levels
@@ -1908,6 +1990,30 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self.win.img_view.setEvaluationOverlay(False)
         if hasattr(self.win.img_view, "clearMontageTileOverlays"):
             self.win.img_view.clearMontageTileOverlays()
+        # "In view complete" is exactly the edge the deferred out-of-view
+        # invalidation is waiting for, so this is where it is invited.  The
+        # prefetch entry invites it too; the drain owns its own gates so the
+        # ordering property does not depend on which owner arrives first, and
+        # a montage that stops committing (nothing left to converge) still
+        # drains instead of holding its queue until the next user action.
+        drain_deferred_out_of_view_invalidation(self, session)
+        # NOT invited here: the halo warm.  This is the moment the product rule
+        # names for it — visible work done, session idle — and prefetch has no
+        # invitation of its own at that moment (every other one hangs off a
+        # commit, so a montage that finished converging after a data change
+        # gets none; measured on a settled 272-tile montage after a slice step,
+        # the 24-tile halo ring stayed 0/24 display-cached through a second of
+        # idle with zero prefetch tiles scheduled).  Adding the invitation was
+        # measured on this branch and reverted: it costs
+        # ``test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope``
+        # one whole-montage republication per pan leg, 0 -> 1.  Bisected to
+        # ``_warm_prefetched_tiled_residency`` — with the invitation kept and
+        # only that warm disabled, the republication goes away.  So the
+        # out-of-view retention did NOT unblock the halo warm that
+        # retention-halo-2026-07-30.md §3 rejected: the warm deposits into the
+        # commit-scoped payload map for a tile no commit will present, and the
+        # retention predicate cannot rescue it because it requires the backend
+        # to be DRAWING the payload already, which a warm never is.
         return True
 
     def _sync_committed_montage_geometry(self, geometry, *, semantic_commit: bool = True) -> None:

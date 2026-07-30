@@ -38,6 +38,29 @@ class ImageSurface(Protocol):
         """
         ...
 
+    def hide_superseded_tiled_presentation(self, reason: str, *, tiles: frozenset[int]) -> int:
+        """Stop drawing the named tiles, keeping their residency.
+
+        The seam a data change crosses when the drawn pixels are kept as a
+        stale-but-honest bridge for what the user is looking at.  The bridge is
+        only honest where the camera is: an out-of-view tile the surface is
+        still drawing after the data changed is a tile a quick pan would reveal
+        with the PREVIOUS data in it, and on a persistent-residency backend no
+        per-tile predicate runs on a pure camera move to refuse it.
+
+        The caller names the superseded tiles rather than passing a viewport,
+        because "outside the viewport" and "superseded" are different sets and
+        conflating them costs the out-of-view retention its whole point: a
+        camera move that supersedes nothing must hide nothing.
+
+        The contract is deliberately narrow so it can stay on the visible path.
+        It hides; it does not remove.  Page residency, pins, payload wrappers
+        and lifecycle state are all untouched, which is what leaves the
+        expensive per-tile invalidation free to run later, off the path that
+        owes the screen new pixels.  Returns how many tiles it hid.
+        """
+        ...
+
     def hide_tiled_presentation(self, reason: str) -> None: ...
 
     def reset_tiled_residency(self, reason: str) -> None: ...

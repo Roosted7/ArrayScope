@@ -129,6 +129,10 @@ class _FakeImageView:
             )
         return self.report
 
+    def hide_superseded_tiled_presentation(self, reason, *, tiles):
+        self.hide_superseded = (str(reason), frozenset(tiles))
+        return 0
+
     def hide_tiled_presentation(self, reason):
         self.hide_tiled_reason = str(reason)
 

@@ -190,8 +190,13 @@ recorded because they are the regime the map describes and are **not** claims:
   presented tiles widen the containment the clamp checks. The round's level
   *source* is whole-montage already and does not move.
 - **Untouched:** the PyQtGraph victim policy (§2.3), the three inconsistent halo
-  radii (§1), deferred invalidation on data change, and the whole-montage
-  per-camera-move passes (§4). The atomic-successor builder keeps its own
+  radii (§1), and the whole-montage per-camera-move passes (§4).
+  Deferred invalidation on data change is now
+  [its own dossier](data-change-invalidation-2026-07-30.md) — and it found that
+  retention widened a real seam: the presented set is now viewport-plus-halo, so
+  a data change that never reaches `invalidate_tiled_presentation` (which is most
+  of them) left an order of magnitude more superseded pixels standing for a pan
+  to reveal. The atomic-successor builder keeps its own
   `active_tiles == upserts` contract and is not widened; after an atomic handoff
   the retention set is rebuilt from scratch by the next general build.
 

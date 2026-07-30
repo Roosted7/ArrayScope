@@ -44,6 +44,11 @@ from arrayscope.render.lod import (
 )
 from arrayscope.window.frame_effects import interactive_active
 
+# One idle turn's share of deferred out-of-view removals.  Sized against the
+# per-commit removal cost rather than the montage: the drain is re-invited
+# after every commit, so a larger batch buys nothing but a longer GUI turn.
+DEFERRED_OUT_OF_VIEW_DRAIN_BATCH = 32
+
 
 @dataclass(frozen=True)
 class MontagePrefetchDecision:
@@ -99,6 +104,14 @@ def schedule_near_viewport_montage_prefetch(
     busy = _busy(window, session)
     if not window._frame_session_is_current(session):
         return _record(window, (MontagePrefetchDecision(None, None, "stale", "session is stale"),))
+    # Owed work before speculative work, and both only once the screen is
+    # served.  A data change hides its out-of-view tiles at the seam and
+    # leaves their removals queued here; draining them is what finally lets
+    # the backend forget the superseded slots.  It shares this function's
+    # gates rather than adding its own: the condition for "safe to spend a
+    # GUI turn on something the user is not looking at" is the same one, and
+    # a second copy of it would be a second thing to keep in step.
+    drain_deferred_out_of_view_invalidation(window, session)
     # A document with no operations used to be rejected outright here
     # (``blocked_no_stage``): the original prefetch was built around reusing an
     # already-materialized operation stage, and without one there was nothing to
@@ -460,6 +473,44 @@ def schedule_near_viewport_montage_prefetch(
             MontagePrefetchDecision(None, None, "blocked_no_tile", "no nearby uncached tile")
         )
     return _record(window, tuple(decisions))
+
+
+def drain_deferred_out_of_view_invalidation(window, session) -> int:
+    """Queue a bounded batch of deferred out-of-view removals.
+
+    The ordering property lives here, in one predicate: nothing is drained
+    until ``visible_plan_complete()``.  A data change hides its superseded
+    out-of-view tiles immediately — the correctness half, at the seam, and
+    proportional to what actually changed — and parks their removals; those
+    removals are the whole-montage half — each one
+    rides the ``removals`` tuple of every commit until the backend
+    acknowledges it — so letting them start before the visible tiles have
+    their pixels is the slowdown the requirement forbids.
+
+    ``DEFERRED_OUT_OF_VIEW_DRAIN_BATCH`` bounds one turn's share; the caller
+    is re-invited after each commit, so the tail converges without an
+    unbounded queue and without a timer of its own.
+    """
+
+    deferred = getattr(session, "deferred_out_of_view_invalidations", None)
+    if not deferred:
+        return 0
+    # Self-gated rather than caller-gated: two owners invite this (the commit
+    # followup's prefetch step and the moment the visible plan reports
+    # complete), and the ordering property must not depend on which one got
+    # there first.
+    if _interaction_active(window) or not window._frame_session_is_current(session):
+        return 0
+    if not session.visible_plan_complete():
+        return 0
+    drained = session.drain_deferred_out_of_view_invalidation(DEFERRED_OUT_OF_VIEW_DRAIN_BATCH)
+    if not drained:
+        return 0
+    # The removals now need a commit to reach the backend.  The coalesced
+    # replan is the standing "there is presentation work" signal; going
+    # through it keeps this off the direct-commit path entirely.
+    window.request_montage_replan(session)
+    return len(drained)
 
 
 def _candidate_tiles(session, *, direction: int = 0):

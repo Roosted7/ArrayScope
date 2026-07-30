@@ -45,6 +45,10 @@ class _FakeSurface:
     def invalidate_tiled_presentation(self, reason, *, hide_pixels=True):
         self.calls.append(("invalidate_tiled", str(reason), bool(hide_pixels)))
 
+    def hide_superseded_tiled_presentation(self, reason, *, tiles):
+        self.calls.append(("hide_superseded", str(reason), frozenset(tiles)))
+        return 0
+
     def hide_tiled_presentation(self, reason):
         self.calls.append(("hide_tiled", str(reason), None))
 

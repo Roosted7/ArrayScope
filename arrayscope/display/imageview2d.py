@@ -852,6 +852,15 @@ class ImageViewShell(QtWidgets.QWidget):
 
         raise NotImplementedError
 
+    def hide_superseded_tiled_presentation(self, reason: str, *, tiles: frozenset[int]) -> int:
+        """Backend contract: stop drawing the named superseded tiles.
+
+        See ``ImageSurface.hide_superseded_tiled_presentation``: hide only,
+        never remove, so the seam stays proportional to what changed.
+        """
+
+        raise NotImplementedError
+
     def hide_tiled_presentation(self, reason: str) -> None:
         """Backend contract: deactivate the tiled presentation entirely."""
 
@@ -2878,6 +2887,12 @@ class ImageView2D(ImageViewShell):
         self._montage_tile_layer_histogram_key = None
         self._montage_display_mode = "none"
         self.imageItem.setVisible(False)
+
+    def hide_superseded_tiled_presentation(self, reason: str, *, tiles: frozenset[int]) -> int:
+        layer = self._montage_tile_layer
+        if layer is None:
+            return 0
+        return int(layer.hide_tiles(tiles))
 
     def hide_tiled_presentation(self, reason: str) -> None:
         if self._montage_tile_layer is not None:

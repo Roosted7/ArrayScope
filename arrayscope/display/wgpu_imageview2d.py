@@ -2756,6 +2756,64 @@ class WgpuImageView2D(ImageViewShell):
         self._montage_display_mode = "none"
         self.imageItem.setVisible(False)
 
+    def hide_superseded_tiled_presentation(self, reason: str, *, tiles: frozenset[int]) -> int:
+        """Drop the named tiles from the drawn instance set.
+
+        This backend is the reason the seam exists.  A pan submits a camera
+        uniform and nothing else, so a superseded instance left standing after
+        a data change is drawn from pages that still hold the previous data
+        with no CPU code in the path to refuse it.  Every other staleness guard
+        in the tiled pipeline is a per-tile predicate evaluated during a
+        commit, and a pure camera move performs no commit.
+
+        Cost is proportional to the drawn set: a narrowed committed record plus
+        the instance rebuild it forces.  Deliberately NOT done here: page
+        eviction, pin release, payload drops, descriptor teardown.  Those are
+        the removal, and they belong after the visible set is served.  The
+        narrowed record also makes the next commit's
+        ``previous_commit["tiles"] <= payloads`` precondition easier to satisfy
+        rather than harder, so this cannot turn a delta into a republication.
+        """
+
+        committed = self._wgpu_committed
+        if not committed or self._montage_display_mode != "wgpu_tile_layer":
+            return 0
+        superseded = {int(tile) for tile in tiles}
+        if not superseded:
+            return 0
+        drawn = committed.get("tiles") or {}
+        narrowed = {
+            int(number): info for number, info in drawn.items() if int(number) not in superseded
+        }
+        if len(narrowed) == len(drawn):
+            return 0
+        # Preview-atlas members are ordinary entries in ``tiles`` (each names
+        # its own atlas page), so narrowing the population already stops
+        # drawing the superseded ones; this only keeps the bookkeeping tuple
+        # consistent with what is drawn.
+        atlas_tiles = tuple(
+            int(tile)
+            for tile in (committed.get("preview_atlas_active_tiles", ()) or ())
+            if int(tile) not in superseded
+        )
+        serial = int(self._wgpu_commit_serial) + 1
+        self._wgpu_commit_serial = serial
+        self._wgpu_committed = {
+            **committed,
+            "tiles": narrowed,
+            "preview_atlas_active_tiles": atlas_tiles,
+            "serial": serial,
+            # The population changed by construction, so the successor may
+            # neither patch from nor reuse the predecessor's instance order.
+            "base_serial": None,
+            "changed_tiles": None,
+            "population_stable": False,
+        }
+        self._wgpu_tiled_binding_signature = None
+        self._submit_wgpu((UpdateTileInstances(self._wgpu_tile_instances()),))
+        self._request_wgpu_canvas_draw()
+        return len(drawn) - len(narrowed)
+
     def reset_tiled_residency(self, reason: str) -> None:
         self.discardPreparedTiledUploads()
         executor = self._wgpu_executor

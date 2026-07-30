@@ -800,6 +800,23 @@ class FrameSession:
     retained_out_of_view_evictions: int = 0
     retained_out_of_view_returns: int = 0
     _retention_departure_stamp: int = 0
+    # Out-of-view tiles a data change invalidated whose PHYSICAL removal has
+    # not been queued yet.  The surface stopped drawing them at the seam
+    # (``hide_superseded_tiled_presentation``), which is the whole of what
+    # correctness needs; what is deferred is the removal, which rides every
+    # commit until the backend acknowledges it and is therefore whole-montage
+    # work on the path that owes the screen new pixels.  Bounded by the montage:
+    # a tile can appear at most once, and returning to view removes it.
+    deferred_out_of_view_invalidations: set[int] = field(default_factory=set)
+    # The ordering property in one switch: with it off the retarget queues
+    # every invalidated tile's removal inline, which is what main does.  It is
+    # a field rather than a constant so an A/B can interleave both arms in one
+    # process — sequential single-shot processes have inverted the sign of a
+    # measurement in this repo four times.
+    defer_out_of_view_removals: bool = True
+    deferred_out_of_view_deferred: int = 0
+    deferred_out_of_view_drained: int = 0
+    deferred_out_of_view_returned: int = 0
     visible_tile_numbers: frozenset[int] = field(default_factory=frozenset)
     level_generation: PresentationGenerationTracker = field(
         default_factory=PresentationGenerationTracker
@@ -2001,8 +2018,14 @@ class FrameSession:
                 changed_slots.add(index)
                 self.lifecycle.presentation_discarded(index)
                 self.skipped_tiles.discard(index)
-                self.dirty_payloads[index] = None
-                self.pending_removals.add(index)
+                self._forget_out_of_view_retention(index)
+                if index in self.visible_tile_numbers or not self.defer_out_of_view_removals:
+                    self.dirty_payloads[index] = None
+                    self.pending_removals.add(index)
+                else:
+                    # Out of view: the surface stops drawing it at the seam
+                    # instead, and the removal waits for the visible set.
+                    self.defer_out_of_view_invalidation(index)
                 if 0 <= index < len(plan.tiles):
                     self.mark_tile_state(plan.tiles[index], MontageTileState.UNLOADED)
                 misses += 1
@@ -3757,6 +3780,67 @@ class FrameSession:
         self.pending_payload_upserts.pop(index, None)
         self.level_generation.forget_tile(index)
 
+    def defer_out_of_view_invalidation(self, tile_number: int) -> None:
+        """Queue an invalidated out-of-view tile's removal for later.
+
+        The tile has already lost its payload, its source id and its
+        presentation acknowledgement — that bookkeeping is a handful of dict
+        pops and stays inline, because leaving it undone would let a later
+        pass treat superseded data as current.  What is deferred is the one
+        piece that is neither cheap nor per-tile-bounded: entering
+        ``pending_removals``, which re-emits the tile in the ``removals``
+        tuple of EVERY commit until the backend acknowledges it.  Measured on
+        a 272-tile montage, a slice step put 248 out-of-view removals into all
+        nine commits that ran before the 24 visible tiles were complete.
+        """
+
+        index = int(tile_number)
+        if index in self.deferred_out_of_view_invalidations:
+            return
+        self.deferred_out_of_view_invalidations.add(index)
+        self.deferred_out_of_view_deferred += 1
+
+    def release_deferred_out_of_view_invalidations(self, planned_numbers) -> None:
+        """Drop deferred entries for tiles that are in scope again.
+
+        A tile the camera came back to is produced from scratch through the
+        ordinary planned path: the seam already stopped the backend drawing
+        it, so there is nothing left to remove and a queued removal would race
+        the replacement upsert for the same slot.
+        """
+
+        returned = self.deferred_out_of_view_invalidations.intersection(planned_numbers)
+        if not returned:
+            return
+        self.deferred_out_of_view_invalidations.difference_update(returned)
+        self.deferred_out_of_view_returned += len(returned)
+
+    def drain_deferred_out_of_view_invalidation(self, limit: int) -> tuple[int, ...]:
+        """Promote up to ``limit`` deferred invalidations to real removals.
+
+        Callers own the ordering gate — this must not run until the visible
+        set is complete — and the batch bound is what keeps the tail off any
+        single GUI turn.  Lowest tile number first so the drain is
+        deterministic and a partially drained montage is reproducible.
+        """
+
+        limit = max(0, int(limit))
+        if limit <= 0 or not self.deferred_out_of_view_invalidations:
+            return ()
+        batch = tuple(sorted(self.deferred_out_of_view_invalidations)[:limit])
+        for index in batch:
+            self.deferred_out_of_view_invalidations.discard(int(index))
+            self.dirty_payloads[int(index)] = None
+            self.pending_removals.add(int(index))
+        self.deferred_out_of_view_drained += len(batch)
+        emit_trace(
+            "out_of_view_invalidation_drained",
+            session_id=int(self.session_id),
+            tiles=batch,
+            remaining=len(self.deferred_out_of_view_invalidations),
+        )
+        return batch
+
     def _forget_out_of_view_retention(self, tile_number: int) -> bool:
         """Drop retention bookkeeping for one tile; return whether it was held."""
 
@@ -3976,6 +4060,7 @@ class FrameSession:
         previous_payloads = dict(previous_state.payloads)
         materialized = {int(index) for index in self.rendered_tiles}
         planned_numbers = set(self.visible_tile_numbers).difference(self.skipped_tiles)
+        self.release_deferred_out_of_view_invalidations(planned_numbers)
         plan_tiles_cache = getattr(self, "_plan_tiles_by_number_cache", None)
         if plan_tiles_cache is None or plan_tiles_cache[0] is not self.plan:
             plan_tiles_by_number = {

@@ -187,6 +187,20 @@ The warm is on the wrong side of a seam it does not own. It needs **either**:
 
 Until one of those lands, warming the halo from prefetch makes panning worse.
 
+> **Re-checked 2026-07-30 after out-of-view retention landed, and it is still
+> blocked** — see
+> [data-change-invalidation-2026-07-30.md](data-change-invalidation-2026-07-30.md)
+> §5. Retention does not qualify as the second option above: `_may_retain_out_of_view`
+> requires the backend to be **drawing** the payload already, which a speculative
+> warm never is. Two new facts from that check. First, after a data change the
+> halo is not warmed at all and the reason is upstream of the warm — prefetch has
+> no invitation left once the montage stops committing (`prefetch_scheduled = 0`,
+> ring 0 of 24 through a second of idle). Second, adding that invitation and
+> bisecting isolates the cost precisely: with the invitation kept and only
+> `_warm_prefetched_tiled_residency` disabled, the retention test's extra
+> whole-montage republication per pan leg disappears. The display-cache half of
+> the walk is free; the residency warm is the whole price.
+
 ---
 
 ## 4. What this did not touch

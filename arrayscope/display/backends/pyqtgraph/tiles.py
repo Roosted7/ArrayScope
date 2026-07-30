@@ -858,6 +858,7 @@ class MontageTileLayer:
         self._lookup_table = default_gray_lut()
         self._preview_atlas_item: _CompactPreviewAtlasItem | None = None
         self._preview_atlas_decline_reason = ""
+        self._superseded_atlas_retentions = 0
         self._payload_prepare_ms = 0.0
         self._prepared_uploads = prepared_uploads
         self._prepared_assembly_hits = 0
@@ -1156,6 +1157,54 @@ class MontageTileLayer:
             self._preview_atlas_item.setVisible(False)
         for tile_number in tuple(self._states):
             self._hide_tile(int(tile_number))
+
+    def hide_tiles(self, tiles) -> int:
+        """Hide the named drawn tiles, keeping their residency.
+
+        The per-tile half of ``hide_all``, split off so a data change can stop
+        drawing what it superseded without touching what it did not.
+        Everything ``_hide_tile`` keeps is kept: pixels, ``ImageItem``, scene
+        membership and the reuse-pool claim.  A tile hidden here comes back
+        through the ordinary identity-checked upsert path, never through
+        ``_reshow_retained_active_tiles`` — its acknowledged identity names the
+        superseded data, which is exactly what that guard refuses.
+
+        The compact preview atlas is one item covering many tiles, so it
+        cannot be hidden per tile.  It is dropped only when no tile still on
+        screen depends on it; hiding a load-bearing atlas would blank the
+        bridge this seam exists to preserve.  When it is load-bearing it stays
+        and the retention is counted, because that is the one case where a
+        superseded tile can still reach the screen on this backend.
+        """
+
+        superseded = {int(tile) for tile in tiles}
+        if not superseded:
+            return 0
+        hidden = 0
+        for index in sorted(superseded):
+            state = self._states.get(int(index))
+            if state is None or not _state_is_physically_visible(state):
+                continue
+            self._hide_tile(int(index))
+            hidden += 1
+        atlas = self._preview_atlas_item
+        if atlas is not None and atlas.isVisible():
+            atlas_tiles = {int(tile) for tile in atlas.active_tiles}
+            stale_members = atlas_tiles & superseded
+            if stale_members:
+                survivors = atlas_tiles - superseded
+                covered_directly = {
+                    index
+                    for index in survivors
+                    if (state := self._states.get(int(index))) is not None
+                    and _state_is_physically_visible(state)
+                }
+                if survivors <= covered_directly:
+                    atlas.setVisible(False)
+                    hidden += len(stale_members)
+                else:
+                    self._superseded_atlas_retentions += 1
+        return hidden
 
     def update_presentation(
         self,
