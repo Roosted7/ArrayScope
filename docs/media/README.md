@@ -82,6 +82,15 @@ promised feature is actually visible. The dated
 [walkthrough audit](../reviews/2026-07-30-readme-walkthrough-audit.md) records
 the baseline findings, README feature coverage, and bounded acceptance order.
 
+Qt's offscreen plugin does not include separate popup surfaces in
+`QWidget.grab()`, and can dismiss a `QMenu` immediately. The recorder handles
+that limitation explicitly: it composites a grab of the real built menu at
+the live control anchor, moves the synthetic cursor using the menu action's
+real geometry, and triggers the real `QAction`. Combo choices use the same
+presentation seam with the live combo model and `setCurrentIndex()` signal
+path. This keeps menus visible without pretending an unrelated cursor click
+caused the change.
+
 ## Staying maintainable
 
 `tests/app/test_demo_recorder_smoke.py` records every scenario in `--smoke`

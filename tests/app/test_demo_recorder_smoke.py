@@ -62,3 +62,24 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
     assert captions, f"{name} recorded no caption beats"
     assert actions, f"{name} recorded no action beats"
     assert all(event["end_frame"] is not None for event in manifest["events"])
+    if name == "fft":
+        overlay_choices = [
+            event
+            for event in actions
+            if event["kind"] == "click"
+            and event["target"]
+            and event["target"]["widget_type"] == "QMenuAction"
+        ]
+        labels = {event["label"] for event in overlay_choices}
+        assert {
+            "choose centered FFT on axis 0",
+            "choose centered FFT on axis 1",
+            "choose magnitude",
+            "choose log scale",
+            "choose phase",
+        } <= labels
+        for event in overlay_choices:
+            x, y, width, height = event["target"]["rect"]
+            cursor_x, cursor_y = event["cursor_at_press"]
+            assert x <= cursor_x <= x + width
+            assert y <= cursor_y <= y + height

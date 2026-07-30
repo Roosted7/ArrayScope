@@ -236,6 +236,8 @@ class Recorder:
         self._caption_born_frame = 0
         self._events: list[dict] = []
         self._open_caption_event: dict | None = None
+        self._overlay_widget = None
+        self._overlay_top_left = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -321,6 +323,17 @@ class Recorder:
         image = self.win.grab().toImage().convertToFormat(QtGui.QImage.Format.Format_RGB32)
         painter = QtGui.QPainter(image)
         try:
+            if self._overlay_widget is not None:
+                overlay = (
+                    self._overlay_widget.grab()
+                    .toImage()
+                    .convertToFormat(QtGui.QImage.Format.Format_ARGB32)
+                )
+                if overlay.isNull() or overlay.width() < 2 or overlay.height() < 2:
+                    raise RuntimeError(
+                        f"popup overlay grabbed blank from {type(self._overlay_widget).__name__}"
+                    )
+                painter.drawImage(self._overlay_top_left, overlay)
             caption_age = (self.frame_index - self._caption_born_frame) / self.fps
             alpha = min(1.0, caption_age / CAPTION_FADE_S) if self._caption else 0.0
             _draw_caption(painter, image.width(), image.height(), self._caption, alpha)
@@ -383,6 +396,127 @@ class Recorder:
             "rect": [top_left.x(), top_left.y(), rect.width(), rect.height()],
             "point": [point.x(), point.y()],
         }
+
+    def _show_overlay(self, widget, anchor_widget, *, placement: str) -> None:
+        from pyqtgraph.Qt import QtCore
+
+        widget.ensurePolished()
+        widget.adjustSize()
+        widget.resize(widget.sizeHint())
+        anchor_top_left = anchor_widget.mapTo(self.win, anchor_widget.rect().topLeft())
+        anchor_rect = anchor_widget.rect()
+        if placement == "above":
+            x = anchor_top_left.x()
+            y = anchor_top_left.y() - widget.height() - 4
+        elif placement == "below":
+            x = anchor_top_left.x()
+            y = anchor_top_left.y() + anchor_rect.height() + 4
+        else:
+            raise ValueError(f"unknown overlay placement {placement!r}")
+        x = max(4, min(x, self.win.width() - widget.width() - 4))
+        y = max(4, min(y, self.win.height() - widget.height() - 4))
+        self._overlay_widget = widget
+        self._overlay_top_left = QtCore.QPointF(float(x), float(y))
+
+    def _overlay_action_target(self, menu, action) -> dict:
+        geometry = menu.actionGeometry(action)
+        point = self._overlay_top_left + geometry.center()
+        return {
+            "widget_type": "QMenuAction",
+            "object_name": str(action.data() or ""),
+            "rect": [
+                self._overlay_top_left.x() + geometry.x(),
+                self._overlay_top_left.y() + geometry.y(),
+                geometry.width(),
+                geometry.height(),
+            ],
+            "point": [point.x(), point.y()],
+        }
+
+    def open_overlay_menu(self, anchor_widget, menu, *, placement: str, label: str) -> None:
+        self.click(
+            anchor_widget,
+            invoke=lambda: self._show_overlay(menu, anchor_widget, placement=placement),
+            settle_after=False,
+            label=label,
+        )
+
+    def choose_overlay_action(
+        self,
+        menu,
+        action,
+        *,
+        label: str | None = None,
+        move_s: float = 0.5,
+        readable_hold_s: float = 0.65,
+    ) -> None:
+        """Choose a real QAction from a composited offscreen menu.
+
+        Qt's offscreen plugin renders popup surfaces separately from the
+        window, and may dismiss a QMenu as soon as it is shown. The recorder
+        therefore grabs the built production menu into the window capture,
+        while the chosen QAction and its signal remain the real action path.
+        """
+        from pyqtgraph.Qt import QtCore
+
+        if menu is not self._overlay_widget:
+            raise RuntimeError("menu choice requires the menu to be the active overlay")
+        geometry = menu.actionGeometry(action)
+        if not geometry.isValid() or geometry.isEmpty():
+            raise RuntimeError(f"menu action {action.text()!r} has no visible geometry")
+        target = self._overlay_action_target(menu, action)
+        event = self._start_action(
+            "click",
+            label or f"choose {action.text().replace('&', '')}",
+            target=target,
+        )
+        menu.setActiveAction(action)
+        point = QtCore.QPointF(*target["point"])
+        self.move_to(point, seconds=move_s)
+        self.hold(readable_hold_s)
+        event["press_frame"] = self.frame_index
+        event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
+        self._ripples.append((self.frame_index, QtCore.QPointF(self.cursor)))
+        self.cursor_pressed = True
+        self.hold(0.1)
+        action.trigger()
+        event["activate_frame"] = self.frame_index
+        self.cursor_pressed = False
+        self._overlay_widget = None
+        self._overlay_top_left = None
+        self.settle()
+        self.hold(0.3)
+        self._finish_action(event)
+
+    def choose_combo_item(self, combo, data, *, label: str) -> None:
+        """Show a faithful composited choice list and activate the combo item."""
+        from pyqtgraph.Qt import QtCore, QtWidgets
+
+        menu = QtWidgets.QMenu(self.win)
+        chosen = None
+        for index in range(combo.count()):
+            action = menu.addAction(combo.itemIcon(index), combo.itemText(index))
+            action.setCheckable(True)
+            action.setChecked(index == combo.currentIndex())
+            model_index = combo.model().index(index, combo.modelColumn(), combo.rootModelIndex())
+            action.setEnabled(
+                bool(combo.model().flags(model_index) & QtCore.Qt.ItemFlag.ItemIsEnabled)
+            )
+            action.setData(combo.itemData(index))
+            action.triggered.connect(
+                lambda checked=False, index=index: combo.setCurrentIndex(index)
+            )
+            if combo.itemData(index) == data:
+                chosen = action
+        if chosen is None:
+            raise RuntimeError(f"combo item {data!r} not found")
+        self.open_overlay_menu(
+            combo,
+            menu,
+            placement="below",
+            label=f"open {self._widget_label(combo)} choices",
+        )
+        self.choose_overlay_action(menu, chosen, label=label)
 
     @staticmethod
     def _widget_label(widget) -> str:
@@ -672,10 +806,28 @@ def s_fft(rec: Recorder):
 
     rec.caption("Add centered FFT steps — the source array is never modified")
     chip0 = win.dimension_strip.chip(0)
-    rec.click(chip0.ops_button, invoke=lambda: win._append_operation("centered_fft", dim=0))
+    anchor0 = chip0.ops_button.mapToGlobal(chip0.ops_button.rect().topLeft())
+    menu0 = win._build_operation_context_menu(0, anchor0)
+    fft0 = next(action for action in menu0.actions() if action.data() == "centered_fft")
+    rec.open_overlay_menu(
+        chip0.ops_button,
+        menu0,
+        placement="above",
+        label="open axis 0 operation menu",
+    )
+    rec.choose_overlay_action(menu0, fft0, label="choose centered FFT on axis 0")
     rec.hold_until_settled(2.5, tail_s=0.6)
     chip1 = win.dimension_strip.chip(1)
-    rec.click(chip1.ops_button, invoke=lambda: win._append_operation("centered_fft", dim=1))
+    anchor1 = chip1.ops_button.mapToGlobal(chip1.ops_button.rect().topLeft())
+    menu1 = win._build_operation_context_menu(1, anchor1)
+    fft1 = next(action for action in menu1.actions() if action.data() == "centered_fft")
+    rec.open_overlay_menu(
+        chip1.ops_button,
+        menu1,
+        placement="above",
+        label="open axis 1 operation menu",
+    )
+    rec.choose_overlay_action(menu1, fft1, label="choose centered FFT on axis 1")
     rec.hold_until_settled(2.5, tail_s=1.0)
 
     rec.caption("Complex data: switch to magnitude on a log scale")
@@ -683,13 +835,13 @@ def s_fft(rec: Recorder):
     scale = win.display_toolbar.scale_combo
     # Magnitude on a linear scale is a single bright DC pixel (near-black
     # frame); make that beat brief and get to the log view quickly.
-    rec.click(combo, invoke=lambda: combo.setCurrentIndex(combo.findData("abs")))
+    rec.choose_combo_item(combo, "abs", label="choose magnitude")
     rec.hold_until_settled(1.5, tail_s=0.15)
-    rec.click(scale, invoke=lambda: scale.setCurrentIndex(scale.findData("log")), move_s=0.4)
+    rec.choose_combo_item(scale, "log", label="choose log scale")
     rec.hold_until_settled(2.0, tail_s=1.6)
 
     rec.caption("…or phase")
-    rec.click(combo, invoke=lambda: combo.setCurrentIndex(combo.findData("angle")))
+    rec.choose_combo_item(combo, "angle", label="choose phase")
     rec.hold_until_settled(2.0, tail_s=1.6)
 
     rec.caption("Every step is reversible — toggle it in the operation stack")
@@ -700,7 +852,10 @@ def s_fft(rec: Recorder):
         combo.setCurrentIndex(combo.findData("abs"))
         scale.setCurrentIndex(scale.findData("log"))
 
-    rec.click(combo, invoke=_back_to_log_magnitude, move_s=0.3)
+    rec.choose_combo_item(combo, "abs", label="return to magnitude")
+    if scale.currentData() != "log":
+        rec.choose_combo_item(scale, "log", label="restore log scale")
+    _back_to_log_magnitude()
     rec.settle()
     dock_body = win.operation_dock.widget()
     rec.move_to(dock_body, seconds=0.8)
