@@ -587,13 +587,18 @@ class Recorder:
         event = self._start_action("preview", label, target=target)
         menu.setActiveAction(action)
         self.move_to(QtCore.QPointF(*target["point"]), seconds=move_s)
+        # Record where the pointer actually rests so the inspector can prove
+        # the highlight and the cursor name the same entry.
+        event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
         event["activate_frame"] = self.frame_index
         self.hold(readable_hold_s)
         self._finish_action(event)
         self._overlay_widget = None
         self._overlay_top_left = None
 
-    def choose_combo_item(self, combo, data, *, label: str, after_trigger=None) -> None:
+    def choose_combo_item(
+        self, combo, data, *, label: str, control_label: str, after_trigger=None
+    ) -> None:
         """Show a faithful composited choice list and activate the combo item."""
         from pyqtgraph.Qt import QtCore, QtWidgets
 
@@ -621,15 +626,27 @@ class Recorder:
             combo,
             menu,
             placement="below",
-            label=f"open {self._widget_label(combo)} choices",
+            label=f"open {control_label} choices",
         )
         self.choose_overlay_action(menu, chosen, label=label)
 
     @staticmethod
     def _widget_label(widget) -> str:
+        """Name a control the way a reviewer would.
+
+        ``text()`` is only a label on buttons and actions. On an editor it is
+        the current *content*, which would name the same field "12" in one
+        run and "16:112" in the next — unreadable as evidence.
+        """
+        from pyqtgraph.Qt import QtGui, QtWidgets
+
         if widget is None:
             return ""
-        for attr in ("accessibleName", "text", "title"):
+        names = ["accessibleName"]
+        if isinstance(widget, QtWidgets.QAbstractButton | QtGui.QAction):
+            names.append("text")
+        names.append("title")
+        for attr in names:
             value = getattr(widget, attr, None)
             if callable(value):
                 value = value()
@@ -837,7 +854,9 @@ class Recorder:
     def zoom_image(self, factor: float, center_xy, seconds=1.2) -> None:
         """Smoothly zoom the viewport by ``factor`` around an image point,
         with the cursor parked on that point (wheel-zoom look)."""
-        event = self._start_action("zoom", f"zoom image {factor:.2f}×")
+        # Plain "x": the inspector's default bitmap font has no U+00D7, and a
+        # tofu box in the evidence sheet is worse than an ASCII multiplier.
+        event = self._start_action("zoom", f"zoom image {factor:.2f}x")
         vb = self.win.img_view.getView()
         steps = self._frames_for(seconds)
         per_step = factor ** (1.0 / steps)
@@ -877,20 +896,22 @@ class Recorder:
         per_char_s=0.12,
         *,
         label: str | None = None,
+        control_label: str | None = None,
     ) -> None:
         """Click into a line edit and type ``text`` one character at a time.
         ``on_text`` (if given) is called with the full text once at the end —
         wire it to the window handler the edit would notify."""
+        control_label = control_label or self._widget_label(line_edit)
         event = self._start_action(
             "type",
-            label or f"type {text!r} into {self._widget_label(line_edit)}",
+            label or f"type {text!r} into {control_label}",
             target=self._widget_target(line_edit, (0.5, 0.5)),
         )
         self.click(
             line_edit,
             invoke=lambda: line_edit.setFocus(),
             settle_after=False,
-            label=f"focus {self._widget_label(line_edit)}",
+            label=f"focus {control_label}",
         )
         event["press_frame"] = self.frame_index
         event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
@@ -912,13 +933,14 @@ class Recorder:
         on_text,
         per_value_s: float,
         label: str,
+        control_label: str | None = None,
     ) -> None:
         """Animate successive real edit values under one manifested action."""
         self.click(
             line_edit,
             invoke=line_edit.setFocus,
             settle_after=False,
-            label=f"focus {self._widget_label(line_edit)}",
+            label=f"focus {control_label or self._widget_label(line_edit)}",
         )
         event = self._start_action(
             "scrub",
@@ -961,6 +983,7 @@ def s_showcase(rec: Recorder):
         on_text=lambda text: win._on_slice_text_changed(2, text),
         per_value_s=0.09,
         label="scrub axis 2 slices",
+        control_label="the axis 2 slice range",
     )
     rec.hold(0.6)
 
@@ -971,6 +994,7 @@ def s_showcase(rec: Recorder):
         "16:112",
         on_text=lambda text: win._on_slice_text_changed(0, text),
         label="crop axis 0 to 16:112",
+        control_label="the axis 0 slice range",
     )
     rec.hold_until_settled(1.5, tail_s=0.8)
     rec.caption("Return to the full axis with ':'")
@@ -979,6 +1003,7 @@ def s_showcase(rec: Recorder):
         ":",
         on_text=lambda text: win._on_slice_text_changed(0, text),
         label="restore full axis 0",
+        control_label="the axis 0 slice range",
     )
     rec.hold_until_settled(1.5, tail_s=0.6)
 
@@ -1041,12 +1066,12 @@ def s_fft(rec: Recorder):
     rec.caption("Complex data: switch to magnitude on a log scale")
     combo = win.display_toolbar.channel_combo
     scale = win.display_toolbar.scale_combo
-    rec.choose_combo_item(scale, "log", label="choose log scale")
-    rec.choose_combo_item(combo, "abs", label="choose magnitude")
+    rec.choose_combo_item(scale, "log", label="choose log scale", control_label="scale")
+    rec.choose_combo_item(combo, "abs", label="choose magnitude", control_label="channel")
     rec.hold_until_settled(2.0, tail_s=1.6)
 
     rec.caption("…or phase")
-    rec.choose_combo_item(combo, "angle", label="choose phase")
+    rec.choose_combo_item(combo, "angle", label="choose phase", control_label="channel")
     rec.hold_until_settled(2.0, tail_s=1.6)
 
     rec.caption("Every step is reversible — toggle it in the operation stack")
@@ -1055,6 +1080,7 @@ def s_fft(rec: Recorder):
         combo,
         "abs",
         label="return to logarithmic magnitude",
+        control_label="channel",
         after_trigger=lambda: scale.setCurrentIndex(scale.findData("log")),
     )
     rec.settle()
@@ -1090,6 +1116,7 @@ def s_montage(rec: Recorder):
         on_text=lambda text: win._on_slice_text_changed(2, text),
         per_char_s=0.45,
         label="enter montage range on axis 2",
+        control_label="the axis 2 slice range",
     )
     rec.hold(0.55)
     rec.caption("Tiles are evaluated and presented progressively")
