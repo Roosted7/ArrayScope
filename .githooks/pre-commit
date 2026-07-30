@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# Refuse a commit that the CI `Lint (ruff)` job would reject.
+#
+# This hook exists because that job is not a gate here. It runs on `push` and
+# `pull_request`, but the work happens in local worktrees on branches that are
+# not pushed, so in practice CI sees main in occasional large batches and
+# nothing requires its verdict. Between 2026-07-25 and 2026-07-30, 247 commits
+# landed on main without CI running once, and ruff went from clean to 15
+# errors inside that window. Commit time is the only moment a lint gate
+# reliably fires in this repository.
+#
+# The checks are exactly the two CI steps, run over the whole tree rather than
+# the staged subset: CI lints the tree, and a hook that passed on a partial
+# view would be the kind of gate that cannot fail. Both take ~15 ms.
+#
+# Bypass with `git commit --no-verify` when you mean to; enable with
+#   git config core.hooksPath .githooks
+set -euo pipefail
+
+if ! command -v ruff >/dev/null 2>&1; then
+	# Not found is a hard failure, never a skip. A hook that waves the commit
+	# through when its tool is missing reports green for the one situation it
+	# cannot actually check.
+	echo "pre-commit: ruff is not on PATH, so the lint gate cannot run." >&2
+	echo "  Commit through the maintained environment:" >&2
+	echo "    PATH=~/miniconda3/bin:\$PATH direnv exec . git commit ..." >&2
+	echo "  Or bypass deliberately with --no-verify." >&2
+	exit 1
+fi
+
+status=0
+
+if ! ruff check .; then
+	echo "pre-commit: ruff check failed. Fix with: ruff check --fix ." >&2
+	status=1
+fi
+
+if ! ruff format --check .; then
+	echo "pre-commit: ruff format check failed. Fix with: ruff format ." >&2
+	status=1
+fi
+
+exit "$status"

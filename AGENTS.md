@@ -48,7 +48,17 @@ PATH=~/miniconda3/bin:$PATH direnv exec . conda env update -f environment.yml --
 
 Headless GUI tests normally use `QT_QPA_PLATFORM=offscreen`. WGPU/Vulkan tests still need separate real-hardware runs before performance or Wayland claims are accepted.
 
-Lint and formatting are ruff, configured in `pyproject.toml` and enforced by the CI `lint` job. Before committing: `ruff check --fix .` and `ruff format .`. The ignore list is deliberate (e.g. `E402` because `prefer_pyside6()` must run before Qt imports, `PLC0415` because lazy imports are load-bearing, `PLW0108` because Qt signal-connect lambdas swallow emitted arguments by design) — do not "fix" code to satisfy an ignored rule.
+Lint and formatting are ruff, configured in `pyproject.toml`. Before committing: `ruff check --fix .` and `ruff format .`.
+
+The gate is the tracked `.githooks/pre-commit` hook, not the CI `lint` job. Enable it once per clone (the setting is shared by every worktree):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+CI runs the same two commands, but only on pushed branches, and work here happens in local worktrees that are not pushed — between 2026-07-25 and 2026-07-30 main took 247 commits with no CI run at all, and ruff went from clean to 15 errors inside that window. Treat a red hook as the real signal and CI as a late confirmation.
+
+The ignore list is deliberate (e.g. `E402` because `prefer_pyside6()` must run before Qt imports, `PLC0415` because lazy imports are load-bearing, `PLW0108` because Qt signal-connect lambdas swallow emitted arguments by design) — do not "fix" code to satisfy an ignored rule.
 
 ## Architecture rules
 
