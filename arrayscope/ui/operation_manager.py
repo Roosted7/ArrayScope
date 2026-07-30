@@ -23,7 +23,9 @@ another window's edit) rebuilds the tree in place, preserving selection by id.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
@@ -37,6 +39,10 @@ from arrayscope.ui.toasts import show_status_message
 _ID_ROLE = QtCore.Qt.ItemDataRole.UserRole
 _GROUP_ROLE = QtCore.Qt.ItemDataRole.UserRole + 1
 _VIRTUAL_ROLE = QtCore.Qt.ItemDataRole.UserRole + 2
+# A Problems row's identity is its wrapper file path, never an operation id: the
+# id lives inside a payload the loader could not accept. See
+# ``library.OperationProblem`` for why the whole channel is keyed this way.
+_PROBLEM_PATH_ROLE = QtCore.Qt.ItemDataRole.UserRole + 3
 
 _PROBLEMS_GROUP = "Problems"
 _KIND_CHOICES = ("int", "float")
@@ -51,6 +57,26 @@ _RUNTIME_CHOICES = (
 
 def _is_user_op(operation_id: str) -> bool:
     return str(operation_id).startswith("user:")
+
+
+class _RawField:
+    """Attribute view over one raw parameter / input-slot dict.
+
+    The parameter and input-slot table fillers read their values with
+    ``getattr(obj, name, default)`` because they are handed registry objects. A
+    wrapper the loader rejected has only its stored dicts -- which carry
+    exactly the same fields -- so this adapts one to the other rather than
+    growing a second, silently diverging pair of fillers for the repair path.
+    """
+
+    def __init__(self, payload):
+        self._payload = dict(payload)
+
+    def __getattr__(self, name):
+        try:
+            return self._payload[name]
+        except KeyError:
+            raise AttributeError(name) from None
 
 
 class _OperationTree(QtWidgets.QTreeWidget):
@@ -77,6 +103,13 @@ class _OperationTree(QtWidgets.QTreeWidget):
         index = 0
         while index < self.topLevelItemCount():
             item = self.topLevelItem(index)
+            if item.data(0, _VIRTUAL_ROLE):
+                # The Problems group is not part of the arrangement: its rows
+                # carry a file path rather than an operation id, so the
+                # id-shaped normalization below would evict every one of them
+                # to the top level on the next unrelated drop.
+                index += 1
+                continue
             if item.data(0, _ID_ROLE):
                 # An op dropped at the top level slides into the nearest group.
                 self.takeTopLevelItem(index)
@@ -107,6 +140,8 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.setMinimumSize(720, 620)
         self.setSizeGripEnabled(True)
         self._loaded_id = None
+        self._loaded_problem = None
+        self._problems_by_path = {}
         self._suppress = False
         self._reloading = False
         self._source_infos = {}
@@ -210,6 +245,39 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.common_check = QtWidgets.QCheckBox("Show in the Common (pinned) section", self)
         form.addRow("", self.common_check)
         right.addLayout(form)
+
+        # -- repair pane (Problems rows only) ------------------------------
+        # A stored definition the loader rejected is edited *here*, in the same
+        # column and — whenever its payload still parses — through the same
+        # form widgets above. The raw text pane below is the fallback for the
+        # one case the form cannot express: a file that is not JSON at all.
+        self.repair_box = QtWidgets.QGroupBox("Repair this stored definition", self)
+        repair_layout = QtWidgets.QVBoxLayout(self.repair_box)
+        self.problem_message_label = QtWidgets.QLabel("", self)
+        self.problem_message_label.setObjectName("OperationsProblemLabel")
+        self.problem_message_label.setWordWrap(True)
+        self.problem_message_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        repair_layout.addWidget(self.problem_message_label)
+        self.problem_path_label = QtWidgets.QLabel("", self)
+        self.problem_path_label.setObjectName("OperationsMetaLabel")
+        self.problem_path_label.setWordWrap(True)
+        self.problem_path_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        repair_layout.addWidget(self.problem_path_label)
+        self.raw_json_edit = QtWidgets.QPlainTextEdit(self)
+        self.raw_json_edit.setPlaceholderText("Wrapper JSON")
+        self.raw_json_edit.setMinimumHeight(220)
+        repair_layout.addWidget(self.raw_json_edit, 1)
+        raw_buttons = QtWidgets.QHBoxLayout()
+        self.raw_json_save_button = QtWidgets.QPushButton("Save wrapper JSON", self)
+        raw_buttons.addWidget(self.raw_json_save_button)
+        raw_buttons.addStretch(1)
+        repair_layout.addLayout(raw_buttons)
+        self.repair_box.setVisible(False)
+        right.addWidget(self.repair_box)
 
         self.source_box = QtWidgets.QGroupBox("Implementation", self)
         source_layout = QtWidgets.QVBoxLayout(self.source_box)
@@ -417,6 +485,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.open_file_button.clicked.connect(self._open_code_file)
         self.open_folder_button.clicked.connect(self._open_folder)
         self.reset_all_button.clicked.connect(self._reset_all)
+        self.raw_json_save_button.clicked.connect(self._save_raw_wrapper)
         self.done_button.clicked.connect(self.accept)
 
         self.label_edit.editingFinished.connect(self._apply_user_edits)
@@ -475,6 +544,11 @@ class OperationManagerDialog(QtWidgets.QDialog):
 
     def _refresh_tree(self):
         selected = self.selected_operation_id()
+        problem_path = self.selected_problem_path()
+        # A repair that works makes the row leave Problems, so "keep the
+        # selection" has to mean the definition, not the row: fall through to
+        # the id the repaired payload claims.
+        repaired_id = self._loaded_problem.operation_id if self._loaded_problem else None
         self._reloading = True
         try:
             self.tree.clear()
@@ -488,7 +562,12 @@ class OperationManagerDialog(QtWidgets.QDialog):
             self._append_problems_group()
         finally:
             self._reloading = False
-        if selected is None or not self.select_operation(selected):
+        restored = (
+            (selected is not None and self.select_operation(selected))
+            or (problem_path is not None and self.select_problem_path(problem_path))
+            or (repaired_id is not None and self.select_operation(repaired_id))
+        )
+        if not restored:
             self._select_first_operation()
         self._load_editor()
 
@@ -536,6 +615,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
         return item
 
     def _append_problems_group(self):
+        self._problems_by_path = {}
         problems = library.user_operation_problems()
         if not problems:
             return
@@ -543,11 +623,16 @@ class OperationManagerDialog(QtWidgets.QDialog):
         group_item.setData(0, _VIRTUAL_ROLE, True)
         group_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
         self.tree.addTopLevelItem(group_item)
-        for path, message in problems:
-            child = QtWidgets.QTreeWidgetItem([os.path.basename(path)])
-            child.setData(0, _VIRTUAL_ROLE, True)
+        for problem in problems:
+            self._problems_by_path[problem.path] = problem
+            label = problem.operation_id or os.path.basename(problem.path)
+            child = QtWidgets.QTreeWidgetItem([label])
+            # Only the *group* stays virtual. The row itself is addressable by
+            # file path, which is what makes it selectable, editable, and
+            # removable instead of a dead end.
+            child.setData(0, _PROBLEM_PATH_ROLE, problem.path)
             child.setIcon(0, material_icon("warning"))
-            child.setToolTip(0, message)
+            child.setToolTip(0, f"{os.path.basename(problem.path)} — {problem.message}")
             child.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
             group_item.addChild(child)
         group_item.setExpanded(True)
@@ -558,6 +643,18 @@ class OperationManagerDialog(QtWidgets.QDialog):
             for child_index in range(group_item.childCount()):
                 child = group_item.child(child_index)
                 if child.data(0, _ID_ROLE) == str(operation_id):
+                    self.tree.setCurrentItem(child)
+                    return True
+        return False
+
+    def select_problem_path(self, path: str) -> bool:
+        """Select the Problems row for one stored wrapper file."""
+
+        for group_index in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(group_index)
+            for child_index in range(group_item.childCount()):
+                child = group_item.child(child_index)
+                if child.data(0, _PROBLEM_PATH_ROLE) == str(path):
                     self.tree.setCurrentItem(child)
                     return True
         return False
@@ -576,6 +673,22 @@ class OperationManagerDialog(QtWidgets.QDialog):
         if item is None or item.data(0, _VIRTUAL_ROLE):
             return None
         value = item.data(0, _ID_ROLE)
+        return None if value is None else str(value)
+
+    def selected_problem_path(self):
+        """Wrapper file path of the selected Problems row, or ``None``.
+
+        The sibling of :meth:`selected_operation_id`. A Problems row has no
+        registered operation, so that method answers ``None`` for it -- which
+        is exactly right, and exactly why this one has to exist: every action
+        that used to early-return on ``None`` now has a second question to ask
+        before deciding the selection is unaddressable.
+        """
+
+        item = self.tree.currentItem()
+        if item is None:
+            return None
+        value = item.data(0, _PROBLEM_PATH_ROLE)
         return None if value is None else str(value)
 
     # ------------------------------------------------------------------
@@ -610,43 +723,50 @@ class OperationManagerDialog(QtWidgets.QDialog):
     # Editor
     # ------------------------------------------------------------------
 
+    def _clear_editor_fields(self):
+        self._suppress = True
+        try:
+            self.label_edit.clear()
+            self.id_label.clear()
+            self.group_combo.clear()
+            self.description_edit.clear()
+            self.icon_edit.clear()
+            self.icon_preview.clear()
+            self.requires_axis_check.setChecked(False)
+            self.changes_shape_label.clear()
+            self.runtime_combo.setCurrentIndex(0)
+            self.common_check.setChecked(False)
+            self.source_path_edit.clear()
+            self.callable_combo.clear()
+            self.callable_hint.clear()
+            self.copy_radio.setChecked(False)
+            self.link_radio.setChecked(False)
+            self.copy_radio.setVisible(False)
+            self.link_radio.setVisible(False)
+            self.storage_hint.clear()
+            self.command_template_edit.clear()
+            self.params_table.setRowCount(0)
+            self.slots_table.setRowCount(0)
+        finally:
+            self._suppress = False
+
     def _load_editor(self):
         if self._reloading:
             return
         operation_id = self.selected_operation_id()
+        problem_path = self.selected_problem_path()
         self._loaded_id = operation_id
+        self._loaded_problem = (
+            self._problems_by_path.get(problem_path) if problem_path is not None else None
+        )
+        if self._loaded_problem is not None:
+            self._load_repair_editor(self._loaded_problem)
+            return
+        self.repair_box.setVisible(False)
         if operation_id is None:
             self._set_editor_enabled(False)
-            self._suppress = True
-            try:
-                self.label_edit.clear()
-                self.id_label.clear()
-                self.group_combo.clear()
-                self.description_edit.clear()
-                self.icon_edit.clear()
-                self.icon_preview.clear()
-                self.requires_axis_check.setChecked(False)
-                self.changes_shape_label.clear()
-                self.runtime_combo.setCurrentIndex(0)
-                self.common_check.setChecked(False)
-                self.source_path_edit.clear()
-                self.callable_combo.clear()
-                self.callable_hint.clear()
-                self.copy_radio.setChecked(False)
-                self.link_radio.setChecked(False)
-                self.copy_radio.setVisible(False)
-                self.link_radio.setVisible(False)
-                self.storage_hint.clear()
-                self.command_template_edit.clear()
-                self.params_table.setRowCount(0)
-                self.slots_table.setRowCount(0)
-            finally:
-                self._suppress = False
-            item = self.tree.currentItem()
-            problem = item.toolTip(0) if item is not None and item.data(0, _VIRTUAL_ROLE) else ""
-            self.status_label.setText(
-                f"Operation problem — {problem}" if problem else "Select an operation to edit it."
-            )
+            self._clear_editor_fields()
+            self.status_label.setText("Select an operation to edit it.")
             self._sync_button_states()
             return
         try:
@@ -713,6 +833,245 @@ class OperationManagerDialog(QtWidgets.QDialog):
                 "System definition — read-only here. Duplicate makes an editable user copy."
             )
         self._sync_button_states()
+
+    # ------------------------------------------------------------------
+    # Repair editor (Problems rows)
+    # ------------------------------------------------------------------
+
+    def _load_repair_editor(self, problem):
+        """Show a stored-but-unloadable definition as something to fix.
+
+        Two shapes, one column. When the payload still parses as an object the
+        ordinary form above is driven straight from the raw dict -- the loader
+        rejected the definition, it did not make the stored ``label`` or
+        ``command_template`` unreadable -- and edits save back to the file by
+        path. When the file is not JSON at all there is no dict to drive a form
+        from, so the raw text pane is the editor and Save is explicit.
+        """
+
+        self.repair_box.setVisible(True)
+        self.problem_message_label.setText(
+            problem.message
+            if problem.payload is not None
+            # A bare JSON decoder message ("Expecting value: line 1 column 46")
+            # says nothing about what it is a message *about*.
+            else f"Unreadable wrapper — {problem.message}"
+        )
+        self.problem_path_label.setText(problem.path)
+        self.review_button.setVisible(False)
+        payload = problem.payload
+
+        if payload is None:
+            self._set_editor_enabled(False)
+            self._clear_editor_fields()
+            self._set_icon_row_visible(False)
+            self.source_box.setVisible(False)
+            self.command_box.setVisible(False)
+            self.raw_json_edit.setVisible(True)
+            self.raw_json_save_button.setVisible(True)
+            self._suppress = True
+            try:
+                try:
+                    with open(problem.path) as handle:
+                        self.raw_json_edit.setPlainText(handle.read())
+                except OSError as exc:
+                    self.raw_json_edit.setPlainText("")
+                    self.problem_path_label.setText(f"{problem.path} — {exc}")
+            finally:
+                self._suppress = False
+            self.status_label.setText(
+                "This file is not valid JSON, so there is nothing to fill a form from. "
+                "Edit it here and save, or remove it."
+            )
+            self._sync_button_states()
+            return
+
+        self.raw_json_edit.setVisible(False)
+        self.raw_json_save_button.setVisible(False)
+        self._set_editor_enabled(True)
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        self._suppress = True
+        try:
+            self.label_edit.setText(str(payload.get("label") or ""))
+            self.id_label.setText(str(payload.get("id") or "(no id)"))
+            self._reload_group_combo(str(payload.get("group") or "User"))
+            self.description_edit.setText(str(payload.get("description") or ""))
+            self.icon_edit.setText(str(payload.get("icon") or ""))
+            self._update_icon_preview()
+            self.requires_axis_check.setChecked(bool(payload.get("requires_axis", False)))
+            self.changes_shape_label.setText(
+                "Changes shape" if payload.get("changes_shape") else "Preserves shape"
+            )
+            self.common_check.setChecked(False)
+            runtime_index = self.runtime_combo.findData(str(payload.get("runtime") or "python"))
+            self.runtime_combo.setCurrentIndex(max(0, runtime_index))
+            self._load_repair_source_editor(source)
+            self.command_template_edit.setText(str(payload.get("command_template") or ""))
+            self.handoff_combo.setCurrentText(str(payload.get("handoff") or "npy"))
+            timeout = payload.get("timeout_s", 600.0)
+            try:
+                self.timeout_spin.setValue(0.0 if timeout is None else float(timeout))
+            except (TypeError, ValueError):
+                self.timeout_spin.setValue(0.0)
+            self.shell_check.setChecked(bool(payload.get("shell", False)))
+            self._reload_environment_combos(str(payload.get("environment") or ""))
+            self._fill_raw_parameters(payload.get("parameters"))
+            self._fill_raw_input_slots(payload.get("input_slots"))
+        finally:
+            self._suppress = False
+
+        self._set_icon_row_visible(True)
+        self._sync_runtime_visibility()
+        self._apply_editor_editability(True)
+        # Nothing about a broken definition belongs in the pinned section, and
+        # the layout keys on a registered id this file does not have.
+        self.common_check.setEnabled(False)
+        self.status_label.setText(
+            "Stored but not loaded — fix the highlighted problem; every field here saves "
+            "to the file and the library rescans."
+        )
+        self._sync_button_states()
+
+    def _load_repair_source_editor(self, source):
+        """Fill the Implementation box from a raw wrapper's ``source`` block."""
+
+        self._source_infos = {}
+        self.callable_combo.clear()
+        directory = library.user_operations_directory()
+        stored = str(source.get("path") or "")
+        path = stored if (not stored or os.path.isabs(stored)) else os.path.join(directory, stored)
+        self.source_path_edit.setText(path)
+        self.source_path_edit.setToolTip(path)
+        if path:
+            try:
+                infos = library.introspect_python_source(path)
+            except Exception:
+                infos = []
+            self._source_infos = {info.name: info for info in infos}
+            self.callable_combo.addItems([info.name for info in infos])
+        callable_name = str(source.get("callable") or "")
+        if callable_name and self.callable_combo.findText(callable_name) < 0:
+            self.callable_combo.addItem(callable_name)
+        self.callable_combo.setCurrentText(callable_name)
+        count = len(self._source_infos)
+        self.callable_hint.setText(
+            f"{count} top-level callable{'s' if count != 1 else ''} found (AST only)."
+        )
+        is_link = str(source.get("mode") or "import") == "link"
+        self.copy_radio.setVisible(True)
+        self.link_radio.setVisible(True)
+        self.link_radio.setChecked(is_link)
+        self.copy_radio.setChecked(not is_link)
+        self._update_storage_hint()
+
+    def _fill_raw_parameters(self, parameters):
+        self.params_table.blockSignals(True)
+        try:
+            self.params_table.setRowCount(0)
+            for payload in parameters if isinstance(parameters, list) else ():
+                if not isinstance(payload, dict):
+                    continue
+                # An unloadable wrapper is exactly where a value has the wrong
+                # type, so normalize before the table touches it: a bad "kind"
+                # is what the user came here to see and fix, not a second crash.
+                normalized = dict(payload)
+                normalized["name"] = str(normalized.get("name", ""))
+                normalized["kind"] = str(normalized.get("kind", "float"))
+                normalized["label"] = str(
+                    normalized.get("label") or normalized["name"].replace("_", " ").title()
+                )
+                normalized["description"] = str(normalized.get("description", ""))
+                self._append_parameter_row(_RawField(normalized), editable=True)
+            self.params_table.setEditTriggers(
+                QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+                | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+            )
+        finally:
+            self.params_table.blockSignals(False)
+
+    def _fill_raw_input_slots(self, input_slots):
+        self.slots_table.blockSignals(True)
+        try:
+            self.slots_table.setRowCount(0)
+            for payload in input_slots if isinstance(input_slots, list) else ():
+                if not isinstance(payload, dict):
+                    continue
+                normalized = dict(payload)
+                normalized["name"] = str(normalized.get("name", ""))
+                normalized["label"] = str(
+                    normalized.get("label") or normalized["name"].replace("_", " ").title()
+                )
+                accepts = normalized.get("accepts")
+                normalized["accepts"] = (
+                    [str(value) for value in accepts] if isinstance(accepts, list) else []
+                )
+                normalized["description"] = str(normalized.get("description", ""))
+                self._append_input_slot_row(_RawField(normalized))
+            self.slots_table.setEditTriggers(
+                QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+                | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+            )
+        finally:
+            self.slots_table.blockSignals(False)
+
+    def _save_raw_wrapper(self):
+        problem = self._loaded_problem
+        if problem is None:
+            return
+        text = self.raw_json_edit.toPlainText()
+        try:
+            payload = json.loads(text)
+        except ValueError as exc:
+            self.problem_message_label.setText(f"Not valid JSON yet — {exc}")
+            return
+        if not isinstance(payload, dict):
+            self.problem_message_label.setText(
+                "A wrapper must be a JSON object (a single {…} document)."
+            )
+            return
+        claimed = payload.get("id")
+        # Adopt the id the user just typed *before* the rescan: a repair that
+        # works removes this row, and the selection has to follow the
+        # definition to wherever it now lives in the tree.
+        self._loaded_problem = problem._replace(
+            payload=payload,
+            operation_id=str(claimed) if isinstance(claimed, str) and claimed else None,
+        )
+        if library.update_user_operation_file(problem.path, payload):
+            show_status_message(self._window, "Saved the wrapper and rescanned.", timeout=2500)
+
+    def _repair_source_block(self, path: str, callable_name: str):
+        """Build a wrapper ``source`` block for a repair, copying when asked.
+
+        Mirrors what :func:`library.update_user_operation_source` does for a
+        registered operation -- Copy really copies, Link really stores the
+        absolute path -- so a repaired definition is stored the same way an
+        ordinary one is, not in a private repair-only shape.
+        """
+
+        if self.link_radio.isChecked():
+            return {"mode": "link", "path": os.path.abspath(path), "callable": callable_name}
+        directory = library.user_operations_directory()
+        stored = os.path.basename(path)
+        destination = os.path.join(directory, stored)
+        if os.path.abspath(path) != os.path.abspath(destination):
+            try:
+                os.makedirs(directory, exist_ok=True)
+                shutil.copyfile(path, destination)
+            except OSError as exc:
+                show_status_message(self._window, f"Could not copy {path}: {exc}", timeout=4000)
+                return None
+        return {"mode": "import", "path": stored, "callable": callable_name}
+
+    def _persist_repair_fields(self, fields: dict):
+        """Merge editor fields into the raw payload and rewrite it by path."""
+
+        problem = self._loaded_problem
+        if problem is None or problem.payload is None:
+            return
+        payload = dict(problem.payload)
+        payload.update(fields)
+        library.update_user_operation_file(problem.path, payload)
 
     def _reload_group_combo(self, current_group: str):
         groups = [group for group, _entries in library.grouped_operations(include_hidden=True)]
@@ -798,13 +1157,21 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.group_combo.setEnabled(True)
         self.common_check.setEnabled(True)
 
+    def _editing_definition(self) -> bool:
+        """Whether the selection is a definition this dialog may rewrite.
+
+        A user operation *or* a Problems row: the second is a stored user
+        definition too, and refusing to edit it is precisely the dead end this
+        bundle removes.
+        """
+
+        return self._loaded_problem is not None or _is_user_op(self._loaded_id or "")
+
     def _sync_runtime_visibility(self):
         runtime = str(self.runtime_combo.currentData() or "python")
         self.source_box.setVisible(runtime == "python")
         self.command_box.setVisible(runtime != "python")
-        self.shell_check.setEnabled(
-            bool(_is_user_op(self._loaded_id or "") and runtime == "command")
-        )
+        self.shell_check.setEnabled(bool(self._editing_definition() and runtime == "command"))
         if runtime != "command":
             self.shell_check.setChecked(False)
 
@@ -816,8 +1183,6 @@ class OperationManagerDialog(QtWidgets.QDialog):
         if self._suppress or self._reloading:
             return
         operation_id = self._loaded_id
-        if operation_id is None or not _is_user_op(operation_id):
-            return
         runtime = str(self.runtime_combo.currentData() or "python")
         fields = {
             "runtime": runtime,
@@ -828,6 +1193,17 @@ class OperationManagerDialog(QtWidgets.QDialog):
         }
         if runtime != "python":
             fields["command_template"] = self.command_template_edit.text().strip()
+        if self._loaded_problem is not None:
+            self._persist_repair_fields(fields)
+            return
+        if operation_id is None or not _is_user_op(operation_id):
+            return
+        if runtime == "python":
+            # Switching to Python makes ``source`` load-bearing. A wrapper that
+            # never needed one is one combo-box click from being a definition
+            # the loader refuses -- so give it a stub before, not a Problems
+            # row after.
+            library.ensure_user_operation_source(operation_id)
         wrapper = library.user_operation_wrapper(operation_id) or {}
         template = wrapper.get("template")
         if isinstance(template, dict) and template.get("kind") == "empty":
@@ -858,6 +1234,16 @@ class OperationManagerDialog(QtWidgets.QDialog):
                 self.environment_combo.addItem(record.name, record.id)
                 self.environment_editor_combo.addItem(record.name, record.id)
             index = self.environment_combo.findData(selected)
+            if selected and index < 0:
+                # The stored environment has no record — deleted, renamed, or
+                # arrived with an imported definition. Falling back to "none"
+                # here would look harmless and then be persisted by the next
+                # runtime autosave, silently destroying the reference the user
+                # needs in order to recreate the environment. Keep it visible
+                # and keep it selected; ADR 0060 already says an unresolvable
+                # environment is a reported problem, not a discarded field.
+                self.environment_combo.addItem(f"{selected} (missing)", selected)
+                index = self.environment_combo.findData(selected)
             self.environment_combo.setCurrentIndex(max(0, index))
             editor_index = self.environment_editor_combo.findData(self._editing_environment_id)
             self.environment_editor_combo.setCurrentIndex(max(0, editor_index))
@@ -1079,7 +1465,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
         self.params_table.setItem(row, 6, QtWidgets.QTableWidgetItem(description))
 
     def _add_parameter_row(self):
-        if not _is_user_op(self._loaded_id or ""):
+        if not self._editing_definition():
             return
         self._append_parameter_row(None, editable=True)
         self._apply_user_edits()
@@ -1125,7 +1511,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
             self.slots_table.setItem(row, column, item)
 
     def _add_input_slot_row(self):
-        if not _is_user_op(self._loaded_id or ""):
+        if not self._editing_definition():
             return
         self._append_input_slot_row()
         self._apply_user_edits()
@@ -1212,6 +1598,18 @@ class OperationManagerDialog(QtWidgets.QDialog):
         if self._suppress or self._reloading:
             return
         operation_id = self._loaded_id
+        if self._loaded_problem is not None:
+            self._persist_repair_fields(
+                {
+                    "label": self.label_edit.text().strip(),
+                    "description": self.description_edit.text().strip(),
+                    "icon": self.icon_edit.text().strip() or "extension",
+                    "requires_axis": self.requires_axis_check.isChecked(),
+                    "parameters": self._table_parameters(),
+                    "input_slots": self._table_input_slots(),
+                }
+            )
+            return
         if operation_id is None or not _is_user_op(operation_id):
             return
         library.update_user_operation(
@@ -1232,6 +1630,12 @@ class OperationManagerDialog(QtWidgets.QDialog):
             return
         operation_id = self._loaded_id
         new_group = str(new_group).strip()
+        if self._loaded_problem is not None:
+            if new_group:
+                # The stored group is a wrapper field; the arrangement is keyed
+                # by registered id, which this definition does not have yet.
+                self._persist_repair_fields({"group": new_group})
+            return
         if operation_id is None or not new_group:
             return
         if _is_user_op(operation_id):
@@ -1260,13 +1664,23 @@ class OperationManagerDialog(QtWidgets.QDialog):
     def _sync_button_states(self):
         operation_id = self.selected_operation_id()
         if operation_id is None:
-            for button in (
-                self.duplicate_button,
-                self.remove_button,
-                self.unhide_button,
-                self.open_file_button,
-            ):
-                button.setEnabled(False)
+            problem_path = self.selected_problem_path()
+            # A Problems row is a stored definition like any other: it can be
+            # deleted and its file can be opened. Only Duplicate and Restore
+            # genuinely need a registered operation.
+            self.duplicate_button.setEnabled(False)
+            self.unhide_button.setEnabled(False)
+            self.remove_button.setEnabled(problem_path is not None)
+            self.open_file_button.setEnabled(problem_path is not None)
+            if problem_path is not None:
+                set_button_icon(
+                    self.remove_button,
+                    "delete",
+                    tooltip="Remove this stored definition and its files",
+                )
+                set_button_icon(
+                    self.open_file_button, "edit", tooltip="Open the stored wrapper file"
+                )
             return
         is_user = _is_user_op(operation_id)
         hidden = operation_id in library.hidden_operations()
@@ -1282,10 +1696,28 @@ class OperationManagerDialog(QtWidgets.QDialog):
         )
         self.unhide_button.setEnabled(hidden)
         self.open_file_button.setEnabled(is_user)
+        set_button_icon(self.open_file_button, "edit", tooltip="Open the code file")
 
     def _remove_or_hide(self):
         operation_id = self.selected_operation_id()
         if operation_id is None:
+            problem_path = self.selected_problem_path()
+            if problem_path is None:
+                return
+            confirm = QtWidgets.QMessageBox.question(
+                self,
+                "Remove operation",
+                f"Remove the stored definition “{os.path.basename(problem_path)}” "
+                "and delete its files?",
+            )
+            if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+            if library.remove_user_operation_file(problem_path):
+                show_status_message(
+                    self._window,
+                    f"Removed “{os.path.basename(problem_path)}”.",
+                    timeout=2500,
+                )
             return
         if _is_user_op(operation_id):
             entry_label = self._current_label(operation_id)
@@ -1323,7 +1755,15 @@ class OperationManagerDialog(QtWidgets.QDialog):
 
     def _open_code_file(self):
         operation_id = self.selected_operation_id()
-        if operation_id is None or not _is_user_op(operation_id):
+        if operation_id is None:
+            problem_path = self.selected_problem_path()
+            if problem_path is None:
+                return
+            # The wrapper file itself: for a definition the loader rejected it
+            # is the file that needs editing, and it is always there.
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(problem_path))
+            return
+        if not _is_user_op(operation_id):
             return
         path = library.user_operation_source_path(operation_id)
         if not path or not os.path.exists(path):
@@ -1382,7 +1822,7 @@ class OperationManagerDialog(QtWidgets.QDialog):
     # ------------------------------------------------------------------
 
     def _choose_source_file(self):
-        if not _is_user_op(self._loaded_id or ""):
+        if not self._editing_definition():
             return
         path, _ = get_open_file_name(
             self, "Choose operation source", "", "Python (*.py);;All files (*)"
@@ -1442,10 +1882,22 @@ class OperationManagerDialog(QtWidgets.QDialog):
         if self._suppress or self._reloading:
             return
         operation_id = self._loaded_id
-        if operation_id is None or not _is_user_op(operation_id):
-            return
         path = self.source_path_edit.text().strip()
         callable_name = self.callable_combo.currentText().strip()
+        if self._loaded_problem is not None:
+            # ``update_user_operation_source`` is id-keyed and copies files; a
+            # definition the loader rejected may have no usable id, so record
+            # the retarget in the payload and let the rescan adjudicate it.
+            # Pointing at a real file with a real callable IS the repair for
+            # the whole missing-source / renamed-callable family.
+            if not path:
+                return
+            source = self._repair_source_block(path, callable_name)
+            if source is not None:
+                self._persist_repair_fields({"source": source})
+            return
+        if operation_id is None or not _is_user_op(operation_id):
+            return
         if not path or not callable_name:
             return
         try:

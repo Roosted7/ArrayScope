@@ -575,12 +575,13 @@ def s_operation_params_popup(ctx: Ctx):
 
 @scenario("operation_manager")
 def s_operation_manager(ctx: Ctx):
+    import json
     import tempfile
     from pathlib import Path
 
     from arrayscope.app import user_dirs
     from arrayscope.operations import library
-    from arrayscope.ui.operation_manager import OperationManagerDialog
+    from arrayscope.ui.operation_manager import _PROBLEM_PATH_ROLE, OperationManagerDialog
 
     # Isolation: the gallery's private QSettings name already nests the user
     # config (and thus the ops dir) under a per-scenario application name, but
@@ -590,7 +591,31 @@ def s_operation_manager(ctx: Ctx):
     user_dirs.user_operations_directory = lambda: ops_dir
     library.user_operations_directory = lambda: str(ops_dir)
 
-    # A broken wrapper JSON so the Problems group renders.
+    # Two broken wrappers, one per repair shape. The first still parses, so the
+    # repair state under review is the ordinary form driven from the raw
+    # payload; the second does not parse at all, which is the only case that
+    # falls back to a raw JSON text pane.
+    (ops_dir / "unfinished-denoise.json").write_text(
+        json.dumps(
+            {
+                "format": "arrayscope-operation",
+                "version": 1,
+                "id": "user:unfinished_denoise",
+                "label": "Unfinished denoise",
+                "description": "Wavelet denoise, mid-edit.",
+                "group": "User",
+                "icon": "extension",
+                "runtime": "python",
+                "source": {
+                    "mode": "import",
+                    "path": "unfinished-denoise.py",
+                    "callable": "denoise",
+                },
+                "parameters": [{"name": "threshold", "label": "Threshold", "kind": "float"}],
+            },
+            indent=2,
+        )
+    )
     (ops_dir / "broken.json").write_text('{"format": "arrayscope-operation", "version":')
     # A tiny valid user op imported from a source outside the ops dir.
     src_dir = Path(tempfile.mkdtemp(prefix="ui-gallery-src-"))
@@ -707,17 +732,30 @@ def s_operation_manager(ctx: Ctx):
     dialog.advanced_button.setChecked(False)
     dialog.resize(780, 720)
 
-    problems_item = None
+    # A Problems row is a definition the user can still fix, so the state worth
+    # reviewing is the repair editor -- the loader's message above an ordinary,
+    # editable form -- not a selected row over a blank pane.
+    problem_rows = {}
     for index in range(dialog.tree.topLevelItemCount()):
         group = dialog.tree.topLevelItem(index)
-        if group.text(0) == "Problems" and group.childCount():
-            problems_item = group.child(0)
-            break
-    if problems_item is None:
-        raise RuntimeError("Problems group not present in operation manager tree")
-    dialog.tree.setCurrentItem(problems_item)
+        if group.text(0) != "Problems":
+            continue
+        for child_index in range(group.childCount()):
+            child = group.child(child_index)
+            path = child.data(0, _PROBLEM_PATH_ROLE)
+            if path is not None:
+                problem_rows[os.path.basename(str(path))] = child
+    for name in ("unfinished-denoise.json", "broken.json"):
+        if name not in problem_rows:
+            raise RuntimeError(f"Problems row for {name} not present in operation manager tree")
+
+    dialog.tree.setCurrentItem(problem_rows["unfinished-denoise.json"])
     ctx.pump(6)
     ctx.shot(dialog, "problems")
+
+    dialog.tree.setCurrentItem(problem_rows["broken.json"])
+    ctx.pump(6)
+    ctx.shot(dialog, "problems_raw_json")
     dialog.close()
 
 

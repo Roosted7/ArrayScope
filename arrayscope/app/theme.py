@@ -813,6 +813,10 @@ QLabel#OperationsMetaLabel {{
     color: {t.text_muted};
     font-size: 8.5pt;
 }}
+QLabel#OperationsProblemLabel {{
+    color: {t.error};
+    font-weight: 600;
+}}
 QLabel#ArrayInfoLabel {{
     color: {t.text_muted};
     font-size: 8.5pt;
