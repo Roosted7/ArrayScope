@@ -8226,8 +8226,9 @@ def _install_profile_session_fixture(
     path = Path(session_fixture)
     if not path.exists():
         raise FileNotFoundError(f"profile session fixture not found: {path}")
+    text = path.read_text(encoding="utf-8")
     try:
-        template = loads_session(path.read_text(encoding="utf-8"), np.shape(data))
+        template = loads_session(text, np.shape(data))
     except ValueError as exc:
         raise ValueError(
             f"profile session fixture {path} does not fit dataset shape "
@@ -8236,6 +8237,26 @@ def _install_profile_session_fixture(
             "For other datasets pass --session-fixture '' to disable the "
             "restore, or provide a fixture saved from a compatible session."
         ) from exc
+    # The session loader deliberately *migrates* a saved view to the document
+    # it is restored against (clamping indices, dropping an invalid montage
+    # axis) so real saved views survive edited operation stacks. A profiling
+    # fixture has the opposite contract: it exists to reproduce one exact
+    # view, and a silently clamped montage window would profile a different
+    # workload while looking green. Refuse a fixture whose recorded shape is
+    # not the shape this dataset derives to.
+    recorded = json.loads(text).get("recipe", {}).get("view_state", {}).get("shape")
+    if recorded is not None:
+        derived = tuple(int(size) for size in template.recipe.view_state.shape)
+        if tuple(int(size) for size in recorded) != derived:
+            raise ValueError(
+                f"profile session fixture {path} does not fit dataset shape "
+                f"{np.shape(data)}: it was saved against {tuple(recorded)} "
+                f"and this dataset derives to {derived}. The session loader "
+                "would adapt the view rather than reproduce it, and an "
+                "adapted view profiles a different workload. Pass "
+                "--session-fixture '' to disable the restore, or provide a "
+                "fixture saved from a compatible session."
+            )
     metadata = metadata_for_file(data_path, data=data)
     session = replace(template, metadata=metadata)
     stored = save_session_file(_file_view_session_config_dir(), session)
