@@ -155,3 +155,31 @@ def test_disabled_expensive_fft_not_in_pipeline_peak():
 
     assert len(costs) == 1
     assert costs[0].kind == "view"
+
+
+def test_the_coordinator_takes_an_axis_set_from_either_channel():
+    """The two ways a surface hands over an axis set, both landing the same op.
+
+    A popup forwards ``form.values()``, which carries the selection under the
+    reserved key; a recipe or a direct caller passes ``axes=``. Neither is a
+    special case for the coordinator.
+    """
+
+    data = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+
+    from_form = OperationCoordinator(data)
+    from_form.append_operation("mean_axes", axis=None, parameters={"axes": (0, 2)})
+
+    explicit = OperationCoordinator(data)
+    explicit.append_operation("mean_axes", axes=(2, 0))
+
+    assert from_form.shape == (3,)
+    assert from_form.document.operations == explicit.document.operations
+    np.testing.assert_array_equal(from_form.evaluator.current_data(), data.mean(axis=(0, 2)))
+
+
+def test_the_coordinator_names_an_out_of_range_axis_set_before_evaluating():
+    coordinator = OperationCoordinator(np.zeros((2, 3), dtype=np.float32))
+
+    with pytest.raises(ValueError, match="out of bounds"):
+        coordinator.append_operation("centered_fftn", axes=(0, 2))
