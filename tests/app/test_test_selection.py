@@ -659,6 +659,10 @@ def test_seeding_copies_rather_than_links(tmp_path, monkeypatch):
     donor = donor_checkout / "themap"
     donor.write_bytes(b"donor-map")
     monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    # Seeding is what this asserts, so the opt-out must not be inherited from the
+    # shell. Without this the test fails under `ARRAYSCOPE_TESTMON_SEED=0`, which
+    # is exactly what you set while recording a map from scratch.
+    monkeypatch.delenv("ARRAYSCOPE_TESTMON_SEED", raising=False)
     monkeypatch.setattr(
         testmon_policy,
         "_best_donor_map",
@@ -693,3 +697,358 @@ def test_testmon_still_exposes_what_the_policy_reaches_into():
     assert "deselected_tests" in inspect.getsource(TestmonSelect), (
         "tests/conftest.py reports the unaffected count from this attribute"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The scope guard: a run that looked at part of the suite must not delete the rest
+# --------------------------------------------------------------------------- #
+
+
+class _FakeTestmonData:
+    """Just enough of ``TestmonData`` to observe what gets retained."""
+
+    def __init__(self, recorded):
+        self.all_tests = {name: {"failed": False} for name in recorded}
+        self.retained = None
+
+    def sync_db_fs_tests(self, retain):
+        self.retained = set(retain)
+
+
+def _scoped_config(arguments, recorded, testpaths=("tests",)):
+    return SimpleNamespace(
+        rootdir=str(REPO_ROOT),
+        args=list(arguments),
+        invocation_params=SimpleNamespace(dir=str(REPO_ROOT)),
+        testmon_data=_FakeTestmonData(recorded),
+        testmon_config=SimpleNamespace(select=True, collect=True),
+        getini=lambda name: list(testpaths) if name == "testpaths" else None,
+    )
+
+
+#: Real paths, because ``path_arguments`` resolves against the filesystem and
+#: silently drops an argument that does not exist — which would make every
+#: assertion below pass for the wrong reason.
+_IN_SCOPE = "tests/kernel/test_kernel.py::test_in_scope"
+_OUT_OF_SCOPE = "tests/ui/test_window_sync.py::test_out_of_scope"
+
+
+def test_a_scoped_run_keeps_the_map_entries_it_never_looked_at():
+    """The defect this closes, at unit scale.
+
+    testmon deletes every recorded test a run neither collected nor called
+    unaffected. On ``pytest tests/render`` that silently drops the tests in
+    *other* directories that the working tree affects — and because its whole
+    file then looks unaffected, collection never rediscovers it and nothing
+    re-adds it. Measured before the guard: an edit to ``arrayscope/core/roi.py``
+    affecting 14 tests outside ``tests/kernel``, then ``pytest tests/kernel``,
+    then ``pytest`` — 14 map entries deleted and 13 of the 14 tests never run,
+    with `pytest`, `pytest --since` and `tools/test_selection.py` all reporting
+    nothing affected.
+    """
+
+    config = _scoped_config(["tests/kernel"], [_IN_SCOPE, _OUT_OF_SCOPE])
+    assert testmon_policy.protect_map_outside_the_scope(config) == 1
+    config.testmon_data.sync_db_fs_tests(retain={_IN_SCOPE})
+    assert _OUT_OF_SCOPE in config.testmon_data.retained
+
+
+def test_the_scoped_run_still_cleans_up_inside_its_own_scope():
+    """The deletion has a real job; only its reach was wrong.
+
+    A renamed or deleted test inside the scope *was* collected, so judging it
+    absent is sound. Protecting everything would leave those entries forever.
+    """
+
+    config = _scoped_config(["tests/kernel"], [_IN_SCOPE, _OUT_OF_SCOPE])
+    testmon_policy.protect_map_outside_the_scope(config)
+    config.testmon_data.sync_db_fs_tests(retain=set())
+    assert _IN_SCOPE not in config.testmon_data.retained
+
+
+def test_a_node_id_run_counts_as_narrow():
+    """The sharpest form of the bug, not an exception to it.
+
+    ``pytest file.py::test`` collects that file and nothing else. Measured with
+    node ids treated as "no path arguments", which is what
+    ``path_arguments`` reports for them: one such run deleted 49 map entries —
+    the edit's entire affected set — and the following ``pytest`` ran nothing.
+    """
+
+    config = _scoped_config([_IN_SCOPE], [_IN_SCOPE, _OUT_OF_SCOPE])
+    assert not testmon_policy.collected_the_whole_suite(config)
+    assert testmon_policy.protect_map_outside_the_scope(config) == 1
+
+
+def test_a_whole_suite_run_leaves_testmons_own_bookkeeping_alone():
+    """A bare ``pytest`` carries ``testpaths`` as an argument and is not scoped.
+
+    Reading that as a scope would arm the guard on every ordinary run and stop
+    the map ever shedding a renamed test.
+    """
+
+    config = _scoped_config(["tests"], [_IN_SCOPE, _OUT_OF_SCOPE])
+    assert testmon_policy.collected_the_whole_suite(config)
+    assert testmon_policy.protect_map_outside_the_scope(config) == 0
+    config.testmon_data.sync_db_fs_tests(retain={_IN_SCOPE})
+    assert config.testmon_data.retained == {_IN_SCOPE}
+
+
+def test_the_guard_is_installed_once():
+    """Both the controller and the workers install it; wrapping twice would not
+    break the result, but it would make the retained set impossible to reason
+    about. The second call is a no-op."""
+
+    config = _scoped_config(["tests/kernel"], [_IN_SCOPE, _OUT_OF_SCOPE])
+    assert testmon_policy.protect_map_outside_the_scope(config) == 1
+    assert testmon_policy.protect_map_outside_the_scope(config) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Executed-function coverage read out of the map (tests/coverage_map.py)
+# --------------------------------------------------------------------------- #
+
+_SAMPLE = '''\
+"""A module docstring."""
+
+CONSTANT = 1
+
+
+def covered(value):
+    if value:
+        return value
+    return 0
+
+
+class Holder:
+    attribute = 2
+
+    def method(self):
+        return self.attribute
+'''
+
+
+def _sample_tree(tmp_path, source=_SAMPLE, name="pkg/module.py"):
+    from tests import coverage_map
+
+    path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    return coverage_map, path.relative_to(tmp_path).as_posix()
+
+
+def test_the_module_block_is_reported_as_reach_never_as_a_function():
+    """It spans line one to EOF, so "covered" only means "some test touched the
+    file". Counting it as a function is what makes a merely-imported module read
+    as covered — measured at up to 36 points of disagreement with coverage.py on
+    a single file, in that direction."""
+
+    from tests import coverage_map
+
+    functions, module_checksum = coverage_map.functions_of(REPO_ROOT, "tests/coverage_map.py")
+    assert module_checksum is not None
+    assert functions, "the module has functions"
+    assert all(function.name != "unknown" for function in functions), (
+        "testmon names the module body 'unknown'; it must not be in the function count"
+    )
+
+
+def test_class_bodies_are_module_level_and_methods_are_not(tmp_path):
+    """The shape the metric depends on: only ``def`` bodies are blocks, so a
+    class statement lives in the module block while its methods do not."""
+
+    coverage_map, relative = _sample_tree(tmp_path)
+    functions, _ = coverage_map.functions_of(tmp_path, relative)
+    assert sorted(function.name for function in functions) == ["covered", "method"]
+
+
+def test_a_function_counts_as_covered_when_any_one_of_its_lines_ran(tmp_path):
+    """The metric's upward bias, pinned rather than hidden: a function abandoned
+    at its first guard is indistinguishable from one that ran to completion."""
+
+    from testmon.process_code import Module, create_fingerprint
+
+    coverage_map, relative = _sample_tree(tmp_path)
+    module = Module(source_code=_SAMPLE, filename=relative, rootdir=str(tmp_path))
+    functions, _ = coverage_map.functions_of(tmp_path, relative)
+    entered = next(function for function in functions if function.name == "covered")
+    # Only the `if value:` line of `covered` — nothing else in the file.
+    hit = set(create_fingerprint(module, [entered.line]))
+    assert entered.checksum in hit
+
+
+def test_a_functions_identity_survives_an_insertion_above_it(tmp_path):
+    """Why the sidecar stores a body digest and not testmon's checksum.
+
+    ``Block.code`` carries the block's index within the file, so inserting a
+    function at the top changes every checksum below it. Comparing baselines on
+    that would report a whole file as changed after a one-line insertion — and
+    would churn the "newly covered / no longer" delta into noise.
+    """
+
+    coverage_map, relative = _sample_tree(tmp_path)
+    before = {
+        function.name: (function.checksum, function.body)
+        for function in coverage_map.functions_of(tmp_path, relative)[0]
+    }
+    (tmp_path / relative).write_text(
+        "def inserted():\n    return 1\n\n\n" + _SAMPLE, encoding="utf-8"
+    )
+    after = {
+        function.name: (function.checksum, function.body)
+        for function in coverage_map.functions_of(tmp_path, relative)[0]
+    }
+    assert after["covered"][0] != before["covered"][0], "testmon's checksum does shift"
+    assert after["covered"][1] == before["covered"][1], "the body digest must not"
+
+
+def test_two_identical_bodies_in_one_file_stay_two_functions(tmp_path):
+    """Otherwise the identities collapse and the baseline arithmetic stops adding
+    up — a file could lose a function and report no change."""
+
+    coverage_map, relative = _sample_tree(
+        tmp_path, "def a():\n    return 1\n\n\ndef b():\n    return 1\n"
+    )
+    functions, _ = coverage_map.functions_of(tmp_path, relative)
+    assert len({function.body for function in functions}) == 1, "same body, same digest"
+    assert len({function.identity for function in functions}) == 2
+
+
+def test_the_structure_cache_only_reparses_what_changed(tmp_path):
+    """Parsing the tree costs ~2.3 s, more than a small selected run takes end to
+    end, so a warm run must parse nothing."""
+
+    coverage_map, relative = _sample_tree(tmp_path)
+    cold = coverage_map.Structure()
+    entry = cold.for_file(tmp_path, relative)
+    assert cold.parsed == 1
+
+    warm = coverage_map.Structure(cold.payload())
+    assert warm.for_file(tmp_path, relative) == entry
+    assert warm.parsed == 0, "unchanged content must not be re-parsed"
+
+    (tmp_path / relative).write_text(_SAMPLE + "\n\ndef added():\n    return 2\n")
+    again = coverage_map.Structure(cold.payload())
+    again.for_file(tmp_path, relative)
+    assert again.parsed == 1, "changed content must be"
+
+
+def test_the_cache_forgets_a_deleted_file(tmp_path):
+    """The payload is what this pass saw, so a removed file expires rather than
+    propping the denominator up forever."""
+
+    coverage_map, relative = _sample_tree(tmp_path)
+    cold = coverage_map.Structure()
+    cold.for_file(tmp_path, relative)
+    second = coverage_map.Structure(cold.payload())
+    assert second.payload() == {}
+
+
+def test_drift_names_what_was_gained_and_lost():
+    from tests import coverage_map
+
+    reach = coverage_map.Reach(
+        environment="offscreen",
+        covered=2,
+        total=3,
+        files_reached=1,
+        files_total=1,
+        identities=frozenset({"a", "b"}),
+    )
+    drift = coverage_map.drift(reach, {"covered": 2, "total": 3, "identities": ["a", "c"]})
+    assert drift.gained == ("b",)
+    assert drift.lost == ("c",)
+    assert drift.moved
+
+
+def test_no_baseline_means_no_delta_rather_than_a_zero():
+    """A fresh clone has nothing to compare against, and inventing a comparison
+    is worse than not having one."""
+
+    from tests import coverage_map
+
+    reach = coverage_map.Reach(
+        environment="offscreen", covered=1, total=2, files_reached=1, files_total=1
+    )
+    assert coverage_map.drift(reach, None) is None
+    assert coverage_map.drift(reach, {}) is None
+
+
+def test_an_unreadable_map_measures_as_nothing(tmp_path):
+    """Every degradation here has to be "no number", never a wrong one."""
+
+    from tests import coverage_map
+
+    assert coverage_map.read_map(tmp_path / "absent", "offscreen") is None
+    assert coverage_map.measure(REPO_ROOT, tmp_path / "absent", "offscreen") is None
+
+
+def test_the_denominator_is_the_one_the_coverage_job_measures():
+    """``[tool.coverage.run] source`` declared once, so the map-derived figure and
+    CI's cannot silently describe different trees."""
+
+    from tests import coverage_map
+
+    assert coverage_map.source_roots(REPO_ROOT) == ("arrayscope",)
+
+
+def test_the_sidecar_round_trips_and_a_broken_one_reads_as_empty(tmp_path):
+    from tests import coverage_map
+
+    map_path = tmp_path / ".testmondata"
+    coverage_map.write_sidecar(
+        map_path, structure={"a.py": {"fsha": "x"}}, baselines={"offscreen": {"covered": 1}}
+    )
+    payload = coverage_map.read_sidecar(map_path)
+    assert coverage_map.cached_structure(payload) == {"a.py": {"fsha": "x"}}
+    assert coverage_map.baselines(payload)["offscreen"]["covered"] == 1
+
+    coverage_map.sidecar_path(map_path).write_text("{not json", encoding="utf-8")
+    assert coverage_map.read_sidecar(map_path) == {}
+    assert coverage_map.cached_structure({}) == {}
+    assert coverage_map.baselines({}) == {}
+
+
+def test_seeding_carries_the_coverage_sidecar_across(tmp_path, monkeypatch):
+    """The donor's baseline is the right baseline for a checkout cut from it.
+
+    That is what makes "since this checkout's baseline" mean "since main" in a
+    worktree with nothing to bootstrap — the same reasoning that makes a seeded
+    map's reds the inherited ones.
+    """
+
+    from tests import coverage_map
+
+    donor_checkout = tmp_path / "main"
+    worktree = tmp_path / "worktree"
+    donor_checkout.mkdir()
+    worktree.mkdir()
+    donor = donor_checkout / "themap"
+    donor.write_bytes(b"donor-map")
+    coverage_map.write_sidecar(
+        donor, structure={"a.py": {"fsha": "x"}}, baselines={"offscreen": {"covered": 7}}
+    )
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    monkeypatch.delenv("ARRAYSCOPE_TESTMON_SEED", raising=False)
+    monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: donor)
+
+    assert testmon_policy.seed_map(worktree) == str(donor)
+    seeded = coverage_map.read_sidecar(worktree / "themap")
+    assert coverage_map.baselines(seeded)["offscreen"]["covered"] == 7
+
+
+def test_seeding_without_a_donor_sidecar_is_not_an_error(tmp_path, monkeypatch):
+    """A donor recorded before this existed still seeds its map."""
+
+    donor_checkout = tmp_path / "main"
+    worktree = tmp_path / "worktree"
+    donor_checkout.mkdir()
+    worktree.mkdir()
+    donor = donor_checkout / "themap"
+    donor.write_bytes(b"donor-map")
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    monkeypatch.delenv("ARRAYSCOPE_TESTMON_SEED", raising=False)
+    monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: donor)
+
+    assert testmon_policy.seed_map(worktree) == str(donor)
+    assert (worktree / "themap").read_bytes() == b"donor-map"

@@ -49,6 +49,7 @@ everything, untraced, exactly as before.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -329,6 +330,73 @@ def apply_known_red_policy(config, new_reds: set[str]) -> int:
     return len(inherited)
 
 
+def protect_map_outside_the_scope(config) -> int:
+    """Stop a scoped run from deleting the map entries it did not look at.
+
+    testmon garbage-collects the map on every run by deleting each recorded test
+    that the run neither collected nor called unaffected
+    (``TestmonData.sync_db_fs_tests``). That is right for a whole-suite run,
+    where "not collected" really does mean "gone". For a scoped one it is a
+    silent, permanent hole, and it hits exactly the test you most need:
+
+        edit arrayscope/display/scene.py   -> affects one test, in tests/ui
+        pytest tests/render                -> that test is affected, was not
+                                              collected, and is deleted
+        pytest                             -> "affected: nothing", 0 tests run
+
+    The last step is the damage. Its map entry is gone, so nothing marks it
+    affected; and testmon's file-level ``pytest_ignore_collect`` skips its whole
+    file because every *remaining* test in it is unaffected, so collection never
+    rediscovers it and ``sync_db_fs_tests`` never re-adds it. The edit is then
+    untested and reported as fully tested — by ``pytest``, by ``pytest --since``,
+    and by ``tools/test_selection.py``, all three. Only ``--no-testmon`` catches
+    it. Measured, on a complete map: 3941 recorded tests, ``pytest tests/render``
+    takes it to 3940, and the working tree's one affected test evaporates.
+
+    So the deletion is narrowed to the scope the run actually examined: every
+    mapped test whose file lies outside the run's path arguments is retained
+    regardless. In-scope cleanup still happens, which is the part that has a
+    legitimate job to do (a renamed or deleted test), and it is still exact —
+    that scope *was* collected.
+
+    A run that collected the whole suite is left alone: testmon's own bookkeeping
+    is correct there and this must not second-guess it. That includes the ordinary
+    bare ``pytest``, whose ``testpaths`` argument *is* a path argument — see
+    :func:`collected_the_whole_suite`. A node-id run counts as narrow, because it
+    is: ``pytest file.py::test`` collects that file and nothing else, and it is
+    the sharpest form of the bug rather than an exception to it.
+
+    Returns the number of mapped tests it will protect, for the report line.
+    """
+
+    data = getattr(config, "testmon_data", None)
+    if data is None or getattr(data, "_arrayscope_scope_guard", False):
+        return 0
+    paths = collected_scope(config)
+    if collected_the_whole_suite(config):
+        return 0
+
+    try:
+        recorded = tuple(data.all_tests or ())
+    except Exception:  # an unreadable map degrades to testmon's own behaviour
+        return 0
+    outside = frozenset(name for name in recorded if not under(name.split("::", 1)[0], paths))
+    if not outside:
+        return 0
+
+    original = data.sync_db_fs_tests
+
+    def sync_db_fs_tests(retain, _original=original, _outside=outside):
+        return _original(retain=set(retain) | set(_outside))
+
+    try:
+        data.sync_db_fs_tests = sync_db_fs_tests
+        data._arrayscope_scope_guard = True
+    except AttributeError:  # a testmon upgrade made the object immutable
+        return 0
+    return len(outside)
+
+
 def seed_map(rootdir: os.PathLike[str] | str) -> str | None:
     """Copy a sibling checkout's map in when this one has none. Returns the donor.
 
@@ -372,7 +440,30 @@ def seed_map(rootdir: os.PathLike[str] | str) -> str | None:
     except OSError:
         Path(staged).unlink(missing_ok=True)
         return None
+    _seed_coverage_sidecar(donor, destination)
     return str(donor)
+
+
+def _seed_coverage_sidecar(donor: Path, destination: Path) -> None:
+    """Carry the donor's coverage sidecar across with its map.
+
+    Two things ride in that file, and both want to come: the block-structure
+    parse cache, which is content-addressed and therefore valid anywhere, and
+    the donor's coverage baseline — which is exactly the right baseline for a
+    checkout branched off the donor. It makes "since this checkout's baseline"
+    mean "since main" in a worktree, with nothing to bootstrap, the same way
+    seeding the map itself makes the inherited reds the donor's reds.
+    """
+
+    from tests import coverage_map
+
+    source = coverage_map.sidecar_path(donor)
+    if not source.exists():
+        return
+    import shutil
+
+    with contextlib.suppress(OSError):
+        shutil.copyfile(source, coverage_map.sidecar_path(destination))
 
 
 def _best_donor_map(rootdir: Path, filename: str) -> Path | None:
@@ -887,14 +978,37 @@ def path_arguments(config) -> tuple[str, ...]:
 
     Node-id arguments (``file.py::test``) are dropped: testmon turns selection
     off for those anyway, so they must not be allowed to narrow the estimate.
+    For the other question — what this run could *collect*, where a node id is
+    every bit as narrow as a directory — see :func:`collected_scope`.
     """
 
+    return _resolved_arguments(config, node_ids=False)
+
+
+def collected_scope(config) -> tuple[str, ...]:
+    """The files and directories this run's arguments could collect.
+
+    Like :func:`path_arguments`, except a node id contributes its *file*:
+    ``pytest file.py::test`` collects nothing outside that file, so anything the
+    run concludes about the rest of the suite is a conclusion about tests it
+    never looked at. Different question from the impact estimate, different
+    answer — which matters, because getting it wrong here would let
+    :func:`protect_map_outside_the_scope` treat a one-test run as exhaustive and
+    hand testmon the whole map to garbage-collect.
+    """
+
+    return _resolved_arguments(config, node_ids=True)
+
+
+def _resolved_arguments(config, *, node_ids: bool) -> tuple[str, ...]:
     root = Path(config.rootdir)
     invocation_dir = Path(getattr(config.invocation_params, "dir", os.getcwd()))
     resolved: list[str] = []
     for argument in config.args:
         if "::" in argument:
-            continue
+            if not node_ids:
+                continue
+            argument = argument.split("::", 1)[0]
         candidate = Path(argument)
         if not candidate.is_absolute():
             candidate = invocation_dir / argument
@@ -905,6 +1019,28 @@ def path_arguments(config) -> tuple[str, ...]:
         except ValueError:
             continue
     return tuple(resolved)
+
+
+def collected_the_whole_suite(config) -> bool:
+    """Whether this run's arguments cover every configured test root.
+
+    Not the same as "no path arguments": ``testpaths`` resolves a bare ``pytest``
+    to ``tests``, so the ordinary inner-loop run *does* carry one, and a caller
+    that treated any path argument as a narrowing scope would classify every run
+    as scoped. Both callers here — the map's scope guard and the coverage report
+    — need "did this look at the whole suite", which is this.
+    """
+
+    paths = collected_scope(config)
+    if not paths:
+        return True
+    try:
+        roots = tuple(str(entry) for entry in (config.getini("testpaths") or ()))
+    except (ValueError, KeyError):
+        roots = ()
+    if not roots:
+        return False  # nothing to compare against: assume it narrowed
+    return all(under(root, paths) for root in roots)
 
 
 def under(relative_path: str, paths: tuple[str, ...]) -> bool:

@@ -61,7 +61,10 @@ passes says the affected tests pass — a strictly smaller claim.
 | Re-run the inherited reds too | `ARRAYSCOPE_TESTMON_RERUN_FAILING=1 pytest` |
 | Rebuild the map from scratch | `rm .testmondata && pytest` |
 | Re-record without deselecting | `pytest --testmon-noselect` |
-| Coverage, artifacts, CI | already exhaustive — see below |
+| Which functions the suite executes | `python tools/test_selection.py coverage` |
+| New code on this branch that no test runs | `python tools/test_selection.py coverage --since` |
+| The coverage baseline is not yours | `python tools/test_selection.py accept-coverage` |
+| Artifacts, CI | already exhaustive — see below |
 
 Scoping still works and still narrows further: `pytest tests/ui` runs the
 affected tests *in* `tests/ui`. Manual selectors (`-k`, `-m`, `--lf`, a
@@ -163,6 +166,9 @@ gets its own. It is a SQLite file of about 2.5 MB for this suite.
   the tests it skipped keep fingerprints that are still valid by construction.
   There is no refresh chore. A first run on an empty map runs everything, in
   order to record everything.
+* **A scoped run no longer shrinks it** — see
+  [What a scoped run used to delete](#what-a-scoped-run-used-to-delete). That was
+  a real hole, and a bad one.
 * **It is keyed by regime.** `environment_expression` in `pyproject.toml` keys
   entries by `QT_QPA_PLATFORM` plus the `ARRAYSCOPE_STRICT_UI`, `_GPU_TESTS` and
   `_STRESS` ring variables. The same test executes different code offscreen and
@@ -181,6 +187,57 @@ gets its own. It is a SQLite file of about 2.5 MB for this suite.
 If the map is missing or unreadable, every code path degrades to running
 everything. There is no state in which selection silently skips more than it
 should because the map broke.
+
+### What a scoped run used to delete
+
+testmon garbage-collects the map on every run: `TestmonData.sync_db_fs_tests`
+deletes each recorded test the run neither collected nor called unaffected. That
+is correct for a whole-suite run, where "not collected" does mean "gone". For a
+scoped one it was a silent, permanent hole, and it took out exactly the test you
+most needed:
+
+```
+edit arrayscope/core/roi.py     ->  affects 14 tests, none of them in tests/kernel
+pytest tests/kernel             ->  all 14 are affected, none were collected,
+                                    all 14 are deleted from the map
+pytest                          ->  "affected: nothing". 1 test runs. The other
+                                    13 never run again.
+```
+
+The last step is the damage, and it compounds: with no map entry nothing marks
+the test affected, and testmon's file-level `pytest_ignore_collect` skips its
+whole file because every *remaining* test in it is unaffected — so collection
+never rediscovers it and nothing re-adds it. The edit was then untested and
+reported as fully tested by `pytest`, by `pytest --since`, and by
+`tools/test_selection.py status` (which counts unmapped *files*, and the file was
+still mapped). Only `pytest --no-testmon` caught it. Repairing the map needed a
+full `--testmon-noselect` run.
+
+**A node id was the worst case, and it is the everyday debugging move.** `pytest
+tests/kernel/test_kernel.py::test_x` collects one file, so a single such run
+deleted **49** entries — the edit's entire affected set — after which `pytest`
+ran nothing at all on a modified tree.
+
+`testmon_policy.protect_map_outside_the_scope` narrows the deletion to the scope
+the run actually looked at: every mapped test whose file lies outside the run's
+arguments is retained regardless. Cleanup *inside* the scope still happens, which
+is the part with a legitimate job (a renamed or deleted test), and it is still
+exact there, because that scope was collected. A run that covers every
+`testpaths` root is left alone entirely — note a bare `pytest` carries `tests` as
+an argument, so "has path arguments" is not the same question as "was scoped"
+(`collected_the_whole_suite`).
+
+Measured, matched A/B from an identical map, same 14-test affected set:
+
+| | map entries deleted | tests the next `pytest` runs |
+|---|---|---|
+| before | 14 of 14 | 1 |
+| after | 0 | 24, including all 13 that had been lost |
+
+This is also why the coverage figure below refuses to report on a scoped run, and
+why it publishes the number of tests the map holds: **this is what had eroded
+`main`'s map to 2680 of 3941 tests**, and a coverage number over two thirds of the
+suite would have read as a 15-point regression that did not exist.
 
 ### A new worktree seeds itself
 
@@ -302,6 +359,128 @@ recorded them.
 `--since` is the cheap step between an inner-loop run and the full
 `--no-testmon` gate. It is not a replacement for the gate: it still cannot see
 the three blind spots above.
+
+## Coverage, for free
+
+The map records the AST blocks each test executed. Unioned across every recorded
+test, that answers a question nobody was asking it — **which functions in
+`arrayscope/` does the suite execute?** — for the price of one SQL query. No
+coverage pass, no wall clock.
+
+```bash
+python tools/test_selection.py coverage
+```
+
+```
+functions entered by a test   5306 of 6204  (85.5%)
+files a test reaches at all   281 of 295
+```
+
+The same figure appears at the end of a run, **but only when it moved**:
+
+```
+coverage: 5311 of 6205 functions executed (85.6%), +3 since this checkout's
+baseline (3 newly covered, 0 no longer).
+```
+
+It is legitimate on a *selected* run, which is the point: a deselected test keeps
+its recorded fingerprint, and that fingerprint is still valid by construction —
+the same invariant selection itself rests on. It self-heals for the same reason a
+selected run is honest: when a file changes, every test that recorded it is
+affected, so it re-runs and re-records in the same breath, and stale checksums
+stop matching and drop out of the numerator.
+
+### It is not coverage.py's number
+
+This measures **functions entered**, and it must never be quoted against CI's
+Codecov line percentage. Measured on identical execution data (`tests/core` plus
+`tests/kernel`, coverage.py's own `executed_lines` folded through testmon's own
+`create_fingerprint`):
+
+| | |
+|---|---|
+| coverage.py lines | 14.8% |
+| testmon blocks | 13.1% |
+| per-file delta | median +0.0, **spread −36.1 to +17.4 points** |
+
+The aggregate agreement is two large biases cancelling, not accuracy. Per file
+they diverge violently, in both directions, for one structural reason each:
+
+* **Upward** — a block counts as covered when *any* line in it ran, so a function
+  abandoned at its first guard reads exactly like one run to completion.
+* **Downward** — a module's top-level statements (imports, class bodies, every
+  `def`, every constant) are a *single* block spanning the whole file, so merely
+  importing a module makes coverage.py call most of its statements covered.
+
+The second is severe enough that the module block is excluded from the metric
+entirely: it spans line one to EOF, so "covered" there only means "some test
+touched this file". That is reported separately, as reach.
+
+### How close is it to the truth?
+
+Validated against a full `pytest --cov` run on the same tree, with a completely
+recorded map:
+
+| | functions |
+|---|---|
+| ground truth (full `--cov` run) | 5271 of 6204 — 84.96% |
+| the map, for free | 5312 of 6204 — **85.62%** |
+
+**0.66 points apart**, from 99 the map knew about and the coverage run skipped
+(tests conditionally skipped that day, recorded earlier) and 58 the coverage run
+saw and the map cannot (mostly child processes, blind spot 1 above).
+
+Cost: 2.1 s cold, **47 ms warm**. Block structure is cached beside the map keyed
+by each file's git blob sha, so a warm run parses nothing and the cost after the
+first is proportional to the diff.
+
+### It is a floor, not an estimate
+
+A test the map has never recorded contributes nothing, so the figure is a floor
+whose tightness is exactly the share of the suite the map holds — which is why
+`coverage` prints that count. With `main`'s eroded 2680-of-3941 map, the same
+tree measured 70.2% against the true 85.0%: **a 15-point phantom regression**.
+That erosion is [fixed](#what-a-scoped-run-used-to-delete); the reporting still
+refuses on a scoped run rather than trusting it.
+
+### What it compares against
+
+Three bases, in preference order, and never an invented one:
+
+1. **`--since`, before merging.** Not a percentage — for a file this branch
+   edited, the map holds only the current revision's fingerprints, so the
+   baseline revision's coverage is *not recoverable* and a "percent since main"
+   would read every edited file as newly uncovered. What is exact is the useful
+   half:
+
+   ```
+   coverage: of 1 functions this branch adds or changes since main, 1 are
+   executed by no test:
+       arrayscope/core/roi.py:462  _never_called_by_any_test
+   ```
+
+   Exact because a function this branch touched necessarily re-recorded in the
+   run that just happened. Comparison is on an index-free body digest, so
+   inserting a function at the top of a file does not report every function below
+   it as changed — which testmon's own checksum would, and which is why it
+   over-selects there.
+
+2. **The inner loop: what this checkout inherited.** Observed rather than
+   inferred, exactly like [the red ledger](#tests-that-were-already-red-and-tests-you-just-broke)
+   and for the same reason. A worktree seeds its coverage baseline from the same
+   donor as its map, so "since this checkout's baseline" means "since `main`"
+   with nothing to bootstrap. `accept-coverage` re-baselines when the ground has
+   moved under it.
+
+3. **Nothing.** A fresh clone gets the absolute figure and no delta.
+
+State lives in `.testmondata-coverage.json` beside the map — gitignored, one per
+checkout, holding the parse cache and the baseline. Losing it costs one re-parse
+and one baseline, never a wrong number.
+
+`--cov` still turns selection off, and that rule is unchanged: coverage.py over a
+subset of the suite *is* a false number. This is a different measurement, over
+the union of everything the map has recorded.
 
 ## When the machine is busy
 

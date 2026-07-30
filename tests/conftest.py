@@ -47,7 +47,7 @@ if _XDIST_WORKER:
     os.environ.setdefault("ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_config_root, "artifacts"))
 
 
-from tests import load_report, red_ledger, testmon_policy
+from tests import coverage_map, load_report, red_ledger, testmon_policy
 
 #: Written by the controller (or a serial run) only; workers read the file.
 _red_ledger = None
@@ -306,6 +306,12 @@ def pytest_sessionstart(session):
     _red_ledger = None
     config = session.config
     testmon_config = getattr(config, "testmon_config", None)
+    # Both the controller and every worker delete from the map during their own
+    # collection, so both need the scope guard — unlike the ledger below, which
+    # deliberately has one writer. Installed here because sessionstart is the
+    # last point that reliably precedes collection on both.
+    if testmon_config:
+        testmon_policy.protect_map_outside_the_scope(config)
     if _XDIST_WORKER or not testmon_config or not testmon_config.collect:
         return
     data = getattr(config, "testmon_data", None)
@@ -419,6 +425,8 @@ def pytest_terminal_summary(terminalreporter, config):
         if busy:
             terminalreporter.write_line(busy, bold=True, yellow=True)
 
+    _report_function_coverage(terminalreporter, config)
+
     if not _selection_is_narrowing(config):
         return
     data = getattr(config, "testmon_data", None)
@@ -426,7 +434,7 @@ def pytest_terminal_summary(terminalreporter, config):
     unaffected = len(getattr(data, "stable_test_names", ()) or ())
     if not mapped or not unaffected:
         return
-    since = getattr(config, "arrayscope_since", None)
+    since = getattr(config, "arrayscope_since", None) or _since_on_the_controller(config)
     reached = 0
     if since is not None:
         ref, reached = since
@@ -472,6 +480,157 @@ def pytest_terminal_summary(terminalreporter, config):
         )
         for nodeid in sorted(new_reds):
             terminalreporter.write_line(f"    {nodeid}", red=True)
+
+
+def _since_on_the_controller(config):
+    """``(ref, count)`` for a ``--since`` run whose collection happened elsewhere.
+
+    ``config.arrayscope_since`` is written during ``pytest_collection``, which
+    under xdist runs on the workers — so the controller, the only process with a
+    terminal, had neither the ``--since`` line nor its correction to the
+    "unaffected and did not run" count. The gap the run had already closed was
+    reported as still open, and the flag looked like it had done nothing.
+
+    Recomputed here rather than forwarded: the query is read-only and the workers
+    have no channel to hand a number back on. It costs a couple of seconds, and
+    ``--since`` is the pre-merge step, not the inner loop.
+    """
+
+    if config.getoption("since", default=None) is None:
+        return None
+    data = getattr(config, "testmon_data", None)
+    if data is None:
+        return None
+    try:
+        ref, merge_base = testmon_policy.resolve_baseline(
+            config.rootdir, config.getoption("since") or None
+        )
+        checksums = testmon_policy.baseline_method_checksums(config.rootdir, merge_base)
+        if checksums is None:
+            return None
+        reached = testmon_policy.tests_reached_since_baseline(data, checksums)
+    except Exception:  # a summary line is not worth failing a finished run over
+        return None
+    return None if reached is None else (ref, len(reached))
+
+
+def _report_function_coverage(terminalreporter, config):
+    """Say what the map now knows about executed functions — only when it moved.
+
+    The map records which AST blocks each test executed, so the union over every
+    recorded test is a coverage figure this run has already paid for. See
+    ``tests/coverage_map.py`` for what the number is and, more importantly, what
+    it is not: it is not `coverage.py`'s line percentage, the two disagree by up
+    to 36 points per file in both directions, and they must never be quoted as
+    the same thing.
+
+    Printed only when the covered set *changed*, because on a clean tree it
+    cannot: an inner loop that touches nothing coverage-relevant would otherwise
+    grow one more line saying so every time.
+
+    Skipped for a run that did not collect the whole suite, and only for that.
+    A scoped run leaves out-of-scope affected tests unrecorded, so both the
+    figure and its delta would move for a reason that has nothing to do with the
+    code. Deselection itself is *not* a reason to withhold it: under ``-k`` or
+    ``--testmon-noselect`` the whole suite is still collected, nothing is dropped
+    from the map, and ``--testmon-noselect`` is precisely the run that leaves the
+    map — and therefore this figure — at its most complete.
+    """
+
+    if _XDIST_WORKER:
+        return
+    decision = getattr(config, "arrayscope_selection", None)
+    if decision is None or not decision.active:
+        return  # no map to read: --no-testmon, --cov, or testmon not installed
+    if not testmon_policy.collected_the_whole_suite(config):
+        return
+    environment = getattr(getattr(config, "testmon_data", None), "environment", None)
+    if not environment:
+        return
+
+    map_path = testmon_policy.map_path(config.rootdir)
+    sidecar = coverage_map.read_sidecar(map_path)
+    structure = coverage_map.Structure(coverage_map.cached_structure(sidecar))
+    reach = coverage_map.measure(config.rootdir, map_path, environment, structure=structure)
+    if reach is None or not reach.total:
+        return
+
+    baselines = coverage_map.baselines(sidecar)
+    drift = coverage_map.drift(reach, baselines.get(environment))
+    roots = "/, ".join(coverage_map.source_roots(config.rootdir))
+    if drift is None:
+        # First run in this checkout: record what it inherited and say so once.
+        # Anything that moves from here is this checkout's own doing — the same
+        # baseline rule tests/red_ledger.py uses for reds.
+        baselines[environment] = coverage_map.baseline_from(reach)
+        terminalreporter.write_line(
+            f"coverage: {reach.covered} of {reach.total} functions in {roots}/ are "
+            f"executed by a recorded test ({reach.percent:.1f}%) — baseline for this "
+            "checkout.",
+            bold=True,
+        )
+    elif drift.moved:
+        terminalreporter.write_line(
+            f"coverage: {reach.covered} of {reach.total} functions executed "
+            f"({reach.percent:.1f}%), {reach.covered - drift.baseline_covered:+d} since "
+            f"this checkout's baseline ({len(drift.gained)} newly covered, "
+            f"{len(drift.lost)} no longer). "
+            "`python tools/test_selection.py coverage` names them.",
+            bold=True,
+            yellow=bool(drift.lost),
+        )
+
+    # The option, not ``config.arrayscope_since``: that is set during collection,
+    # which under xdist happens on the workers, so the controller — the only
+    # process with a terminal — never sees it.
+    since = config.getoption("since", default=None)
+    if since is not None:
+        _report_new_code_coverage(terminalreporter, config, environment, map_path, structure, since)
+
+    if structure.parsed or environment not in coverage_map.baselines(sidecar):
+        coverage_map.write_sidecar(map_path, structure=structure.payload(), baselines=baselines)
+
+
+def _report_new_code_coverage(terminalreporter, config, environment, map_path, structure, ref):
+    """On a ``--since`` run, name the new code no test executes.
+
+    This is the one comparison against the branch point that is exact. A global
+    "percent since main" is not available and is deliberately not faked: for a
+    file this branch edited, the map holds only the current revision's
+    fingerprints, so the baseline revision's coverage cannot be recovered from it
+    (see the note in ``tests/coverage_map.py``).
+    """
+
+    try:
+        ref, merge_base = testmon_policy.resolve_baseline(config.rootdir, ref or None)
+    except testmon_policy.UsageError:
+        return
+    fresh = coverage_map.new_code(
+        config.rootdir, map_path, environment, ref, merge_base, structure=structure
+    )
+    if fresh is None or not fresh.total:
+        return
+    if not fresh.uncovered:
+        terminalreporter.write_line(
+            f"coverage: every one of the {fresh.total} functions this branch adds or "
+            f"changes since {ref} is executed by a test.",
+            bold=True,
+        )
+        return
+    terminalreporter.write_line(
+        f"coverage: of {fresh.total} functions this branch adds or changes since {ref}, "
+        f"{len(fresh.uncovered)} are executed by no test:",
+        bold=True,
+        yellow=True,
+    )
+    for function in fresh.uncovered[:12]:
+        terminalreporter.write_line(f"    {function}", yellow=True)
+    if len(fresh.uncovered) > 12:
+        terminalreporter.write_line(
+            f"    ... and {len(fresh.uncovered) - 12} more "
+            "(`python tools/test_selection.py coverage --since` lists them)",
+            yellow=True,
+        )
 
 
 # Keep direct-import test modules from replacing the real package in sys.modules.

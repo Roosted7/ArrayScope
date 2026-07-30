@@ -6,6 +6,16 @@ This file records user-visible release changes. Detailed development history and
 
 ### Added
 
+- Coverage numbers now come out of the change-selection map for free:
+  `python tools/test_selection.py coverage` reports which functions in
+  `arrayscope/` the suite executes (one SQL query, 47 ms warm, no coverage
+  pass), a run prints a one-line delta when that figure moves, and
+  `coverage --since` names the functions this branch adds or changes that no
+  test executes. Validated at 0.66 points from a full `pytest --cov` run on the
+  same tree. It measures *functions entered*, not `coverage.py` lines, and is
+  deliberately not comparable with the CI/Codecov figure — see
+  `docs/testing/test-selection.md`.
+
 - Standalone installers for all three platforms, built from a shared
   PyInstaller bundle (Python fully hidden): a Linux AppImage, a conventional
   Windows wizard installer (per-user by default, optional desktop icon and
@@ -30,6 +40,18 @@ This file records user-visible release changes. Detailed development history and
   selection instead of trying to construct a removed backend.
 
 ### Fixed
+
+- A scoped test run no longer deletes the change-selection map entries it never
+  looked at. `pytest tests/kernel` — or, worse, `pytest file.py::test` — used to
+  drop every recorded test that the working tree affected *outside* that scope,
+  after which nothing marked those tests affected and their files were skipped at
+  collection, so the edit went untested while `pytest`, `pytest --since` and
+  `tools/test_selection.py` all reported nothing affected. Only `--no-testmon`
+  caught it. Measured: an edit affecting 14 tests, then `pytest tests/kernel`,
+  then `pytest` ran 1 of them; a single node-id run deleted 49 entries and left
+  `pytest` running nothing at all. Also fixes the `--since` summary line and the
+  "unaffected and did not run" count, which the xdist controller had been
+  computing as though the flag had done nothing.
 
 - WGPU reduced phase-vector LOD pages now preserve resultant coherence as
   intensity instead of rendering cancellation at full-brightness phase hue.

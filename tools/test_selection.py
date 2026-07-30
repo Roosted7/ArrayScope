@@ -13,12 +13,20 @@ the tests does not:
   cover: test files it has never recorded, and declared child-process entry
   points that have moved. A map with a hole in it selects confidently and
   wrongly, so the hole has to be visible.
+* **What does the suite actually execute?** — `coverage` unions the map's
+  recorded blocks into an executed-function figure, for the price of one query.
+  It is *not* coverage.py's line percentage and prints its own caveats; see
+  `tests/coverage_map.py`.
 
 Usage:
     python tools/test_selection.py                  # impact of the working tree
     python tools/test_selection.py impact --tests   # ... listing every node id
     python tools/test_selection.py impact --json    # ... as JSON
     python tools/test_selection.py status
+    python tools/test_selection.py coverage             # functions the suite runs
+    python tools/test_selection.py coverage --uncovered # ... naming the rest
+    python tools/test_selection.py coverage --since     # new code no test runs
+    python tools/test_selection.py accept-coverage      # re-baseline the delta
 
 Both read the map for one environment — offscreen by default, matching ring 1.
 Pass `--environment` (or set the same variables the ring uses, e.g.
@@ -213,6 +221,209 @@ def command_status(args) -> int:
     return 0
 
 
+def _coverage(args, *, with_changed_files: bool = False):
+    """Measure, and hand back the pieces every coverage subcommand needs."""
+
+    from tests import coverage_map
+
+    environment = _environment(args.environment)
+    map_path = testmon_policy.map_path(REPO_ROOT)
+    provisional = 0
+    if with_changed_files:
+        peek = _read_map(environment, with_changed_files=True)
+        provisional = len([name for name in peek.changed_files if name.endswith(".py")])
+    sidecar = coverage_map.read_sidecar(map_path)
+    structure = coverage_map.Structure(coverage_map.cached_structure(sidecar))
+    reach = coverage_map.measure(
+        REPO_ROOT,
+        map_path,
+        environment,
+        structure=structure,
+        provisional_files=provisional,
+    )
+    if reach is None:
+        raise SystemExit(
+            f"No readable selection map at {map_path}.\n"
+            "Record one by running the suite once: pytest"
+        )
+    if structure.parsed:
+        coverage_map.write_sidecar(
+            map_path,
+            structure=structure.payload(),
+            baselines=coverage_map.baselines(sidecar),
+        )
+    return coverage_map, environment, map_path, sidecar, structure, reach
+
+
+def command_coverage(args) -> int:
+    """What the map says the suite executes, and what that number is worth.
+
+    The map records the AST blocks each test executed, so unioning it answers
+    "which functions does the suite run" for the price of one query — no
+    coverage pass, no wall clock. Two things keep that honest and are printed
+    with it: the metric is *functions entered*, not `coverage.py` lines (the two
+    disagree by up to 36 points per file, in both directions — see
+    ``tests/coverage_map.py``), and the figure is a floor whose tightness is
+    exactly the share of the suite the map has recorded.
+    """
+
+    coverage_map, environment, map_path, sidecar, structure, reach = _coverage(
+        args, with_changed_files=not args.json
+    )
+    fresh = None
+    if args.since is not None:
+        ref, merge_base = testmon_policy.resolve_baseline(REPO_ROOT, args.since or None)
+        fresh = coverage_map.new_code(
+            REPO_ROOT, map_path, environment, ref, merge_base, structure=structure
+        )
+    drift = coverage_map.drift(reach, coverage_map.baselines(sidecar).get(environment))
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "environment": environment,
+                    "metric": "functions entered by at least one recorded test",
+                    "covered": reach.covered,
+                    "total": reach.total,
+                    "percent": round(reach.percent, 2),
+                    "files_reached": reach.files_reached,
+                    "files_total": reach.files_total,
+                    "recorded_tests": reach.recorded_tests,
+                    "per_package": {
+                        name: {"covered": values[0], "total": values[1]}
+                        for name, values in sorted(reach.per_package.items())
+                    },
+                    "uncovered": [
+                        {"path": item.path, "line": item.line, "name": item.name}
+                        for item in reach.uncovered
+                    ],
+                    "unreached_files": list(reach.unreached_files),
+                    "baseline": None
+                    if drift is None
+                    else {
+                        "covered": drift.baseline_covered,
+                        "total": drift.baseline_total,
+                        "gained": len(drift.gained),
+                        "lost": len(drift.lost),
+                    },
+                    "since": None
+                    if fresh is None
+                    else {
+                        "ref": fresh.ref,
+                        "changed_functions": fresh.total,
+                        "uncovered": [
+                            {"path": item.path, "line": item.line, "name": item.name}
+                            for item in fresh.uncovered
+                        ],
+                    },
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"environment  {environment}")
+    print(f"map          {map_path}  ({reach.recorded_tests} tests recorded)")
+    print()
+    print(f"functions entered by a test   {reach.covered} of {reach.total}  ({reach.percent:.1f}%)")
+    print(f"files a test reaches at all   {reach.files_reached} of {reach.files_total}")
+    if drift is not None:
+        moved = reach.covered - drift.baseline_covered
+        print(
+            f"since this checkout's baseline {moved:+d}  "
+            f"({len(drift.gained)} newly covered, {len(drift.lost)} no longer)"
+        )
+    print()
+    print("This is not coverage.py's line percentage and cannot be compared with CI's")
+    print("Codecov figure: a function counts as covered when any line in it ran, and")
+    print("module-level code is excluded entirely. It is also a floor — a test the map")
+    print("has never recorded contributes nothing. See tests/coverage_map.py.")
+    if reach.provisional_files:
+        print()
+        print(
+            f"PROVISIONAL: {reach.provisional_files} source files still differ from the map, "
+            "so their functions read as uncovered until the tests using them re-run."
+        )
+
+    print()
+    packages = [item for item in reach.per_package.items() if item[1][1]]
+    for name, (covered, total) in sorted(packages, key=lambda item: item[1][0] / item[1][1]):
+        print(f"    {name:<34} {100.0 * covered / total:5.1f}%  {covered:>5}/{total:<5}")
+
+    if fresh is not None:
+        print()
+        if not fresh.total:
+            print(f"since {fresh.ref}: this branch changes no functions under the source roots.")
+        elif not fresh.uncovered:
+            print(
+                f"since {fresh.ref}: all {fresh.total} functions this branch adds or changes "
+                "are executed by a test."
+            )
+        else:
+            print(
+                f"since {fresh.ref}: of {fresh.total} functions this branch adds or changes, "
+                f"{len(fresh.uncovered)} are executed by no test:"
+            )
+            for function in fresh.uncovered:
+                print(f"    {function}")
+
+    if args.uncovered:
+        print()
+        print(f"never entered by a recorded test ({len(reach.uncovered)}):")
+        for function in reach.uncovered:
+            print(f"    {function}")
+        print()
+        print(f"never reached at all ({len(reach.unreached_files)}):")
+        for name in reach.unreached_files:
+            print(f"    {name}")
+        print()
+        print("A package __init__ here is usually a false positive: it is imported at")
+        print("collection time, before any test's tracing starts, so no test owns it.")
+
+    if drift is not None and drift.moved and not args.uncovered:
+        for label, entries in (("newly covered", drift.gained), ("no longer", drift.lost)):
+            if not entries:
+                continue
+            print()
+            print(f"{label} since the baseline ({len(entries)}):")
+            for identity in entries[:20]:
+                print(f"    {identity.split('#', 1)[0]}")
+            if len(entries) > 20:
+                print(f"    ... and {len(entries) - 20} more")
+    return 0
+
+
+def command_accept_coverage(args) -> int:
+    """Re-baseline coverage: call the current figure this checkout's starting point.
+
+    The mirror of ``accept-reds``, and needed for the same reason. The baseline
+    is what this checkout inherited when its map arrived, which is right while
+    you work and wrong once the ground moves — a worktree that jumped fifty
+    commits, or a branch stacked on another's work, reports that branch's
+    coverage changes as its own forever.
+    """
+
+    coverage_map, environment, map_path, sidecar, structure, reach = _coverage(args)
+    recorded = coverage_map.baselines(sidecar)
+    previous = recorded.get(environment)
+    recorded[environment] = coverage_map.baseline_from(reach)
+    coverage_map.write_sidecar(map_path, structure=structure.payload(), baselines=recorded)
+    if previous:
+        moved = reach.covered - int(previous.get("covered", 0))
+        print(
+            f"Baseline for {environment!r} moved from {previous.get('covered')} to "
+            f"{reach.covered} of {reach.total} functions ({moved:+d})."
+        )
+    else:
+        print(
+            f"Recorded a baseline for {environment!r}: {reach.covered} of "
+            f"{reach.total} functions ({reach.percent:.1f}%)."
+        )
+    print("Coverage changes from here are this checkout's own.")
+    return 0
+
+
 def command_accept_reds(args) -> int:
     """Re-baseline: declare the current failures inherited rather than yours.
 
@@ -257,6 +468,30 @@ def main(argv: list[str] | None = None) -> int:
 
     status = subparsers.add_parser("status", help="what the map does not cover")
     status.set_defaults(func=command_status)
+
+    coverage = subparsers.add_parser(
+        "coverage",
+        help="functions the suite executes, read out of the map for free",
+    )
+    coverage.add_argument(
+        "--uncovered", action="store_true", help="list every function no test enters"
+    )
+    coverage.add_argument(
+        "--since",
+        metavar="REF",
+        nargs="?",
+        const="",
+        default=None,
+        help="also report the functions this branch adds or changes that no test enters",
+    )
+    coverage.add_argument("--json", action="store_true", help="machine-readable output")
+    coverage.set_defaults(func=command_coverage)
+
+    accept_coverage = subparsers.add_parser(
+        "accept-coverage",
+        help="call the current coverage this checkout's baseline, not the inherited one",
+    )
+    accept_coverage.set_defaults(func=command_accept_coverage)
 
     accept = subparsers.add_parser(
         "accept-reds",
