@@ -95,3 +95,37 @@ Two consequences worth keeping:
 The dossier's own `244 → 32 ms` medians were taken on a quiet machine across
 eight fresh managed-Weston processes and remain the claim of record; they are not
 reproducible under contention and should not be re-quoted from a loaded run.
+
+### Work-proportional gate and rebind-transaction evidence
+
+The regression gate now asserts the work the transition controls and records
+elapsed time as evidence:
+
+- 272 seed items admitted in nine callbacks, with the governor's named
+  rebind cap at 32 and observed batches never exceeding it;
+- target ladder admission and retained-fallback presentation batches both
+  capped at four by the same named governor policy;
+- exactly one complete fallback-gate post/firing;
+- 272 page-backed-superset rebinds and zero exact-plane rebinds for this field
+  transition, so the page-backed R3 path is measured rather than inferred.
+
+Bounds derivation now occurs only after physical residency accepts a candidate.
+The failed canonical candidate is no longer scanned before the successful
+strict-subset candidate. Each 32-tile governed callback scans 326,400 bytes
+(the smallest accepted reduced planes); the whole 272-tile handoff scans
+2,774,400 bytes once, rather than scanning both candidates.
+
+Three executed managed-Weston invocations (six parametrized instances), with
+the orientation order alternated, all passed the complete functional gate:
+
+| Invocation order | 1-min loadavg at launch | max callback `(0,1)` / `(1,0)` | max bounds-scan transaction `(0,1)` / `(1,0)` |
+|---|---:|---:|---:|
+| `(0,1)`, `(1,0)` | 1.71 | 59.391 / 44.101 ms | 2.554 / 1.874 ms |
+| `(1,0)`, `(0,1)` | 4.02 | 78.965 / 95.709 ms | 2.290 / 3.856 ms |
+| `(0,1)`, `(1,0)` | 9.80 | 51.215 / 54.272 ms | 1.674 / 2.864 ms |
+
+The latter two runs reported material external load. The admitted work and all
+pixel/order assertions stayed invariant while wall time moved, which is the
+reason the clock is no longer the pass/fail predicate. The cold bounds scan is
+inside the governed callback, but its worst measured transaction is 3.856 ms;
+it is not an R5 blocker after the scan is restricted to the accepted plane.
