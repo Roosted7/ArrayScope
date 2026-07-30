@@ -106,6 +106,31 @@ def test_edit_operation_seeds_and_replaces_generic_op(qtbot):
     assert (int(crop.start), int(crop.stop)) == (1, 4)
 
 
+def test_edit_operation_reopens_a_parameterless_axis_set_op(qtbot):
+    """The pencil flow must open for an axis-set op with no parameters.
+
+    ``centered_fftn`` has no parameter rows, so the old "nothing to edit"
+    guard would return before building a form -- leaving the one thing the
+    user *can* change, the axis set, uneditable after the fact.
+    """
+
+    win = _window(qtbot)
+    win.operation_coordinator.append_operation("centered_fftn", axes=(1, 2))
+    win._set_document(win.operation_coordinator.document)
+    win.edit_operation(0)
+    popup = win._operation_params_popup
+    assert popup is not None
+    # Seeded with the operation's current selection.
+    assert sorted(a for a, check in popup._axis_checks.items() if check.isChecked()) == [1, 2]
+    popup._axis_checks[2].setChecked(False)
+    popup._axis_checks[0].setChecked(True)
+    process_events(qtbot, count=2)
+    popup._accept()
+    process_events(qtbot)
+    assert _op_ids(win) == ["centered_fftn"]
+    assert tuple(win.document.steps[0].operation.axes) == (0, 1)
+
+
 def test_native_soft_threshold_parameter_flow(qtbot):
     """Driving the float form must land the native threshold parameter."""
 

@@ -191,6 +191,8 @@ class OperationActionsMixin:
             entry,
             shape=self.data.shape,
             axis=dim,
+            axis_choices=self._axis_choices(),
+            display_axes=self.view_state.display_axes(),
             slot_options=self._slot_source_options(entry),
         )
         if form is None:
@@ -631,13 +633,17 @@ class OperationActionsMixin:
             entry = get_operation_entry(operation_id)
         except Exception:
             return
-        if not entry.parameters and not entry.input_slots:
+        if not entry.parameters and not entry.input_slots and not entry.requires_axes:
             return
         axis = getattr(operation, "axis", None)
+        axes = tuple(getattr(operation, "axes", None) or ())
         form = build_parameter_form(
             entry,
             shape=self.base_data.shape,
             axis=axis,
+            axes=axes,
+            axis_choices=self._axis_choices(),
+            display_axes=self.view_state.display_axes(),
             slot_options=self._slot_source_options(entry),
             slot_bindings=dict(getattr(operation, "slot_bindings", ()) or ()),
         )
