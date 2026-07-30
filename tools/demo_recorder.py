@@ -1084,7 +1084,14 @@ def s_montage(rec: Recorder):
 
     rec.caption("Type ':' to montage the whole dimension")
     chip = win.dimension_strip.chip(2)
-    rec.type_into(chip.slice_edit, ":", on_text=lambda text: win._on_slice_text_changed(2, text))
+    rec.type_into(
+        chip.slice_edit,
+        ":",
+        on_text=lambda text: win._on_slice_text_changed(2, text),
+        per_char_s=0.45,
+        label="enter montage range on axis 2",
+    )
+    rec.hold(0.55)
     rec.caption("Tiles are evaluated and presented progressively")
     rec.hold_until_settled(6.0, tail_s=1.6)
 

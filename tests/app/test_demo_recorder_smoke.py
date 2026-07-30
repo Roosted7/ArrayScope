@@ -115,6 +115,13 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             "restore full axis 0",
             "show image at true 1:1",
         } <= labels
+    if name == "montage":
+        montage_action = next(
+            event for event in actions if event["label"] == "enter montage range on axis 2"
+        )
+        assert montage_action["kind"] == "type"
+        assert montage_action["target"]["widget_type"] == "SliceIndexEdit"
+        assert montage_action["caption"] == "Type ':' to montage the whole dimension"
     if name == "workflow":
         labels = {event["label"] for event in actions}
         assert {
