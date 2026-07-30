@@ -122,7 +122,7 @@ does not give you.
 
 ## What it cannot see
 
-testmon traces Python lines executed **in the pytest process**. Three things are
+testmon traces Python lines executed **in the pytest process**. Four things are
 therefore invisible, and none of them are fixed by running `pytest` again:
 
 1. **Child processes.** Coverage stops at the process boundary. The tests that
@@ -138,6 +138,22 @@ therefore invisible, and none of them are fixed by running `pytest` again:
    Selection has nothing to say there, and [the ring rules](README.md) are
    unchanged: whoever touches a display/render/kernel/window lane still runs
    those rings themselves.
+4. **Python read as *input*.** The architecture guards —
+   `tests/app/test_dead_code.py`, `test_architecture_guards.py`,
+   `test_g5_architecture_guards.py`, `test_import_health.py` — `ast.parse` the
+   tree rather than executing it, so testmon records no dependency on what they
+   inspect. Measured, the whole recorded dependency set of the dead-code guard
+   is `['tests/app/test_dead_code.py', 'tests/dead_code.py']`: editing anything
+   in `arrayscope/` never selects it. This is under-selection, and it is a
+   variant of item 2 the phrase "non-Python inputs" does not name.
+
+   It has one useful consequence. The residual risk in module-block forgiveness
+   is a test that *introspects* a module — `dir()`, `getattr()`, a `__all__`
+   scan — and so notices a newly added name without executing it. In this tree
+   the tests that would do that are exactly the ones selection already never
+   runs for an `arrayscope/` edit, so the hole is bounded by a measurement
+   rather than by an argument. The commit hook runs the dead-code guard on every
+   commit regardless.
 
 Item 3 has no local escape hatch at all: even a forced untraced sweep runs the
 whole *offscreen* suite, and rings 3–4 are not in it either way, so nothing on
@@ -309,6 +325,80 @@ If the map is missing or unreadable, every code path degrades to running
 everything. There is no state in which selection silently skips more than it
 should because the map broke.
 
+### Adding a function does not re-run the file's world
+
+testmon puts a module's **whole top-level body in one AST block spanning line 1
+to EOF**, so that block is in 100% of the file's fingerprints, and its
+comparison is a subset test against the file's current checksum list. One
+top-level statement moving therefore retired one 4-byte checksum and with it
+every test that had ever touched the file. Measured before the fix: appending
+one inert, uncalled function to `arrayscope/window/frame_session.py` selected
+**258 of 3933 tests and cost 123.16 s of wall clock**, and the number of tests
+whose executed code had changed was zero.
+
+Selection now *forgives* a retired checksum when it can prove the code is the
+same. Two rules, both applied per file against the revisions the sidecar
+retains:
+
+* **The module block**, when the current revision is the previous one with
+  statements *inserted* — nothing removed, modified or reordered — and every
+  inserted statement is inert (below).
+* **Any block whose index-free body digest still exists.** `Block.code` is
+  `f"{index}:{ast_repr}"`, so moving a function down a file changes the
+  checksums of everything below it while the code is byte-identical. Identical
+  digest, identical AST; only the ordinal moved, and nothing can observe an
+  ordinal.
+
+Measured on a settled map of 3987 tests, working tree clean at 0 affected:
+
+| Edit | Before | After |
+|---|---:|---:|
+| append a function to `arrayscope/render/lod.py` | 164 tests / 324 s recorded | **0** |
+| append a function to `arrayscope/window/frame_session.py` | 266 / 372 s | **0** |
+| insert a function above the first `def` in `lod.py` | 164 / 324 s | **0** |
+| add a method to `ViewState` (`core/view_state.py`) | 144 / 146 s | **0** |
+| append one test to `tests/display/test_odd_origin_crop_geometry.py` | 297 | **0** |
+| change a constant in `lod.py` | 164 | 164 |
+| add an unused import to `lod.py` | 164 | 164 |
+| append a *decorated* function to `lod.py` | 164 | 164 |
+
+**What is inert**, and nothing else is:
+
+* an **undecorated** `def` or `async def` whose name was not already bound in
+  that scope, and whose default arguments are literals, plain names or
+  attributes, or containers of those. Decorators run at import and mutate shared
+  registries — this tree has them, in `arrayscope/operations/library.py`.
+  Defaults evaluate at definition time; annotations do not (PEP 649).
+* a **class** with no decorators, no bases and no keywords, whose body is only
+  methods, docstrings, `pass` and literal assignments. A base class gets
+  `__init_subclass__` called on it, and `metaclass=` is a call.
+* a method added to an **existing** class only if that class is undecorated or
+  `@dataclass` — a class decorator reads the finished body. (Census: 415
+  decorated classes here, 411 `@dataclass`, 4 `@runtime_checkable`; adding a
+  method to a runtime-checkable Protocol changes what `isinstance` answers.)
+
+**What is never forgiven**, beyond the above: a name starting with `__`
+(a `def __repr__` replaces something with no block to compare, and a module-level
+`def __getattr__` changes every attribute lookup on the module); any file whose
+source mentions `__all__`; any file declared in `OUT_OF_PROCESS_DEPENDENCIES`,
+where the whole file is the honest dependency because nothing about the child
+process is traced; and any file with no retained previous revision, which is a
+fresh sidecar or more than five revisions of drift.
+
+The direction of the risk is fixed by construction. Forgiveness only appends to
+the right-hand side of testmon's subset test, so a mistake can turn "affected"
+into "unaffected" and never the reverse — it can never make more tests run, and
+it changes nothing else testmon does. `tests/app/test_selection_forgiveness.py`
+drives testmon's own comparison against testmon's own fingerprints, so every
+case carries the control arm that says what selection did without it.
+
+The previous revisions live in `.testmondata-coverage.json`, the sidecar the
+coverage figure already writes, extended to track every file the map depends on
+(572 here, against the 295 under `arrayscope/`) and to keep the last five
+revisions of each. It costs 0.79 MB per generation of drift on a 1.6 MB file,
+about 1 s of parsing on a cold sidecar, and ~25 ms per changed file when
+selection reads it.
+
 ### What a scoped run used to delete
 
 testmon garbage-collects the map on every run: `TestmonData.sync_db_fs_tests`
@@ -476,6 +566,22 @@ including `tests/conftest.py` that is 41 tests against 55, and the gap grows wit
 how widely the touched code is executed. Non-Python changes — a fixture array, an
 icon — have no method structure, so they fall back to reaching every test that
 recorded them.
+
+That figure used to be the *best* case rather than the typical one: the same
+module block that made an added function re-run a whole file made `--since`
+degrade to file-level for every file the branch added one to. The same two rules
+apply here, mirrored — the fingerprints are current and the checksum list is the
+branch point's, so it is the current checksums that get appended — and no
+sidecar is needed, because `git show` has already produced the baseline
+revision.
+
+Measured by translating each recorded fingerprint forward through the edit the
+way the re-record would write it (a disk edit alone cannot show it: `--since`
+compares *recorded* fingerprints, and the recording only moves when the tests
+re-run): appending an inert function to `render/lod.py` goes **165 reached →
+0**, adding a method to `ViewState` **144 → 0**, appending one test to a
+297-test file **297 → 0**. A changed constant in `lod.py` stays at 165, and so
+do a changed body and a new import.
 
 `--since` is the pre-merge command precisely because it is still a *selected*
 run: the branch-sized answer at map speed. It does not pretend to be a sweep —
@@ -697,6 +803,13 @@ selection.
 * **"Nothing is mapped"** — the environment key of your shell differs from the
   one the suite writes. Check `QT_QPA_PLATFORM` and the `ARRAYSCOPE_*` ring
   variables, or pass `--environment`.
+* **Reverting an edit does not restore the map** once a run happened in
+  between. The map is re-recorded by the run, so the revert is just another
+  change: mutate → `pytest` (123.16 s, 296 tests) → revert → `pytest` (73.66 s,
+  262 tests), measured. That doubles the price of exactly the experiment a
+  suspicious developer runs, so do the revert *before* the confirming run, not
+  after it. Without a run in between the fingerprints match again and nothing
+  re-runs.
 * **Suspect selection itself** — report it (rule 6); there is deliberately no
   environment variable that turns it off
   from the picture without editing anything.
