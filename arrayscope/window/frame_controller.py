@@ -33,6 +33,7 @@ from arrayscope.display.montage import (
     MontageTileState,
     RenderedTile,
     make_montage_plan,
+    viewport_tiles,
 )
 from arrayscope.display.planning import fallback_level_source, normalize_bounds
 from arrayscope.display.pyramid import preview_level_for_tile_shape
@@ -1677,10 +1678,18 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
     def _prune_stale_montage_tile_work(self, session: FrameSession) -> None:
         if not _viewport_interaction_active(self):
             return
+        # Through ``viewport_tiles``, like every other halo consumer. This one
+        # got the constant's name without its derivation, which leaves it
+        # naming a *narrower* set than the halo it is spelled after: it cancels
+        # in-flight work mid-drag, so a raw-rect ``keep`` un-loads tiles the
+        # session is protecting and the drag then re-requests them.
         keep = {
             int(tile.montage_index)
-            for tile in session.plan.tiles_intersecting(
-                session.view_range, margin_tiles=RETENTION_HALO_TILES
+            for tile in viewport_tiles(
+                session.plan,
+                view_range=session.view_range,
+                viewport_shape=session.viewport_shape,
+                margin_tiles=RETENTION_HALO_TILES,
             )
         }
         if not keep:

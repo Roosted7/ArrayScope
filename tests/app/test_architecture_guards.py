@@ -1798,3 +1798,53 @@ def test_backend_labelled_evidence_rejects_factory_fallbacks():
         if "require_image_view_backend(" not in path.read_text()
     ]
     assert not missing, f"backend-labelled evidence accepts factory fallback: {missing}"
+
+
+# ``tiles_intersecting`` takes the raw camera rect. ``viewport_tiles`` snaps
+# that rect outward to whole-tile bounds first, and every consumer of "which
+# tiles does this camera cover" must go through it, because the two answers
+# differ -- 6 tiles against 15 on the field montage -- and a consumer holding
+# the narrower one silently under-protects or under-plans against a session
+# holding the wider one.
+_RAW_RECT_TILE_SET_EXEMPTIONS = {
+    # The one derivation. This is the call every other consumer routes through.
+    ("arrayscope/display/montage.py", "viewport_tiles"),
+    # FrameRegion.active, deliberately still on the raw rect pending the rect
+    # convention adjudication (docs/redesign/retention-halo-2026-07-30.md §4).
+    # The comment at the site is the record; this entry is its ceiling.
+    ("arrayscope/display/frame_planner.py", "_plan_montage"),
+    # Not a viewport set: a focus fallback that ends at "every tile in the
+    # plan" anyway, and has no viewport_shape to snap with.
+    ("arrayscope/window/montage_viewport.py", "_nearest_visible_tile"),
+}
+
+
+def test_camera_tile_sets_come_from_one_derivation():
+    """Two ways to ask "which tiles does this camera cover" is the bug.
+
+    Each divergence found so far looked local and was not: the convergence
+    latch compared a raw-rect key against a snapped-rect visible set and could
+    skip a retarget that had work, and the mid-drag work pruner named the
+    retention halo constant while deriving a narrower set than the halo.
+    Neither is visible from the site that has it -- only from the pair -- so
+    the guard is on the pair.
+
+    Adding an exemption is a decision to hold a second convention. Say why
+    here and at the site.
+    """
+
+    found = set()
+    for path in sorted((ROOT / "arrayscope").rglob("*.py")):
+        rel = path.relative_to(ROOT).as_posix()
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call) and _call_name(inner) == "tiles_intersecting":
+                    found.add((rel, node.name))
+
+    assert found <= _RAW_RECT_TILE_SET_EXEMPTIONS, (
+        "these derive a camera tile set from the raw rect instead of "
+        f"viewport_tiles: {sorted(found - _RAW_RECT_TILE_SET_EXEMPTIONS)}"
+    )
