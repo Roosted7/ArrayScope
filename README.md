@@ -191,7 +191,7 @@ tools/env pytest -q tests/core
 
 `tools/env <command>` runs one command against `.venv` without needing direnv or an activated shell — useful for scripts and CI-like invocations. Each checkout gets its own venv deliberately: a shared editable install lets one checkout’s pointer decide what every other process imports.
 
-`pytest` runs the tests your working tree affects and skips the ones it provably does not — pytest-testmon records which source lines each test executed, so a change selects the tests that reach it wherever they live. `pytest --no-testmon` runs the whole suite, which is what to run before merging. `python tools/test_selection.py` reports the blast radius without running anything. See [change-driven test selection](docs/testing/test-selection.md).
+`pytest` runs the tests your working tree affects and skips the ones it provably does not — pytest-testmon records which source lines each test executed, so a change selects the tests that reach it wherever they live. `pytest --since` is the pre-merge command: it names everything the branch changed, reports which of it the map already verified against the current tree, and runs only the gaps. `python tools/test_selection.py` reports the blast radius without running anything. See [change-driven test selection](docs/testing/test-selection.md).
 
 The suite runs in parallel by default (`pytest-xdist`); append `-n 0` to run serially when debugging. See [testing strategy](docs/testing/strategy.md#parallel-execution) for details.
 
