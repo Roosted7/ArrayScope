@@ -1511,12 +1511,16 @@ def operation_runtime(operation_id: str) -> str:
     wrapper = user_operation_wrapper(operation_id)
     if wrapper is not None:
         return str(wrapper.get("runtime") or SUPPORTED_RUNTIME)
-    try:
-        from arrayscope.operations.operation_definitions import export_operation_definition
+    from arrayscope.operations.operation_definitions import export_operation_definition
 
-        return str(export_operation_definition(operation_id).get("runtime") or "python")
-    except Exception:
+    try:
+        definition = export_operation_definition(operation_id)
+    except ValueError:
+        # The registry's documented answer for an id it cannot resolve — an
+        # unknown operation, or a plugin whose package is not installed.  It
+        # declares no runtime, so the caller sees the default one.
         return "python"
+    return str(definition.get("runtime") or "python")
 
 
 def quarantine_imported_command(operation_id: str) -> bool:
