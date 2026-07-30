@@ -21,6 +21,12 @@ SLOT_OPEN_DOCUMENT = "open-document"
 SLOT_ROI_MASK = "roi-mask"
 SLOT_ROI_COORDINATES = "roi-coordinates"
 SLOT_SAVED_ARRAY = "saved-array"
+# A named file handed to the operation as its *path*, not as a loaded array: a
+# torch checkpoint, a coil-sensitivity database, a config the tool reads itself.
+# Without it such an input has to be smuggled through ``saved-array``, which
+# would memory-map it as ``.npy`` and fail, or through a plain path parameter,
+# which no watcher re-resolves when the file moves.
+SLOT_FILE = "file"
 
 SLOT_SOURCE_KINDS = frozenset(
     {
@@ -29,6 +35,7 @@ SLOT_SOURCE_KINDS = frozenset(
         SLOT_ROI_MASK,
         SLOT_ROI_COORDINATES,
         SLOT_SAVED_ARRAY,
+        SLOT_FILE,
     }
 )
 _SLOT_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -138,6 +145,10 @@ class ResolvedSlot:
     ``source`` is deliberately excluded from equality.  Operation/document cache
     identity is the explicit ``source_identity`` plus binding, shape, and dtype;
     large arrays must never participate in dataclass equality.
+
+    ``loader`` decides what :meth:`materialize` produces.  Every loader but
+    ``file`` produces an array checked against ``shape``/``dtype``; ``file``
+    produces the path string itself, and both are empty for it.
     """
 
     binding: SlotBinding
@@ -161,9 +172,14 @@ class ResolvedSlot:
             _freeze(self.source_identity),
         )
 
-    def materialize(self) -> np.ndarray:
+    def materialize(self) -> np.ndarray | str:
         if self.unavailable_reason:
             raise RuntimeError(self.unavailable_reason)
+        if self.loader == "file":
+            # A file slot's value *is* its path: the operation opens it itself
+            # (a model checkpoint, a config), so there is no array to check a
+            # shape or a dtype against.
+            return str(self.source)
         if self.loader == "document":
             value = self.source.materialize()
         elif self.loader == "dimension-set":

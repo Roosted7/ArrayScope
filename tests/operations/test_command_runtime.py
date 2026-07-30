@@ -95,6 +95,33 @@ def test_non_numeric_parameters_stay_one_token_each(tmp_path):
     ]
 
 
+def test_a_file_slot_substitutes_its_own_path_without_a_scratch_copy(tmp_path):
+    """A ``file`` slot names a file; it is never staged into the scratch dir.
+
+    Copying a model checkpoint or a database per invocation would be wrong as
+    well as wasteful -- the point of the kind is that the operation opens the
+    file where it lives.
+    """
+
+    executable = _fake_npy_command(tmp_path)
+    record = tmp_path / "argv.json"
+    model = tmp_path / "weights.bin"
+    model.write_bytes(b"not an array")
+    template = f'"{executable}" --record="{record}" --model {{model}} {{in}} {{out}}'
+
+    run_command_template(
+        template,
+        np.arange(4, dtype=np.float32),
+        inputs={"model": str(model)},
+    )
+
+    argv = json.loads(record.read_text())
+    assert argv[1:3] == ["--model", str(model)]
+    # The scratch directory is gone by now, so the path the child saw can only
+    # have been the original one.
+    assert model.read_bytes() == b"not an array"
+
+
 def test_boolean_parameters_render_lowercase(tmp_path):
     command = build_command(
         "tool --flag {flag} {in} {out}",

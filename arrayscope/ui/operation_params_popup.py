@@ -21,7 +21,7 @@ from collections.abc import Callable
 
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from arrayscope.operations.input_slots import SLOT_SAVED_ARRAY, SlotBinding
+from arrayscope.operations.input_slots import SLOT_FILE, SLOT_SAVED_ARRAY, SlotBinding
 from arrayscope.operations.parameter_forms import ParameterForm
 from arrayscope.operations.registry import OperationEntry
 from arrayscope.ui.bubbles import EditBubble
@@ -112,11 +112,18 @@ class OperationParamsPopup(EditBubble):
             )
             self._slot_combos[slot.name] = combo
             row_layout.addWidget(combo, 1)
-            if SLOT_SAVED_ARRAY in slot.accepts:
+            for kind, prompt, pattern in (
+                (SLOT_SAVED_ARRAY, "Choose a saved array", "NumPy arrays (*.npy)"),
+                (SLOT_FILE, "Choose a file", "All files (*)"),
+            ):
+                if kind not in slot.accepts:
+                    continue
                 browse = QtWidgets.QToolButton(self)
-                set_button_icon(browse, "folder_open", tooltip="Choose a saved array")
+                set_button_icon(browse, "folder_open", tooltip=prompt)
                 browse.clicked.connect(
-                    lambda _checked=False, name=slot.name: self._choose_saved_array(name)
+                    lambda _checked=False, name=slot.name, kind=kind, prompt=prompt, pattern=pattern: (
+                        self._choose_slot_file(name, kind, prompt, pattern)
+                    )
                 )
                 row_layout.addWidget(browse)
             self._fields_layout.addRow(slot.label, row)
@@ -284,19 +291,15 @@ class OperationParamsPopup(EditBubble):
         )
         self._refresh_validation()
 
-    def _choose_saved_array(self, name: str) -> None:
-        path, _selected_filter = get_open_file_name(
-            self,
-            "Choose saved array",
-            "",
-            "NumPy arrays (*.npy)",
-        )
+    def _choose_slot_file(self, name: str, kind: str, prompt: str, pattern: str) -> None:
+        path, _selected_filter = get_open_file_name(self, prompt, "", pattern)
         if not path:
             return
+        prefix = "Saved array" if kind == SLOT_SAVED_ARRAY else "File"
         binding = SlotBinding(
-            SLOT_SAVED_ARRAY,
+            kind,
             path=path,
-            label=f"Saved array — {path.rsplit('/', 1)[-1]}",
+            label=f"{prefix} — {path.rsplit('/', 1)[-1]}",
         )
         combo = self._slot_combos[name]
         index = combo.findData(binding)

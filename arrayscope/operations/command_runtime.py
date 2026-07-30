@@ -224,7 +224,7 @@ def run_array_command(
     command: Sequence[str] | str,
     array: np.ndarray,
     *,
-    inputs: Mapping[str, np.ndarray] | None = None,
+    inputs: Mapping[str, np.ndarray | str] | None = None,
     handoff: str = "npy",
     shell: bool = False,
     cancellation_token: object | None = None,
@@ -240,6 +240,11 @@ def run_array_command(
     ``command`` must already contain the concrete input/output paths.  Most
     callers should use :func:`run_command_template`, which creates them and
     preserves argv boundaries.
+
+    An ``inputs`` value that is a ``str`` is a *file* slot: its path substitutes
+    as-is, with no copy into the scratch directory.  Copying would be wrong as
+    well as wasteful -- a model checkpoint or a database is named, not handed
+    over, and may be far larger than the array itself.
     """
 
     import subprocess
@@ -264,6 +269,9 @@ def run_array_command(
         read_options = {"min_rank": written.ndim} if format_spec.rank_floor_aware else {}
         slot_paths: dict[str, str] = {}
         for name, value in sorted(dict(inputs or {}).items()):
+            if isinstance(value, str):
+                slot_paths[str(name)] = value
+                continue
             safe_name = "".join(
                 character if character.isalnum() or character in "_-" else "_"
                 for character in str(name)
@@ -356,7 +364,7 @@ def run_command_template(
     array: np.ndarray,
     *,
     parameters: Mapping[str, object] | None = None,
-    inputs: Mapping[str, np.ndarray] | None = None,
+    inputs: Mapping[str, np.ndarray | str] | None = None,
     handoff: str = "npy",
     shell: bool = False,
     prefix: Sequence[str] = (),

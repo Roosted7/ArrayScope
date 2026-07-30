@@ -21,6 +21,7 @@ from arrayscope.operations.capabilities import OperationClass
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.input_slots import (
     SLOT_DIMENSION_SET,
+    SLOT_FILE,
     SLOT_OPEN_DOCUMENT,
     SLOT_ROI_COORDINATES,
     SLOT_ROI_MASK,
@@ -264,6 +265,96 @@ def test_window_resolves_dimension_document_roi_and_saved_sources(tmp_path):
         SlotBinding(SLOT_SAVED_ARRAY, path=str(saved_path)),
     )
     np.testing.assert_array_equal(saved.materialize(), saved_value)
+
+
+def _file_slot_spec(operation_id="test-slots:model"):
+    """An op handed a *path*: it opens the file itself, nothing is loaded for it."""
+
+    def build(_axis, _params, slots):
+        with open(slots["model"], encoding="utf-8") as handle:
+            weight = float(handle.read().strip())
+        return lambda data: np.asarray(data) * weight
+
+    return PluginOperationSpec(
+        id=operation_id,
+        label="Scale by model file",
+        build=build,
+        input_slots=(OperationInputSlot("model", "Model", accepts=(SLOT_FILE,)),),
+    )
+
+
+def test_file_slot_resolves_to_a_path_with_saved_array_identity(tmp_path):
+    model = tmp_path / "weights.txt"
+    model.write_text("3\n")
+    window = _SlotWindow(np.ones((2, 2), dtype=np.float32), RoiStore())
+
+    resolved = window._resolve_operation_slot(
+        SimpleNamespace(label="Model"),
+        SlotBinding(SLOT_FILE, path=str(model)),
+    )
+
+    # The materialized value is the path, and nothing was read to produce it.
+    assert resolved.materialize() == str(model)
+    assert resolved.shape == ()
+    assert resolved.dtype == ""
+    stat = model.stat()
+    assert resolved.source_identity == (str(model), stat.st_mtime_ns, stat.st_size)
+
+    # Rewriting the file changes the identity, so a cached characterization for
+    # the old contents cannot be reused.
+    model.write_text("4\n")
+    rewritten = window._resolve_operation_slot(
+        SimpleNamespace(label="Model"),
+        SlotBinding(SLOT_FILE, path=str(model)),
+    )
+    assert rewritten.source_identity != resolved.source_identity
+
+
+def test_file_slot_feeds_its_path_to_the_operation(tmp_path):
+    model = tmp_path / "weights.txt"
+    model.write_text("3\n")
+    spec = _file_slot_spec()
+    registry.register_pack_operation(spec)
+    window = _SlotWindow(np.ones((2, 2), dtype=np.float32), RoiStore())
+
+    operation = registry.create_operation(
+        spec.id,
+        slot_bindings={"model": SlotBinding(SLOT_FILE, path=str(model))},
+        slot_resolver=window._resolve_operation_slot,
+    )
+
+    assert operation.current_unavailable_reason() == ""
+    np.testing.assert_array_equal(operation.apply(np.ones((2, 2))), np.full((2, 2), 3.0))
+
+    # A recipe carries the binding, so the same step rebuilds from disk.
+    (step,) = recipes.steps_from_recipe(
+        recipes.recipe_from_steps((OperationStep(operation),)),
+        base_shape=(2, 2),
+        slot_resolver=window._resolve_operation_slot,
+    )
+    assert step.operation == operation
+
+
+def test_a_removed_file_slot_source_fails_closed(tmp_path):
+    model = tmp_path / "weights.txt"
+    model.write_text("3\n")
+    spec = _file_slot_spec("test-slots:model-gone")
+    registry.register_pack_operation(spec)
+    window = _SlotWindow(np.ones((2, 2), dtype=np.float32), RoiStore())
+    binding = SlotBinding(SLOT_FILE, path=str(model))
+    operation = registry.create_operation(
+        spec.id,
+        slot_bindings={"model": binding},
+        slot_resolver=window._resolve_operation_slot,
+    )
+    window._set_document(ArrayDocument(window.base_data, steps=(OperationStep(operation),)))
+
+    model.unlink()
+    assert window._refresh_operation_slot_bindings(file_path=str(model), render=False) is True
+    (step,) = window.document.steps
+    assert step.enabled is False
+    assert "Model" in step.unavailable_reason
+    assert "cannot resolve" in step.unavailable_reason
 
 
 class _Coordinator:

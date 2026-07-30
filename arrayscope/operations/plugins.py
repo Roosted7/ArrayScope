@@ -283,7 +283,13 @@ class PluginOperation:
     def _slot_inputs(self) -> dict[str, ResolvedSlot]:
         return dict(self.resolved_slots)
 
-    def _slot_arrays(self) -> dict[str, np.ndarray]:
+    def _slot_arrays(self) -> dict[str, np.ndarray | str]:
+        """Each bound slot's materialized value.
+
+        Array-backed slots produce an ``ndarray``; a ``file`` slot produces its
+        path, which the operation opens itself.
+        """
+
         reason = self.current_unavailable_reason()
         if reason:
             raise RuntimeError(f"operation {self.plugin_id!r} is unavailable: {reason}")

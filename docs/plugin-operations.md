@@ -456,10 +456,20 @@ more `accepts` values:
 | `roi-mask` | One ROI rasterized to a 2-D boolean image-plane mask. |
 | `roi-coordinates` | One ROI as an `N×2` float64 `(x, y)` coordinate array. |
 | `saved-array` | One memory-mapped `.npy` array. |
+| `file` | One named file, delivered as its **path**. Nothing is loaded. |
 
 The slot name must be a Python-style identifier, must not duplicate a parameter
 name, and becomes the callable keyword or command-template placeholder. Every
 declared slot is required when the operation is added.
+
+`file` is the odd one out and deliberately so: every other kind materializes an
+array, while a `file` slot hands the operation the path and lets it open the
+file itself — a torch checkpoint, a coil-sensitivity database, a config the tool
+parses. It is bound, watched, and identified exactly like `saved-array` (the
+binding stores the path; resolution records `(path, mtime, size)` so replacing
+the file re-characterizes the operation, and removing it makes the step
+unavailable rather than crashing it), but in a command template `{slot:name}`
+substitutes the path **as-is**, with no copy into the scratch directory.
 
 ### Runtime bodies
 

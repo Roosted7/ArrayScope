@@ -12,6 +12,7 @@ from pyqtgraph.Qt import QtCore
 from arrayscope.core.roi import roi_coordinates
 from arrayscope.operations.input_slots import (
     SLOT_DIMENSION_SET,
+    SLOT_FILE,
     SLOT_OPEN_DOCUMENT,
     SLOT_ROI_COORDINATES,
     SLOT_ROI_MASK,
@@ -23,6 +24,10 @@ from arrayscope.operations.input_slots import (
 )
 from arrayscope.operations.plugins import PluginOperation
 from arrayscope.operations.registry import create_operation
+
+# Binding kinds whose source is a file on disk: they carry a ``path``, they are
+# watched, and a removal makes the step unavailable rather than crashing it.
+_PATH_BOUND_KINDS = frozenset({SLOT_SAVED_ARRAY, SLOT_FILE})
 
 
 class OperationSlotSourcesMixin:
@@ -211,6 +216,21 @@ class OperationSlotSourcesMixin:
                 loader="saved-array",
                 source=path,
             )
+        if binding.kind == SLOT_FILE:
+            # Same identity as a saved array -- (path, mtime, size) -- so
+            # replacing the file re-characterizes the operation. What differs is
+            # that nothing is read here: the operation receives the path and
+            # opens the file itself.
+            path = os.path.abspath(os.path.expanduser(binding.path))
+            if not os.path.isfile(path):
+                raise FileNotFoundError(path)
+            stat = os.stat(path)
+            return ResolvedSlot(
+                binding=replace(binding, path=path),
+                source_identity=(path, int(stat.st_mtime_ns), int(stat.st_size)),
+                loader="file",
+                source=path,
+            )
         raise ValueError(f"unsupported input binding kind: {binding.kind!r}")
 
     def _find_open_document(self, source_id: str):
@@ -264,7 +284,7 @@ class OperationSlotSourcesMixin:
                     steps.append(step)
                     continue
                 if file_path is not None and not any(
-                    binding.kind == SLOT_SAVED_ARRAY
+                    binding.kind in _PATH_BOUND_KINDS
                     and os.path.abspath(binding.path) == os.path.abspath(file_path)
                     for binding in bindings.values()
                 ):
@@ -312,7 +332,7 @@ class OperationSlotSourcesMixin:
             for step in self.document.steps
             if isinstance(step.operation, PluginOperation)
             for _name, binding in step.operation.slot_bindings
-            if binding.kind == SLOT_SAVED_ARRAY and os.path.isfile(binding.path)
+            if binding.kind in _PATH_BOUND_KINDS and os.path.isfile(binding.path)
         }
         if paths:
             watcher.addPaths(sorted(paths))
