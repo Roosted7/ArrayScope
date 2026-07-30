@@ -35,7 +35,8 @@ if ! command -v ruff >/dev/null 2>&1; then
 	# cannot actually check.
 	echo "pre-commit: ruff is not on PATH, so the lint gate cannot run." >&2
 	echo "  Commit through the maintained environment:" >&2
-	echo "    PATH=~/miniconda3/bin:\$PATH direnv exec . git commit ..." >&2
+	echo "    tools/env git commit ..." >&2
+	echo "  (no environment yet? create it with: uv sync)" >&2
 	echo "  Or bypass deliberately with --no-verify." >&2
 	exit 1
 fi

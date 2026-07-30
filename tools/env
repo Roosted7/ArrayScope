@@ -1,60 +1,61 @@
 #!/usr/bin/env bash
 #
-# Run one command in the arrayscope environment without paying for activation.
+# Run one command in this checkout's environment without paying for activation.
 #
 #     tools/env pytest                  # the loop
 #     tools/env pytest --since          # before merging
 #     tools/env ruff check .
 #     tools/env git commit ...          # puts ruff+python on PATH for the hook
 #
-# Why this exists: `direnv exec . <command>` re-evaluates the conda hook and
-# runs `conda env list` on every single call — measured 1.56 s on the reference
-# machine before the command even starts, which is 3x the suite's entire no-op
-# fast path. An interactive shell pays that once per `cd` and never notices;
-# a script or an agent pays it per command. A conda environment does not need
-# activation to be *used* — its binaries run fine by path (verified against a
-# Qt/offscreen window test in a process that never saw conda) — so this just
-# finds the env and execs. ~80 ms.
+# Why this exists: `direnv exec . <command>` re-evaluates .envrc on every single
+# call. Under the retired conda .envrc that meant a `conda shell.bash hook` plus
+# a `conda env list` per command — measured 1.56 s on the reference machine
+# before the command even started, 3x the suite's entire no-op fast path. An
+# interactive shell pays that once per `cd` and never notices; a script or an
+# agent pays it per command. The uv .envrc is far cheaper, but the principle
+# stands: a venv does not need activating to be *used*. Its binaries run fine by
+# path, so this just finds the venv and execs. ~5 ms.
 #
-# Portability: nothing here is specific to one machine except the conventional
-# install locations probed last. An unusual install states its location once:
+# The venv is per-checkout (<repo root>/.venv, created by `uv sync`) and found
+# by walking up from this script's own location, never from the caller's cwd:
+# harnesses reset cwd between commands, and the whole point of one venv per
+# checkout is that `tools/env` in *this* tree uses *this* tree's install.
 #
-#     export ARRAYSCOPE_ENV_PREFIX=/wherever/envs/arrayscope
+# An unusual layout states its location once:
+#
+#     export ARRAYSCOPE_ENV_PREFIX=/wherever/.venv
 
 set -euo pipefail
 
 prefix="${ARRAYSCOPE_ENV_PREFIX:-}"
 
-if [[ -z "$prefix" && "${CONDA_DEFAULT_ENV:-}" == "arrayscope" && -n "${CONDA_PREFIX:-}" ]]; then
-	# Already activated: trust the shell rather than second-guessing it.
-	prefix="$CONDA_PREFIX"
-fi
-
 if [[ -z "$prefix" ]]; then
-	for base in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3" "$HOME/mambaforge" /opt/conda; do
-		if [[ -x "$base/envs/arrayscope/bin/python" ]]; then
-			prefix="$base/envs/arrayscope"
+	# Walk up from this script, not from $PWD.
+	dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	while :; do
+		if [[ -x "$dir/.venv/bin/python" ]]; then
+			prefix="$dir/.venv"
 			break
 		fi
+		[[ "$dir" == "/" ]] && break
+		dir="$(dirname "$dir")"
 	done
 fi
 
+if [[ -z "$prefix" && -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+	# Already activated and no checkout venv to prefer: trust the shell rather
+	# than second-guessing it.
+	prefix="$VIRTUAL_ENV"
+fi
+
 if [[ -z "$prefix" || ! -x "$prefix/bin/python" ]]; then
-	echo "tools/env: no arrayscope environment found." >&2
-	echo "  Create it:   conda env create -f environment.yml" >&2
-	echo "  Or name it:  export ARRAYSCOPE_ENV_PREFIX=/path/to/envs/arrayscope" >&2
+	echo "tools/env: no ArrayScope environment found." >&2
+	echo "  Create it:   uv sync" >&2
+	echo "  Or name it:  export ARRAYSCOPE_ENV_PREFIX=/path/to/.venv" >&2
 	exit 1
 fi
 
+export VIRTUAL_ENV="$prefix"
 export PATH="$prefix/bin:$PATH"
-export CONDA_PREFIX="$prefix"
-export CONDA_DEFAULT_ENV="arrayscope"
-
-# `conda` itself lives in the *base* install's bin, two levels up from
-# envs/arrayscope — append it so `tools/env conda env update ...` works too.
-conda_base="$(dirname "$(dirname "$prefix")")"
-if [[ -x "$conda_base/bin/conda" ]]; then
-	export PATH="$PATH:$conda_base/bin"
-fi
 
 exec "$@"
