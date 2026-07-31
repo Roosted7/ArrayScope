@@ -798,6 +798,41 @@ class Recorder:
 
         self.click(widget, invoke=activate, label=label)
 
+    def click_item_view(self, view, row: int, *, invoke, label: str) -> None:
+        """Activate one visible item with evidence for its exact row geometry."""
+        from pyqtgraph.Qt import QtCore
+
+        if hasattr(view, "visualItemRect"):
+            item = view.item(row)
+            local_rect = view.visualItemRect(item)
+        else:
+            model = view.model()
+            local_rect = view.visualRect(model.index(row, 0))
+        viewport = view.viewport()
+        top_left = self._map_widget_point(viewport, local_rect.topLeft())
+        rect = QtCore.QRectF(
+            top_left.x(),
+            top_left.y(),
+            float(local_rect.width()),
+            float(local_rect.height()),
+        )
+        target = self._window_rect_target(rect, label=type(view).__name__ + "Item")
+        event = self._start_action("click", label, target=target)
+        self._frame_event(event, target)
+        self.move_to(QtCore.QPointF(*target["point"]), seconds=0.5)
+        event["press_frame"] = self.frame_index
+        event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
+        self._ripples.append((self.frame_index, QtCore.QPointF(self.cursor)))
+        self.cursor_pressed = True
+        self.hold(0.1)
+        invoke()
+        event["activate_frame"] = self.frame_index
+        self.cursor_pressed = False
+        self.settle()
+        self.hold(0.3)
+        self._finish_action(event)
+        self._focus_rect = None
+
     def choose_overlay_action(
         self,
         menu,
@@ -1001,10 +1036,11 @@ class Recorder:
         if self._overlay_widget is None:
             self._focus_rect = None
 
-    def begin_gesture(self, label: str) -> dict:
+    def begin_gesture(self, label: str, *, button: str = "left") -> dict:
         from pyqtgraph.Qt import QtCore
 
         event = self._start_action("drag", label)
+        event["button"] = button
         event["press_frame"] = self.frame_index
         event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
         self._ripples.append((self.frame_index, QtCore.QPointF(self.cursor)))
@@ -1172,6 +1208,22 @@ class Recorder:
                 self.capture()
         action_event["activate_frame"] = self.frame_index - 1
         self._finish_action(action_event)
+
+    def send_image_mouse(self, event_type, image_point, *, button, buttons) -> bool:
+        """Send one real viewport mouse event at an image-space point."""
+        from pyqtgraph.Qt import QtCore, QtGui
+
+        view = self.win.img_view
+        scene_pos = view.getView().mapViewToScene(QtCore.QPointF(*image_point))
+        local = QtCore.QPointF(view.graphicsView.mapFromScene(scene_pos))
+        event = QtGui.QMouseEvent(
+            event_type,
+            local,
+            button,
+            buttons,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+        return bool(view.eventFilter(view.graphicsView.viewport(), event))
 
     def drag_window_levels(self, *, low_fraction: float, high_fraction: float) -> None:
         """Animate an honest histogram-window gesture and its pixel response."""
@@ -1553,18 +1605,33 @@ def s_montage(rec: Recorder):
 def s_roi(rec: Recorder):
     import dataclasses
 
-    from arrayscope.core.roi import RoiKind
+    from pyqtgraph.Qt import QtCore
 
     win = rec.window(_phantom2d(256), size=(1100, 820))
-    rec.caption("Draw ROIs to inspect regions")
-    rec.hold(1.4)
+    rec.caption("Choose an ROI tool, then add it from the Inspection panel")
+    rec.transition("open inspection panel", win._show_inspection_dock, hold_s=0.7)
+    tool_combo = win.inspection_dock.tool_combo
+    rec.choose_combo_item(
+        tool_combo,
+        "roi_rectangle",
+        label="choose Rectangle ROI tool",
+        control_label="ROI tool",
+    )
+    before_ids = {selection.id for selection in win.img_view.roiSelections()}
+    rec.click(win.inspection_dock.add_button, label="add selected Rectangle ROI")
+    added = [
+        selection for selection in win.img_view.roiSelections() if selection.id not in before_ids
+    ]
+    if len(added) != 1:
+        raise RuntimeError(f"Add ROI created {len(added)} selections instead of one")
+    selection = added[0]
+    rec.hold(0.5)
 
-    # Rectangle ROI, animated corner-drag: create small, then grow the
-    # geometry each frame while the cursor rides the dragged corner.
+    # Animate the real selection returned by the dock's Add action while the
+    # cursor rides the corner. Creation itself is never scripted directly.
     x0, y0, x1, y1 = 62.0, 78.0, 148.0, 152.0
     rec.move_to(rec.image_point(x0, y0), seconds=0.8)
-    selection = win.img_view.createRoi(RoiKind.RECTANGLE, rect=(x0, y0, 2.0, 2.0))
-    rectangle_gesture = rec.begin_gesture("draw rectangle ROI")
+    rectangle_gesture = rec.begin_gesture("resize added rectangle ROI")
     steps = rec._frames_for(1.4)
     for i in range(1, steps + 1):
         t = _ease(i / steps)
@@ -1577,8 +1644,8 @@ def s_roi(rec: Recorder):
 
     rec.caption("Statistics and histograms update live")
     rec.transition(
-        "open inspection panel",
-        win._show_inspection_dock,
+        "focus live ROI statistics",
+        lambda: None,
         hold_s=1.2,
         focus_target=lambda: rec._table_cells_target(
             win.inspection_dock.stats_table,
@@ -1589,17 +1656,49 @@ def s_roi(rec: Recorder):
     )
     rec.hold_until_settled(2.5, tail_s=1.8)
 
-    rec.caption("Trace a line profile through the features")
+    rec.caption("Polyline and freehand drawing live in the command palette")
+    palette = win._build_command_palette_dialog()
+    rec.open_overlay_widget(
+        palette,
+        win.inspection_dock.tool_combo,
+        placement="above",
+        label="show command palette",
+    )
+    rec.type_into(
+        palette.search,
+        "polyline",
+        label="search for polyline ROI",
+        control_label="command search",
+    )
+    command, _axis = palette.selected()
+    if command is None or command.id != "roi_polyline":
+        raise RuntimeError("command palette did not select the polyline ROI entry")
+
+    def choose_polyline():
+        win._run_palette_command(command.id)
+        rec._overlay_widget = None
+        rec._overlay_top_left = None
+
+    rec.click_item_view(
+        palette.list_widget,
+        palette.list_widget.currentRow(),
+        invoke=choose_polyline,
+        label="choose Draw polyline ROI",
+    )
+
+    rec.caption("Trace a polyline profile through the features")
     polyline_points = ((30.0, 220.0), (118.0, 96.0), (216.0, 190.0))
     rec.move_to(rec.image_point(*polyline_points[0]), seconds=0.6)
-    polyline = win.img_view.createRoi(
-        RoiKind.POLYLINE,
-        points=(polyline_points[0], polyline_points[0]),
-    )
-    polyline_gesture = rec.begin_gesture("draw polyline profile")
-    drawn = [polyline_points[0]]
-    for destination in polyline_points[1:]:
-        start = drawn[-1]
+    left = QtCore.Qt.MouseButton.LeftButton
+    polyline_gesture = rec.begin_gesture("draw polyline profile", button="left")
+    if not rec.send_image_mouse(
+        QtCore.QEvent.Type.MouseButtonPress,
+        polyline_points[0],
+        button=left,
+        buttons=left,
+    ):
+        raise RuntimeError("armed polyline tool did not consume its press")
+    for start, destination in itertools.pairwise(polyline_points):
         segment_frames = rec._frames_for(0.8)
         for index in range(1, segment_frames + 1):
             t = _ease(index / segment_frames)
@@ -1607,13 +1706,21 @@ def s_roi(rec: Recorder):
                 start[0] + (destination[0] - start[0]) * t,
                 start[1] + (destination[1] - start[1]) * t,
             )
-            geometry = dataclasses.replace(polyline.geometry, points=(*drawn, point))
-            win.img_view._set_roi_geometry(polyline.id, geometry, emit=False)
+            rec.send_image_mouse(
+                QtCore.QEvent.Type.MouseMove,
+                point,
+                button=QtCore.Qt.MouseButton.NoButton,
+                buttons=left,
+            )
             rec.cursor = rec.image_point(*point)
             rec.capture()
-        drawn.append(destination)
-    geometry = dataclasses.replace(polyline.geometry, points=tuple(drawn))
-    win.img_view._set_roi_geometry(polyline.id, geometry, emit=True)
+    if not rec.send_image_mouse(
+        QtCore.QEvent.Type.MouseButtonRelease,
+        polyline_points[-1],
+        button=left,
+        buttons=QtCore.Qt.MouseButton.NoButton,
+    ):
+        raise RuntimeError("active polyline tool did not consume its release")
     rec.finish_gesture(polyline_gesture)
     rec.hold_until_settled(2.5, tail_s=1.6)
 

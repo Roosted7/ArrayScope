@@ -377,6 +377,21 @@ class OperationActionsMixin:
         return None
 
     def open_command_palette(self):
+        dialog = self._build_command_palette_dialog()
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return None
+        command, axis = dialog.selected()
+        if command is None:
+            return None
+        if command.kind == "operation":
+            return self.request_operation(command.id, axis)
+        if command.kind == "colormap":
+            return self._apply_palette_colormap(command.id)
+        return self._run_palette_command(command.id)
+
+    def _build_command_palette_dialog(self):
+        """Build the production palette without entering its modal loop."""
+
         # The palette is the catalogue's single search surface. Flatten the same
         # library-backed listing used by the popup and dimension menu so hidden
         # operations stay hidden and manager ordering remains authoritative.
@@ -421,19 +436,9 @@ class OperationActionsMixin:
             ]
         )
         default_axis = self._default_operation_axis()
-        dialog = CommandPaletteDialog(
+        return CommandPaletteDialog(
             commands, axis_choices=self._axis_choices(), default_axis=default_axis, parent=self
         )
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return None
-        command, axis = dialog.selected()
-        if command is None:
-            return None
-        if command.kind == "operation":
-            return self.request_operation(command.id, axis)
-        if command.kind == "colormap":
-            return self._apply_palette_colormap(command.id)
-        return self._run_palette_command(command.id)
 
     def _colormap_palette_commands(self):
         """Every colormap, as a palette command.

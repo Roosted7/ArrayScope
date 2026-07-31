@@ -119,8 +119,12 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
     if name == "roi":
         labels = {event["label"] for event in actions}
         assert {
-            "draw rectangle ROI",
+            "choose Rectangle ROI tool",
+            "add selected Rectangle ROI",
+            "resize added rectangle ROI",
             "open inspection panel",
+            "search for polyline ROI",
+            "choose Draw polyline ROI",
             "draw polyline profile",
             "close inspection panel",
             "enable live pointer profile",
@@ -128,7 +132,9 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         assert not [
             event for event in actions if event["kind"] == "click" and event["target"] is None
         ], "ROI transitions must not imply a click at an unrelated cursor position"
-        inspection = next(event for event in actions if event["label"] == "open inspection panel")
+        inspection = next(
+            event for event in actions if event["label"] == "focus live ROI statistics"
+        )
         assert inspection["detail_inset"] is True
     if name == "showcase":
         labels = {event["label"] for event in actions}
