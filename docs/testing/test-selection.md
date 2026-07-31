@@ -115,6 +115,22 @@ passes says the affected tests pass — a strictly smaller claim, and a differen
 one from "the suite is green". What it is *not* is an unfinished job: the tests
 that did not run could only have re-confirmed fingerprints that still hold.
 
+Both sentences state completeness, and there is exactly one thing that withdraws
+it — a test whose record came from a **skip**:
+
+```
+test selection: nothing to run — no line your working tree changed is executed
+  by any of the 3540 recorded tests.
+  Unmeasured remainder: 10 tests skipped when the map recorded them, so their
+  recorded dependencies describe a gate, not their code —
+  tests/gpu_interaction/test_wgpu_screen_present.py (10).
+  `pytest --since` reaches them; running them where their gate opens is what
+  measures them.
+```
+
+When that line is there, "not a gap" is gone, because it would be false. See
+[a record made by a test that skipped](#a-record-made-by-a-test-that-skipped).
+
 | Goal | Command |
 |---|---|
 | Inner loop | `pytest` |
@@ -194,6 +210,106 @@ therefore invisible, and none of them are fixed by running `pytest` again:
 Item 3 has no local escape hatch at all: even a forced untraced sweep runs the
 whole *offscreen* suite, and rings 3–4 are not in it either way, so nothing on
 this page substitutes for running them — see [the ring rules](README.md).
+
+### A record made by a test that skipped
+
+A fifth thing was invisible until 2026-07-31, and it was the worst of them,
+because unlike the four above it did not merely leave a test unselected — it
+produced a *record* that read as evidence of the opposite.
+
+testmon records the lines a test executed. It records them for a test that
+**skipped** exactly as it records them for one that ran: the map's schema keeps
+`failed` and `duration` and nothing else, so a skip lands as a fast green whose
+dependency set is whatever the module import and the gate that turned it away
+happened to touch. Nothing in the map distinguishes the two.
+
+Every `tests/gpu_interaction` test is opt-in (`ARRAYSCOPE_GPU_TESTS=1` plus a
+real display), so under the default `offscreen` environment they all skip — and
+all get recorded. Measured on the branch that found this:
+
+| environment | dependency files per ring-4 test | records `screen_canvas.py`? |
+|---|---|---|
+| `offscreen` (what every default `pytest` and `--since` reads) | 2–3 | no |
+| `xcb+gpu` | 26–224 | yes |
+| `wayland+gpu` | 26–224 | yes |
+
+So a branch that rewrote `screen_canvas.py` was told:
+
+```
+test selection: nothing to run — no line your working tree changed is executed
+  by any of the 11 recorded tests.
+  That is a result, not a gap.
+```
+
+and `pytest --since` reported *"branch reaches 104 tests — all 104 verified
+green against this exact tree from recorded runs, nothing left to run"*. Those
+eleven tests were the change's only real coverage, one of them genuinely needed
+updating for it, and a regression would have passed every gate this page tells
+you to run. The blast radius is not only ring 4: measured over a full
+re-record, **69 tests in the `offscreen` map skipped when they were recorded**,
+across `tests/gpu_interaction`, `tests/gpu`, `tests/stress` and
+`tests/display`.
+
+**What fixes it.** The outcome is a fact only a run can see, so it is written
+down as it happens, in `tests/skip_ledger.py` — the same shape, and the same
+argument, as the red and flake ledgers. A marked test's recorded dependency set
+is not evidence of independence, and two things follow:
+
+* **`--since` reaches it.** Not just relabels it — *reaches* it. The gate
+  derives its reached set from recorded dependencies, so a skip-recorded test
+  was absent from that set however completely the branch rewrote what it
+  executes. The gate is the run that makes a completeness claim, so the gate is
+  the run that pays to make it true, and a skip costs about a millisecond to
+  re-attempt.
+* **The inner loop reports it** as an unmeasured remainder instead of folding it
+  into "unaffected by construction", and drops "that is a result, not a gap".
+  The loop makes no completeness claim, so it does not pay; it just stops
+  claiming what it cannot support.
+
+**A mark clears on exactly one event: the test runs for real.** That is when its
+record stops describing a gate and starts describing code. Nothing expires and
+nothing is tuned.
+
+**The limitation that follows, stated rather than hidden.** Opening the gate is
+invisible to selection — the gate's inputs are the environment, not the code —
+so the ordinary inner loop deselects a marked test and the mark survives a run
+that would have cleared it. Widening the inner loop to re-attempt every mark was
+the alternative, and it was rejected: it would drag the whole opt-in ring into
+every offscreen run and cost the `nothing to run` fast path. So the escape hatch
+is named on the remainder line, on every run that has one. Either of these
+clears a mark:
+
+```bash
+pytest --since
+```
+
+```bash
+pytest tests/gpu_interaction/test_wgpu_screen_present.py::test_resize_reconfigures_and_keeps_presenting
+```
+
+A node-id argument turns selection off for that run (`testmon_policy.selects`),
+which is how the branch that found this got its tests to run at all.
+
+**The same hole on the coverage side.** `tools/test_selection.py coverage
+--since` reported `screen_canvas.py:465 ensure_context` and `_on_surface_resized`
+as new functions with no test, for the same reason read from the other end: the
+`offscreen` map holds skip records, and the coverage figure is per environment.
+It now asks the other environments too, so such a function reads
+`executed under xcb+gpu, wayland+gpu, not here` rather than as untested.
+
+**Existing maps cannot heal themselves**, and this is the one part with no clever
+answer. The ledger records outcomes as they happen, so it can only speak for
+tests some run has observed since it existed; on a map recorded before that,
+every entry's skip status is unknown, and unknown is exactly the state that
+reads as "unaffected by construction". There is no way to look at an old record
+and tell what it was. So the sweep record carries a `skips` stamp beside
+`attributed`, `--since` refuses without it, and the inner loop names it on every
+run — the same treatment, for the same reason, as the per-test attribution fix
+earlier the same day. One re-record retires both:
+
+```bash
+pytest --testmon-noselect
+```
 
 ## Where selection turns itself off
 
@@ -791,6 +907,7 @@ from recorded runs, 5 run now (1 broken here, 3 without evidence, 1 known flake)
 |---|---|
 | **verified** | stable, recorded green, not in the flake ledger — reported, not run |
 | **broken here** | the red ledger owns it; the map cannot vouch for a red it recorded |
+| **skipped when recorded** | the skip ledger owns it; its recorded dependencies describe the gate that turned it away, not its code, so the gate reaches it unconditionally ([above](#a-record-made-by-a-test-that-skipped)) |
 | **without evidence** | unstable (a bare `pytest` would run it anyway), or never recorded — every new test lands here |
 | **inherited red** | stable, recorded, last outcome red. A merge gate owns those: the moment the branch lands, an inherited red is `main`'s red |
 | **known flake** | stable and green, but observed to flip outcome with no code change (below) |

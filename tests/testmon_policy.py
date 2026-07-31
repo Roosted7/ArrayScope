@@ -128,12 +128,16 @@ OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "tests/gpu_interaction/test_wgpu_native_wayland_pin.py": (
         "experiments/wgpu_gate_b/probe_native_wayland.py",
     ),
-    # The per-test-batch oracle runs a real pytest+testmon session over files
-    # generated in tmp_path: a second live testmon inside this process would
-    # fight the one recording the oracle itself. The child's only repo-tracked
-    # code is `tests/testmon_policy.py`, which the tests here already execute
-    # in-process, so there is nothing to re-attach.
-    "tests/app/test_test_selection.py": (),
+    # The per-test-batch and skipped-record oracles run a real pytest+testmon
+    # session over files generated in tmp_path: a second live testmon inside
+    # this process would fight the one recording the oracle itself.
+    # `tests/testmon_policy.py` needs no entry — the tests here already execute
+    # it in-process. `tests/skip_ledger.py` does: the child's conftest is the
+    # only thing that ever calls `SkipLedger.observe` and `save`, and the
+    # in-process half of these tests reaches no further than `read_skips`. A
+    # change to the outcome rule would otherwise not select the oracle that
+    # exists to check it — which is this file's own failure mode, one level in.
+    "tests/app/test_test_selection.py": ("tests/skip_ledger.py",),
 }
 
 #: Command-line flags that mean "the developer already chose"; the default
@@ -212,6 +216,18 @@ def attribution_gap(sweep_record: dict) -> str:
     a different history: its entries came from a donor whose records predate
     the fix, and nothing since has re-recorded them wholesale.
 
+    ``skips`` is the second stamp and the same argument one step along. A record
+    written for a test that *skipped* holds the dependencies of the gate that
+    turned it away, and testmon's schema keeps only ``failed`` and ``duration``,
+    so nothing in the map can tell that record from a fast green. The remedy —
+    ``tests/skip_ledger.py`` — writes the outcome down as it happens, which
+    means it can only speak for tests some run has observed since it existed. On
+    a map recorded before that, every entry's skip status is unknown, and
+    unknown is exactly the state that reads as "unaffected by construction".
+    Hence a stamp rather than a heuristic: there is no way to look at an
+    existing record and tell what it was, so the honest move is to report that
+    and name the one run that fixes it.
+
     (A map recorded from scratch post-fix stamps itself: its first run
     executes everything, which the sweep detector counts as exhaustive.)
 
@@ -225,7 +241,13 @@ def attribution_gap(sweep_record: dict) -> str:
     if not isinstance(sweep_record, dict):
         sweep_record = {}
     if sweep_record.get("swept") and sweep_record.get("attributed"):
-        return ""
+        if sweep_record.get("skips"):
+            return ""
+        return (
+            "this map's last full record predates skip-outcome recording "
+            "(2026-07-31: a test that skipped recorded the dependencies of the "
+            "gate that turned it away, and nothing could tell that from a green)"
+        )
     if sweep_record.get("swept"):
         return (
             "this map's last full record predates per-test dependency "
@@ -607,9 +629,9 @@ def _copy_map(donor: Path, destination: Path) -> bool:
     SQLite file read by a concurrently starting run would look like a corrupt
     map rather than a missing one.
 
-    Three files travel, and the map is the only one that has to arrive. The two
+    Four files travel, and the map is the only one that has to arrive. The three
     passengers are copied — never linked, for the same reason the map is not —
-    after the map is in place, so a failure in either costs what it carries and
+    after the map is in place, so a failure in any one costs what it carries and
     nothing else.
     """
 
@@ -626,7 +648,23 @@ def _copy_map(donor: Path, destination: Path) -> bool:
         return False
     _seed_coverage_sidecar(donor, destination)
     _seed_flake_ledger(donor, destination)
+    _seed_skip_ledger(donor, destination)
     return True
+
+
+def _seed_skip_ledger(donor: Path, destination: Path) -> None:
+    """Carry the donor's skip marks across with its map.
+
+    Same lifetime argument as the flake ledger above, and the same failure
+    mode: a map that arrives without its marks arrives able to vouch for
+    records that were witnessed never running. See
+    ``tests/skip_ledger.py:carry_skips``.
+    """
+
+    from tests import skip_ledger
+
+    with contextlib.suppress(Exception):  # observations, never a result
+        skip_ledger.carry_skips(donor, destination)
 
 
 def _seed_flake_ledger(donor: Path, destination: Path) -> None:
@@ -1586,7 +1624,13 @@ def tests_reached_since_baseline(data, checksums) -> frozenset[str] | None:
 #: Why a test this branch reaches cannot be skipped, most-specific first. The
 #: order is both the tie-break (a test qualifying twice gets the first label)
 #: and the order the closing sentence prints them in.
-RUN_REASONS = ("broken here", "without evidence", "inherited red", "known flake")
+RUN_REASONS = (
+    "broken here",
+    "skipped when recorded",
+    "without evidence",
+    "inherited red",
+    "known flake",
+)
 
 #: The other half of the partition: the map already holds a green for this exact
 #: code, so running it again could only reproduce it.
@@ -1601,6 +1645,7 @@ def partition_reached(
     failed: frozenset[str] | set[str],
     broken_here: frozenset[str] | set[str],
     flaky: frozenset[str] | set[str],
+    skipped: frozenset[str] | set[str] = frozenset(),
 ) -> dict[str, frozenset[str]]:
     """Split the tests a branch reaches into "already proven" and "must run".
 
@@ -1614,6 +1659,12 @@ def partition_reached(
 
     * ``broken here`` — the red ledger owns it. The map cannot vouch for a red
       it recorded, because the map was written by the run that broke it.
+    * ``skipped when recorded`` — the skip ledger owns it. Its recorded
+      dependency set describes the import and the gate that turned it away, not
+      the code it would execute, so "your change is not in that set" says
+      nothing at all. Reaching it costs about a millisecond, because a test that
+      skips goes on skipping; what it buys is that the gate stops counting a
+      never-executed test as proof. See ``tests/skip_ledger.py``.
     * ``without evidence`` — unstable (a bare ``pytest`` would run it anyway) or
       never recorded at all. New tests land here, which is the point.
     * ``inherited red`` — stable, recorded, and its last outcome was a failure.
@@ -1632,6 +1683,8 @@ def partition_reached(
     for name in reached:
         if name in broken_here:
             buckets["broken here"].add(name)
+        elif name in skipped:
+            buckets["skipped when recorded"].add(name)
         elif name not in recorded or name not in stable:
             buckets["without evidence"].add(name)
         elif name in failed:
@@ -1689,14 +1742,16 @@ def since_partition(config, reached, new_reds) -> dict[str, frozenset[str]] | No
     direction is always *more* tests, never fewer.
     """
 
-    from tests import red_ledger
+    from tests import red_ledger, skip_ledger
 
     data = getattr(config, "testmon_data", None)
     if data is None:
         return None
     try:
         all_tests = dict(data.all_tests or {})
-        flaky = red_ledger.read_flakes(map_path(config.rootdir), data.environment)
+        path = map_path(config.rootdir)
+        flaky = red_ledger.read_flakes(path, data.environment)
+        skipped = skip_ledger.read_skips(path, data.environment)
         return partition_reached(
             reached,
             recorded=frozenset(all_tests),
@@ -1706,6 +1761,7 @@ def since_partition(config, reached, new_reds) -> dict[str, frozenset[str]] | No
             ),
             broken_here=frozenset(new_reds or ()),
             flaky=frozenset(flaky),
+            skipped=frozenset(skipped),
         )
     except Exception:  # an unreadable map or ledger must widen the run, not narrow it
         return None
@@ -1781,9 +1837,22 @@ def since_verification(ref, reached, config, new_reds=(), *, fresh: bool = False
     collection happens) and the one that owns the terminal (the controller,
     which never collects and so recomputes this instead). A number derived twice
     by two code paths is a number that eventually disagrees with itself.
+
+    It also owns the one widening of ``reached`` this gate performs, for the
+    same single-owner reason: both callers derive the reached set from recorded
+    dependencies, and a test recorded as *skipped* has a dependency set that
+    describes the gate that turned it away rather than the code it would run.
+    Such a test is therefore never reached on the evidence, however completely
+    the branch rewrites what it executes — the map does not under-*answer* the
+    question here, it under-scopes the question itself, exactly as an
+    unattributed map does (see :func:`attribution_gap`). Since the ledger cannot
+    say what the test would have touched, the gate reaches it unconditionally
+    and lets the run find out. Ring-4 tests under ``offscreen`` simply skip
+    again for about a millisecond each; on the display where they do run, they
+    run.
     """
 
-    reached = frozenset(reached)
+    reached = frozenset(reached) | _skipped_when_recorded(config)
     partition = None if fresh else since_partition(config, reached, new_reds)
     if partition is None:
         # Degraded, or asked for: run everything reached. Reported as one bucket
@@ -1805,6 +1874,32 @@ def since_verification(ref, reached, config, new_reds=(), *, fresh: bool = False
         running,
         frozenset().union(*(partition[reason] for reason in RUN_REASONS)),
     )
+
+
+def _skipped_when_recorded(config) -> frozenset[str]:
+    """Mapped tests the skip ledger has witnessed skipping in this environment.
+
+    Restricted to node ids the map still holds, so a mark for a test that has
+    since been renamed cannot widen the gate by a name nothing will collect —
+    the ledger prunes those itself on any run that collects their file, and this
+    covers the window before one does.
+
+    Empty on any failure, which degrades to the behaviour this fixes rather than
+    to a crash. That is the wrong direction for once, and deliberately so: the
+    alternative is a merge gate that cannot start, and the honest report of an
+    unreadable ledger belongs to :func:`attribution_gap`, not here.
+    """
+
+    from tests import skip_ledger
+
+    data = getattr(config, "testmon_data", None)
+    if data is None:
+        return frozenset()
+    try:
+        marks = skip_ledger.read_skips(map_path(config.rootdir), data.environment)
+        return frozenset(marks) & frozenset(data.all_tests or ())
+    except Exception:
+        return frozenset()
 
 
 COUPLED_MARKER = "coupled_order"

@@ -1225,10 +1225,23 @@ class NewCode:
     ref: str
     covered: tuple[Function, ...]
     uncovered: tuple[Function, ...]
+    #: Of ``uncovered``, the functions some *other* recorded environment does
+    #: execute. They are not untested; they are untested **here**, and the two
+    #: are different enough that reporting the first for the second sent an
+    #: agent hunting for a missing test that already existed. See
+    #: :func:`new_code`.
+    covered_elsewhere: tuple[tuple[Function, tuple[str, ...]], ...] = ()
 
     @property
     def total(self) -> int:
         return len(self.covered) + len(self.uncovered)
+
+    @property
+    def genuinely_uncovered(self) -> tuple[Function, ...]:
+        """``uncovered`` minus what another environment runs. The actionable set."""
+
+        elsewhere = {function.checksum for function, _ in self.covered_elsewhere}
+        return tuple(function for function in self.uncovered if function.checksum not in elsewhere)
 
 
 def new_code(
@@ -1246,6 +1259,23 @@ def new_code(
     computable one, and it is exact in the direction that matters: a function
     whose body this branch touched necessarily re-recorded in the run that just
     happened, so "no test executes it" cannot be an artefact of a stale map.
+
+    That guarantee holds **within one environment**, which is a narrower claim
+    than the phrase "no test executes it" makes, and the gap between the two is
+    a real defect this function used to have. The map is per environment; a test
+    gated on hardware the default ``offscreen`` environment does not have skips
+    there, and a skip records the dependencies of its gate. So a function only
+    ring 4 executes reads as uncovered against the ``offscreen`` map however
+    thoroughly ``xcb+gpu`` covers it — measured on 2026-07-31, when
+    ``screen_canvas.py``'s ``ensure_context`` and ``_on_surface_resized`` were
+    reported as new functions with no test while ten recorded ring-4 tests were
+    executing both.
+
+    The fix is to ask the other environments, which costs one more query of a
+    database already open and turns a false negative into a true statement:
+    ``covered_elsewhere`` names the environments that do run it, and
+    ``genuinely_uncovered`` is what is left. Nothing is hidden — a function no
+    environment executes reads exactly as it did before.
 
     Comparison is on the index-free body digest, so inserting a function at the
     top of a file does not report every function below it as changed — which the
@@ -1289,4 +1319,60 @@ def new_code(
     for function in fresh:
         seen = covered.get(function.path, set())
         (executed if function.checksum in seen else missing).append(function)
-    return NewCode(ref=ref, covered=tuple(executed), uncovered=tuple(missing))
+    return NewCode(
+        ref=ref,
+        covered=tuple(executed),
+        uncovered=tuple(missing),
+        covered_elsewhere=_covered_in_other_environments(map_path, environment, missing),
+    )
+
+
+def _covered_in_other_environments(
+    map_path, environment: str, missing: list[Function]
+) -> tuple[tuple[Function, tuple[str, ...]], ...]:
+    """For each uncovered function, the other environments that do execute it.
+
+    Read once per environment rather than once per function: the map holds three
+    of them at most on this machine and the whole-environment read is the same
+    query :func:`read_map` already makes.
+
+    Silent on any failure, returning empty. The caller then reports exactly what
+    it reported before this existed, which is a weaker statement rather than a
+    wrong one.
+    """
+
+    if not missing:
+        return ()
+    try:
+        others = _environment_names(map_path) - {environment}
+    except Exception:
+        return ()
+    reach: dict[str, dict[str, set[int]]] = {}
+    for name in sorted(others):
+        read = read_map(map_path, name)
+        if read is not None:
+            reach[name] = read[0]
+
+    found = []
+    for function in missing:
+        names = tuple(
+            name
+            for name, covered in reach.items()
+            if function.checksum in covered.get(function.path, set())
+        )
+        if names:
+            found.append((function, names))
+    return tuple(found)
+
+
+def _environment_names(map_path) -> set[str]:
+    connection = _read_only(map_path)
+    if connection is None:
+        return set()
+    try:
+        return {row[0] for row in connection.execute("SELECT environment_name FROM environment")}
+    except sqlite3.Error:
+        return set()
+    finally:
+        with contextlib.suppress(sqlite3.Error):
+            connection.close()

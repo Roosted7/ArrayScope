@@ -610,6 +610,50 @@ def test_the_closing_line_states_a_result_rather_than_a_deficit():
     assert "222" in something
 
 
+def test_no_run_claims_a_complete_affected_set_over_a_skip_recorded_test():
+    """The completeness half of the claim is withdrawn, and the rest survives.
+
+    A test that skipped when the map recorded it has a dependency set describing
+    its gate, so neither "unaffected by construction" nor "a result, not a gap"
+    can cover it. Both sentences used to say so anyway — on the branch that
+    found this, for the eleven tests that were the change's only real coverage.
+
+    What must *not* happen is the sentence collapsing into a warning: the run
+    still ran what it ran, and the tests it skipped over really are unaffected.
+    Only the remainder is new, and it names the files so the reader can see
+    which family went unmeasured.
+    """
+
+    from tests.conftest import unaffected_summary
+
+    ring = tuple(f"tests/gpu_interaction/test_wgpu_screen_present.py::t{n}" for n in range(10))
+
+    nothing = "\n".join(unaffected_summary(0, 3941, 3941, 222.0, since=None, unmeasured=ring))
+    assert "nothing to run" in nothing
+    assert "result, not a gap" not in nothing, "a remainder is exactly a gap"
+    assert "Unmeasured remainder: 10 tests" in nothing
+    assert "tests/gpu_interaction/test_wgpu_screen_present.py (10)" in nothing
+    assert "pytest --since" in nothing, "the remainder must name the run that reaches it"
+
+    something = "\n".join(unaffected_summary(20, 3520, 3540, 222.0, since=None, unmeasured=ring))
+    assert "by construction" in something, "the tests that really are unaffected still are"
+    assert "not a sample" not in something, "the completeness claim must be withdrawn"
+    assert "every test the map can speak for" in something
+    assert "Unmeasured remainder: 10 tests" in something
+
+
+def test_the_remainder_line_names_the_worst_files_and_counts_the_rest():
+    """It is a sentence, not a listing: thirty node ids bury the one fact."""
+
+    from tests.conftest import unmeasured_lines
+
+    spread = tuple(f"tests/ring{n}/test_{n}.py::t" for n in range(6))
+    printed = "\n".join(unmeasured_lines(spread))
+    assert "Unmeasured remainder: 6 tests" in printed
+    assert "+3 more file(s)" in printed
+    assert unmeasured_lines(()) == []
+
+
 def test_the_closing_line_still_reports_what_since_pulled_back_in():
     from tests.conftest import unaffected_summary
 

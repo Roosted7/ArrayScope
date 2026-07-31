@@ -109,6 +109,53 @@ def _unmapped_test_files(peek) -> set[str]:
     }
 
 
+def _unmeasured_marks(environment: str) -> list[str]:
+    """Which of "the recorded tests all still hold" cannot hold anything.
+
+    This command is the third place that claim is made — after the run's
+    closing sentence and the no-op fast path — and it needs the same
+    withdrawal: a test that skipped when the map recorded it has a dependency
+    set describing its gate, so "it still holds for this tree" is not a
+    statement about its code. See ``tests/skip_ledger.py``.
+
+    Returned rather than printed because both output shapes need it, and a
+    ``--json`` consumer reading an empty ``affected_tests`` is misled by exactly
+    the same omission a reader would be.
+    """
+
+    from tests import skip_ledger
+
+    try:
+        marks = skip_ledger.read_skips(testmon_policy.map_path(REPO_ROOT), environment)
+    except Exception:  # a report line is not worth failing the command over
+        return []
+    # The ledger's own set, not intersected with the map: this command reads the
+    # map through a peek that does not carry test names, and the ledger already
+    # prunes entries whose file gets collected. A stale name would over-report
+    # by one line, which is the safe direction here.
+    return sorted(marks)
+
+
+def _print_unmeasured_remainder(environment: str) -> None:
+    """The human half of the above."""
+
+    from tests import skip_ledger
+
+    unmeasured = _unmeasured_marks(environment)
+    if not unmeasured:
+        return
+    print()
+    print(f"    Except {len(unmeasured)}: skipped when the map recorded them, so their")
+    print("    recorded dependencies describe a gate rather than their code.")
+    # Grouped by the ledger's own rule, so this command and the run's closing
+    # sentence cannot disagree about what the remainder is.
+    for name, count in skip_ledger.remainder_by_file(unmeasured):
+        print(f"        {name:<66} {count:>4}")
+    print()
+    print("    `pytest --since` reaches them; running them where their gate opens")
+    print("    is what measures them.")
+
+
 def command_impact(args) -> int:
     environment = _environment(args.environment)
     peek = _read_map(environment, with_changed_files=True)
@@ -126,6 +173,10 @@ def command_impact(args) -> int:
                     "affected_files": dict(sorted(per_file.items())),
                     "affected_seconds": round(peek.affected_seconds, 1),
                     "unmapped_test_files": sorted(unmapped),
+                    # A consumer reading an empty "affected_tests" gets the
+                    # same false completeness the printed sentence used to
+                    # give, so the remainder travels with it.
+                    "unmeasured_skip_recorded_tests": _unmeasured_marks(environment),
                 },
                 indent=2,
             )
@@ -156,6 +207,7 @@ def command_impact(args) -> int:
         print()
     if not peek.affected_tests:
         print("affected: nothing — the recorded tests all still hold for this tree.")
+        _print_unmeasured_remainder(environment)
     else:
         print(
             f"affected: {len(peek.affected_tests)} tests in {len(per_file)} files, "
@@ -419,12 +471,22 @@ def command_coverage(args) -> int:
                 "are executed by a test."
             )
         else:
+            # Split before printing. "Executed by no test" is a claim about the
+            # whole suite, and this map is one environment's — a function only
+            # ring 4 enters is untested *here* and thoroughly tested there. The
+            # two want different reactions from the reader, so they get
+            # different sentences. See tests/coverage_map.py:new_code.
+            here = fresh.genuinely_uncovered
+            elsewhere = fresh.covered_elsewhere
             print(
                 f"since {fresh.ref}: of {fresh.total} functions this branch adds or changes, "
-                f"{len(fresh.uncovered)} are executed by no test:"
+                f"{len(here)} are executed by no test"
+                + (f" and {len(elsewhere)} only by another environment's:" if elsewhere else ":")
             )
-            for function in fresh.uncovered:
+            for function in here:
                 print(f"    {function}")
+            for function, environments in elsewhere:
+                print(f"    {function}  — executed under {', '.join(environments)}, not here")
 
     if args.uncovered:
         print()

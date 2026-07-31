@@ -526,13 +526,19 @@ def test_the_sweep_record_survives_another_feature_writing_the_sidecar(tmp_path)
 
 
 def test_attribution_gap_reads_the_sweep_record():
-    stamped = {"sha": "abc", "at": "x", "swept": True, "attributed": True}
+    stamped = {"sha": "abc", "at": "x", "swept": True, "attributed": True, "skips": True}
     assert testmon_policy.attribution_gap(stamped) == ""
 
     pre_fix_sweep = {"sha": "abc", "at": "x", "swept": True}
     assert "predates per-test dependency attribution" in testmon_policy.attribution_gap(
         pre_fix_sweep
     )
+
+    # Two stamps, two distinct holes, and the order matters: a map missing both
+    # is reported for the attribution one, because that is the wider defect and
+    # the same re-record closes them together.
+    pre_skip_sweep = {"sha": "abc", "at": "x", "swept": True, "attributed": True}
+    assert "predates skip-outcome recording" in testmon_policy.attribution_gap(pre_skip_sweep)
 
     never_swept = {"sha": "abc", "at": "x", "swept": False}
     assert "never been fully recorded" in testmon_policy.attribution_gap(never_swept)
@@ -554,11 +560,32 @@ def test_a_real_sweep_stamps_attribution_and_an_anchor_does_not(
 
     swept = _sweep_config(testmon_noselect=True)
     reporter = SimpleNamespace(stats={"passed": [object()] * 4302}, write_line=lambda *a, **k: None)
+    # Both halves of this test turn on one session global, so both halves set it
+    # rather than inherit it. The run executing these assertions has a ledger of
+    # its own when it is serial and *none* when it lands on an xdist worker
+    # (``pytest_sessionstart`` opens the ledger on the controller only), so a
+    # test that read the ambient value would pass or fail on where it landed.
+    monkeypatch.setattr(harness, "_skip_ledger", object())
     harness._report_sweep_cadence(reporter, swept)
     record = coverage_map.last_sweep(coverage_map.read_sidecar(map_path))
     assert record["swept"] is True
     assert record["attributed"] is True
+    assert record["skips"] is True
     assert testmon_policy.attribution_gap(record) == ""
+
+    # The skip stamp is narrower than its neighbour, and the difference is that
+    # global rather than anything on the config: it certifies that a ledger was
+    # open to *witness* the outcomes. A sweep also counts when the policy turned
+    # selection off (``--no-testmon``, ``--cov``, CI), and those runs open no
+    # ledger — so they must record the attribution stamp and withhold this one.
+    map_path.unlink(missing_ok=True)
+    (tmp_path / (".testmondata" + coverage_map.COVERAGE_SUFFIX)).unlink(missing_ok=True)
+    monkeypatch.setattr(harness, "_skip_ledger", None)
+    harness._report_sweep_cadence(reporter, _sweep_config(testmon_noselect=True))
+    unwitnessed = coverage_map.last_sweep(coverage_map.read_sidecar(map_path))
+    assert unwitnessed["attributed"] is True
+    assert "skips" not in unwitnessed
+    assert "predates skip-outcome recording" in testmon_policy.attribution_gap(unwitnessed)
 
     map_path.unlink(missing_ok=True)
     (tmp_path / (".testmondata" + coverage_map.COVERAGE_SUFFIX)).unlink(missing_ok=True)
@@ -602,12 +629,24 @@ def test_since_refuses_on_a_map_without_the_attribution_stamp(
     with pytest.raises(pytest.UsageError, match="testmon-noselect"):
         harness._refuse_since_on_unattributed_map(config)
 
-    # Stamped: the same call is silent.
+    # Half-stamped still refuses, and says which half: a map that cannot tell a
+    # skip from a green under-scopes the reached set the same way a missing
+    # dependency edge does.
     coverage_map.write_sidecar(
         map_path,
         structure={},
         baselines={},
         sweep={"sha": "abc", "at": "x", "swept": True, "attributed": True},
+    )
+    with pytest.raises(pytest.UsageError, match="skip-outcome recording"):
+        harness._refuse_since_on_unattributed_map(config)
+
+    # Fully stamped: the same call is silent.
+    coverage_map.write_sidecar(
+        map_path,
+        structure={},
+        baselines={},
+        sweep={"sha": "abc", "at": "x", "swept": True, "attributed": True, "skips": True},
     )
     harness._refuse_since_on_unattributed_map(config)
 

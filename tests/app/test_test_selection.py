@@ -1622,3 +1622,358 @@ def test_a_later_test_still_records_the_dependency_an_earlier_one_executed(tmp_p
         "the second test lost the dependency the first already executed — "
         "per-test batching is no longer protecting the map"
     )
+
+
+# --------------------------------------------------------------------------- #
+# A record made by a test that skipped
+# --------------------------------------------------------------------------- #
+#
+# The map keeps `failed` and `duration` and nothing else, so a test that skipped
+# lands in it as a fast green whose dependency set is whatever the import and
+# the gate touched. Selection then reads that set as proof the test does not
+# execute your change, which is a claim the record cannot support -- it means
+# only that the test did not run. See `tests/skip_ledger.py` for the branch this
+# cost.
+
+
+def _gated_project(tmp_path):
+    """A one-test project whose test is gated on an environment variable.
+
+    The production shape exactly: a module-level flag read from the environment,
+    a ``skipif`` on it, and a body that calls into a second file. When the gate
+    is shut the test never enters ``gated_mod``, and the map has no way to say
+    so.
+    """
+
+    import textwrap
+
+    (tmp_path / "gated_mod.py").write_text("def work():\n    return 'original'\n", encoding="utf-8")
+    (tmp_path / "test_gated.py").write_text(
+        textwrap.dedent(
+            """
+            import os
+
+            import pytest
+
+            import gated_mod
+
+            ENABLED = os.environ.get("GATE_OPEN") == "1"
+
+
+            @pytest.mark.skipif(not ENABLED, reason="the gate is shut")
+            def test_gated():
+                assert gated_mod.work() == "original"
+            """
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "conftest.py").write_text(
+        textwrap.dedent(
+            f"""
+            import sys
+
+            sys.path.insert(0, {str(REPO_ROOT)!r})
+            from tests import skip_ledger, testmon_policy
+
+            testmon_policy.pin_per_test_dependency_batches()
+
+            _ledger = None
+
+
+            def pytest_sessionstart(session):
+                global _ledger
+                _ledger = skip_ledger.SkipLedger.load(session.config.rootdir / ".testmondata", "e")
+
+
+            def pytest_runtest_logreport(report):
+                _ledger.observe(report)
+
+
+            def pytest_sessionfinish(session):
+                _ledger.save()
+            """
+        ),
+        encoding="utf-8",
+    )
+
+
+def _run_child_pytest(tmp_path, *arguments, **environment):
+    import subprocess
+    import sys
+
+    child = {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+    child["PYTHONDONTWRITEBYTECODE"] = "1"
+    child.update(environment)
+    result = subprocess.run(
+        (sys.executable, "-m", "pytest", "--testmon", "-q", *arguments),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env=child,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result
+
+
+def _recorded_dependencies(tmp_path) -> dict[str, set[str]]:
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / ".testmondata") as connection:
+        rows = connection.execute(
+            """
+            SELECT te.test_name, f.filename
+            FROM test_execution te
+            JOIN test_execution_file_fp tef ON tef.test_execution_id = te.id
+            JOIN file_fp f ON f.id = tef.fingerprint_id
+            """
+        ).fetchall()
+    edges: dict[str, set[str]] = {}
+    for test_name, filename in rows:
+        edges.setdefault(test_name, set()).add(filename)
+    return edges
+
+
+def test_a_skipped_test_records_a_dependency_set_that_omits_the_code_it_would_run(tmp_path):
+    """The defect itself, through a real testmon recording. Not our bug to fix.
+
+    Pinned because everything else here is a compensation for it, and a testmon
+    release that started distinguishing the two outcomes would make the
+    compensation dead weight rather than wrong. If this ever goes green the
+    other way round, the ledger can go.
+    """
+
+    from tests import skip_ledger
+
+    _gated_project(tmp_path)
+    _run_child_pytest(tmp_path, GATE_OPEN="0")
+
+    recorded = _recorded_dependencies(tmp_path)
+    name = next(key for key in recorded if key.endswith("test_gated"))
+    assert "test_gated.py" in recorded[name], "the skip still recorded the module it imported"
+    assert "gated_mod.py" not in recorded[name], (
+        "testmon now records what a skipped test *would* have run — the skip "
+        "ledger is no longer needed"
+    )
+    assert skip_ledger.read_skips(tmp_path / ".testmondata", "e") == {name}
+
+
+def test_a_test_recorded_as_skipped_is_not_evidence_that_a_change_misses_it(tmp_path):
+    """The regression this whole file section exists for.
+
+    A branch rewrites ``gated_mod.py``. The map says the one test that would
+    execute it does not depend on it — truthfully, because when it was recorded
+    it skipped. Before the fix that answer flowed straight through
+    :func:`partition_reached` into ``verified``, and ``--since`` reported the
+    branch fully proven with its only real coverage never collected. That is the
+    2026-07-31 ``screen_canvas.py`` miss reproduced in twenty lines.
+    """
+
+    from tests import skip_ledger
+
+    _gated_project(tmp_path)
+    _run_child_pytest(tmp_path, GATE_OPEN="0")
+    (tmp_path / "gated_mod.py").write_text(
+        "def work():\n    return 'rewritten'\n", encoding="utf-8"
+    )
+
+    name = next(key for key in _recorded_dependencies(tmp_path) if key.endswith("test_gated"))
+    skipped = skip_ledger.read_skips(tmp_path / ".testmondata", "e")
+    # The map's own answer, unchanged and still wrong: the test is stable
+    # against a rewritten `gated_mod.py`, because its record never saw it.
+    partition = testmon_policy.partition_reached(
+        {name},
+        recorded={name},
+        stable={name},
+        failed=set(),
+        broken_here=set(),
+        flaky=set(),
+        skipped=skipped,
+    )
+    assert partition[testmon_policy.VERIFIED] == frozenset(), (
+        "a test that skipped when the map recorded it was counted as verified "
+        "green against this tree"
+    )
+    assert partition["skipped when recorded"] == frozenset({name})
+
+
+def test_the_gate_reaches_a_skip_recorded_test_the_branch_diff_cannot_find():
+    """Widening ``reached``, not just relabelling it.
+
+    ``--since`` derives the reached set from recorded dependencies, so a
+    skip-recorded test is absent from it however completely the branch rewrites
+    what it executes. Partitioning alone would therefore fix nothing: there is
+    nothing in the set to partition. Both callers go through
+    :func:`since_verification`, which is where the widening lives.
+    """
+
+    name = "tests/gpu_interaction/test_wgpu_screen_present.py::test_auto_present_method"
+    config = SimpleNamespace(
+        testmon_data=SimpleNamespace(
+            environment="offscreen",
+            all_tests={name: {"failed": False, "duration": 0.001}},
+            stable_test_names={name},
+        ),
+        rootdir=REPO_ROOT,
+    )
+    reached_without_it = frozenset()
+
+    def fake_skips(map_path, environment):
+        assert environment == "offscreen"
+        return {name}
+
+    from tests import skip_ledger
+
+    original = skip_ledger.read_skips
+    skip_ledger.read_skips = fake_skips
+    try:
+        report = testmon_policy.since_verification("main", reached_without_it, config)
+    finally:
+        skip_ledger.read_skips = original
+
+    assert report.reached == 1, "the gate never reached the one test that covers the change"
+    assert report.verified == 0
+    assert report.run_tests == frozenset({name})
+    assert ("skipped when recorded", 1) in report.running
+
+
+def test_a_mark_clears_the_moment_the_test_actually_runs(tmp_path):
+    """The only event that retires a mark, and the only one that should.
+
+    A skip mark says "this record describes a gate". Running the test for real
+    is precisely when that stops being true: the record becomes a statement
+    about code, and the test goes back to being ordinary evidence. Nothing
+    expires, nothing is tuned, and no mark can outlive the condition that
+    justified it — which is what keeps the remainder from becoming a permanent
+    line everybody reads past.
+
+    The first half of this test pins the *limitation* that follows from it, and
+    it is deliberately not a bug: opening the gate is invisible to selection,
+    because the gate's inputs are the environment rather than the code, so the
+    ordinary inner loop deselects the marked test and the mark survives a run
+    that would have cleared it. Widening the inner loop to re-attempt every mark
+    was the alternative and was rejected — it would drag the whole opt-in ring
+    into every offscreen run and cost the "nothing to run" fast path. So the
+    escape hatch is named instead, on the remainder line, on every run that has
+    one: ``pytest --since`` reaches the marks, and a node-id run (which is how
+    the branch that found this got its tests to run at all) selects past the map
+    entirely. Either clears the mark.
+    """
+
+    from tests import skip_ledger
+
+    _gated_project(tmp_path)
+    _run_child_pytest(tmp_path, GATE_OPEN="0")
+    marked = skip_ledger.read_skips(tmp_path / ".testmondata", "e")
+    assert marked, "nothing was marked to clear"
+
+    # The gate opens, but nothing the map can see has changed, so the inner loop
+    # deselects the test and learns nothing new about it.
+    _run_child_pytest(tmp_path, GATE_OPEN="1")
+    assert skip_ledger.read_skips(tmp_path / ".testmondata", "e") == marked
+
+    # A run that actually selects it does clear it, and re-records the real
+    # dependency the skip could never have shown.
+    _run_child_pytest(tmp_path, "test_gated.py::test_gated", GATE_OPEN="1")
+
+    name = next(key for key in _recorded_dependencies(tmp_path) if key.endswith("test_gated"))
+    assert "gated_mod.py" in _recorded_dependencies(tmp_path)[name], (
+        "the run that opened the gate did not re-record the real dependency"
+    )
+    assert skip_ledger.read_skips(tmp_path / ".testmondata", "e") == set()
+
+
+def test_an_xfail_is_not_a_skip_however_it_is_reported(tmp_path):
+    """xfail arrives as ``skipped`` with ``wasxfail``, and its body ran.
+
+    Worth its own test because the distinction is invisible in the outcome
+    string and getting it wrong is silent in the expensive direction: every
+    xfail in the suite would carry a permanent mark, widening the merge gate
+    forever and burying the remainder line under tests that were never the
+    problem.
+    """
+
+    import textwrap
+
+    from tests import skip_ledger
+
+    (tmp_path / "test_x.py").write_text(
+        textwrap.dedent(
+            """
+            import pytest
+
+            @pytest.mark.xfail(reason="known")
+            def test_expected_to_fail():
+                assert False
+
+            @pytest.mark.skip(reason="gated")
+            def test_really_skipped():
+                pass
+            """
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "gated_mod.py").write_text("def work():\n    return 1\n", encoding="utf-8")
+    _gated_project(tmp_path)  # for the conftest that wires the ledger
+    (tmp_path / "test_gated.py").unlink()
+    _run_child_pytest(tmp_path)
+
+    marks = skip_ledger.read_skips(tmp_path / ".testmondata", "e")
+    assert not any("test_expected_to_fail" in name for name in marks), (
+        "an xfail was marked unmeasured — its body ran and its record is evidence"
+    )
+    assert any("test_really_skipped" in name for name in marks)
+
+
+def test_a_function_only_another_environment_runs_is_not_reported_untested(tmp_path):
+    """The same hole, read from the coverage side.
+
+    ``new_code`` compares against one environment's map, so a function only ring
+    4 enters reads as "executed by no test" under ``offscreen`` however
+    thoroughly ``xcb+gpu`` covers it — which is how ``screen_canvas.py``'s
+    ``ensure_context`` and ``_on_surface_resized`` were reported as new
+    functions with no test while ten recorded ring-4 tests were executing both.
+
+    The split is what the reader acts on, so it is the split that is pinned
+    here; the cross-environment lookup itself is a query and is exercised
+    against a real multi-environment map below.
+    """
+
+    from tests.coverage_map import Function, NewCode
+
+    def function(name, checksum):
+        return Function(path="a.py", name=name, line=1, checksum=checksum, body=name)
+
+    ring_four_only = function("ensure_context", 11)
+    nobody = function("dead_helper", 22)
+    fresh = NewCode(
+        ref="main",
+        covered=(),
+        uncovered=(ring_four_only, nobody),
+        covered_elsewhere=((ring_four_only, ("xcb+gpu", "wayland+gpu")),),
+    )
+
+    assert fresh.total == 2
+    assert fresh.genuinely_uncovered == (nobody,), (
+        "a function another environment executes was reported as untested"
+    )
+
+
+def test_the_map_reports_every_environment_it_holds():
+    """The lookup above is only as good as the list of environments to ask.
+
+    Against this checkout's own map, because a hand-built fixture would pin the
+    query's shape rather than that it answers — and the environment table is
+    testmon's, so a schema move must surface here rather than as a silently
+    empty answer that reads exactly like "no other environment covers it".
+    """
+
+    from tests import coverage_map
+
+    map_path = testmon_policy.map_path(REPO_ROOT)
+    if not map_path.exists():
+        pytest.skip("no recorded map in this checkout")
+    names = coverage_map._environment_names(map_path)
+    assert names, "the map holds no environment rows at all — has the schema moved?"
+    assert all(isinstance(name, str) for name in names)

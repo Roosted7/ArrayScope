@@ -308,17 +308,53 @@ def test_the_cadence_nudge_still_fires_on_a_run_that_ran_nothing(
         testmon_policy.map_path(tmp_path),
         structure={},
         baselines={},
-        # `attributed` because this test exercises the cadence CLOCK: an
-        # unstamped record now takes the attribution branch instead, which
-        # has its own fast-path test in test_since_verification.py.
+        # Fully stamped because this test exercises the cadence CLOCK: a record
+        # missing either stamp takes the attribution branch instead, which has
+        # its own fast-path test in test_since_verification.py.
         sweep={
             "sha": "0" * 40,
             "at": "2026-05-01T00:00:00+00:00",
             "swept": True,
             "attributed": True,
+            "skips": True,
         },
     )
 
     harness._report_nothing_to_run(config, peek)
     printed = capsys.readouterr().out
     assert "swept exhaustively" in printed, "the fast path dropped the cadence nudge"
+
+
+def test_the_fast_path_withdraws_the_claim_when_a_record_came_from_a_skip(
+    tmp_path, capsys, monkeypatch, as_the_controller
+):
+    """This is *the* run that said "nothing to run — that is a result, not a gap"
+    for a rewritten `screen_canvas.py` whose only real coverage was eleven
+    skip-recorded ring-4 tests.
+
+    It reads the ledger from the file rather than from memory, and that is not
+    incidental: this path never reaches ``pytest_sessionstart``, so the live
+    ledger every other caller uses does not exist here. A remainder that only
+    worked in the full path would miss the exact shape that caused the miss.
+    """
+
+    from tests import skip_ledger
+
+    config, peek = _printing_config(tmp_path)
+    monkeypatch.setattr(testmon_policy, "decide", lambda config: config.arrayscope_selection)
+    # What production has here: the fast path returns from `pytest_cmdline_main`
+    # before `pytest_sessionstart`, so no ledger is open. Patched rather than
+    # assumed, because the session *running this assertion* has one of its own.
+    monkeypatch.setattr(harness, "_skip_ledger", None)
+    ledger = skip_ledger.SkipLedger.load(tmp_path / ".testmondata", "offscreen")
+    for index in range(11):
+        ledger.record(f"tests/test_a.py::test_{index}", skipped=True)
+    ledger.save()
+
+    assert harness._report_nothing_to_run(config, peek) == 0
+
+    printed = capsys.readouterr().out
+    assert "test selection: nothing to run" in printed
+    assert "That is a result, not a gap." not in printed, "a remainder is exactly a gap"
+    assert "Unmeasured remainder: 11 tests" in printed
+    assert "tests/test_a.py (11)" in printed

@@ -48,7 +48,7 @@ if _XDIST_WORKER:
     os.environ.setdefault("ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_config_root, "artifacts"))
 
 
-from tests import coverage_map, load_report, red_ledger, testmon_policy
+from tests import coverage_map, load_report, red_ledger, skip_ledger, testmon_policy
 
 # testmon reads each test's dependency edges out of coverage dynamic contexts,
 # and coverage's sysmon core (its default on CPython 3.14+) credits a line only
@@ -64,6 +64,9 @@ _red_ledger = None
 #: Same writer, same lifetime: the flake ledger and the two map facts it needs
 #: from *before* anything ran. See :func:`pytest_sessionstart`.
 _flake_ledger = None
+#: Same writer again: which recorded tests ended in a skip, so their dependency
+#: sets stop being read as evidence of independence. See ``tests/skip_ledger.py``.
+_skip_ledger = None
 _forced_reds: frozenset[str] = frozenset()
 _changed_since_recorded: frozenset[str] = frozenset()
 #: What this run *is*, for anything it observes: settled once at sessionstart
@@ -1176,7 +1179,17 @@ def _report_nothing_to_run(config, peek) -> int:
     # from the map is the run shape a quiet fortnight is made of, so skipping
     # it here would hide the nudge from exactly the checkout that needs it.
     _report_sweep_cadence(reporter, config)
-    for line in unaffected_summary(0, peek.mapped_tests, peek.mapped_tests, 0.0, since=None):
+    # The remainder belongs here more than anywhere: this is the run that says
+    # "nothing to run", and it is the exact shape that sent a rewritten
+    # screen_canvas.py to merge with its only real coverage never collected.
+    for line in unaffected_summary(
+        0,
+        peek.mapped_tests,
+        peek.mapped_tests,
+        0.0,
+        since=None,
+        unmeasured=_unmeasured_remainder(config),
+    ):
         writer.line(line, bold=True)
     inherited = peek.forced_tests
     if inherited and not testmon_policy.rerun_known_red_tests(config):
@@ -1342,10 +1355,11 @@ def pytest_sessionstart(session):
     and one writer means no lock and no lost update.
     """
 
-    global _red_ledger, _flake_ledger, _forced_reds, _changed_since_recorded
+    global _red_ledger, _flake_ledger, _skip_ledger, _forced_reds, _changed_since_recorded
     global _flake_run_shape, _flake_load_start
     _red_ledger = None
     _flake_ledger = None
+    _skip_ledger = None
     _forced_reds = frozenset()
     _changed_since_recorded = frozenset()
     _flake_run_shape = {}
@@ -1377,6 +1391,12 @@ def pytest_sessionstart(session):
     except Exception:  # a missing ledger costs a re-run, never a wrong result
         _red_ledger = None
     try:
+        _skip_ledger = skip_ledger.SkipLedger.load(
+            testmon_policy.map_path(config.rootdir), data.environment
+        )
+    except Exception:  # an unreadable ledger costs a cheap re-attempt, not a result
+        _skip_ledger = None
+    try:
         _flake_ledger = red_ledger.FlakeLedger.load(
             testmon_policy.map_path(config.rootdir), data.environment
         )
@@ -1398,14 +1418,14 @@ def pytest_sessionstart(session):
 def pytest_collection_finish(session):
     """Serial runs collect here; xdist collects on the workers (see below)."""
 
-    if _red_ledger is not None:
+    if _red_ledger is not None or _skip_ledger is not None:
         _collected.update(item.nodeid for item in session.items)
 
 
 def pytest_xdist_node_collection_finished(node, ids):
     """The controller's only view of what was collected, since it never collects."""
 
-    if _red_ledger is not None:
+    if _red_ledger is not None or _skip_ledger is not None:
         _collected.update(ids)
 
 
@@ -1416,6 +1436,9 @@ def pytest_sessionfinish(session):
     if _flake_ledger is not None:
         _flake_ledger.forget(_changed_since_recorded)
         _flake_ledger.save()
+    if _skip_ledger is not None:
+        _skip_ledger.forget_missing(_collected)
+        _skip_ledger.save()
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -1450,6 +1473,12 @@ def pytest_runtest_logreport(report):
         # no code-shaped explanation for that, so the map's green is not
         # evidence about it — see tests/red_ledger.py:FlakeLedger.
         _flake_ledger.observe(report.nodeid, when=_now_iso(), context=_flake_observation_context())
+    if _skip_ledger is not None:
+        # The rule for what an outcome says about the body having run is the
+        # ledger's own, not this hook's: it is the whole subtlety of that file,
+        # and a second copy here drifted from it inside one session (an xfail
+        # marked unmeasured, which its own guard test caught). One owner.
+        _skip_ledger.observe(report)
     yield
 
 
@@ -2026,7 +2055,12 @@ def pytest_terminal_summary(terminalreporter, config):
     skipped = max(0, unaffected - len(ran_anyway))
     sweep = sum(_recorded_test_seconds(config).values())
     for line in unaffected_summary(
-        tests_executed(terminalreporter), skipped, mapped, sweep, since=since
+        tests_executed(terminalreporter),
+        skipped,
+        mapped,
+        sweep,
+        since=since,
+        unmeasured=_unmeasured_remainder(config),
     ):
         terminalreporter.write_line(line, bold=True)
     if inherited and not testmon_policy.rerun_known_red_tests(config):
@@ -2052,7 +2086,80 @@ def tests_executed(terminalreporter) -> int:
     return sum(len(stats.get(key, ()) or ()) for key in ("passed", "failed", "error"))
 
 
-def unaffected_summary(ran, skipped, mapped, sweep_seconds, since) -> list[str]:
+def _unmeasured_remainder(config) -> tuple[str, ...]:
+    """Mapped tests whose record still describes a gate rather than their code.
+
+    These are the ones the closing sentence may not count as "unaffected by
+    construction": their recorded dependency set says what the gate touched, so
+    it cannot say whether your change is in the code they would execute. Naming
+    them is what turns a false completeness claim into a true statement with a
+    stated remainder — see ``tests/skip_ledger.py``.
+
+    Read from the **live** ledger where there is one, and that is the whole
+    subtlety. "Reached" is not "measured": ``--since`` reaches every mark, and
+    offscreen every one of them skips again, which leaves the change exactly as
+    unmeasured as before — an earlier draft of this subtracted what the run
+    reached and reported an empty remainder for that case, which is the same
+    false claim one step along. The live ledger is the honest set because it is
+    the outcome ledger: a test that ran for real this run has already had its
+    mark cleared by ``SkipLedger.observe``, and one that skipped again still
+    carries it. So the remainder empties exactly when the tests are
+    measured, on the display where their gate opens, and not a run before.
+    """
+
+    data = getattr(config, "testmon_data", None)
+    if data is None:
+        return ()
+    try:
+        environment = data.environment
+        live = _skip_ledger
+        if live is not None and live.environment == environment:
+            marks = set(live.skipped)
+        else:
+            # No live ledger, or one belonging to a different environment — the
+            # no-op fast path is the first case, and it is the exact run this
+            # remainder exists for: it returns from ``pytest_cmdline_main``
+            # before ``pytest_sessionstart``, so nothing has opened a ledger.
+            # The environment check is what stops a second in-process
+            # ``pytest.main()`` reading the previous session's marks, the way
+            # ``reuse_map_read`` guards its own carried state.
+            marks = skip_ledger.read_skips(testmon_policy.map_path(config.rootdir), environment)
+        return tuple(sorted(marks & set(data.all_tests or ())))
+    except Exception:  # a report line is not worth failing a run over
+        return ()
+
+
+def unmeasured_lines(unmeasured) -> list[str]:
+    """Name the tests whose record cannot answer the question, or say nothing.
+
+    Grouping is ``skip_ledger.remainder_by_file``'s, not this function's: three
+    places withdraw the completeness claim and none of them may disagree about
+    what the remainder *is*.
+
+    This one names the *command* too. A remainder line that only reported a
+    number would be one more thing to read past — which is precisely what the
+    grey "inherited reds not re-run" line was measured to become — and the whole
+    reason this exists is that the previous wording sent a branch to merge
+    without its only real coverage.
+    """
+
+    if not unmeasured:
+        return []
+    ranked = skip_ledger.remainder_by_file(unmeasured)
+    limit = skip_ledger.REMAINDER_FILES_NAMED
+    named = ", ".join(f"{name} ({count})" for name, count in ranked[:limit])
+    if len(ranked) > limit:
+        named += f", +{len(ranked) - limit} more file(s)"
+    tests = "test" if len(unmeasured) == 1 else "tests"
+    return [
+        f"  Unmeasured remainder: {len(unmeasured)} {tests} skipped when the map recorded them, "
+        "so their recorded",
+        f"  dependencies describe a gate, not their code — {named}.",
+        "  `pytest --since` reaches them; running them where their gate opens is what measures them.",
+    ]
+
+
+def unaffected_summary(ran, skipped, mapped, sweep_seconds, since, unmeasured=()) -> list[str]:
     """The closing sentence about the gap between this run and the suite.
 
     This is the highest-leverage string in the file, and it used to say the
@@ -2069,25 +2176,42 @@ def unaffected_summary(ran, skipped, mapped, sweep_seconds, since) -> list[str]:
 
     Kept as a pure function because the sentence is the feature. It is the only
     thing between a green selected run and somebody deciding to "make sure".
+
+    ``unmeasured`` is the one thing that can withdraw the completeness half of
+    the claim, and it had to exist because the claim was being made falsely. A
+    test that *skipped* when the map recorded it has a dependency set describing
+    the gate that turned it away, so "your change is not in it" is not a
+    statement about that test's code at all — see ``tests/skip_ledger.py`` for
+    the branch this cost. Both sentences below therefore stop at what the
+    evidence supports and name the remainder, rather than rounding it into
+    "unaffected by construction" or "a result, not a gap".
     """
 
     lines = []
+    remainder = len(unmeasured)
     if ran:
         tests = "test" if ran == 1 else "tests"
         lines.append(
             f"test selection: ran the {ran} {tests} your tree reaches. The other {skipped} of "
             f"{mapped} are unaffected by construction — their recorded"
         )
+        closing = (
+            "This is the complete affected set, not a sample."
+            if not remainder
+            else "That covers every test the map can speak for."
+        )
         lines.append(
             f"  fingerprints still hold, so running them could only re-confirm them "
-            f"(~{sweep_seconds:.0f} s). This is the complete affected set, not a sample."
+            f"(~{sweep_seconds:.0f} s). {closing}"
         )
     else:
         lines.append(
             "test selection: nothing to run — no line your working tree changed is executed "
             f"by any of the {mapped} recorded tests."
         )
-        lines.append("  That is a result, not a gap.")
+        if not remainder:
+            lines.append("  That is a result, not a gap.")
+    lines.extend(unmeasured_lines(unmeasured))
     if since is not None:
         # The verification report, always — including when it widened by zero.
         # "Your branch reaches 65 tests and 65 are already proven" is the most
@@ -2364,6 +2488,12 @@ def _report_sweep_cadence(terminalreporter, config) -> None:
                 # was recorded with complete dependency attribution. Absent on
                 # the anchor: swept=False already says "no full record exists".
                 **({"attributed": True} if swept else {}),
+                # Narrower than its neighbour on purpose. A sweep also counts
+                # when the policy turned selection *off* (``--no-testmon``,
+                # ``--cov``, CI), and those runs open no ledger — so they
+                # witness every skip and write none of them down. Stamping them
+                # would claim exactly the knowledge this key exists to certify.
+                **({"skips": True} if swept and _skip_ledger is not None else {}),
             },
         )
 
