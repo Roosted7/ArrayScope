@@ -128,6 +128,7 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             "draw polyline profile",
             "close inspection panel",
             "enable live pointer profile",
+            "track live profile with pointer",
         } <= labels
         assert not [
             event for event in actions if event["kind"] == "click" and event["target"] is None
@@ -136,6 +137,11 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             event for event in actions if event["label"] == "focus live ROI statistics"
         )
         assert inspection["detail_inset"] is True
+        profile = next(
+            event for event in actions if event["label"] == "track live profile with pointer"
+        )
+        assert profile["profile_updates"] > 3
+        assert profile["profile_start"] != profile["profile_end"]
     if name == "showcase":
         labels = {event["label"] for event in actions}
         assert {

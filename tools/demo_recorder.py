@@ -1106,7 +1106,16 @@ class Recorder:
         local = view.graphicsView.mapFromScene(scene_pos)
         return QtCore.QPointF(view.graphicsView.viewport().mapTo(self.win, local))
 
-    def move_to(self, target, seconds=0.7, on_point=None) -> None:
+    def image_coordinates(self, window_point) -> tuple[float, float]:
+        """Map a synthetic window-space cursor position back to image space."""
+        view = self.win.img_view
+        viewport = view.graphicsView.viewport()
+        local = viewport.mapFrom(self.win, window_point.toPoint())
+        scene_pos = view.graphicsView.mapToScene(local)
+        image_pos = view.getView().mapSceneToView(scene_pos)
+        return float(image_pos.x()), float(image_pos.y())
+
+    def move_to(self, target, seconds=0.7, on_point=None, *, min_steps: int = 1) -> None:
         """Ease the cursor to ``target`` (a window-space QPointF, or a widget
         whose center is used). ``on_point`` is called with each intermediate
         window-space position — use it to feed hover/marker updates."""
@@ -1115,7 +1124,7 @@ class Recorder:
         if hasattr(target, "mapTo"):
             target = self.widget_point(target)
         start = QtCore.QPointF(self.cursor)
-        steps = self._frames_for(seconds)
+        steps = max(int(min_steps), self._frames_for(seconds))
         for i in range(1, steps + 1):
             t = _ease(i / steps)
             self.cursor = QtCore.QPointF(
@@ -1224,6 +1233,36 @@ class Recorder:
             QtCore.Qt.KeyboardModifier.NoModifier,
         )
         return bool(view.eventFilter(view.graphicsView.viewport(), event))
+
+    def move_live_profile(self, points, *, seconds_per_segment: float = 0.7) -> None:
+        """Move the live marker on every animation frame, not only at waypoints."""
+        event = self._start_action("hover", "track live profile with pointer")
+        updates = 0
+        first = None
+        last = None
+
+        def update(window_point):
+            nonlocal updates, first, last
+            x, y = self.image_coordinates(window_point)
+            first = first or [x, y]
+            last = [x, y]
+            updates += 1
+            self.win.img_view.setProfileMarker(x, y, visible=True)
+            self.win._on_profile_marker_moved(x, y)
+            self.win._update_live_profile_from_pending_pos()
+
+        for x, y in points:
+            self.move_to(
+                self.image_point(x, y),
+                seconds=seconds_per_segment,
+                on_point=update,
+                min_steps=2,
+            )
+        event["profile_updates"] = updates
+        event["profile_start"] = first
+        event["profile_end"] = last
+        event["activate_frame"] = max(event["start_frame"], self.frame_index - 1)
+        self._finish_action(event)
 
     def drag_window_levels(self, *, low_fraction: float, high_fraction: float) -> None:
         """Animate an honest histogram-window gesture and its pixel response."""
@@ -1734,12 +1773,8 @@ def s_roi(rec: Recorder):
         lambda: win.widgets["buttons"]["display"]["live_profile"].setChecked(True),
     )
 
-    for x, y in ((60.0, 60.0), (120.0, 120.0), (200.0, 96.0)):
-        rec.move_to(rec.image_point(x, y), seconds=0.7)
-        win.img_view.setProfileMarker(x, y, visible=True)
-        win._on_profile_marker_moved(x, y)
-        win._update_live_profile_from_pending_pos()
-        rec.hold_until_settled(1.5, tail_s=0.3)
+    rec.move_live_profile(((60.0, 60.0), (120.0, 120.0), (200.0, 96.0)))
+    rec.hold_until_settled(2.5, tail_s=0.5)
     rec.hold(1.6)
 
 
