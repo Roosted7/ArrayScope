@@ -47,6 +47,15 @@ Environment traps this module pins (both field-proven, 2026-07-21):
 Failure is always loud.  If Weston cannot start we raise — we never fall
 back to the offscreen platform, because an offscreen run labelled as
 compositor evidence is exactly the vacuous oracle law #5 forbids.
+
+**The X arm (2026-07-31).**  ``xwayland=True`` additionally starts this
+compositor's own X server, so an xcb client can be measured without an
+attached X.org session.  It is the same trade the module already makes for
+Wayland — a real server and real GL, on no attached display — with one
+honest limit: XWayland is not X.org, so anything that depends on the DDX
+rather than on the X11 protocol (input shapes, child-window clipping and
+stacking are protocol; modesetting and DRI3-vs-fallback presentation are
+not) still owes a native-X.org confirmation.
 """
 
 from __future__ import annotations
@@ -63,6 +72,15 @@ from uuid import uuid4
 
 HEADLESS_DISPLAY_ENV = "ARRAYSCOPE_HEADLESS_DISPLAY"
 """Set to the socket name inside a managed headless compositor."""
+
+HEADLESS_X_DISPLAY_ENV = "ARRAYSCOPE_HEADLESS_X_DISPLAY"
+"""Set to the X display (``:N``) when the managed compositor runs XWayland.
+
+Kept distinct from ``DISPLAY`` so a nested caller can tell "there is a
+managed X server here" from "something inherited an X display from the
+developer's session", which is exactly the confusion this module refuses to
+allow for the Wayland socket.
+"""
 
 MESA_EGL_VENDOR = Path("/usr/share/glvnd/egl_vendor.d/50_mesa.json")
 EGL_VENDOR_ENV = "__EGL_VENDOR_LIBRARY_FILENAMES"
@@ -85,19 +103,41 @@ class HeadlessDisplay:
     log_path: Path
     output_size: tuple[int, int]
     exact_window: bool = False
+    x_display: str = ""
 
-    def child_environment(self, environ=None) -> dict[str, str]:
-        """Environment for a client that should render into this compositor."""
+    def child_environment(self, environ=None, *, qt_platform: str = "wayland") -> dict[str, str]:
+        """Environment for a client that should render into this compositor.
+
+        ``qt_platform="xcb"`` is the X-session arm of the screen-present
+        evidence (2026-07-31): the client talks X11 to this compositor's own
+        XWayland instead of Wayland directly, which is the only way to
+        exercise the X11 swapchain recipe without an attached X.org session.
+        It requires ``xwayland=True`` on the compositor, and says so rather
+        than handing back an environment whose ``DISPLAY`` would resolve to
+        the developer's session.
+        """
 
         environ = os.environ if environ is None else environ
         child = dict(environ)
         child["WAYLAND_DISPLAY"] = self.socket_name
-        child["QT_QPA_PLATFORM"] = "wayland"
+        child["QT_QPA_PLATFORM"] = qt_platform
         child[HEADLESS_DISPLAY_ENV] = self.socket_name
-        child.pop("DISPLAY", None)  # never let a client silently pick XWayland
+        # Never let a client silently pick up an X display: either this
+        # compositor's own XWayland, or none at all.
+        child.pop("DISPLAY", None)
+        if qt_platform == "xcb" and not self.x_display:
+            raise RuntimeError(
+                "an xcb client needs an X server: start the headless display with xwayland=True"
+            )
+        if self.x_display:
+            child["DISPLAY"] = self.x_display
+            child[HEADLESS_X_DISPLAY_ENV] = self.x_display
         if self.exact_window:
             # Qt's client-side titlebar would offset the window inside the
-            # output and break the capture == window identity below.
+            # output and break the capture == window identity below.  This
+            # knob is Wayland-only: an X11 client's decoration is the window
+            # manager's, so exact-window evidence under xcb would need its
+            # own treatment and has not been established.
             child["QT_WAYLAND_DISABLE_WINDOWDECORATION"] = "1"
         _pin_egl_vendor(child)
         return child
@@ -148,12 +188,45 @@ close-animation=none
 """
 
 
+def _await_x_display(log_path: Path, process, timeout_s: float) -> str:
+    """The ``:N`` weston's XWayland announced, once it is listening.
+
+    XWayland starts asynchronously after the Wayland socket appears, and its
+    display number is assigned (not chosen by us), so the log line is the
+    only place it exists.  Waiting for it here means a caller never races a
+    half-started X server — the failure mode that would otherwise show up as
+    an unexplained "cannot open display" inside the child.
+    """
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"headless Weston exited while starting XWayland "
+                f"(rc={process.returncode}); log: {log_path}"
+            )
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            marker = "xserver listening on display "
+            if marker in line:
+                return line.split(marker, 1)[1].strip()
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"headless Weston never announced an XWayland display within "
+        f"{timeout_s:.0f}s; log: {log_path}"
+    )
+
+
 @contextmanager
 def headless_display(
     *,
     output_size: tuple[int, int] = DEFAULT_OUTPUT_SIZE,
     log_dir: str | Path | None = None,
     exact_window: bool = False,
+    xwayland: bool = False,
 ):
     """Own one headless Weston for the duration of the block.
 
@@ -177,10 +250,20 @@ def headless_display(
     # size and keeps its panel, so reusing it silently offsets the window and
     # breaks the capture == window identity.  Evidence always owns its
     # compositor.  (Caught by tests/gpu_interaction/test_headless_exact_window.)
+    # An XWayland request can only join a batch whose compositor actually has
+    # one; otherwise it would inherit a Wayland-only display and the X arm
+    # would silently become a Wayland run wearing an xcb label.
     active = os.environ.get(HEADLESS_DISPLAY_ENV, "")
-    if active and not exact_window:
+    active_x_display = os.environ.get(HEADLESS_X_DISPLAY_ENV, "")
+    if active and not exact_window and (active_x_display or not xwayland):
         runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", "")).resolve()
-        yield HeadlessDisplay(active, runtime_dir / f"{active}.log", output_size, exact_window)
+        yield HeadlessDisplay(
+            active,
+            runtime_dir / f"{active}.log",
+            output_size,
+            exact_window,
+            active_x_display,
+        )
         return
 
     weston, _ = _require_binaries()
@@ -212,6 +295,7 @@ def headless_display(
         weston,
         "--backend=headless",
         "--renderer=gl",
+        *(("--xwayland",) if xwayland else ()),
         # Natural window sizes: never the kiosk shell (see module docstring).
         "--shell=desktop",
         # Authorizes the screen-capture protocol weston-screenshooter needs.
@@ -239,7 +323,8 @@ def headless_display(
                 f"headless Weston did not create {socket_path} within "
                 f"{STARTUP_TIMEOUT_S:.0f}s; log: {log_path}"
             )
-        yield HeadlessDisplay(socket_name, log_path, (width, height), exact_window)
+        x_display = _await_x_display(log_path, process, STARTUP_TIMEOUT_S) if xwayland else ""
+        yield HeadlessDisplay(socket_name, log_path, (width, height), exact_window, x_display)
     finally:
         process.terminate()
         try:
@@ -259,16 +344,24 @@ def run_in_headless_display(
     output_size: tuple[int, int] = DEFAULT_OUTPUT_SIZE,
     log_dir: str | Path | None = None,
     exact_window: bool = False,
+    qt_platform: str = "wayland",
 ) -> int:
-    """Run one command against a private headless compositor."""
+    """Run one command against a private headless compositor.
+
+    ``qt_platform="xcb"`` implies XWayland: the child gets a ``DISPLAY`` on
+    this compositor's own X server and never on the developer's session.
+    """
 
     with headless_display(
-        output_size=output_size, log_dir=log_dir, exact_window=exact_window
+        output_size=output_size,
+        log_dir=log_dir,
+        exact_window=exact_window,
+        xwayland=(qt_platform == "xcb"),
     ) as display:
         completed = subprocess.run(
             tuple(str(part) for part in child_command),
             check=False,
-            env=display.child_environment(),
+            env=display.child_environment(qt_platform=qt_platform),
         )
         return int(completed.returncode)
 
@@ -311,6 +404,15 @@ def main(argv: tuple[str, ...] | None = None) -> int:
             "placed at (0,0) and one capture is exactly the window image"
         ),
     )
+    parser.add_argument(
+        "--qt-platform",
+        default="wayland",
+        choices=("wayland", "xcb"),
+        help=(
+            "QPA for the child; xcb starts this compositor's own XWayland "
+            "and points the child at it (X-session evidence arm)"
+        ),
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = tuple(args.command)
@@ -323,6 +425,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
         output_size=(args.width, args.height),
         log_dir=args.log_dir,
         exact_window=args.exact_window,
+        qt_platform=args.qt_platform,
     )
 
 
