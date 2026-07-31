@@ -1734,10 +1734,20 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # snapshot captures changes between iterations (commits happen after
         # this loop), and rebuilding it per tile made the loop quadratic in
         # the retained-store size.
-        resolution_context = self._montage_cache_resolution_context(
-            document=session.document,
-            colormap_lut=session.colormap_lut,
-            shader_display=bool(getattr(session, "shader_display", False)),
+        #
+        # Built only when there is an addition to spend it on. The per-tile
+        # version was reached exclusively from inside the loop body, so an
+        # empty additions tuple used to touch none of what the snapshot reads
+        # -- hoisting it unguarded made a no-op pass newly demand
+        # `win.operation_evaluator` and the retained store.
+        resolution_context = (
+            self._montage_cache_resolution_context(
+                document=session.document,
+                colormap_lut=session.colormap_lut,
+                shader_display=bool(getattr(session, "shader_display", False)),
+            )
+            if additions_to_process
+            else None
         )
         for tile in additions_to_process:
             display_cached, display_missing = self._resolve_montage_tiles_from_cache(

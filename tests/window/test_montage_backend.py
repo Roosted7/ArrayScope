@@ -5127,6 +5127,16 @@ def test_interactive_viewport_expansion_admits_only_required_tiles(qt_app, monke
             self.resolved_batches.append(tuple(int(tile.montage_index) for tile in batch))
             return (), batch
 
+        def _montage_cache_resolution_context(self, **_kwargs):
+            # Stubbed alongside the resolve above, and for the same reason:
+            # this Window replaces cache resolution wholesale to count which
+            # tiles get admitted. The shared lookup snapshot moved out of
+            # `_resolve_montage_tiles_from_cache` into its caller, so the
+            # real builder (which reaches `win.operation_evaluator` and the
+            # retained store) is now reached even when the resolve itself is
+            # replaced. The resolve stub ignores the context it is handed.
+            return None
+
         def apply_montage_presentation(self, session):
             self.commits += 1
 
