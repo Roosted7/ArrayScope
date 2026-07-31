@@ -207,6 +207,27 @@ no blink, no rejection reporting, atomic bypass).
   backend either way — the fill owner is S1 (cold-entry stage plan), not this
   path.
 
+## 6b. Gate evidence (inherited reds, baselined)
+
+`pytest` (affected set) is green after one re-run; the residual is the known
+load-flake `test_single_slice_to_full_montage_presents_around_retained_exact_tile[scalar]`,
+which passes on `--rerun-reds`.
+
+`pytest --since` reports 5–7 failures in `tests/ui`, four of them on
+**wgpu-only** paths this change cannot reach. Three independent controls say
+they are inherited:
+
+1. the same `--since` selection with `ARRAYSCOPE_PYQTGRAPH_RESOLVE_BUDGET=0`
+   (old behavior, same binary) fails **7**, i.e. one *more* than the fix arm;
+2. the same seven node ids on unmodified main (`c1c295e5`, separate worktree,
+   same venv) fail **6 then 7 of 7**;
+3. every one of them passes when run in a smaller grouping.
+
+So the branch delta against main on this set is zero-to-negative. These are
+the documented `tests/ui` co-scheduling reds, not a regression — but note the
+bundle is *reliably* red on main, which makes it a stronger candidate for the
+flake ledger than "occasional load flake".
+
 ## 7. The honest allowance (queue row 1)
 
 With the incidental term cut, what remains at field size on this machine is
