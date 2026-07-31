@@ -10,7 +10,7 @@ import pyqtgraph.Qt as Qt
 
 from arrayscope.app.errors import handle_ui_exception, traceback_text
 from arrayscope.core.compute_policy import ComputeLane
-from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS
+from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS, GuiCallbackBudget
 from arrayscope.core.trace import emit_trace
 from arrayscope.core.window_levels import WindowLevelController
 from arrayscope.display.backend_contract import image_view_backend_capabilities
@@ -4051,6 +4051,29 @@ def plan_stage_fan_in_candidates(
     return limits
 
 
+def _hot_stage_plan_budget(renderer, missing_tiles) -> GuiCallbackBudget:
+    builder = getattr(renderer, "_montage_callback_budget", None)
+    item_cap = max(1, len(tuple(missing_tiles)))
+    if callable(builder):
+        return builder(
+            "montage_stage_plan",
+            interactive=viewport_interaction_active(renderer),
+            work_class="stage_plan",
+            item_cap=item_cap,
+        )
+    return GuiCallbackBudget(
+        channel="montage_stage_plan",
+        work_class="stage_plan",
+        item_cap=item_cap,
+    )
+
+
+def _record_hot_stage_budget(renderer, budget: GuiCallbackBudget) -> None:
+    recorder = getattr(renderer, "_record_gui_budget", None)
+    if callable(recorder):
+        recorder(budget)
+
+
 def hot_cached_stage_fan_in_plan(renderer, document, missing_tiles) -> dict[str, object]:
     """Attach already-resident stage values without GUI-thread slab planning."""
 
@@ -4127,9 +4150,22 @@ def hot_cached_stage_fan_in_plan(renderer, document, missing_tiles) -> dict[str,
             "retained_stage_decision": "cached-hot-full-stage",
             "repeated_expensive_stage_per_tile": False,
         }
+    # The per-tile fallback match below is O(missing_tiles * cache_entries)
+    # region planning, and it runs inside one GUI callback: unbounded at field
+    # scale it owned the event loop for seconds (cold-entry rank-1,
+    # docs/redesign/gui-callback-owners-2026-07-31.md §2 S1).  It is a head
+    # start, not an obligation — every caller pairs it with the deferred
+    # placeholder plus the async kernel planner — so it runs under the
+    # window's GUI callback budget and hands the remainder to that planner.
+    budget = _hot_stage_plan_budget(renderer, missing_tiles)
+    budget_deferred = False
     tile_stage_keys = {}
     stage_values = {}
     for tile in missing_tiles:
+        if budget.should_yield():
+            budget_deferred = True
+            break
+        budget.record_item()
         tile_number = int(tile.montage_index)
         request = request_for_image(tile.view_state)
         axis_ranges = tuple(
@@ -4187,6 +4223,19 @@ def hot_cached_stage_fan_in_plan(renderer, document, missing_tiles) -> dict[str,
         getattr(renderer, "_hot_stage_match_cache_misses", 0) or 0
     ) + int(cache_misses)
     renderer._last_hot_stage_total_cpu_ms = (thread_time() - profile_start) * 1000.0
+    _record_hot_stage_budget(renderer, budget)
+    if budget_deferred:
+        # Partial matches are dropped rather than attached: attaching a
+        # budget-truncated subset would make "no match recorded" ambiguous
+        # between "scanned, none exists" and "never scanned", and the async
+        # planner replans the full missing set anyway.  The match cache keeps
+        # what this slice learned, so a later call resumes ahead.
+        renderer._hot_stage_budget_deferrals = (
+            int(getattr(renderer, "_hot_stage_budget_deferrals", 0) or 0) + 1
+        )
+        plan = deferred_stage_fan_in_plan()
+        plan["retained_stage_decision"] = "hot-stage-budget-deferred"
+        return plan
     if not tile_stage_keys:
         return deferred_stage_fan_in_plan()
     return {
