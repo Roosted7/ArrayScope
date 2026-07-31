@@ -1237,6 +1237,7 @@ def pytest_configure(config):
     _ensure_map_seeded(config)
     _refuse_unselected_run(config)
     _refuse_serial_run(config)
+    _refuse_since_on_unattributed_map(config)
     _cap_explicit_workers(config)
     decision = testmon_policy.decide(config)
     config.arrayscope_selection = decision
@@ -1875,6 +1876,53 @@ def _refuse_fresh_without_since(config) -> None:
     )
 
 
+def _refuse_since_on_unattributed_map(config) -> None:
+    """A merge gate may not rest on records with missing dependency edges.
+
+    ``--since`` derives "reached" from each test's *recorded* dependencies, so
+    a map written under batched sysmon coverage under-scopes the question
+    itself: the tests missing an edge to a changed file are exactly the ones
+    the gate neither runs nor counts, and it then says "verified". ``--fresh``
+    inherits the same hole — it re-runs the reached set, and the reached set is
+    the broken part. So the gate refuses outright until the map has one full
+    record under per-test attribution, which is the one state in which its
+    claim means what it says. The inner loop is deliberately *not* refused:
+    it makes no claim beyond the tests it ran, and its closing line names the
+    gap on every run (see ``_report_sweep_cadence``).
+    """
+
+    if _XDIST_WORKER or config.getoption("since", None) is None:
+        return
+    if not testmon_policy.decide(config).active:
+        return  # nothing selected through the map, nothing to over-trust
+    peek = _map_peek(config)
+    if peek is None or peek.empty:
+        return  # an absent map already degrades to running everything
+    record = coverage_map.last_sweep(
+        coverage_map.read_sidecar(testmon_policy.map_path(config.rootdir))
+    )
+    gap = testmon_policy.attribution_gap(record)
+    if not gap:
+        return
+    raise pytest.UsageError(
+        "\n".join(
+            (
+                f"Refused: {gap}.",
+                "",
+                "A missing dependency edge is invisible to this gate: the test is not",
+                "selected, not counted as reached, and reported verified. One re-record",
+                "repairs the map and retires this refusal:",
+                "",
+                "    pytest --testmon-noselect     (~4 min, records every edge)",
+                "",
+                "then re-run:  pytest --since",
+                "",
+                "Read docs/testing/test-selection.md (per-test dependency batches).",
+            )
+        )
+    )
+
+
 def _report_gate_run_cost(terminalreporter, config) -> None:
     """Close every selection-bypassing run with what it cost and a defect ask.
 
@@ -2311,6 +2359,11 @@ def _report_sweep_cadence(terminalreporter, config) -> None:
                 "sha": testmon_policy.head_sha(config.rootdir),
                 "at": _now_iso(),
                 "swept": swept,
+                # Only code that carries the per-test-batch pin can write this
+                # key, so its presence on a real sweep is proof the whole map
+                # was recorded with complete dependency attribution. Absent on
+                # the anchor: swept=False already says "no full record exists".
+                **({"attributed": True} if swept else {}),
             },
         )
 
@@ -2329,6 +2382,17 @@ def _report_sweep_cadence(terminalreporter, config) -> None:
         # A new checkout must not open with a nag, so its first bare run starts
         # the clock instead of complaining about a sweep it never had time for.
         remember(swept=False)
+        return
+    gap = testmon_policy.attribution_gap(record)
+    if gap:
+        # No clock: an under-attributed map is under-selecting *now*, on every
+        # run, and the loop is where the missing edges silently skip tests.
+        terminalreporter.write_line(
+            f"test selection: {gap} — selection is under-scoped until one "
+            "re-record: pytest --testmon-noselect (~4 min).",
+            bold=True,
+            yellow=True,
+        )
         return
     line = cadence_nudge(
         record,

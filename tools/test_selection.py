@@ -196,6 +196,17 @@ def command_status(args) -> int:
     for name in sorted(unmapped):
         print(f"    {name}")
 
+    from tests import coverage_map
+
+    gap = testmon_policy.attribution_gap(
+        coverage_map.last_sweep(coverage_map.read_sidecar(testmon_policy.map_path(REPO_ROOT)))
+    )
+    if gap:
+        print()
+        print(f"ATTRIBUTION: {gap}.")
+        print("    Selection under-scopes and --since refuses until one re-record:")
+        print("    pytest --testmon-noselect")
+
     from tests import red_ledger
 
     broken_here = red_ledger.read_new_reds(testmon_policy.map_path(REPO_ROOT), environment)

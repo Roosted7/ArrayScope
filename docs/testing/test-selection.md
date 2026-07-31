@@ -485,6 +485,26 @@ before the pin cannot heal itself (the tests with missing edges are exactly
 the ones selection no longer runs): re-record it with
 `pytest --testmon-noselect`.
 
+**The re-record is enforced, not remembered.** A pre-fix map is wrong in the
+invisible direction, so the repair cannot live in a doc paragraph. A real
+sweep now stamps the sidecar's sweep record with `attributed` — only code
+carrying the pin can write it, and a map recorded from scratch stamps itself,
+because its first run executes everything and counts as a sweep. Until a map
+carries the stamp (`testmon_policy.attribution_gap`):
+
+* every bare `pytest` closes with the gap and the repair command — no cadence
+  clock, because an under-attributed map is under-selecting *now*;
+* **`pytest --since` refuses outright**, `--fresh` included. The gate's
+  "reached" set is derived from recorded edges, so a map with missing edges
+  under-scopes the question itself — the tests missing an edge to a changed
+  file are exactly the ones the gate neither runs nor counts before saying
+  "verified";
+* `tools/test_selection.py status` names the gap under `ATTRIBUTION:`.
+
+One `pytest --testmon-noselect` records every edge, stamps the sidecar, and
+retires all three. The stamp travels with the sidecar wherever the map is
+seeded or adopted, so a checkout inheriting a repaired map inherits the proof.
+
 ### Adding a function does not re-run the file's world
 
 testmon puts a module's **whole top-level body in one AST block spanning line 1

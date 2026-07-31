@@ -516,3 +516,122 @@ def test_the_sweep_record_survives_another_feature_writing_the_sidecar(tmp_path)
     coverage_map.write_sidecar(map_path, structure={"a": 1}, baselines={"env": {}})
 
     assert coverage_map.last_sweep(coverage_map.read_sidecar(map_path))["sha"] == "abc"
+
+
+# --- Per-test attribution: the stamp, and what refuses without it -------------
+# A map recorded under batched sysmon coverage holds dependency records that
+# are subsets of the truth (see testmon_policy.pin_per_test_dependency_batches).
+# The stamp says "every record behind this sidecar was made with complete
+# edges"; only post-fix code can write it, and a sweep is the only writer.
+
+
+def test_attribution_gap_reads_the_sweep_record():
+    stamped = {"sha": "abc", "at": "x", "swept": True, "attributed": True}
+    assert testmon_policy.attribution_gap(stamped) == ""
+
+    pre_fix_sweep = {"sha": "abc", "at": "x", "swept": True}
+    assert "predates per-test dependency attribution" in testmon_policy.attribution_gap(
+        pre_fix_sweep
+    )
+
+    never_swept = {"sha": "abc", "at": "x", "swept": False}
+    assert "never been fully recorded" in testmon_policy.attribution_gap(never_swept)
+    assert "never been fully recorded" in testmon_policy.attribution_gap({})
+    assert "never been fully recorded" in testmon_policy.attribution_gap(None)
+
+
+def test_a_real_sweep_stamps_attribution_and_an_anchor_does_not(tmp_path, monkeypatch):
+    """The stamp exists because this code carries the batch pin: any sweep it
+    records was recorded with complete edges. The anchor claims no such thing."""
+
+    from tests import conftest as harness
+
+    map_path = tmp_path / ".testmondata"
+    monkeypatch.setattr(testmon_policy, "map_path", lambda rootdir: map_path)
+    monkeypatch.setattr(testmon_policy, "head_sha", lambda rootdir: "abc")
+
+    swept = _sweep_config(testmon_noselect=True)
+    reporter = SimpleNamespace(stats={"passed": [object()] * 4302}, write_line=lambda *a, **k: None)
+    harness._report_sweep_cadence(reporter, swept)
+    record = coverage_map.last_sweep(coverage_map.read_sidecar(map_path))
+    assert record["swept"] is True
+    assert record["attributed"] is True
+    assert testmon_policy.attribution_gap(record) == ""
+
+    map_path.unlink(missing_ok=True)
+    (tmp_path / (".testmondata" + coverage_map.COVERAGE_SUFFIX)).unlink(missing_ok=True)
+    idle = _sweep_config()
+    idle.arrayscope_fast_path = True
+    idle.getoption = lambda name, default=None: default
+    quiet_reporter = SimpleNamespace(stats={}, write_line=lambda *a, **k: None)
+    harness._report_sweep_cadence(quiet_reporter, idle)
+    anchor = coverage_map.last_sweep(coverage_map.read_sidecar(map_path))
+    assert anchor["swept"] is False
+    assert "attributed" not in anchor
+
+
+def test_since_refuses_on_a_map_without_the_attribution_stamp(tmp_path, monkeypatch):
+    """The gate's 'reached' set is derived from recorded edges, so a map with
+    missing edges under-scopes the question itself — --fresh included. Refusal,
+    with the one command that repairs it."""
+
+    from tests import conftest as harness
+
+    map_path = tmp_path / ".testmondata"
+    map_path.write_bytes(b"")
+    monkeypatch.setattr(testmon_policy, "map_path", lambda rootdir: map_path)
+    coverage_map.write_sidecar(
+        map_path,
+        structure={},
+        baselines={},
+        sweep={"sha": "abc", "at": "x", "swept": True},
+    )
+
+    config = _sweep_config()
+    config.getoption = lambda name, default=None: "main" if name == "since" else default
+    config.arrayscope_map_peek = SimpleNamespace(empty=False)
+    monkeypatch.setattr(harness, "_map_peek", lambda config: config.arrayscope_map_peek)
+    monkeypatch.setattr(
+        testmon_policy, "decide", lambda config: testmon_policy.Decision(True, "default")
+    )
+
+    with pytest.raises(pytest.UsageError, match="testmon-noselect"):
+        harness._refuse_since_on_unattributed_map(config)
+
+    # Stamped: the same call is silent.
+    coverage_map.write_sidecar(
+        map_path,
+        structure={},
+        baselines={},
+        sweep={"sha": "abc", "at": "x", "swept": True, "attributed": True},
+    )
+    harness._refuse_since_on_unattributed_map(config)
+
+    # An absent or empty map already degrades to running everything.
+    config.arrayscope_map_peek = None
+    coverage_map.write_sidecar(map_path, structure={}, baselines={}, sweep={"swept": False})
+    harness._refuse_since_on_unattributed_map(config)
+
+
+def test_the_loop_names_the_gap_immediately_not_on_a_clock(tmp_path, monkeypatch):
+    """An under-attributed map under-selects on every run, so the nudge must
+    not wait out the 21-day/40-commit cadence clocks."""
+
+    from tests import conftest as harness
+
+    map_path = tmp_path / ".testmondata"
+    monkeypatch.setattr(testmon_policy, "map_path", lambda rootdir: map_path)
+    coverage_map.write_sidecar(
+        map_path,
+        structure={},
+        baselines={},
+        sweep={"sha": "abc", "at": "2026-07-31T00:00:00+00:00", "swept": True},
+    )
+
+    lines = []
+    reporter = SimpleNamespace(stats={}, write_line=lambda line, **markup: lines.append(line))
+    config = _sweep_config()
+    config.arrayscope_fast_path = True
+    config.getoption = lambda name, default=None: default
+    harness._report_sweep_cadence(reporter, config)
+    assert any("testmon-noselect" in line and "under-scoped" in line for line in lines)

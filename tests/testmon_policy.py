@@ -188,6 +188,46 @@ def pin_per_test_dependency_batches() -> bool:
     return True
 
 
+def attribution_gap(sweep_record: dict) -> str:
+    """Why this map's records cannot back an evidence claim, or ``""``.
+
+    A sweep record carrying ``attributed`` was written by code that pins
+    per-test coverage batches (see :func:`pin_per_test_dependency_batches`),
+    so every entry in the map behind it was recorded with complete dependency
+    edges. Any other state means the map may hold records made under batched
+    sysmon coverage — each a *subset* of the truth — and a missing edge is the
+    invisible kind of wrong: the test is not selected, not "reached", and
+    reported verified. A map with no full record at all is the same hole with
+    a different history: its entries came from a donor whose records predate
+    the fix, and nothing since has re-recorded them wholesale.
+
+    (A map recorded from scratch post-fix stamps itself: its first run
+    executes everything, which the sweep detector counts as exhaustive.)
+
+    The gap heals exactly one way — ``pytest --testmon-noselect`` — and the
+    callers make that the path of least resistance rather than a footnote:
+    the inner loop names it on every run, and ``--since`` refuses until it
+    has happened, because a gate whose "reached" set is itself under-scoped
+    cannot make the claim the gate exists to make.
+    """
+
+    if not isinstance(sweep_record, dict):
+        sweep_record = {}
+    if sweep_record.get("swept") and sweep_record.get("attributed"):
+        return ""
+    if sweep_record.get("swept"):
+        return (
+            "this map's last full record predates per-test dependency "
+            "attribution (2026-07-31: batched sysmon coverage credited each "
+            "line only to the first test in a 250-test batch)"
+        )
+    return (
+        "this map has never been fully recorded under per-test dependency "
+        "attribution (its entries were seeded from records that predate the "
+        "2026-07-31 fix)"
+    )
+
+
 @dataclass(frozen=True)
 class Decision:
     """Whether selection runs for one pytest invocation, and why."""
