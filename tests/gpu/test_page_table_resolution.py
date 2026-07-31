@@ -222,13 +222,15 @@ def test_owner_pin_replacement_keeps_shared_coverage_until_last_owner_releases()
     table.replace_pin_set("view-a", (coarse,))
     table.replace_pin_set("view-b", (coarse,))
     table.replace_pin_set("view-a", (fine_a,))
-    assert coarse not in table.eviction_candidates()
-    assert fine_a not in table.eviction_candidates()
+    assert table.is_pinned(coarse)  # view-b still names it
+    assert table.is_pinned(fine_a)
 
     table.replace_pin_set("view-b", (fine_b,))
-    assert coarse in table.eviction_candidates()
-    assert fine_a not in table.eviction_candidates()
-    assert fine_b not in table.eviction_candidates()
+    assert not table.is_pinned(coarse)  # the last owner moved on
+    assert table.is_pinned(fine_a)
+    assert table.is_pinned(fine_b)
+    # And the released page is what the executor would actually take.
+    assert table.eviction_candidate() == coarse
 
 
 def test_all_pinned_table_offers_nothing_to_evict_and_still_resolves():
@@ -241,7 +243,7 @@ def test_all_pinned_table_offers_nothing_to_evict_and_still_resolves():
     coarse_slot = bind(table, coarse, 0)
     table.replace_pin_set("active-view", (coarse,))
 
-    assert table.eviction_candidates() == ()
+    assert table.eviction_candidate() is None
 
     assert len(table) == 1
     assert_resolution(

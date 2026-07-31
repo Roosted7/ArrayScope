@@ -1711,9 +1711,10 @@ def test_histogram_frontier_survives_same_submission_eviction_pressure():
     assert filler_key not in resident
     counts = np.asarray(report.histograms[3])
     assert int(counts.sum()) == PAGE * PAGE
-    # The shield is submission-scoped: nothing stays pinned afterwards.
+    # The shield is submission-scoped: nothing stays pinned afterwards, so
+    # every resident page is offerable and the next victim is one of them.
     assert not any(executor.page_table.is_pinned(k) for k in resident)
-    assert set(executor.page_table.eviction_candidates()) == resident
+    assert executor.page_table.eviction_candidate() in resident
 
 
 def test_histogram_key_sacrificed_to_pool_pressure_reports_missing_not_abort():
@@ -1751,7 +1752,8 @@ def test_histogram_key_sacrificed_to_pool_pressure_reports_missing_not_abort():
     assert executor.page_table.resident_keys() == (second_key,)
     # Sacrifice released the first pin; the survivor's pin releases with the
     # submission — pool-exhaustion honesty for OTHER owners is untouched.
-    assert executor.page_table.eviction_candidates() == (second_key,)
+    assert not executor.page_table.is_pinned(second_key)
+    assert executor.page_table.eviction_candidate() == second_key
 
 
 def test_unbudgeted_pool_rejects_residency_loudly():

@@ -10,8 +10,10 @@ answer once the tree is written, and CI is not a gate in this repository.
 Two classes are refused. **Unreachable** code nothing names at all, and
 **test-only** code whose only callers are under ``tests/`` -- the class a
 coverage number cannot see, because the function still executes and so still
-reads as covered. The rules, the allowlist, and the unadjudicated backlog live
-in :mod:`tests.dead_code`; this file is only the command line.
+reads as covered. Both are asked of module-level definitions and of methods of
+classes no framework can dispatch into. The rules, the allowlists, and the
+unadjudicated backlogs live in :mod:`tests.dead_code`; this file is only the
+command line.
 """
 
 from __future__ import annotations
@@ -44,6 +46,13 @@ def main(argv: list[str] | None = None) -> int:
             "queue row 12, delete or restore a caller:"
         )
         for path, name in pending:
+            print(f"  {path}::{name}")
+        methods = dead_code._PENDING_METHODS
+        print(
+            f"\npending methods ({len(methods)}/{dead_code._PENDING_METHOD_CEILING}) — "
+            "grandfathered when the method rule was added:"
+        )
+        for path, name in methods:
             print(f"  {path}::{name}")
         print()
 

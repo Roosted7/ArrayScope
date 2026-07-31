@@ -10,7 +10,7 @@ Two classes, both failures:
 
 This is a lint, not a test, and it is wired the way ruff is: the gate is
 ``.githooks/pre-commit`` via ``tools/dead_code.py``. Running the tree scan
-again under pytest would buy nothing and cost ~3.7 s on every suite run, so
+again under pytest would buy nothing and cost several seconds on every suite run,
 ``tests/app/test_dead_code.py`` keeps only the synthetic proof that these
 rules can actually fail.
 
@@ -20,10 +20,21 @@ live function nobody tests is uncovered, and a test-only function is
 *covered*. Reachability is a static question about who **names** a definition,
 which is why it is asked statically here.
 
-Scope is module-level ``def``/``class`` only. Methods and nested functions are
-reached through instances, dataclass fields, and duck-typed protocols, so a
-name scan cannot adjudicate them; including them would trade a short, trusted
-report for a long, ignored one.
+Two scopes, because one of them was a blind spot. Module-level ``def``/``class``
+is the original rule. **Methods** are the second, added after a commit replaced
+``PageTable.eviction_candidates`` with a cheaper query, left the old method
+behind with only test callers, and this gate printed "dead code: none" — methods
+were simply never candidates.
+
+Methods are adjudicated only where a name scan honestly can: a method of a
+top-level class that has **no base classes** and is **never used as a base**
+in-tree. A class with a base can be dispatched into from outside the tree
+(Qt calls ``paint``, ``logging`` calls ``filter``, a Protocol seam is called
+through the interface), and a subclass can override; neither leaves a name a
+scan can find. Measured on this tree, dropping that restriction takes the
+report from 116 entries to 200 and every one of the extra 84 examined was
+framework dispatch — the "long, ignored report" this rule is meant not to be.
+Nested functions stay out of scope entirely.
 
 A *reference* is any ``Name``, attribute name, import alias, or **string
 constant** anywhere in the tree. Counting bare strings is what keeps dynamic
@@ -40,7 +51,10 @@ Two references deliberately do *not* count:
 
 AST over ``arrayscope/`` and the repo-root product trees; a plain word scan
 over ``tests/``, where over-approximating can only relabel a finding and never
-hide one. Nothing is imported and no Qt object is built: ~1.9 s.
+hide one. Nothing is imported and no Qt object is built. All three scans share
+one cached parse of the package, which is why adding the method rule made the
+whole gate *faster* than the two scans that each parsed it themselves: 5.3-5.7 s
+against 6.2-8.8 s before, on a machine with about half its cores busy.
 """
 
 from __future__ import annotations
@@ -58,6 +72,8 @@ ROOT = Path(__file__).parents[1]
 _NON_TEST_ROOTS = ("tools", "wrappers", "packaging", "experiments")
 
 _DEFINITION = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+_FUNCTION = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 _STRUCTURAL_BASES = {"Protocol", "ABC"}
 
@@ -232,6 +248,185 @@ _PENDING_ADJUDICATION = (
 _PENDING_CEILING = 64
 
 
+# Methods of name-reachable classes with no production caller, grandfathered
+# when the method rule was added. This list is the honest cost of the rule: it
+# is what the blind spot had already accumulated, and nothing on it is a new
+# failure. The gate refuses anything NOT listed here, so the class of mistake
+# that produced it -- replace a caller, leave the method -- fails at the hook
+# from now on.
+#
+# Several clusters are visible and worth naming rather than hiding:
+#   * ``WgpuPlaneExecutor``'s ``*_total`` properties are instruments that only
+#     probes and tests read. The dossier culture wants those to exist; they
+#     need a decision on whether an instrument counts as production surface.
+#   * ``PageTable`` alone has ``pin``, ``remap_slots`` and ``chunk_in_slot``,
+#     all of which lost their production callers to newer seams -- the same
+#     rot that produced ``eviction_candidates``.
+#   * ``FrameSession``'s tuple accessors and ``WindowLayoutManager``'s geometry
+#     helpers are the two largest, both from superseded call paths.
+#
+# The count below is a ceiling, so this list can only shrink.
+_PENDING_METHODS = (
+    ("arrayscope/core/bounded_cache.py", "BoundedCache.note_hit"),
+    ("arrayscope/core/dimension_roles.py", "DimensionRoles.with_single_profile_axis"),
+    ("arrayscope/core/dimension_roles.py", "DimensionRoles.with_toggled_profile_axis"),
+    ("arrayscope/core/view_state.py", "ViewState.with_axis_fftshifted"),
+    (
+        "arrayscope/display/backends/pyqtgraph/histogram_adapter.py",
+        "PyQtGraphHistogramAdapter.bound_item",
+    ),
+    (
+        "arrayscope/display/backends/pyqtgraph/tiles.py",
+        "MontageTileLayer.assert_presented_index_matches_scan",
+    ),
+    (
+        "arrayscope/display/backends/pyqtgraph/tiles.py",
+        "MontageTileLayer.preview_atlas_decline_reason",
+    ),
+    (
+        "arrayscope/display/backends/pyqtgraph/tiles.py",
+        "MontageTileLayer.preview_atlas_page_count",
+    ),
+    ("arrayscope/display/backends/pyqtgraph/tiles.py", "MontageTileLayer.update_levels"),
+    ("arrayscope/display/frame_planner.py", "FramePlanner.montage_region_set_hits"),
+    ("arrayscope/display/frame_planner.py", "FramePlanner.montage_region_set_misses"),
+    ("arrayscope/display/geometry.py", "DisplayGeometry.view_point_to_display_point"),
+    ("arrayscope/display/glyph_atlas.py", "GlyphAtlas.line_height"),
+    ("arrayscope/display/interaction.py", "DisplayInteractionController.observe_capture_geometry"),
+    ("arrayscope/display/interaction.py", "DisplayInteractionController.observe_profile_position"),
+    ("arrayscope/display/interaction.py", "DisplayInteractionController.set_pointer"),
+    ("arrayscope/display/lod.py", "LodInfo.reduced_extents"),
+    (
+        "arrayscope/display/model/frame.py",
+        "PageBackedPresentation.sample_presented_value_at_native",
+    ),
+    ("arrayscope/display/model/frame.py", "TilePresentationState.near_payloads"),
+    ("arrayscope/display/model/montage_levels.py", "MontageLevelStats.coverage_rank"),
+    ("arrayscope/display/model/montage_levels.py", "MontageLevelTracker.best_source"),
+    ("arrayscope/display/model/montage_levels.py", "MontageLevelTracker.histogram_data_for_stats"),
+    ("arrayscope/display/model/montage_levels.py", "MontageLevelTracker.update_from_tile"),
+    (
+        "arrayscope/display/model/presentation_generation.py",
+        "PresentationGenerationTracker.forget_tiles",
+    ),
+    ("arrayscope/display/montage.py", "MontagePlan.display_rect_for_tiles"),
+    ("arrayscope/display/pyramid.py", "LodPageCache.begin_claim"),
+    ("arrayscope/display/pyramid.py", "LodPageCache.claimed_by"),
+    ("arrayscope/display/pyramid.py", "LodPageCache.plan_set_ineligible"),
+    ("arrayscope/display/pyramid.py", "ResolvedLodPageSet.target_actual_levels"),
+    ("arrayscope/display/pyramid.py", "ResolvedLodPageSet.uniform_actual_level"),
+    ("arrayscope/display/scene.py", "DisplayScene.resident_region_ids"),
+    ("arrayscope/display/source_anchoring.py", "SourceAnchoring.any_anchored"),
+    (
+        "arrayscope/display/view_navigation_driver.py",
+        "QtGestureNavigationDriver.is_middle_drag_active",
+    ),
+    ("arrayscope/display/viewport.py", "ViewportController._current_view_is_near_auto"),
+    ("arrayscope/display/viewport.py", "ViewportController.promote_near_auto"),
+    ("arrayscope/gpu/cache_policy.py", "CompressedTierDecision.pressure_ratio"),
+    ("arrayscope/gpu/chunk_codec.py", "BitpackCodec.is_packed"),
+    ("arrayscope/gpu/chunk_codec.py", "BitpackCodec.payload_words"),
+    ("arrayscope/gpu/chunk_codec.py", "BitpackCodec.read_header"),
+    ("arrayscope/gpu/chunk_codec.py", "CompressedChunkCache.stored_bytes"),
+    ("arrayscope/gpu/chunk_grid.py", "ChunkGrid.origin_for_index"),
+    ("arrayscope/gpu/chunk_grid.py", "ChunkGrid.shape_at"),
+    ("arrayscope/gpu/chunk_grid.py", "ChunkGrid.window_delta"),
+    ("arrayscope/gpu/keys.py", "ChunkLod.axis_scale"),
+    ("arrayscope/gpu/page_table.py", "PageTable.chunk_in_slot"),
+    ("arrayscope/gpu/page_table.py", "PageTable.pin"),
+    ("arrayscope/gpu/page_table.py", "PageTable.remap_slots"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.bound_planes"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.codec_pool_allocated_layers"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.codec_pool_free_layers"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.glyph_atlas_uploads_total"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.histogram_batch_readbacks_total"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.histogram_dispatches_total"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.histogram_readback_resolves_total"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.overlay_buffer_writes_total"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.pool_allocated_layers"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.pool_free_layers"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.set_histogram_codec_mode"),
+    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.widget_atlas_uploads_total"),
+    ("arrayscope/kernel/completions.py", "_DrainState.exhausted"),
+    ("arrayscope/kernel/scheduler.py", "Kernel.forget_results"),
+    ("arrayscope/kernel/scheduler.py", "Kernel.last_shutdown_diagnostics"),
+    ("arrayscope/kernel/scheduler.py", "Kernel.supersede"),
+    ("arrayscope/operations/compressed_tier.py", "CompressedBackingTier.stored_bytes"),
+    ("arrayscope/operations/coordinator.py", "OperationCoordinator.append_operation"),
+    ("arrayscope/operations/coordinator.py", "OperationCoordinator.operation_cost_estimates"),
+    ("arrayscope/operations/coordinator.py", "OperationCoordinator.pipeline_cost_estimate"),
+    ("arrayscope/operations/evaluator.py", "LevelEvidenceBatchResult.max_source_pixels"),
+    ("arrayscope/operations/evaluator.py", "LevelEvidenceBatchResult.requested_pixels"),
+    ("arrayscope/operations/evaluator.py", "OperationEvaluator.cache_diagnostics"),
+    ("arrayscope/operations/evaluator.py", "OperationEvaluator.cached_display_tile"),
+    ("arrayscope/operations/evaluator.py", "OperationEvaluator.current_data"),
+    ("arrayscope/operations/evaluator.py", "OperationEvaluator.note_render_cancelled"),
+    ("arrayscope/operations/evaluator.py", "OperationEvaluator.note_render_degraded"),
+    ("arrayscope/operations/evaluator.py", "OperationEvaluator.note_render_refused"),
+    ("arrayscope/operations/pipeline.py", "ArrayDocument.with_data_changed"),
+    ("arrayscope/operations/pipeline.py", "ArrayDocument.with_replaced_operation"),
+    ("arrayscope/operations/pipeline.py", "ArrayDocument.with_step_enabled"),
+    ("arrayscope/operations/plugin_conformance.py", "OperationCharacterization.predict_shape"),
+    ("arrayscope/operations/plugins.py", "PluginOperation.execution_class"),
+    ("arrayscope/operations/registry.py", "OperationEntry.axis_selection"),
+    (
+        "arrayscope/operations/stage_materialization.py",
+        "StageMaterializationManager.invalidate_document",
+    ),
+    (
+        "arrayscope/operations/stage_materialization.py",
+        "StageMaterializationResult.should_schedule",
+    ),
+    ("arrayscope/presentation/prepared_uploads.py", "PreparedUploadMailbox.note_submitted"),
+    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.best_presentable"),
+    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.evaluation_requests_cleared"),
+    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.feedback_signature"),
+    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.preview_claim_active"),
+    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.stage_blocked_tiles"),
+    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.stage_detached"),
+    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.task_requested"),
+    ("arrayscope/presentation/tile_lifecycle.py", "TilePayloadRef.is_target_quality"),
+    ("arrayscope/profiles/coordinator.py", "ProfileCoordinator.render_from_marker"),
+    ("arrayscope/render/lod.py", "LodPageMaterializationRequest.reduce_factor_xy"),
+    ("arrayscope/window/frame_effects.py", "FramePipelineEffects.admit_tile_result"),
+    ("arrayscope/window/frame_session.py", "FrameSession._session_resident_levels"),
+    ("arrayscope/window/frame_session.py", "FrameSession.consume_dirty_rects"),
+    ("arrayscope/window/frame_session.py", "FrameSession.expand_viewport_coverage"),
+    ("arrayscope/window/frame_session.py", "FrameSession.is_tile_loaded"),
+    ("arrayscope/window/frame_session.py", "FrameSession.loading_tile_tuple"),
+    ("arrayscope/window/frame_session.py", "FrameSession.mark_preview_refinements_dirty"),
+    ("arrayscope/window/frame_session.py", "FrameSession.parked_dirty_payloads"),
+    ("arrayscope/window/frame_session.py", "FrameSession.release_preview_claim"),
+    ("arrayscope/window/frame_session.py", "FrameSession.rendered_tuple"),
+    ("arrayscope/window/frame_session.py", "FrameSession.skipped_tile_tuple"),
+    ("arrayscope/window/frame_session.py", "FrameSession.snapshot_display_tile_payloads"),
+    ("arrayscope/window/layout_controller.py", "WindowLayoutManager._dock_extent_for_area"),
+    (
+        "arrayscope/window/layout_controller.py",
+        "WindowLayoutManager._restore_saved_viewport_session",
+    ),
+    ("arrayscope/window/layout_controller.py", "WindowLayoutManager._viewport_shape_matches"),
+    ("arrayscope/window/layout_controller.py", "WindowLayoutManager._visible_docked_panel_deltas"),
+    (
+        "arrayscope/window/layout_controller.py",
+        "WindowLayoutManager.dockless_window_size_for_viewport_shape",
+    ),
+    (
+        "arrayscope/window/layout_controller.py",
+        "WindowLayoutManager.set_dock_visible_preserving_canvas",
+    ),
+    (
+        "arrayscope/window/montage_payload_cache.py",
+        "RetainedTiledPayloadStore.clear_for_document_or_context_change",
+    ),
+    ("arrayscope/window/panels.py", "PanelManager.reset_panel_layout"),
+    ("arrayscope/window/panels.py", "PanelManager.toggle_panel"),
+)
+
+#: Ceiling for the method backlog, on the same terms as ``_PENDING_CEILING``.
+_PENDING_METHOD_CEILING = 115
+
+
 #: ``arrayscope/tools/`` is the tracing/benchmark/oracle harness (docs/areas.md
 #: routes it to ``tests/app`` + ``tests/stress``). Being called only from tests
 #: is that package's design, so it is exempt from the *test-only* class alone --
@@ -310,10 +505,8 @@ def _structurally_exempt(node: ast.AST, relative: str) -> bool:
         return True
     if isinstance(node, ast.ClassDef):
         # Structural types: an implementation never names its Protocol.
-        for base in node.bases:
-            base_name = base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
-            if base_name in _STRUCTURAL_BASES:
-                return True
+        if any(label in _STRUCTURAL_BASES for label in _base_labels(node)):
+            return True
         for decorator in node.decorator_list:
             decorated = decorator.func if isinstance(decorator, ast.Call) else decorator
             label = (
@@ -330,8 +523,49 @@ def _python_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*.py"))
 
 
-def _words_under(directory: Path) -> set[str]:
-    """Every identifier-shaped word in a tree, without parsing it."""
+@cache
+def _package_trees(root: Path) -> tuple[tuple[str, ast.Module], ...]:
+    """``(relative path, parsed module)`` for every file under ``root/arrayscope``.
+
+    Cached because both scans below want the same parse of the same tree, and
+    parsing the package twice is most of what this gate costs.
+    """
+
+    return tuple(
+        (path.relative_to(root).as_posix(), ast.parse(path.read_text(encoding="utf-8")))
+        for path in _python_files(root / _PACKAGE)
+    )
+
+
+@cache
+def _product_root_names(root: Path) -> frozenset[str]:
+    """Every name the shipping repo-root trees reference.
+
+    A product-root reference SUPPRESSES a finding, so ``tools/dead_code.py``
+    — this module's own CLI — is skipped: if it ever grew a mention of a
+    listed name, it would silently hide that entry.
+    """
+
+    names: set[str] = set()
+    for name in _NON_TEST_ROOTS:
+        directory = root / name
+        if not directory.is_dir():
+            continue
+        for path in _python_files(directory):
+            if path.name == Path(__file__).name:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            names |= _names_referenced(tree, _dunder_all_strings(tree))
+    return frozenset(names)
+
+
+@cache
+def _words_under(directory: Path) -> frozenset[str]:
+    """Every identifier-shaped word in a tree, without parsing it.
+
+    Cached because both scans ask for the same ``tests/`` sweep, and reading
+    that tree twice is most of what a second scan would cost.
+    """
 
     words: set[str] = set()
     if not directory.is_dir():
@@ -358,7 +592,6 @@ def unreferenced_definitions(root: Path) -> tuple[tuple[Definition, ...], tuple[
     and one parse of ``arrayscope/`` plus ``tests/`` is the whole cost here.
     """
 
-    package = root / "arrayscope"
     definitions: list[tuple[Definition, ast.AST]] = []
     # name -> number of distinct owners naming it; an owner is one top-level
     # definition, or one file's module level.
@@ -369,9 +602,7 @@ def unreferenced_definitions(root: Path) -> tuple[tuple[Definition, ...], tuple[
         for name in names:
             package_references[name] = package_references.get(name, 0) + 1
 
-    for path in _python_files(package):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        relative = path.relative_to(root).as_posix()
+    for relative, tree in _package_trees(root):
         declared = _dunder_all_strings(tree)
         module_level: set[str] = set()
         for node in tree.body:
@@ -390,29 +621,13 @@ def unreferenced_definitions(root: Path) -> tuple[tuple[Definition, ...], tuple[
                 module_level |= _names_referenced(node, declared)
         credit(module_level)
 
-    def outside(roots: tuple[str, ...]) -> set[str]:
-        names: set[str] = set()
-        for name in roots:
-            directory = root / name
-            if not directory.is_dir():
-                continue
-            for path in _python_files(directory):
-                # ``tools/dead_code.py`` is this module's CLI. A product-root
-                # reference SUPPRESSES a finding, so if the CLI ever grew a
-                # mention of an allowlisted name it would silently hide it.
-                if path.name == Path(__file__).name:
-                    continue
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-                names |= _names_referenced(tree, _dunder_all_strings(tree))
-        return names
-
     # ``tests/`` is read with a word scan rather than a parse, which is most of
     # this guard's wall clock. It over-approximates -- a name in a test comment
     # counts -- and that is safe in exactly one direction: the test side only
     # ever decides which *label* a finding gets, never whether it is reported.
     # ``product_names`` does suppress findings, so those roots stay parsed.
     test_names = _words_under(root / "tests")
-    product_names = outside(_NON_TEST_ROOTS)
+    product_names = _product_root_names(root)
 
     unreachable: list[Definition] = []
     test_only: list[Definition] = []
@@ -425,6 +640,109 @@ def unreferenced_definitions(root: Path) -> tuple[tuple[Definition, ...], tuple[
         if owners or definition.name in product_names:
             continue
         if definition.name in test_names:
+            if not definition.relative.startswith(_HARNESS_PACKAGE):
+                test_only.append(definition)
+        else:
+            unreachable.append(definition)
+    return tuple(unreachable), tuple(test_only)
+
+
+def _base_labels(node: ast.ClassDef) -> list[str]:
+    return [
+        base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
+        for base in node.bases
+    ]
+
+
+@cache
+def _dispatchable_classes(root: Path) -> frozenset[str]:
+    """Class names something outside a name scan can call methods on.
+
+    A class with a base may be dispatched into from outside the tree — Qt
+    calls ``paint``, ``logging`` calls ``filter``, a Protocol seam is called
+    through the interface — and a class used as a base may have any of its
+    methods overridden or called on a subclass instance. Neither leaves a
+    name in this tree, so neither is adjudicable and both are skipped whole.
+    """
+
+    dispatchable: set[str] = set()
+    for _relative, tree in _package_trees(root):
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if node.bases:
+                dispatchable.add(node.name)
+            dispatchable.update(label for label in _base_labels(node) if label)
+    return frozenset(dispatchable)
+
+
+@cache
+def unreferenced_methods(root: Path) -> tuple[tuple[Definition, ...], tuple[Definition, ...]]:
+    """``(unreachable, test_only)`` methods of name-reachable classes.
+
+    ``Definition.name`` is qualified (``PageTable.eviction_candidates``) so a
+    report names the owner; references are still resolved on the bare method
+    name, because that is all an attribute access carries. Two classes
+    therefore share a verdict when they share a method name — a live ``A.foo``
+    hides a dead ``B.foo``. That is the safe direction: this scan under-reports
+    rather than accusing live code.
+
+    An owner is one method body, one class body, one top-level function, or
+    one file's module level. A method's own body is not an owner of itself
+    (recursion is not a caller), but a *sibling* method is: ``self.foo()``
+    from elsewhere in the class is a real caller.
+    """
+
+    references: dict[str, set[tuple[str, str]]] = {}
+    candidates: list[tuple[Definition, str]] = []
+    dispatchable = _dispatchable_classes(root)
+
+    def credit(names: set[str], site: tuple[str, str]) -> None:
+        for name in names:
+            references.setdefault(name, set()).add(site)
+
+    for relative, tree in _package_trees(root):
+        declared = _dunder_all_strings(tree)
+        module_level: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                adjudicable = node.name not in dispatchable
+                class_level: set[str] = set()
+                for item in node.body:
+                    if not isinstance(item, _FUNCTION):
+                        class_level |= _names_referenced(item, declared)
+                        continue
+                    qualified = f"{node.name}.{item.name}"
+                    credit(_names_referenced(item, declared), (relative, qualified))
+                    # ``@x.setter`` names the property it extends, so a
+                    # decorator belongs to the class, not to the method.
+                    for decorator in item.decorator_list:
+                        class_level |= _names_referenced(decorator, declared)
+                    if adjudicable and not (
+                        item.name.startswith("__") and item.name.endswith("__")
+                    ):
+                        candidates.append((Definition(relative, qualified, item.lineno), item.name))
+                credit(class_level, (relative, node.name))
+                for decorator in node.decorator_list:
+                    module_level |= _names_referenced(decorator, declared)
+            elif isinstance(node, _FUNCTION):
+                credit(_names_referenced(node, declared), (relative, node.name))
+                for decorator in node.decorator_list:
+                    module_level |= _names_referenced(decorator, declared)
+            else:
+                module_level |= _names_referenced(node, declared)
+        credit(module_level, (relative, "<module>"))
+
+    test_names = _words_under(root / "tests")
+    product_names = _product_root_names(root)
+
+    unreachable: list[Definition] = []
+    test_only: list[Definition] = []
+    for definition, bare in candidates:
+        sites = references.get(bare, set()) - {(definition.relative, definition.name)}
+        if sites or bare in product_names:
+            continue
+        if bare in test_names:
             if not definition.relative.startswith(_HARNESS_PACKAGE):
                 test_only.append(definition)
         else:
@@ -523,13 +841,8 @@ def dangling_module_attributes(root: Path) -> list[Dangling]:
     A module with a PEP 562 ``__getattr__`` is skipped: anything resolves there.
     """
 
-    modules: dict[str, set[str]] = {}
-    files: list[tuple[str, ast.Module]] = []
-    for path in _python_files(root / _PACKAGE):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        relative = path.relative_to(root).as_posix()
-        files.append((relative, tree))
-        modules[_module_of(relative)] = _module_level_bindings(tree)
+    files = _package_trees(root)
+    modules = {_module_of(relative): _module_level_bindings(tree) for relative, tree in files}
 
     lazy = {name for name, bound in modules.items() if "__getattr__" in bound}
 
@@ -553,6 +866,7 @@ def problems(root: Path = ROOT) -> list[str]:
     """Every reason this tree should be refused, most actionable first."""
 
     unreachable, test_only = unreferenced_definitions(root)
+    dead_methods = sum(unreferenced_methods(root), ())
 
     dangling = [
         f"dangling reference (nothing defines it): {entry}"
@@ -572,11 +886,21 @@ def problems(root: Path = ROOT) -> list[str]:
         for definition in test_only
         if not _allowed(definition) and not _pending(definition)
     ]
+    methods = [
+        f"dead method (no production caller): {definition}"
+        for definition in dead_methods
+        if (definition.relative, definition.name) not in _PENDING_METHODS
+    ]
+    if methods:
+        methods.append("  -> the caller you replaced was the last one; delete the method with")
+        methods.append("     its assertions, or point the new seam's tests at the survivor.")
+    found += methods
     if found:
         found.append("  -> delete it with its assertions, or restore a real caller;")
         found.append(f"     a genuine entry point goes in _ALLOWLIST in {Path(__file__).name}.")
 
     flagged = {(definition.relative, definition.name) for definition in unreachable + test_only}
+    flagged_methods = {(definition.relative, definition.name) for definition in dead_methods}
     # A stale entry is how the rule gets silently widened, so it is a failure
     # in its own right rather than a line nobody ever deletes.
     stale = [
@@ -589,11 +913,21 @@ def problems(root: Path = ROOT) -> list[str]:
         for path, name in _PENDING_ADJUDICATION
         if (path, name) not in flagged
     ]
+    stale += [
+        f"resolved pending method (no longer flagged): {path}::{name}"
+        for path, name in _PENDING_METHODS
+        if (path, name) not in flagged_methods
+    ]
 
     ceiling = []
     if len(_PENDING_ADJUDICATION) > _PENDING_CEILING:
         ceiling.append(
             f"{len(_PENDING_ADJUDICATION)} pending entries against a ceiling of "
             f"{_PENDING_CEILING}: adjudicate one instead of raising the ceiling."
+        )
+    if len(_PENDING_METHODS) > _PENDING_METHOD_CEILING:
+        ceiling.append(
+            f"{len(_PENDING_METHODS)} pending methods against a ceiling of "
+            f"{_PENDING_METHOD_CEILING}: adjudicate one instead of raising the ceiling."
         )
     return dangling + found + stale + ceiling

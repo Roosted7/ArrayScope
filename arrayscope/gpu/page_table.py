@@ -313,25 +313,16 @@ class PageTable:
     def resident_bytes(self) -> int:
         return sum(entry.nbytes for entry in self._entries.values())
 
-    def eviction_candidates(self) -> tuple[DataChunkKey, ...]:
-        """Unpinned resident chunks, least recently used first."""
-
-        return tuple(
-            key
-            for key, entry in sorted(self._entries.items(), key=lambda item: item[1].last_use)
-            if not entry.pinned
-        )
-
     def eviction_candidate(self, match=None) -> DataChunkKey | None:
         """Least recently used unpinned chunk satisfying ``match(key, slot)``.
 
         The executor asks this once per forced eviction, which under pool
-        pressure means once per upload.  Building the fully sorted candidate
-        tuple there made every pressured upload pay O(resident log resident)
-        for an answer that is a single minimum: ``last_use`` stamps are
-        unique, so the first matching entry of the sorted order is exactly
-        the matching entry with the smallest stamp.  One pass, no sort, no
-        tuple — ``eviction_candidates`` remains for diagnostics and tests.
+        pressure means once per upload.  The predecessor built a fully sorted
+        candidate tuple there, so every pressured upload paid
+        O(resident log resident) for an answer that is a single minimum:
+        ``last_use`` stamps are unique, so the first matching entry of the
+        sorted order is exactly the matching entry with the smallest stamp.
+        One pass, no sort, no tuple.
         """
 
         best_key: DataChunkKey | None = None

@@ -65,29 +65,34 @@ class TestPageTable:
         assert table.generation == generation + 1
 
     def test_eviction_order_is_lru_and_skips_pinned(self):
+        # Successive victims, each taken in turn, are the whole LRU order:
+        # asking for the single victim and then unbinding it walks the same
+        # sequence the executor walks under sustained pool pressure.
         table = PageTable()
         for n in range(3):
             table.bind(chunk(n), PageSlot("p", 0, n), nbytes=1)
         table.touch(chunk(0))  # 1 is now least recently used
         table.pin(chunk(1))
-        assert table.eviction_candidates() == (chunk(2), chunk(0))
+        walked = []
+        while (victim := table.eviction_candidate()) is not None:
+            walked.append(victim)
+            table.unbind(victim)
+        assert walked == [chunk(2), chunk(0)]  # the pinned 1 is never offered
         with pytest.raises(KeyError):
             table.pin(chunk(9))
 
-    def test_single_candidate_agrees_with_the_sorted_order(self):
-        # ``eviction_candidate`` is the executor's per-eviction query; it must
-        # name exactly the victim the full sorted tuple would have yielded
-        # first, both unfiltered and under the executor's pool filter.  The
-        # sort-free path exists because a pressured upload pays this query
-        # once per page; the tuple stays as the diagnostic form.
+    def test_the_victim_query_honours_the_executor_pool_filter(self):
+        # ``_evict_one_unpinned`` needs a free layer in ONE physical pool: the
+        # raw and BC pools of a representation have independent budgets, so a
+        # caller that needs a BC layer must never be handed a freed raw one.
         table = PageTable()
         for n in range(4):
             table.bind(chunk(n), PageSlot("a" if n % 2 else "b", 0, n), nbytes=1)
-        table.touch(chunk(0))
+        table.touch(chunk(0))  # 1 (pool a) and 2 (pool b) are now the oldest
         table.pin(chunk(1))
-        assert table.eviction_candidate() == table.eviction_candidates()[0]
-        pool_a = [key for key in table.eviction_candidates() if table.lookup(key).pool_id == "a"]
-        assert table.eviction_candidate(lambda key, slot: slot.pool_id == "a") == pool_a[0]
+        assert table.eviction_candidate() == chunk(2)
+        assert table.eviction_candidate(lambda key, slot: slot.pool_id == "a") == chunk(3)
+        assert table.eviction_candidate(lambda key, slot: slot.pool_id == "b") == chunk(2)
         assert table.eviction_candidate(lambda key, slot: slot.pool_id == "z") is None
 
     def test_every_binding_pinned_leaves_no_eviction_candidate(self):
@@ -97,7 +102,6 @@ class TestPageTable:
         table = PageTable()
         table.bind(chunk(0), PageSlot("p", 0, 0), nbytes=1)
         table.pin(chunk(0))
-        assert table.eviction_candidates() == ()
         assert table.eviction_candidate() is None
 
     def test_superseded_generation_releases_its_slot_for_the_successor(self):

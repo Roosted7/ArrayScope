@@ -2,7 +2,7 @@
 
 Ring 0 — no Qt, no imports of ``arrayscope``. The whole-tree scan is NOT run
 here: it is a lint, gated at commit time by ``.githooks/pre-commit`` through
-``tools/dead_code.py``, and running it again under pytest would cost ~3.7 s on
+``tools/dead_code.py``, and running it again under pytest would cost seconds on
 every suite run to re-answer a question the hook already refused to let past.
 
 What is left is the part pytest is actually for: a synthetic package where
@@ -16,8 +16,11 @@ from tests.dead_code import (
     _ALLOWLIST,
     _PENDING_ADJUDICATION,
     _PENDING_CEILING,
+    _PENDING_METHOD_CEILING,
+    _PENDING_METHODS,
     dangling_module_attributes,
     unreferenced_definitions,
+    unreferenced_methods,
 )
 
 
@@ -44,6 +47,100 @@ def test_the_pending_backlog_declares_a_ceiling_it_is_within():
 
     assert len(_PENDING_ADJUDICATION) <= _PENDING_CEILING
     assert len(set(_PENDING_ADJUDICATION)) == len(_PENDING_ADJUDICATION)
+    assert len(_PENDING_METHODS) <= _PENDING_METHOD_CEILING
+    assert len(set(_PENDING_METHODS)) == len(_PENDING_METHODS)
+
+
+def test_method_guard_reports_rot_without_accusing_dispatched_classes(tmp_path):
+    """Falsifiability for the method rule, including what it must NOT report.
+
+    The rule exists because ``PageTable.eviction_candidates`` kept only test
+    callers after its production caller was replaced, and the module-level
+    scan could not see it. Its whole risk is the opposite error — accusing a
+    method something outside the tree dispatches into — so the cases that must
+    stay silent are pinned here next to the ones that must fire.
+    """
+
+    package = tmp_path / "arrayscope"
+    package.mkdir()
+    (tmp_path / "tests").mkdir()
+
+    (package / "live.py").write_text(
+        "from arrayscope.shapes import Engine\n"
+        "\n"
+        "def drive():\n"
+        "    engine = Engine()\n"
+        "    engine.public_entry()\n"
+        "    return engine.value_property\n",
+        encoding="utf-8",
+    )
+    (package / "shapes.py").write_text(
+        "class Engine:\n"
+        "    def public_entry(self):\n"
+        "        return self._helper()\n"
+        "\n"
+        "    def _helper(self):\n"
+        "        return 1\n"
+        "\n"
+        "    @property\n"
+        "    def value_property(self):\n"
+        "        return 2\n"
+        "\n"
+        "    def only_a_test_calls_me(self):\n"
+        "        return 3\n"
+        "\n"
+        "    def nobody_calls_me(self):\n"
+        "        return 4\n"
+        "\n"
+        "    def recurses(self, n):\n"
+        "        return 0 if n <= 0 else self.recurses(n - 1)\n"
+        "\n"
+        "    def __len__(self):\n"
+        "        return 0\n"
+        "\n"
+        "\n"
+        "class Painted(QtGraphicsItem):\n"
+        "    def paint(self, painter):\n"
+        "        return None\n"
+        "\n"
+        "\n"
+        "class Base:\n"
+        "    def overridable(self):\n"
+        "        return 1\n"
+        "\n"
+        "\n"
+        "class Derived(Base):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (package / "tools").mkdir()
+    (package / "tools" / "harness.py").write_text(
+        "class Oracle:\n    def read_for_tests(self):\n        return 1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_shapes.py").write_text(
+        "def test_it(engine, oracle):\n"
+        "    assert engine.only_a_test_calls_me() == 3\n"
+        "    assert oracle.read_for_tests() == 1\n",
+        encoding="utf-8",
+    )
+
+    unreachable, test_only = unreferenced_methods(tmp_path)
+
+    assert {definition.name for definition in unreachable} == {
+        "Engine.nobody_calls_me",
+        # Recursion is not a caller, exactly as at module level.
+        "Engine.recurses",
+    }
+    assert {definition.name for definition in test_only} == {"Engine.only_a_test_calls_me"}
+    # Silent by construction, and each for its own reason:
+    #   public_entry   — named by live.py
+    #   _helper        — a sibling method calls it
+    #   value_property — reached as an attribute, not a call
+    #   __len__        — Python calls it
+    #   Painted.paint  — the class has a base, so Qt may dispatch into it
+    #   Base.overridable / Derived — the class is subclassed in-tree
+    #   Oracle.read_for_tests — arrayscope/tools/ is the test harness package
 
 
 def test_guard_separates_dead_code_from_every_exempt_entry_point(tmp_path):
