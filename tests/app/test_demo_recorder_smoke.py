@@ -147,7 +147,7 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         assert {
             "hover image values",
             "adjust histogram window and level",
-            "scrub axis 2 slices",
+            "middle-drag axis 2 slices",
             "crop axis 0 to 72:352",
             "restore full axis 0",
             "show image at true 1:1",
@@ -167,6 +167,11 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         assert levels["button"] == "left"
         assert levels["end_levels"][0] == pytest.approx(levels["start_levels"][0])
         assert levels["end_levels"][1] == pytest.approx(levels["cursor_values"][-1])
+        scrub = next(event for event in actions if event["label"] == "middle-drag axis 2 slices")
+        assert scrub["button"] == "middle"
+        assert scrub["gesture_axis"] == "horizontal"
+        assert scrub["target_axis"] == 2
+        assert scrub["after_index"] != scrub["before_index"]
     if name == "montage":
         montage_action = next(
             event for event in actions if event["label"] == "enter montage range on axis 2"
@@ -175,6 +180,12 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         assert montage_action["target"]["widget_type"] == "SliceIndexEdit"
         assert montage_action["caption"] == "Type ':' to montage the whole dimension"
         assert montage_action["detail_inset"] is True
+        zoom = next(event for event in actions if event["label"] == "middle-drag montage zoom")
+        assert zoom["button"] == "middle"
+        assert zoom["gesture_axis"] == "vertical"
+        before_span = zoom["before_view_range"][0][1] - zoom["before_view_range"][0][0]
+        after_span = zoom["after_view_range"][0][1] - zoom["after_view_range"][0][0]
+        assert after_span < before_span
     if name == "workflow":
         labels = {event["label"] for event in actions}
         assert {

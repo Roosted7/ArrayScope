@@ -1036,10 +1036,16 @@ class Recorder:
         if self._overlay_widget is None:
             self._focus_rect = None
 
-    def begin_gesture(self, label: str, *, button: str = "left") -> dict:
+    def begin_gesture(
+        self,
+        label: str,
+        *,
+        button: str = "left",
+        target: dict | None = None,
+    ) -> dict:
         from pyqtgraph.Qt import QtCore
 
-        event = self._start_action("drag", label)
+        event = self._start_action("drag", label, target=target)
         event["button"] = button
         event["press_frame"] = self.frame_index
         event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
@@ -1249,6 +1255,79 @@ class Recorder:
         )
         return bool(view.eventFilter(view.graphicsView.viewport(), event))
 
+    def send_viewport_mouse(self, event_type, window_point, *, button, buttons) -> bool:
+        """Send one real mouse event using the viewport coordinates under the cursor."""
+        from pyqtgraph.Qt import QtCore, QtGui
+
+        view = self.win.img_view
+        viewport = view.graphicsView.viewport()
+        local = viewport.mapFrom(self.win, window_point.toPoint())
+        event = QtGui.QMouseEvent(
+            event_type,
+            local,
+            button,
+            buttons,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+        return bool(view.eventFilter(viewport, event))
+
+    def middle_drag_navigation(self, *, axis: str, distance: float, seconds: float, label: str):
+        """Drive the shipped middle-drag navigation gesture end to end."""
+        from pyqtgraph.Qt import QtCore
+
+        if axis not in {"horizontal", "vertical"}:
+            raise ValueError(f"unknown middle-drag axis {axis!r}")
+        view = self.win.img_view
+        viewport = view.graphicsView.viewport()
+        target = self._widget_target(viewport, (0.5, 0.5))
+        self.move_to(self.widget_point(viewport), seconds=0.5)
+        target_axis = self.win.dimension_strip.scroll_target_axis()
+        before_index = (
+            None if target_axis is None else int(self.win.view_state.slice_indices[target_axis])
+        )
+        before_range = [list(values) for values in view.getView().viewRange()]
+        middle = QtCore.Qt.MouseButton.MiddleButton
+        event = self.begin_gesture(label, button="middle", target=target)
+        event["gesture_axis"] = axis
+        event["target_axis"] = target_axis
+        self._frame_event(event, target)
+        if not self.send_viewport_mouse(
+            QtCore.QEvent.Type.MouseButtonPress,
+            self.cursor,
+            button=middle,
+            buttons=middle,
+        ):
+            raise RuntimeError("middle-drag navigation did not consume its press")
+        start = QtCore.QPointF(self.cursor)
+        steps = max(2, self._frames_for(seconds))
+        for index in range(1, steps + 1):
+            amount = _ease(index / steps) * float(distance)
+            self.cursor = QtCore.QPointF(
+                start.x() + (amount if axis == "horizontal" else 0.0),
+                start.y() + (amount if axis == "vertical" else 0.0),
+            )
+            self.send_viewport_mouse(
+                QtCore.QEvent.Type.MouseMove,
+                self.cursor,
+                button=QtCore.Qt.MouseButton.NoButton,
+                buttons=middle,
+            )
+            self.capture()
+        if not self.send_viewport_mouse(
+            QtCore.QEvent.Type.MouseButtonRelease,
+            self.cursor,
+            button=middle,
+            buttons=QtCore.Qt.MouseButton.NoButton,
+        ):
+            raise RuntimeError("middle-drag navigation did not consume its release")
+        event["before_index"] = before_index
+        event["after_index"] = (
+            None if target_axis is None else int(self.win.view_state.slice_indices[target_axis])
+        )
+        event["before_view_range"] = before_range
+        event["after_view_range"] = [list(values) for values in view.getView().viewRange()]
+        self.finish_gesture(event, hold_s=0.45)
+
     def move_live_profile(self, points, *, seconds_per_segment: float = 0.7) -> None:
         """Move the live marker on every animation frame, not only at waypoints."""
         event = self._start_action("hover", "track live profile with pointer")
@@ -1374,6 +1453,7 @@ class Recorder:
         from pyqtgraph.Qt import QtCore
 
         event = self._start_action("drag", "pan image")
+        event["button"] = "left"
         vb = self.win.img_view.getView()
         anchor = QtCore.QPointF(self.cursor)
         self.cursor_pressed = True
@@ -1484,26 +1564,13 @@ def s_showcase(rec: Recorder):
     rec.caption("Drag the upper histogram handle to narrow the window")
     rec.drag_window_levels(high_fraction=0.72)
 
-    rec.caption("Scrub through any dimension")
-    chip = win.dimension_strip.chip(2)
-    # Derived from the axis, never a literal sweep: a hard-coded range outlived
-    # the volume it was written for once already, and every index past the end
-    # put "Could not understand slice selection" on screen for a second and a
-    # half of the lead walkthrough.
-    depth = volume.shape[2]
-    rec.scrub_text_values(
-        chip.slice_edit,
-        [
-            *range(depth // 2, depth - 1, 2),
-            *range(depth - 1, 2, -3),
-            *range(3, depth // 2 + 1, 2),
-        ],
-        on_text=lambda text: win._on_slice_text_changed(2, text),
-        per_value_s=0.09,
-        label="scrub axis 2 slices",
-        control_label="the axis 2 slice range",
+    rec.caption("Middle-drag horizontally to scrub the highlighted dimension")
+    rec.middle_drag_navigation(
+        axis="horizontal",
+        distance=80.0,
+        seconds=1.2,
+        label="middle-drag axis 2 slices",
     )
-    rec.hold(0.35)
 
     rec.caption("Crop away the bright left landmark with an explicit range")
     axis0_edit = win.dimension_strip.chip(0).slice_edit
@@ -1663,12 +1730,17 @@ def s_montage(rec: Recorder):
     rec.caption("Tiles are evaluated and presented progressively")
     rec.hold_until_settled(6.0, tail_s=1.6)
 
-    rec.caption("The montage is a real viewport — zoom into any tile")
-    center = rec.view_fraction_point(0.38, 0.4)
-    rec.move_to(rec.image_point(*center), seconds=0.8)
-    rec.zoom_image(2.6, center, seconds=1.5)
-    rec.hold(0.8)
+    rec.caption("The montage is a real viewport — middle-drag vertically to zoom")
     fit_widget = rec.toolbar_action_widget(win.display_toolbar, win.display_toolbar.fit_action)
+    if win.display_toolbar.fit_action.isChecked():
+        rec.click(fit_widget, label="unlock fitted montage")
+    rec.middle_drag_navigation(
+        axis="vertical",
+        distance=-72.0,
+        seconds=1.5,
+        label="middle-drag montage zoom",
+    )
+    rec.hold(0.8)
     rec.click(fit_widget)
     rec.hold_until_settled(2.5, tail_s=1.8)
 

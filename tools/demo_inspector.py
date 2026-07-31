@@ -439,6 +439,8 @@ def timeline_findings(scenario: str, timeline: dict, media: MediaFacts) -> list[
             continue
         name = f"{kind} {event.get('label', index)!r}"
         findings.extend(_caption_findings(scenario, name, event, captions, min_lead_frames))
+        if kind == "drag" and event.get("button") not in {"left", "middle", "right"}:
+            findings.append(Finding("error", scenario, f"{name} does not name its pressed button"))
         if event.get("detail_inset"):
             detail_rect = event.get("detail_rect")
             if detail_rect is None or len(detail_rect) != 4:

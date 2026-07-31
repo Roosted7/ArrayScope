@@ -389,6 +389,34 @@ def test_a_declared_detail_inset_must_name_an_in_frame_source(inspector):
     assert "preview 'show export' detail source lies outside the window" in messages
 
 
+def test_a_drag_must_name_the_button_held_for_its_frame_range(inspector):
+    events = [
+        _caption("Navigate", 0),
+        {
+            "kind": "drag",
+            "label": "middle-drag zoom",
+            "caption": "Navigate",
+            "start_frame": 20,
+            "press_frame": 22,
+            "activate_frame": 30,
+            "end_frame": 40,
+            "target": None,
+            "cursor_at_press": [400, 300],
+        },
+    ]
+
+    messages = [
+        finding.message
+        for finding in inspector["timeline_findings"](
+            "probe",
+            _timeline(events),
+            _facts(inspector, "probe", "mp4", width=1100, duration=200 / 30),
+        )
+    ]
+
+    assert "drag 'middle-drag zoom' does not name its pressed button" in messages
+
+
 def test_a_declared_detail_inset_must_actually_magnify(inspector):
     events = [
         _caption("Inspect the control", 0),
