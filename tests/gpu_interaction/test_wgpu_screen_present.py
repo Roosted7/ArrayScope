@@ -89,11 +89,23 @@ def test_commit_presents_on_the_swapchain_and_drains_the_draw_gate(qt_app, scree
         == diagnostics["tile_presentation_request_count"]
     )
     # Present-mode evidence (Fifo acquire blocks ~15 ms/frame, gate-B): the
-    # chosen mode is recorded; on Mailbox the steady-state acquire must not
-    # pay the vsync block.
+    # chosen mode is recorded; on Mailbox the STEADY-STATE acquire must not
+    # pay the vsync block.  The first acquire on a fresh swapchain is a known
+    # one-off ~15 ms (gate-B tier 1: cold 15 ms against 0.9 ms warm), so the
+    # steady state is driven for explicitly rather than read off whichever
+    # frame the settle loop happened to stop on.  Reading `acquire_ms_last`
+    # straight after the settle used to sample a warm frame only because a
+    # lost draw had forced a second one — an accident, not an oracle.
     assert diagnostics["wgpu_screen_present_mode"] in ("mailbox", "fifo")
     if diagnostics["wgpu_screen_present_mode"] == "mailbox":
-        assert diagnostics["wgpu_screen_acquire_ms_last"] < 10.0
+        presents_before = diagnostics["wgpu_screen_presents"]
+        view._request_wgpu_canvas_draw()
+        assert wait_for_qt_condition(
+            qt_app,
+            lambda: view.wgpuPresentationDiagnostics()["wgpu_screen_presents"] > presents_before,
+            timeout_s=10.0,
+        ), f"no second present to sample warm: {view.wgpuPresentationDiagnostics()}"
+        assert view.wgpuPresentationDiagnostics()["wgpu_screen_acquire_ms_last"] < 10.0
 
 
 def test_resize_reconfigures_and_keeps_presenting(qt_app, screen_view):

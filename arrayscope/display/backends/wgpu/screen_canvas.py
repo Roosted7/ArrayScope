@@ -370,9 +370,17 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
     def _invoke_draw(self) -> None:
         self._draw_scheduled = False
         callback = self._draw_callback
-        if callback is None or not self.isVisible():
-            # Leave a pending resize armed: a later show/expose draws it.
+        if callback is None:
             return
+        # No visibility bail: a draw that runs hidden must still reach the
+        # callback, because the view's draw acknowledgement lives inside it
+        # ("the ack still publishes so the presentation gate can never stay
+        # armed forever on a hidden or headless surface") and the view
+        # coalesces its rerequests against that ack.  Dropping the draw here
+        # left no wakeup armed anywhere — the requested>drawn latch of
+        # 2026-07-31, ground rule 11's forbidden "a later show/expose will
+        # pick it up".  Pixels while hidden are ensure_context's refusal to
+        # make, not this pacer's.
         self._apply_pending_resize()
         self._last_draw_started = perf_counter()
         self.frame_timing.note_draw_started(self._last_draw_started)
@@ -423,9 +431,13 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         """
 
         self._resize_pending = True
-        if self._last_draw_started == float("-inf"):
-            # Nothing has ever been drawn: this is the show/expose-time resize
-            # that establishes the surface size, not an interactive drag.
+        if self._context is None:
+            # No swapchain yet: this is the show/expose-time resize that
+            # establishes the surface size, not an interactive drag.  Keyed
+            # on the context rather than the draw clock because draws now
+            # run (and stamp the clock) on hidden canvases without ever
+            # configuring a chain — the context is the truth about whether
+            # the establish already happened.
             # Configuring the swapchain and taking the first (cold) acquire
             # here keeps that one-off ~15 ms cost off the first *content*
             # frame — deferring it measured 16-26 ms on the commit that
@@ -441,9 +453,15 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         ``set_physical_size`` marks the chain for reconfiguration, so calling
         it per event rebuilt the image chain repeatedly mid-drag.  Every
         resize event since the last frame collapses into this one call.
+
+        A hidden canvas leaves the resize armed rather than reconfiguring
+        against a size no compositor is showing.  Unlike the draw itself
+        (whose acknowledgement nothing else can publish), a deferred resize
+        HAS a standing owner: ``showEvent`` requests a draw unconditionally,
+        and that draw applies it before the first visible frame.
         """
 
-        if not self._resize_pending:
+        if not self._resize_pending or not self.isVisible():
             return
         self._resize_pending = False
         if self._context is not None:
@@ -472,7 +490,12 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         """
 
         if self._context is not None:
-            return self._context
+            # A cached swapchain is only handed out while the widget can
+            # present: draws now run on hidden canvases (so their ack can
+            # publish), and a Fifo acquire against an unmapped surface can
+            # block the GUI thread until the compositor feels like mapping
+            # it again.
+            return self._context if self.isVisible() else None
         if not self.isVisible() or not self._surface_window.isExposed():
             return None
         width, height = self.get_physical_size()
