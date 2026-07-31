@@ -3477,11 +3477,19 @@ def test_present_method_request_normalizes_unknown_values(qt_app):
     view = _view_class("wgpu")(present_method="garbage")
     try:
         # Unknown values normalize to the AUTO default rather than to a
-        # method: off Wayland that resolves to bitmap with the reason
-        # recorded, which is the resolution rule working, not a fallback.
+        # method: with no native swapchain recipe for this platform that
+        # resolves to bitmap with the reason recorded, which is the
+        # resolution rule working, not a fallback.
         assert view._wgpu_present_method_requested == "auto"
         assert view.wgpuPresentMethod() == "bitmap"
-        assert "wayland" in view.wgpuPresentMethodFallbackReason()
+        # The reason names the platform it could not build a swapchain for.
+        # It used to be asserted as the literal "wayland", which stopped
+        # describing the code when AUTO widened to X sessions (3be3d2f7) --
+        # screen present is no longer a Wayland-only recipe, so the offscreen
+        # ring now reports the platform rather than the missing compositor.
+        reason = view.wgpuPresentMethodFallbackReason()
+        assert reason, "an unavailable screen present must record why"
+        assert qt_app.platformName() in reason
     finally:
         view.close()
 
