@@ -198,10 +198,20 @@ def test_grab_presented_framebuffer_sees_the_committed_content(qt_app, screen_vi
     assert float((gray > 10.0).mean()) > 0.05
 
 
-def test_auto_present_method_activates_screen_on_wayland(qt_app):
-    """AUTO's whole point: on a live Wayland session it flips screen on."""
+def test_auto_present_method_activates_screen_on_a_native_session(qt_app):
+    """AUTO's whole point: on a session with a native surface it flips on.
+
+    Runs under whichever QPA this ring was launched with, so it is the same
+    gate for both — and it is what would catch the X widening resolving to
+    bitmap on an X session while every offscreen unit test stayed green.
+    """
+
+    from pyqtgraph.Qt import QtWidgets
 
     from arrayscope.display.wgpu_imageview2d import WgpuImageView2D
+
+    platform = str(QtWidgets.QApplication.instance().platformName())
+    assert platform in ("wayland", "xcb"), f"ring 4 needs a real session, got {platform!r}"
 
     view = WgpuImageView2D(present_method="auto")
     view.resize(420, 320)
@@ -213,6 +223,19 @@ def test_auto_present_method_activates_screen_on_wayland(qt_app):
         diagnostics = view.wgpuPresentationDiagnostics()
         assert diagnostics["wgpu_present_method_requested"] == "auto"
         assert diagnostics["wgpu_present_method_fallback_reason"] == ""
+        # The swapchain is built lazily inside the first draw of real
+        # content, so this commits and then waits, rather than reading a
+        # field that is legitimately empty until a frame has been drawn.
+        _commit_ramp(view)
+        expected = "x11" if platform == "xcb" else "wayland"
+        assert wait_for_qt_condition(
+            qt_app,
+            lambda: view._wgpu_canvas.present_platform == expected,
+            timeout_s=10.0,
+        ), (
+            "the surface must be built on the recipe this session actually "
+            f"has: expected {expected!r}, got {view._wgpu_canvas.present_platform!r}"
+        )
     finally:
         view.close()
         view.teardown_surface()

@@ -35,13 +35,42 @@ module productionizes that probe:
   surface advertises it; when only Fifo exists the acquire stays on-thread
   and the view's per-frame acquire timing diagnostics are the guard rail.
 
-The screen path exists only on a live Wayland session; every other
-environment (offscreen, xcb, missing native interface) reports a loud
+The same recipe drives X sessions (2026-07-31), because the readback the
+screen path avoids costs the same 7 ms at 1300x650 / 26 ms at 4K there.  The
+mechanics differ only in which native interface hands over the display
+connection (``QX11Application`` rather than ``QWaylandApplication``) and
+which wgpu surface source that selects (``WGPUSurfaceSourceXlibWindow``);
+everything below — pacing, Mailbox preference, resize coalescing, teardown —
+is platform-independent and unchanged.
+
+The three Wayland-shaped choices above were re-derived for X11 rather than
+assumed to transfer, since a native child there is a different animal:
+
+* *paint-less window*: still required, for a weaker reason.  On Wayland a Qt
+  SHM backing-store buffer on the swapchain's surface is a FATAL protocol
+  error; on X11 it is merely two writers racing into one drawable, i.e.
+  flicker.  One recipe, and the stronger constraint is the safe one.
+* *window container over a native child widget*: kept, and it costs nothing.
+  The pathology it was introduced for is Wayland-only — X11 has no
+  subsurfaces to shatter into, and native siblings are ordinary server-side
+  windows the X server clips and stacks itself.  What DOES carry over is the
+  reason overlays live inside the wgpu frame: Qt cannot composite its own
+  painting above a native child window on either platform (gate B measured
+  exactly that under xcb).  Overlay ownership keys on the present method,
+  not the platform, so it already covers X11 — confirmed on captured X11
+  pixels, ``docs/redesign/wgpu-screen-on-x11-2026-07-31.md``.
+* *``WindowTransparentForInput``*: on Wayland an empty input region, on X11
+  an empty XShape input region.  Different mechanism, same contract, and the
+  screen-present input oracles run on both.
+
+The screen path exists only where a native surface can actually be built;
+every other environment (offscreen, missing native interface) reports a loud
 fallback reason and the view keeps the bitmap path.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from time import perf_counter
 
 from arrayscope.app.qt_binding import prefer_pyside6
@@ -55,30 +84,75 @@ import contextlib
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 
-def screen_present_unavailable_reason() -> str | None:
-    """Why ``present_method="screen"`` cannot exist here, or ``None`` if it can.
+@dataclass(frozen=True)
+class NativePresentTarget:
+    """The (windowing system, display connection) a wgpu surface is built on.
 
-    Mirrors the tier-0 probe's preconditions exactly: a live QApplication on
-    the ``wayland`` QPA with a working ``QWaylandApplication`` native
-    interface.  Checked BEFORE any widget is created so the caller can fall
-    back to the bitmap canvas without leaving a half-built native child.
+    ``platform`` is wgpu-py's present-info platform key, NOT Qt's QPA name:
+    Qt calls the X11 platform ``xcb`` while wgpu-py's Xlib surface source is
+    selected by ``"x11"``.  Keeping the translation in one named place stops
+    the two vocabularies leaking into the canvas.
+    """
+
+    platform: str
+    display: int
+
+
+def _resolve_native_present_target() -> tuple[NativePresentTarget | None, str | None]:
+    """Which native surface recipe applies here, or why none does.
+
+    Exactly one of the two is ever non-``None``.  Both supported QPAs hand
+    wgpu the same two ingredients — the in-process display connection and
+    the window handle — through different native interfaces, so the
+    per-platform knowledge is confined to this function.
     """
 
     app = QtWidgets.QApplication.instance()
     if app is None:
-        return "no QApplication"
+        return None, "no QApplication"
     platform = str(app.platformName())
-    if platform != "wayland":
-        return f"Qt platform {platform!r} is not wayland"
     try:
         from PySide6.QtGui import QNativeInterface
     except Exception as exc:  # pragma: no cover - PySide6 is the pinned binding
-        return f"QNativeInterface unavailable ({exc})"
+        return None, f"QNativeInterface unavailable ({exc})"
     iface = app.nativeInterface()
-    if not isinstance(iface, QNativeInterface.QWaylandApplication):
-        return "no QWaylandApplication native interface"
-    if not int(iface.display() or 0):
-        return "QWaylandApplication reports a null wl_display"
+    if platform == "wayland":
+        if not isinstance(iface, QNativeInterface.QWaylandApplication):
+            return None, "no QWaylandApplication native interface"
+        display = int(iface.display() or 0)
+        if not display:
+            return None, "QWaylandApplication reports a null wl_display"
+        return NativePresentTarget("wayland", display), None
+    if platform == "xcb":
+        # QX11Application is looked up rather than imported: a PySide6 built
+        # without X11 support has no such attribute, and that must read as a
+        # fallback reason, not an AttributeError inside setupUI.
+        x11_application = getattr(QNativeInterface, "QX11Application", None)
+        if x11_application is None:
+            return None, "PySide6 has no QX11Application native interface"
+        if not isinstance(iface, x11_application):
+            return None, "no QX11Application native interface"
+        display = int(iface.display() or 0)
+        if not display:
+            return None, "QX11Application reports a null Display*"
+        return NativePresentTarget("x11", display), None
+    return None, f"Qt platform {platform!r} has no native swapchain recipe"
+
+
+def screen_present_unavailable_reason() -> str | None:
+    """Why ``present_method="screen"`` cannot exist here, or ``None`` if it can.
+
+    Mirrors the tier-0 probes' preconditions exactly: a live QApplication on
+    a QPA whose native interface can hand over the display connection its
+    windows belong to — ``wayland`` via ``QWaylandApplication``, ``xcb`` via
+    ``QX11Application``.  Checked BEFORE any widget is created so the caller
+    can fall back to the bitmap canvas without leaving a half-built native
+    child.
+    """
+
+    _, reason = _resolve_native_present_target()
+    if reason is not None:
+        return reason
     try:
         import wgpu  # noqa: F401
     except Exception as exc:
@@ -111,9 +185,12 @@ class _ScreenSurfaceWindow(QtGui.QWindow):
         # new frame is presented the compositor keeps compositing the
         # old-size buffer against Qt's already-resized window, which reads
         # as flicker between the old and new sizes (and spill, since
-        # subsurfaces are not clipped to the parent).  This event fires when
-        # the embedded window's real geometry changed, so arm a swapchain
-        # reconfigure and let the canvas present it on the next paced frame.
+        # subsurfaces are not clipped to the parent).  X11 has the flicker
+        # half of that and not the spill half — the server clips a child
+        # window to its parent — but the handling is the same either way.
+        # This event fires when the embedded window's real geometry changed,
+        # so arm a swapchain reconfigure and let the canvas present it on the
+        # next paced frame.
         super().resizeEvent(event)
         self._canvas._on_surface_resized()
 
@@ -256,6 +333,7 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         self._context_error: str = ""
         self._configured_format: str | None = None
         self._present_mode: str = ""
+        self._present_platform: str = ""
         self._present_modes_available: tuple[str, ...] = ()
         self._max_draws_per_second_override: float | None = None
         self._cached_draws_per_second: float | None = None
@@ -333,6 +411,15 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         conservative variant that keeps the shrink direction synchronous was
         measured too — spill 6.3 ms mean / 17.1 ms max, but 551 draws instead
         of 186, so it gives back most of the responsiveness win.
+
+        That trade is WAYLAND-ONLY, measured 2026-07-31: driven 300 px past
+        its top-level, this canvas put 312,000 pixels outside the window on
+        Wayland and exactly zero on X11 (the X server clips a child window to
+        its parent).  So on an X session the same coalescing costs only the
+        flicker half — old-size content for 22.7 ms mean / 33.3 ms max
+        against Wayland's 8.2 / 15.1 in the same sweep — and cannot spill.
+        The handling stays shared: the conservative variant would trade the
+        same responsiveness for a smaller flicker window on both.
         """
 
         self._resize_pending = True
@@ -391,25 +478,28 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
         width, height = self.get_physical_size()
         if width < 1 or height < 1:
             return None
-        # The platform window (and its wl_surface) only exists once winId()
-        # is first resolved.
+        # The platform window (and its wl_surface / X11 Window) only exists
+        # once winId() is first resolved.
         winid = int(self._surface_window.winId())
-        app = QtWidgets.QApplication.instance()
-        from PySide6.QtGui import QNativeInterface
-
-        iface = app.nativeInterface()
-        assert isinstance(iface, QNativeInterface.QWaylandApplication)
+        target, reason = _resolve_native_present_target()
+        if target is None:
+            # setupUI resolved the same question before building this canvas,
+            # so reaching here means the platform changed underneath us.
+            self._context_error = f"no native present target: {reason}"
+            raise RuntimeError(self._context_error)
         try:
             from wgpu.backends.wgpu_native._api import GPUCanvasContext
 
             context = GPUCanvasContext(
                 {
                     "method": "screen",
-                    "platform": "wayland",
-                    # Qt contract pinned by the ring-4 test: under the wayland
-                    # QPA winId() IS the wl_surface* of this embedded window.
+                    "platform": target.platform,
+                    # What winId() means is the per-platform contract the
+                    # ring-4 pins cover: under the wayland QPA it is this
+                    # embedded window's wl_surface* (undocumented), under xcb
+                    # it is its X11 Window XID (documented, long-standing).
                     "window": winid,
-                    "display": int(iface.display()),
+                    "display": target.display,
                     "vsync": True,
                 }
             )
@@ -426,12 +516,17 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
             raise
         self._context = context
         self._configured_format = fmt
+        self._present_platform = target.platform
         # Timings taken before the chain existed (or under a different
         # present mode) do not describe this swapchain; start clean.
         self.frame_timing.reset()
         emit_trace(
             "wgpu_screen_swapchain_configured",
             format=fmt,
+            # Which windowing system the surface was built on: a screen-path
+            # timing that cannot be attributed to a platform is unusable, and
+            # both now exist in the field.
+            platform=self._present_platform,
             present_mode=self._present_mode,
             present_modes=self._present_modes_available,
             physical_size=(width, height),
@@ -475,6 +570,12 @@ class WgpuScreenCanvas(QtWidgets.QWidget):
     @property
     def present_mode(self) -> str:
         return self._present_mode
+
+    @property
+    def present_platform(self) -> str:
+        """``"wayland"``/``"x11"`` once configured, ``""`` before that."""
+
+        return self._present_platform
 
     @property
     def present_modes_available(self) -> tuple[str, ...]:

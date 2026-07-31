@@ -416,11 +416,11 @@ class WgpuImageView2D(ImageViewShell):
         self._display_stack.setStackingMode(QtWidgets.QStackedLayout.StackingMode.StackAll)
 
         # Present-method decision (wgpu_present_method setting).  The screen
-        # swapchain exists only on a live Wayland session: an explicit
-        # ``screen`` pin falls back to bitmap with a recorded reason, and
-        # ``auto`` resolves to screen exactly where the measured gate-B
-        # recipe applies (bitmap everywhere else — offscreen/xcb runs keep
-        # working without configuration changes).
+        # swapchain exists wherever a native surface can be built (Wayland
+        # and X11): an explicit ``screen`` pin falls back to bitmap with a
+        # recorded reason, and ``auto`` resolves to screen exactly there
+        # (bitmap everywhere else — offscreen runs keep working without any
+        # configuration change).
         requested = str(getattr(self, "_wgpu_present_method_requested", "bitmap"))
         self._wgpu_present_method = "bitmap"
         self._wgpu_present_method_fallback_reason = ""

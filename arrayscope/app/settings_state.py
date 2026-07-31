@@ -56,17 +56,18 @@ class RenderResponsivenessChoice(Enum):
 
 
 class WgpuPresentMethodChoice(Enum):
-    # AUTO resolves per session: the screen swapchain exactly where the
-    # measured gate-B recipe applies (native Wayland), bitmap everywhere
-    # else.  Screen on other platforms (e.g. xcb) would be a different,
-    # unmeasured path — AUTO widens only behind new evidence.  It is the
-    # DEFAULT: the resolution rule already declines everywhere the recipe
-    # does not apply, so defaulting to bitmap only denied the measured
-    # path to the sessions it was measured on.
+    # AUTO resolves per session: the screen swapchain wherever a native
+    # surface can actually be built — Wayland (gate B) and X11 (widened
+    # 2026-07-31 behind its own pixel evidence, see
+    # docs/redesign/wgpu-screen-on-x11-2026-07-31.md) — and bitmap
+    # everywhere else, which is what offscreen and any future QPA get.
+    # It is the DEFAULT: the resolution rule already declines everywhere
+    # the recipe does not apply, so defaulting to bitmap only
+    # denied the measured path to the sessions it was measured on.
     AUTO = "auto"
     BITMAP = "bitmap"
-    # SCREEN is the explicit pin (native-Wayland swapchain; the view falls
-    # back to bitmap loudly anywhere the screen path cannot exist).
+    # SCREEN is the explicit pin (native swapchain; the view falls back to
+    # bitmap loudly anywhere the screen path cannot exist).
     SCREEN = "screen"
 
 

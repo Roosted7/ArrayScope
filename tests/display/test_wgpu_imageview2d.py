@@ -3403,15 +3403,22 @@ def test_axis_inversion_mirrors_content_and_redraws_without_commit(qt_app):
 # ---- present-method selection (queue row 3 screen experiment) ---------------
 
 
-def test_screen_request_falls_back_to_bitmap_off_wayland(qt_app):
+def test_screen_request_falls_back_to_bitmap_without_a_native_surface(qt_app):
     """Anywhere the screen path cannot exist, the view keeps the bitmap
-    canvas, records a loud reason, and every commit contract still holds."""
+    canvas, records a loud reason, and every commit contract still holds.
+
+    The reason must name the platform that was actually resolved: with two
+    QPAs now carrying the screen path, "not wayland" would no longer tell a
+    reader whether this is the offscreen ring or a broken X session.
+    """
+
+    from pyqtgraph.Qt import QtWidgets
 
     view = _view_class("wgpu")(present_method="screen")
     try:
         assert view.wgpuPresentMethod() == "bitmap"
         reason = view.wgpuPresentMethodFallbackReason()
-        assert "wayland" in reason
+        assert str(QtWidgets.QApplication.instance().platformName()) in reason
         diagnostics = view.wgpuPresentationDiagnostics()
         assert diagnostics["wgpu_present_method"] == "bitmap"
         assert diagnostics["wgpu_present_method_fallback_reason"] == reason
@@ -3472,17 +3479,26 @@ def test_grab_presented_framebuffer_is_screen_path_only(qt_app):
         view.close()
 
 
-def test_auto_present_method_resolves_to_bitmap_off_wayland(qt_app):
-    """AUTO means "screen where the measured native-Wayland path exists" —
-    everywhere else it quietly resolves to bitmap (reason still recorded in
-    diagnostics; no fallback warning, unlike the explicit screen pin)."""
+def test_auto_present_method_resolves_to_bitmap_without_a_native_surface(qt_app):
+    """AUTO means "screen where a native surface can be built" — Wayland and
+    X11 — and everywhere else it quietly resolves to bitmap (reason still
+    recorded in diagnostics; no fallback warning, unlike the explicit pin).
+
+    The offscreen ring IS the everywhere-else case, and this is what keeps
+    the X widening from leaking into it.
+    """
+
+    from pyqtgraph.Qt import QtWidgets
+
+    platform = str(QtWidgets.QApplication.instance().platformName())
+    assert platform not in ("wayland", "xcb"), "this pin needs the offscreen ring"
 
     view = _view_class("wgpu")(present_method="auto")
     try:
         assert view.wgpuPresentMethod() == "bitmap"
         diagnostics = view.wgpuPresentationDiagnostics()
         assert diagnostics["wgpu_present_method_requested"] == "auto"
-        assert "wayland" in diagnostics["wgpu_present_method_fallback_reason"]
+        assert platform in diagnostics["wgpu_present_method_fallback_reason"]
     finally:
         view.close()
 
