@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "scenario": "operations",
+  "record_fps": 30,
+  "speed": 1.0,
+  "frame_count": 221,
+  "expected_status": [],
+  "window_size": [
+    1100,
+    780
+  ],
+  "capture_size": [
+    1100,
+    858
+  ],
+  "events": [
+    {
+      "kind": "caption",
+      "text": "The operation manager is the authoring surface for the shared library",
+      "start_frame": 0,
+      "end_frame": 39
+    },
+    {
+      "kind": "caption",
+      "text": "Choose Manage operations\u2026 from the real View menu",
+      "start_frame": 39,
+      "end_frame": 124
+    },
+    {
+      "kind": "click",
+      "label": "open View menu",
+      "caption": "Choose Manage operations\u2026 from the real View menu",
+      "start_frame": 48,
+      "press_frame": 66,
+      "activate_frame": 69,
+      "end_frame": 77,
+      "target": {
+        "widget_type": "QMenuBar",
+        "object_name": "",
+        "rect": [
+          0.0,
+          0.0,
+          1100,
+          27
+        ],
+        "point": [
+          550.0,
+          14.0
+        ]
+      },
+      "cursor_at_press": [
+        550.0,
+        14.0
+      ],
+      "detail_inset": false,
+      "detail_rect": null,
+      "detail_scale": null,
+      "detail_box": null
+    },
+    {
+      "kind": "click",
+      "label": "choose Manage operations",
+      "caption": "Choose Manage operations\u2026 from the real View menu",
+      "start_frame": 77,
+      "press_frame": 112,
+      "activate_frame": 115,
+      "end_frame": 124,
+      "target": {
+        "widget_type": "QMenuAction",
+        "object_name": "",
+        "display_text": "Manage operations\u2026",
+        "rect": [
+          9.0,
+          153.0,
+          230,
+          27
+        ],
+        "point": [
+          123.0,
+          166.0
+        ]
+      },
+      "cursor_at_press": [
+        123.0,
+        166.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        135.0,
+        253.0,
+        63.0
+      ],
+      "detail_scale": 1.541501976284585,
+      "detail_box": [
+        682.0,
+        633.0,
+        402,
+        131
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Browse shipped operations; New and Duplicate stay in the same editor",
+      "start_frame": 124,
+      "end_frame": 221
+    },
+    {
+      "kind": "transition",
+      "label": "show operation manager",
+      "caption": "Browse shipped operations; New and Duplicate stay in the same editor",
+      "start_frame": 133,
+      "press_frame": null,
+      "activate_frame": 133,
+      "end_frame": 149,
+      "target": null,
+      "cursor_at_press": null,
+      "detail_inset": false,
+      "detail_rect": null
+    }
+  ]
+}

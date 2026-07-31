@@ -1,0 +1,637 @@
+{
+  "schema_version": 1,
+  "scenario": "fft",
+  "record_fps": 30,
+  "speed": 1.0,
+  "frame_count": 807,
+  "expected_status": [
+    "Phase channel uses a linear scale"
+  ],
+  "window_size": [
+    1100,
+    760
+  ],
+  "capture_size": [
+    1100,
+    838
+  ],
+  "events": [
+    {
+      "kind": "caption",
+      "text": "A phantom image \u2014 let's look at its k-space",
+      "start_frame": 0,
+      "end_frame": 63
+    },
+    {
+      "kind": "caption",
+      "text": "Choose logarithmic magnitude before transforming",
+      "start_frame": 63,
+      "end_frame": 239
+    },
+    {
+      "kind": "click",
+      "label": "open scale choices",
+      "caption": "Choose logarithmic magnitude before transforming",
+      "start_frame": 72,
+      "press_frame": 90,
+      "activate_frame": 93,
+      "end_frame": 101,
+      "target": {
+        "widget_type": "QComboBox",
+        "object_name": "",
+        "rect": [
+          287.0,
+          43.0,
+          94,
+          25
+        ],
+        "point": [
+          334.0,
+          56.0
+        ]
+      },
+      "cursor_at_press": [
+        334.0,
+        56.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        269.0,
+        25.0,
+        130.0,
+        61.0
+      ],
+      "detail_scale": 3.0,
+      "detail_box": [
+        682.0,
+        527.0,
+        402,
+        217
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "choose log scale",
+      "caption": "Choose logarithmic magnitude before transforming",
+      "start_frame": 101,
+      "press_frame": 136,
+      "activate_frame": 139,
+      "end_frame": 148,
+      "target": {
+        "widget_type": "QMenuAction",
+        "object_name": "log",
+        "display_text": "Logarithmic",
+        "rect": [
+          292.0,
+          104.0,
+          124,
+          27
+        ],
+        "point": [
+          353.0,
+          117.0
+        ]
+      },
+      "cursor_at_press": [
+        353.0,
+        117.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        274.0,
+        86.0,
+        160.0,
+        63.0
+      ],
+      "detail_scale": 2.4375,
+      "detail_box": [
+        682.0,
+        556.0,
+        402,
+        188
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "open channel choices",
+      "caption": "Choose logarithmic magnitude before transforming",
+      "start_frame": 148,
+      "press_frame": 166,
+      "activate_frame": 169,
+      "end_frame": 177,
+      "target": {
+        "widget_type": "QComboBox",
+        "object_name": "",
+        "rect": [
+          98.0,
+          43.0,
+          103,
+          25
+        ],
+        "point": [
+          150.0,
+          56.0
+        ]
+      },
+      "cursor_at_press": [
+        150.0,
+        56.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        80.0,
+        25.0,
+        139.0,
+        61.0
+      ],
+      "detail_scale": 2.805755395683453,
+      "detail_box": [
+        682.0,
+        539.0,
+        402,
+        205
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "choose magnitude",
+      "caption": "Choose logarithmic magnitude before transforming",
+      "start_frame": 177,
+      "press_frame": 212,
+      "activate_frame": 215,
+      "end_frame": 224,
+      "target": {
+        "widget_type": "QMenuAction",
+        "object_name": "abs",
+        "display_text": "Magnitude",
+        "rect": [
+          103.0,
+          131.0,
+          118,
+          27
+        ],
+        "point": [
+          161.0,
+          144.0
+        ]
+      },
+      "cursor_at_press": [
+        161.0,
+        144.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        85.0,
+        113.0,
+        154.0,
+        63.0
+      ],
+      "detail_scale": 2.5324675324675323,
+      "detail_box": [
+        682.0,
+        550.0,
+        402,
+        194
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Add centered FFT steps \u2014 the source array is never modified",
+      "start_frame": 239,
+      "end_frame": 462
+    },
+    {
+      "kind": "click",
+      "label": "open axis 0 operation menu",
+      "caption": "Add centered FFT steps \u2014 the source array is never modified",
+      "start_frame": 248,
+      "press_frame": 266,
+      "activate_frame": 269,
+      "end_frame": 277,
+      "target": {
+        "widget_type": "QToolButton",
+        "object_name": "",
+        "rect": [
+          453.0,
+          679.0,
+          29,
+          27
+        ],
+        "point": [
+          468.0,
+          693.0
+        ]
+      },
+      "cursor_at_press": [
+        468.0,
+        693.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        435.0,
+        661.0,
+        65.0,
+        63.0
+      ],
+      "detail_scale": 3.6507936507936507,
+      "detail_box": [
+        835.0,
+        44.0,
+        249,
+        264
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "choose centered FFT on axis 0",
+      "caption": "Add centered FFT steps \u2014 the source array is never modified",
+      "start_frame": 277,
+      "press_frame": 312,
+      "activate_frame": 315,
+      "end_frame": 324,
+      "target": {
+        "widget_type": "QMenuAction",
+        "object_name": "centered_fft",
+        "display_text": "Centered FFT",
+        "rect": [
+          458.0,
+          589.0,
+          166,
+          27
+        ],
+        "point": [
+          540.0,
+          602.0
+        ]
+      },
+      "cursor_at_press": [
+        540.0,
+        602.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        440.0,
+        571.0,
+        202.0,
+        63.0
+      ],
+      "detail_scale": 1.9306930693069306,
+      "detail_box": [
+        682.0,
+        44.0,
+        402,
+        156
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "open axis 1 operation menu",
+      "caption": "Add centered FFT steps \u2014 the source array is never modified",
+      "start_frame": 343,
+      "press_frame": 361,
+      "activate_frame": 364,
+      "end_frame": 372,
+      "target": {
+        "widget_type": "QToolButton",
+        "object_name": "",
+        "rect": [
+          564.0,
+          679.0,
+          29,
+          27
+        ],
+        "point": [
+          579.0,
+          693.0
+        ]
+      },
+      "cursor_at_press": [
+        579.0,
+        693.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        546.0,
+        661.0,
+        65.0,
+        63.0
+      ],
+      "detail_scale": 3.6507936507936507,
+      "detail_box": [
+        16,
+        44.0,
+        249,
+        264
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "choose centered FFT on axis 1",
+      "caption": "Add centered FFT steps \u2014 the source array is never modified",
+      "start_frame": 372,
+      "press_frame": 407,
+      "activate_frame": 410,
+      "end_frame": 419,
+      "target": {
+        "widget_type": "QMenuAction",
+        "object_name": "centered_fft",
+        "display_text": "Centered FFT",
+        "rect": [
+          569.0,
+          589.0,
+          166,
+          27
+        ],
+        "point": [
+          651.0,
+          602.0
+        ]
+      },
+      "cursor_at_press": [
+        651.0,
+        602.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        551.0,
+        571.0,
+        202.0,
+        63.0
+      ],
+      "detail_scale": 1.9306930693069306,
+      "detail_box": [
+        16,
+        44.0,
+        402,
+        156
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "\u2026or phase",
+      "start_frame": 462,
+      "end_frame": 596
+    },
+    {
+      "kind": "click",
+      "label": "open channel choices",
+      "caption": "\u2026or phase",
+      "start_frame": 471,
+      "press_frame": 489,
+      "activate_frame": 492,
+      "end_frame": 500,
+      "target": {
+        "widget_type": "QComboBox",
+        "object_name": "",
+        "rect": [
+          15.0,
+          43.0,
+          46,
+          25
+        ],
+        "point": [
+          38.0,
+          56.0
+        ]
+      },
+      "cursor_at_press": [
+        38.0,
+        56.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        25.0,
+        75.0,
+        61.0
+      ],
+      "detail_scale": 3.7704918032786887,
+      "detail_box": [
+        789.0,
+        480.0,
+        295,
+        264
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "choose phase",
+      "caption": "\u2026or phase",
+      "start_frame": 500,
+      "press_frame": 535,
+      "activate_frame": 538,
+      "end_frame": 547,
+      "target": {
+        "widget_type": "QMenuAction",
+        "object_name": "angle",
+        "display_text": "Phase",
+        "rect": [
+          20.0,
+          185.0,
+          118,
+          27
+        ],
+        "point": [
+          78.0,
+          198.0
+        ]
+      },
+      "cursor_at_press": [
+        78.0,
+        198.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        167.0,
+        152.0,
+        63.0
+      ],
+      "detail_scale": 2.5657894736842106,
+      "detail_box": [
+        682.0,
+        548.0,
+        402,
+        196
+      ]
+    },
+    {
+      "kind": "status",
+      "text": "Phase channel uses a linear scale.",
+      "caption": "\u2026or phase",
+      "start_frame": 538,
+      "end_frame": 557
+    },
+    {
+      "kind": "caption",
+      "text": "Every step is reversible \u2014 toggle it in the operation stack",
+      "start_frame": 596,
+      "end_frame": 807
+    },
+    {
+      "kind": "click",
+      "label": "open channel choices",
+      "caption": "Every step is reversible \u2014 toggle it in the operation stack",
+      "start_frame": 605,
+      "press_frame": 623,
+      "activate_frame": 626,
+      "end_frame": 634,
+      "target": {
+        "widget_type": "QComboBox",
+        "object_name": "",
+        "rect": [
+          15.0,
+          43.0,
+          46,
+          25
+        ],
+        "point": [
+          38.0,
+          56.0
+        ]
+      },
+      "cursor_at_press": [
+        38.0,
+        56.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        25.0,
+        75.0,
+        61.0
+      ],
+      "detail_scale": 3.7704918032786887,
+      "detail_box": [
+        789.0,
+        480.0,
+        295,
+        264
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "return to logarithmic magnitude",
+      "caption": "Every step is reversible \u2014 toggle it in the operation stack",
+      "start_frame": 634,
+      "press_frame": 669,
+      "activate_frame": 672,
+      "end_frame": 681,
+      "target": {
+        "widget_type": "QMenuAction",
+        "object_name": "abs",
+        "display_text": "Magnitude",
+        "rect": [
+          20.0,
+          131.0,
+          118,
+          27
+        ],
+        "point": [
+          78.0,
+          144.0
+        ]
+      },
+      "cursor_at_press": [
+        78.0,
+        144.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        113.0,
+        152.0,
+        63.0
+      ],
+      "detail_scale": 2.5657894736842106,
+      "detail_box": [
+        682.0,
+        548.0,
+        402,
+        196
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "disable first FFT",
+      "caption": "Every step is reversible \u2014 toggle it in the operation stack",
+      "start_frame": 681,
+      "press_frame": 699,
+      "activate_frame": 702,
+      "end_frame": 710,
+      "target": {
+        "widget_type": "QCheckBox",
+        "object_name": "",
+        "rect": [
+          843.0,
+          142.0,
+          19,
+          14
+        ],
+        "point": [
+          853.0,
+          149.0
+        ]
+      },
+      "cursor_at_press": [
+        853.0,
+        149.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        825.0,
+        124.0,
+        55.0,
+        50.0
+      ],
+      "detail_scale": 4.6,
+      "detail_box": [
+        16,
+        480.0,
+        265,
+        264
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "enable first FFT",
+      "caption": "Every step is reversible \u2014 toggle it in the operation stack",
+      "start_frame": 741,
+      "press_frame": 747,
+      "activate_frame": 750,
+      "end_frame": 758,
+      "target": {
+        "widget_type": "QCheckBox",
+        "object_name": "",
+        "rect": [
+          843.0,
+          142.0,
+          19,
+          14
+        ],
+        "point": [
+          853.0,
+          149.0
+        ]
+      },
+      "cursor_at_press": [
+        853.0,
+        149.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        825.0,
+        124.0,
+        55.0,
+        50.0
+      ],
+      "detail_scale": 4.6,
+      "detail_box": [
+        16,
+        480.0,
+        265,
+        264
+      ]
+    }
+  ]
+}

@@ -1,0 +1,344 @@
+{
+  "schema_version": 1,
+  "scenario": "workflow",
+  "record_fps": 30,
+  "speed": 1.0,
+  "frame_count": 398,
+  "expected_status": [],
+  "window_size": [
+    1100,
+    780
+  ],
+  "capture_size": [
+    1100,
+    858
+  ],
+  "events": [
+    {
+      "kind": "caption",
+      "text": "Parameterized operations stay visible and reversible",
+      "start_frame": 0,
+      "end_frame": 45
+    },
+    {
+      "kind": "caption",
+      "text": "Choose Crop axis\u2026 from the real dimension menu",
+      "start_frame": 45,
+      "end_frame": 130
+    },
+    {
+      "kind": "click",
+      "label": "open axis 0 operation menu",
+      "caption": "Choose Crop axis\u2026 from the real dimension menu",
+      "start_frame": 54,
+      "press_frame": 72,
+      "activate_frame": 75,
+      "end_frame": 83,
+      "target": {
+        "widget_type": "QToolButton",
+        "object_name": "",
+        "rect": [
+          321.0,
+          699.0,
+          29,
+          27
+        ],
+        "point": [
+          336.0,
+          713.0
+        ]
+      },
+      "cursor_at_press": [
+        336.0,
+        713.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        303.0,
+        681.0,
+        65.0,
+        63.0
+      ],
+      "detail_scale": 3.6507936507936507,
+      "detail_box": [
+        835.0,
+        44.0,
+        249,
+        264
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "choose crop axis 0",
+      "caption": "Choose Crop axis\u2026 from the real dimension menu",
+      "start_frame": 83,
+      "press_frame": 118,
+      "activate_frame": 121,
+      "end_frame": 130,
+      "target": {
+        "widget_type": "QMenuAction",
+        "object_name": "crop",
+        "display_text": "Crop axis...",
+        "rect": [
+          326.0,
+          582.0,
+          166,
+          27
+        ],
+        "point": [
+          408.0,
+          595.0
+        ]
+      },
+      "cursor_at_press": [
+        408.0,
+        595.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        308.0,
+        564.0,
+        202.0,
+        63.0
+      ],
+      "detail_scale": 1.9306930693069306,
+      "detail_box": [
+        682.0,
+        44.0,
+        402,
+        156
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Edit start and stop; the derived shape updates in place",
+      "start_frame": 130,
+      "end_frame": 279
+    },
+    {
+      "kind": "transition",
+      "label": "show crop parameter popup",
+      "caption": "Edit start and stop; the derived shape updates in place",
+      "start_frame": 139,
+      "press_frame": null,
+      "activate_frame": 139,
+      "end_frame": 155,
+      "target": null,
+      "cursor_at_press": null,
+      "detail_inset": false,
+      "detail_rect": null
+    },
+    {
+      "kind": "edit",
+      "label": "set crop start to 16",
+      "caption": "Edit start and stop; the derived shape updates in place",
+      "start_frame": 155,
+      "press_frame": 169,
+      "activate_frame": 169,
+      "end_frame": 187,
+      "target": {
+        "widget_type": "QSpinBox",
+        "object_name": "",
+        "rect": [
+          362.0,
+          572.0,
+          88,
+          28
+        ],
+        "point": [
+          406.0,
+          586.0
+        ]
+      },
+      "cursor_at_press": [
+        406.0,
+        586.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        344.0,
+        554.0,
+        124.0,
+        64.0
+      ],
+      "detail_scale": 3.1451612903225805,
+      "detail_box": [
+        682.0,
+        44.0,
+        402,
+        235
+      ]
+    },
+    {
+      "kind": "edit",
+      "label": "set crop stop to 80",
+      "caption": "Edit start and stop; the derived shape updates in place",
+      "start_frame": 187,
+      "press_frame": 201,
+      "activate_frame": 201,
+      "end_frame": 219,
+      "target": {
+        "widget_type": "QSpinBox",
+        "object_name": "",
+        "rect": [
+          362.0,
+          604.0,
+          88,
+          28
+        ],
+        "point": [
+          406.0,
+          618.0
+        ]
+      },
+      "cursor_at_press": [
+        406.0,
+        618.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        344.0,
+        586.0,
+        124.0,
+        64.0
+      ],
+      "detail_scale": 3.1451612903225805,
+      "detail_box": [
+        682.0,
+        44.0,
+        402,
+        235
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "apply crop",
+      "caption": "Edit start and stop; the derived shape updates in place",
+      "start_frame": 219,
+      "press_frame": 237,
+      "activate_frame": 240,
+      "end_frame": 248,
+      "target": {
+        "widget_type": "QToolButton",
+        "object_name": "",
+        "rect": [
+          415.0,
+          659.0,
+          35,
+          29
+        ],
+        "point": [
+          433.0,
+          674.0
+        ]
+      },
+      "cursor_at_press": [
+        433.0,
+        674.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        397.0,
+        641.0,
+        71.0,
+        65.0
+      ],
+      "detail_scale": 3.5384615384615383,
+      "detail_box": [
+        821.0,
+        44.0,
+        263,
+        264
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Right-click a dimension to export video or PNG frames",
+      "start_frame": 279,
+      "end_frame": 398
+    },
+    {
+      "kind": "click",
+      "label": "open dimension actions",
+      "caption": "Right-click a dimension to export video or PNG frames",
+      "start_frame": 288,
+      "press_frame": 306,
+      "activate_frame": 309,
+      "end_frame": 317,
+      "target": {
+        "widget_type": "SliceIndexEdit",
+        "object_name": "",
+        "rect": [
+          213.0,
+          696.0,
+          83,
+          28
+        ],
+        "point": [
+          255.0,
+          710.0
+        ]
+      },
+      "cursor_at_press": [
+        255.0,
+        710.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        195.0,
+        678.0,
+        119.0,
+        64.0
+      ],
+      "detail_scale": 3.277310924369748,
+      "detail_box": [
+        682.0,
+        44.0,
+        402,
+        244
+      ]
+    },
+    {
+      "kind": "preview",
+      "label": "preview video and PNG export",
+      "caption": "Right-click a dimension to export video or PNG frames",
+      "start_frame": 317,
+      "press_frame": null,
+      "activate_frame": 332,
+      "end_frame": 368,
+      "target": {
+        "widget_type": "QMenuAction",
+        "object_name": "",
+        "display_text": "Export along this dimension...",
+        "rect": [
+          218.0,
+          660.0,
+          224,
+          27
+        ],
+        "point": [
+          329.0,
+          673.0
+        ]
+      },
+      "cursor_at_press": [
+        329.0,
+        673.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        200.0,
+        642.0,
+        260.0,
+        63.0
+      ],
+      "detail_scale": 1.5,
+      "detail_box": [
+        682.0,
+        44.0,
+        402,
+        128
+      ]
+    }
+  ]
+}

@@ -1,0 +1,428 @@
+{
+  "schema_version": 1,
+  "scenario": "roi",
+  "record_fps": 30,
+  "speed": 1.0,
+  "frame_count": 746,
+  "expected_status": [],
+  "window_size": [
+    1100,
+    820
+  ],
+  "capture_size": [
+    1100,
+    898
+  ],
+  "events": [
+    {
+      "kind": "caption",
+      "text": "Choose an ROI tool, then add it from the Inspection panel",
+      "start_frame": 0,
+      "end_frame": 234
+    },
+    {
+      "kind": "transition",
+      "label": "open inspection panel",
+      "caption": "Choose an ROI tool, then add it from the Inspection panel",
+      "start_frame": 9,
+      "press_frame": null,
+      "activate_frame": 9,
+      "end_frame": 30,
+      "target": null,
+      "cursor_at_press": null,
+      "detail_inset": false,
+      "detail_rect": null
+    },
+    {
+      "kind": "click",
+      "label": "open ROI tool choices",
+      "caption": "Choose an ROI tool, then add it from the Inspection panel",
+      "start_frame": 30,
+      "press_frame": 48,
+      "activate_frame": 51,
+      "end_frame": 59,
+      "target": {
+        "widget_type": "QComboBox",
+        "object_name": "",
+        "rect": [
+          6.0,
+          70.0,
+          87,
+          25
+        ],
+        "point": [
+          50.0,
+          83.0
+        ]
+      },
+      "cursor_at_press": [
+        50.0,
+        83.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        52.0,
+        107.0,
+        61.0
+      ],
+      "detail_scale": 3.6448598130841123,
+      "detail_box": [
+        682.0,
+        548.0,
+        402,
+        256
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "choose Rectangle ROI tool",
+      "caption": "Choose an ROI tool, then add it from the Inspection panel",
+      "start_frame": 59,
+      "press_frame": 94,
+      "activate_frame": 97,
+      "end_frame": 106,
+      "target": {
+        "widget_type": "QMenuAction",
+        "object_name": "roi_rectangle",
+        "display_text": "Rectangle",
+        "rect": [
+          11.0,
+          185.0,
+          106,
+          27
+        ],
+        "point": [
+          63.0,
+          198.0
+        ]
+      },
+      "cursor_at_press": [
+        63.0,
+        198.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        167.0,
+        131.0,
+        63.0
+      ],
+      "detail_scale": 2.9770992366412212,
+      "detail_box": [
+        682.0,
+        582.0,
+        402,
+        222
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "add selected Rectangle ROI",
+      "caption": "Choose an ROI tool, then add it from the Inspection panel",
+      "start_frame": 106,
+      "press_frame": 124,
+      "activate_frame": 127,
+      "end_frame": 135,
+      "target": {
+        "widget_type": "QToolButton",
+        "object_name": "",
+        "rect": [
+          99.0,
+          68.0,
+          35,
+          29
+        ],
+        "point": [
+          117.0,
+          83.0
+        ]
+      },
+      "cursor_at_press": [
+        117.0,
+        83.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        81.0,
+        50.0,
+        71.0,
+        65.0
+      ],
+      "detail_scale": 3.5384615384615383,
+      "detail_box": [
+        821.0,
+        540.0,
+        263,
+        264
+      ]
+    },
+    {
+      "kind": "drag",
+      "label": "resize added rectangle ROI",
+      "caption": "Choose an ROI tool, then add it from the Inspection panel",
+      "start_frame": 174,
+      "press_frame": 174,
+      "activate_frame": 215,
+      "end_frame": 234,
+      "target": null,
+      "cursor_at_press": [
+        526.0,
+        283.0
+      ],
+      "detail_inset": false,
+      "detail_rect": null,
+      "button": "left"
+    },
+    {
+      "kind": "caption",
+      "text": "Statistics and histograms update live",
+      "start_frame": 234,
+      "end_frame": 334
+    },
+    {
+      "kind": "transition",
+      "label": "focus live ROI statistics",
+      "caption": "Statistics and histograms update live",
+      "start_frame": 243,
+      "press_frame": null,
+      "activate_frame": 243,
+      "end_frame": 279,
+      "target": null,
+      "cursor_at_press": null,
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        114.0,
+        306.0,
+        65.0
+      ],
+      "detail_scale": 1.2745098039215685,
+      "detail_box": [
+        682.0,
+        687.0,
+        402,
+        117
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Polyline and freehand drawing live in the command palette",
+      "start_frame": 334,
+      "end_frame": 447
+    },
+    {
+      "kind": "transition",
+      "label": "show command palette",
+      "caption": "Polyline and freehand drawing live in the command palette",
+      "start_frame": 343,
+      "press_frame": null,
+      "activate_frame": 343,
+      "end_frame": 359,
+      "target": null,
+      "cursor_at_press": null,
+      "detail_inset": false,
+      "detail_rect": null
+    },
+    {
+      "kind": "type",
+      "label": "search for polyline ROI",
+      "caption": "Polyline and freehand drawing live in the command palette",
+      "start_frame": 359,
+      "press_frame": 388,
+      "activate_frame": 420,
+      "end_frame": 420,
+      "target": {
+        "widget_type": "QLineEdit",
+        "object_name": "",
+        "rect": [
+          17.0,
+          15.0,
+          256,
+          25
+        ],
+        "point": [
+          145.0,
+          28.0
+        ]
+      },
+      "cursor_at_press": [
+        145.0,
+        28.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        4.0,
+        287.0,
+        54.0
+      ],
+      "detail_scale": 1.3588850174216027,
+      "detail_box": [
+        682.0,
+        697.0,
+        402,
+        107
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "focus command search",
+      "caption": "Polyline and freehand drawing live in the command palette",
+      "start_frame": 359,
+      "press_frame": 377,
+      "activate_frame": 380,
+      "end_frame": 388,
+      "target": {
+        "widget_type": "QLineEdit",
+        "object_name": "",
+        "rect": [
+          17.0,
+          15.0,
+          256,
+          25
+        ],
+        "point": [
+          145.0,
+          28.0
+        ]
+      },
+      "cursor_at_press": [
+        145.0,
+        28.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        4.0,
+        287.0,
+        54.0
+      ],
+      "detail_scale": 1.3588850174216027,
+      "detail_box": [
+        682.0,
+        697.0,
+        402,
+        107
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "choose Draw polyline ROI",
+      "caption": "Polyline and freehand drawing live in the command palette",
+      "start_frame": 420,
+      "press_frame": 435,
+      "activate_frame": 438,
+      "end_frame": 447,
+      "target": {
+        "widget_type": "QListWidgetItem",
+        "object_name": "",
+        "rect": [
+          18.0,
+          47.0,
+          254.0,
+          22.0
+        ],
+        "point": [
+          145.0,
+          58.0
+        ]
+      },
+      "cursor_at_press": [
+        145.0,
+        58.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        4.0,
+        29.0,
+        286.0,
+        58.0
+      ],
+      "detail_scale": 1.3636363636363635,
+      "detail_box": [
+        682.0,
+        691.0,
+        402,
+        113
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Trace a polyline profile through the features",
+      "start_frame": 447,
+      "end_frame": 601
+    },
+    {
+      "kind": "drag",
+      "label": "draw polyline profile",
+      "caption": "Trace a polyline profile through the features",
+      "start_frame": 474,
+      "press_frame": 474,
+      "activate_frame": 521,
+      "end_frame": 531,
+      "target": null,
+      "cursor_at_press": [
+        453.0,
+        605.0
+      ],
+      "detail_inset": false,
+      "detail_rect": null,
+      "button": "left"
+    },
+    {
+      "kind": "transition",
+      "label": "close inspection panel",
+      "caption": "Trace a polyline profile through the features",
+      "start_frame": 580,
+      "press_frame": null,
+      "activate_frame": 580,
+      "end_frame": 589,
+      "target": null,
+      "cursor_at_press": null,
+      "detail_inset": false,
+      "detail_rect": null
+    },
+    {
+      "kind": "caption",
+      "text": "Live profiles follow the pointer",
+      "start_frame": 601,
+      "end_frame": 746
+    },
+    {
+      "kind": "transition",
+      "label": "enable live pointer profile",
+      "caption": "Live profiles follow the pointer",
+      "start_frame": 610,
+      "press_frame": null,
+      "activate_frame": 610,
+      "end_frame": 619,
+      "target": null,
+      "cursor_at_press": null,
+      "detail_inset": false,
+      "detail_rect": null
+    },
+    {
+      "kind": "hover",
+      "label": "track live profile with pointer",
+      "caption": "Live profiles follow the pointer",
+      "start_frame": 619,
+      "press_frame": null,
+      "activate_frame": 681,
+      "end_frame": 682,
+      "target": null,
+      "cursor_at_press": null,
+      "detail_inset": false,
+      "detail_rect": null,
+      "profile_updates": 63,
+      "profile_start": [
+        405.5771428571428,
+        324.7542857142857
+      ],
+      "profile_end": [
+        200.04571428571427,
+        95.81714285714284
+      ]
+    }
+  ]
+}

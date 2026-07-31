@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "scenario": "montage",
+  "record_fps": 30,
+  "speed": 1.0,
+  "frame_count": 380,
+  "expected_status": [],
+  "window_size": [
+    1100,
+    780
+  ],
+  "capture_size": [
+    1100,
+    858
+  ],
+  "events": [
+    {
+      "kind": "caption",
+      "text": "A 24-slice volume \u2014 one slice at a time\u2026",
+      "start_frame": 0,
+      "end_frame": 63
+    },
+    {
+      "kind": "caption",
+      "text": "Type ':' to montage the whole dimension",
+      "start_frame": 63,
+      "end_frame": 131
+    },
+    {
+      "kind": "type",
+      "label": "enter montage range on axis 2",
+      "caption": "Type ':' to montage the whole dimension",
+      "start_frame": 72,
+      "press_frame": 101,
+      "activate_frame": 115,
+      "end_frame": 115,
+      "target": {
+        "widget_type": "SliceIndexEdit",
+        "object_name": "",
+        "rect": [
+          762.0,
+          699.0,
+          83,
+          28
+        ],
+        "point": [
+          804.0,
+          713.0
+        ]
+      },
+      "cursor_at_press": [
+        804.0,
+        713.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        619.0,
+        680.0,
+        284.0,
+        66.0
+      ],
+      "detail_scale": 1.3732394366197183,
+      "detail_box": [
+        16,
+        44.0,
+        402,
+        125
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "focus the axis 2 slice range",
+      "caption": "Type ':' to montage the whole dimension",
+      "start_frame": 72,
+      "press_frame": 90,
+      "activate_frame": 93,
+      "end_frame": 101,
+      "target": {
+        "widget_type": "SliceIndexEdit",
+        "object_name": "",
+        "rect": [
+          762.0,
+          699.0,
+          83,
+          28
+        ],
+        "point": [
+          804.0,
+          713.0
+        ]
+      },
+      "cursor_at_press": [
+        804.0,
+        713.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        744.0,
+        681.0,
+        119.0,
+        64.0
+      ],
+      "detail_scale": 3.277310924369748,
+      "detail_box": [
+        16,
+        44.0,
+        402,
+        244
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Tiles are evaluated and presented progressively",
+      "start_frame": 131,
+      "end_frame": 189
+    },
+    {
+      "kind": "caption",
+      "text": "The montage is a real viewport \u2014 middle-drag vertically to zoom",
+      "start_frame": 189,
+      "end_frame": 380
+    },
+    {
+      "kind": "drag",
+      "label": "middle-drag montage zoom",
+      "caption": "The montage is a real viewport \u2014 middle-drag vertically to zoom",
+      "start_frame": 213,
+      "press_frame": 213,
+      "activate_frame": 257,
+      "end_frame": 272,
+      "target": {
+        "widget_type": "QWidget",
+        "object_name": "",
+        "rect": [
+          19.0,
+          91.0,
+          947,
+          571
+        ],
+        "point": [
+          493.0,
+          377.0
+        ]
+      },
+      "cursor_at_press": [
+        493.0,
+        377.0
+      ],
+      "detail_inset": false,
+      "detail_rect": null,
+      "button": "middle",
+      "gesture_axis": "vertical",
+      "target_axis": 2,
+      "detail_scale": null,
+      "detail_box": null,
+      "before_index": 12,
+      "after_index": 12,
+      "before_view_range": [
+        [
+          -1.1368683772161603e-13,
+          1349.0
+        ],
+        [
+          -53.19429778247098,
+          760.194297782471
+        ]
+      ],
+      "after_view_range": [
+        [
+          204.13264786241268,
+          1145.2980117322336
+        ],
+        [
+          69.97434628641105,
+          637.4563133082355
+        ]
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "Fit",
+      "caption": "The montage is a real viewport \u2014 middle-drag vertically to zoom",
+      "start_frame": 296,
+      "press_frame": 314,
+      "activate_frame": 317,
+      "end_frame": 325,
+      "target": {
+        "widget_type": "QToolButton",
+        "object_name": "",
+        "rect": [
+          559.0,
+          42.0,
+          33,
+          27
+        ],
+        "point": [
+          576.0,
+          56.0
+        ]
+      },
+      "cursor_at_press": [
+        576.0,
+        56.0
+      ],
+      "detail_inset": false,
+      "detail_rect": null
+    }
+  ]
+}

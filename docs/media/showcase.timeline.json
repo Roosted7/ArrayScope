@@ -1,0 +1,628 @@
+{
+  "schema_version": 1,
+  "scenario": "showcase",
+  "record_fps": 30,
+  "speed": 1.0,
+  "frame_count": 786,
+  "expected_status": [],
+  "window_size": [
+    1100,
+    780
+  ],
+  "capture_size": [
+    1100,
+    858
+  ],
+  "events": [
+    {
+      "kind": "caption",
+      "text": "asc(data) \u2014 a structured 384\u00d7320\u00d736 volume, one call away",
+      "start_frame": 0,
+      "end_frame": 69
+    },
+    {
+      "kind": "caption",
+      "text": "Hover for live coordinates and values",
+      "start_frame": 69,
+      "end_frame": 173
+    },
+    {
+      "kind": "hover",
+      "label": "hover image values",
+      "caption": "Hover for live coordinates and values",
+      "start_frame": 99,
+      "press_frame": null,
+      "activate_frame": 164,
+      "end_frame": 165,
+      "target": null,
+      "cursor_at_press": null,
+      "detail_inset": false,
+      "detail_rect": null,
+      "hud_visible_frames": 66,
+      "hud_texts": [
+        "(30, 63) = 1.332e-01 | d2=18",
+        "(31, 63) = 1.339e-01 | d2=18",
+        "(32, 62) = 1.336e-01 | d2=18",
+        "(33, 62) = 1.344e-01 | d2=18",
+        "(35, 61) = 1.348e-01 | d2=18",
+        "(38, 60) = 1.360e-01 | d2=18",
+        "(40, 59) = 1.364e-01 | d2=18",
+        "(43, 57) = 1.361e-01 | d2=18",
+        "(46, 56) = 1.371e-01 | d2=18",
+        "(49, 55) = 1.380e-01 | d2=18",
+        "(52, 54) = 1.389e-01 | d2=18",
+        "(54, 52) = 1.374e-01 | d2=18",
+        "(57, 51) = 1.381e-01 | d2=18",
+        "(60, 50) = 1.386e-01 | d2=18",
+        "(63, 48) = 1.376e-01 | d2=18",
+        "(65, 47) = 1.373e-01 | d2=18",
+        "(68, 46) = 1.376e-01 | d2=18",
+        "(70, 45) = 1.372e-01 | d2=18",
+        "(71, 45) = 1.377e-01 | d2=18",
+        "(72, 44) = 1.368e-01 | d2=18",
+        "(73, 44) = 1.373e-01 | d2=18",
+        "(74, 44) = 1.378e-01 | d2=18",
+        "(75, 45) = 1.398e-01 | d2=18",
+        "(75, 47) = 1.431e-01 | d2=18",
+        "(76, 48) = 1.455e-01 | d2=18",
+        "(78, 50) = 1.508e-01 | d2=18",
+        "(79, 53) = 1.585e-01 | d2=18",
+        "(80, 55) = 1.647e-01 | d2=18",
+        "(82, 57) = 1.726e-01 | d2=18",
+        "(83, 60) = 1.843e-01 | d2=18",
+        "(85, 63) = 1.991e-01 | d2=18",
+        "(86, 65) = 2.099e-01 | d2=18",
+        "(87, 68) = 2.276e-01 | d2=18",
+        "(89, 70) = 2.429e-01 | d2=18",
+        "(90, 72) = 2.581e-01 | d2=18",
+        "(91, 75) = 2.826e-01 | d2=18",
+        "(93, 77) = 3.031e-01 | d2=18",
+        "(94, 78) = 3.139e-01 | d2=18",
+        "(94, 80) = 3.330e-01 | d2=18",
+        "(95, 81) = 3.449e-01 | d2=18",
+        "(96, 82) = 3.572e-01 | d2=18",
+        "(94, 81) = 3.430e-01 | d2=18",
+        "(93, 80) = 3.310e-01 | d2=18",
+        "(91, 79) = 3.173e-01 | d2=18",
+        "(90, 78) = 3.062e-01 | d2=18",
+        "(88, 77) = 2.933e-01 | d2=18",
+        "(86, 76) = 2.808e-01 | d2=18",
+        "(84, 75) = 2.688e-01 | d2=18",
+        "(82, 74) = 2.572e-01 | d2=18",
+        "(80, 73) = 2.462e-01 | d2=18",
+        "(77, 71) = 2.278e-01 | d2=18",
+        "(75, 70) = 2.183e-01 | d2=18",
+        "(73, 69) = 2.094e-01 | d2=18",
+        "(71, 68) = 2.010e-01 | d2=18",
+        "(69, 67) = 1.932e-01 | d2=18",
+        "(68, 66) = 1.876e-01 | d2=18",
+        "(66, 65) = 1.807e-01 | d2=18",
+        "(65, 64) = 1.758e-01 | d2=18",
+        "(64, 64) = 1.743e-01 | d2=18"
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Drag the upper histogram handle to narrow the window",
+      "start_frame": 173,
+      "end_frame": 246
+    },
+    {
+      "kind": "drag",
+      "label": "adjust histogram window and level",
+      "caption": "Drag the upper histogram handle to narrow the window",
+      "start_frame": 182,
+      "press_frame": 197,
+      "activate_frame": 229,
+      "end_frame": 246,
+      "target": {
+        "widget_type": "HistogramLUTWidget",
+        "object_name": "",
+        "rect": [
+          966.0,
+          91.0,
+          115,
+          571
+        ],
+        "point": [
+          1024.0,
+          405.0
+        ]
+      },
+      "cursor_at_press": [
+        1023.0,
+        143.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        957.0,
+        228.0,
+        132.0,
+        92.0
+      ],
+      "button": "left",
+      "detail_scale": 2.5,
+      "detail_box": [
+        16,
+        500.0,
+        342,
+        264
+      ],
+      "start_levels": [
+        0.09543729573488235,
+        1.079227089881897
+      ],
+      "end_levels": [
+        0.09543729573488235,
+        0.8039767642515615
+      ],
+      "cursor_values": [
+        1.0797771353231373,
+        1.0776717889790794,
+        1.0734610962909639,
+        1.0692504036028483,
+        1.0629343645706748,
+        1.0566183255385013,
+        1.04819694016227,
+        1.0397755547860386,
+        1.0292488230657495,
+        1.0187220913454602,
+        1.0081953596251712,
+        0.997668627904882,
+        0.985036549840535,
+        0.9724044717761879,
+        0.959772393711841,
+        0.947140315647494,
+        0.936613583927205,
+        0.9239815058628579,
+        0.9113494277985109,
+        0.8987173497341638,
+        0.8860852716698169,
+        0.8755585399495278,
+        0.8650318082292386,
+        0.8545050765089495,
+        0.8439783447886603,
+        0.835556959412429,
+        0.8271355740361976,
+        0.8208195350040242,
+        0.8145034959718507,
+        0.8102928032837351,
+        0.8060821105956193,
+        0.8039767642515615,
+        0.8039767642515615
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Middle-drag horizontally to scrub the highlighted dimension",
+      "start_frame": 246,
+      "end_frame": 320
+    },
+    {
+      "kind": "drag",
+      "label": "middle-drag axis 2 slices",
+      "caption": "Middle-drag horizontally to scrub the highlighted dimension",
+      "start_frame": 270,
+      "press_frame": 270,
+      "activate_frame": 305,
+      "end_frame": 320,
+      "target": {
+        "widget_type": "QWidget",
+        "object_name": "",
+        "rect": [
+          19.0,
+          91.0,
+          947,
+          571
+        ],
+        "point": [
+          493.0,
+          377.0
+        ]
+      },
+      "cursor_at_press": [
+        493.0,
+        377.0
+      ],
+      "detail_inset": false,
+      "detail_rect": null,
+      "button": "middle",
+      "gesture_axis": "horizontal",
+      "target_axis": 2,
+      "detail_scale": null,
+      "detail_box": null,
+      "before_index": 18,
+      "after_index": 26,
+      "before_view_range": [
+        [
+          -158.43082311733798,
+          478.430823117338
+        ],
+        [
+          0.0,
+          384.0
+        ]
+      ],
+      "after_view_range": [
+        [
+          -158.43082311733798,
+          478.430823117338
+        ],
+        [
+          0.0,
+          384.0
+        ]
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Crop away the bright left landmark with an explicit range",
+      "start_frame": 320,
+      "end_frame": 401
+    },
+    {
+      "kind": "type",
+      "label": "crop axis 0 to 72:352",
+      "caption": "Crop away the bright left landmark with an explicit range",
+      "start_frame": 329,
+      "press_frame": 358,
+      "activate_frame": 382,
+      "end_frame": 382,
+      "target": {
+        "widget_type": "SliceIndexEdit",
+        "object_name": "",
+        "rect": [
+          234.0,
+          699.0,
+          83,
+          28
+        ],
+        "point": [
+          276.0,
+          713.0
+        ]
+      },
+      "cursor_at_press": [
+        276.0,
+        713.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        91.0,
+        680.0,
+        284.0,
+        66.0
+      ],
+      "detail_scale": 1.3732394366197183,
+      "detail_box": [
+        682.0,
+        44.0,
+        402,
+        125
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "focus the axis 0 slice range",
+      "caption": "Crop away the bright left landmark with an explicit range",
+      "start_frame": 329,
+      "press_frame": 347,
+      "activate_frame": 350,
+      "end_frame": 358,
+      "target": {
+        "widget_type": "SliceIndexEdit",
+        "object_name": "",
+        "rect": [
+          234.0,
+          699.0,
+          83,
+          28
+        ],
+        "point": [
+          276.0,
+          713.0
+        ]
+      },
+      "cursor_at_press": [
+        276.0,
+        713.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        216.0,
+        681.0,
+        119.0,
+        64.0
+      ],
+      "detail_scale": 3.277310924369748,
+      "detail_box": [
+        682.0,
+        44.0,
+        402,
+        244
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Return to the full axis with ':'",
+      "start_frame": 401,
+      "end_frame": 458
+    },
+    {
+      "kind": "type",
+      "label": "restore full axis 0",
+      "caption": "Return to the full axis with ':'",
+      "start_frame": 410,
+      "press_frame": 439,
+      "activate_frame": 443,
+      "end_frame": 443,
+      "target": {
+        "widget_type": "SliceIndexEdit",
+        "object_name": "",
+        "rect": [
+          234.0,
+          699.0,
+          83,
+          28
+        ],
+        "point": [
+          276.0,
+          713.0
+        ]
+      },
+      "cursor_at_press": [
+        276.0,
+        713.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        91.0,
+        680.0,
+        284.0,
+        66.0
+      ],
+      "detail_scale": 1.3732394366197183,
+      "detail_box": [
+        682.0,
+        44.0,
+        402,
+        125
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "focus the axis 0 slice range",
+      "caption": "Return to the full axis with ':'",
+      "start_frame": 410,
+      "press_frame": 428,
+      "activate_frame": 431,
+      "end_frame": 439,
+      "target": {
+        "widget_type": "SliceIndexEdit",
+        "object_name": "",
+        "rect": [
+          234.0,
+          699.0,
+          83,
+          28
+        ],
+        "point": [
+          276.0,
+          713.0
+        ]
+      },
+      "cursor_at_press": [
+        276.0,
+        713.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        216.0,
+        681.0,
+        119.0,
+        64.0
+      ],
+      "detail_scale": 3.277310924369748,
+      "detail_box": [
+        682.0,
+        44.0,
+        402,
+        244
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Re-map the image axes with one click",
+      "start_frame": 458,
+      "end_frame": 572
+    },
+    {
+      "kind": "click",
+      "label": "Y",
+      "caption": "Re-map the image axes with one click",
+      "start_frame": 467,
+      "press_frame": 485,
+      "activate_frame": 488,
+      "end_frame": 496,
+      "target": {
+        "widget_type": "QToolButton",
+        "object_name": "",
+        "rect": [
+          697.0,
+          702.0,
+          26,
+          22
+        ],
+        "point": [
+          710.0,
+          713.0
+        ]
+      },
+      "cursor_at_press": [
+        710.0,
+        713.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        679.0,
+        684.0,
+        62.0,
+        58.0
+      ],
+      "detail_scale": 3.9655172413793105,
+      "detail_box": [
+        16,
+        44.0,
+        258,
+        264
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "Y",
+      "caption": "Re-map the image axes with one click",
+      "start_frame": 521,
+      "press_frame": 539,
+      "activate_frame": 542,
+      "end_frame": 550,
+      "target": {
+        "widget_type": "QToolButton",
+        "object_name": "",
+        "rect": [
+          169.0,
+          702.0,
+          26,
+          22
+        ],
+        "point": [
+          182.0,
+          713.0
+        ]
+      },
+      "cursor_at_press": [
+        182.0,
+        713.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        151.0,
+        684.0,
+        62.0,
+        58.0
+      ],
+      "detail_scale": 3.9655172413793105,
+      "detail_box": [
+        826.0,
+        44.0,
+        258,
+        264
+      ]
+    },
+    {
+      "kind": "caption",
+      "text": "Zoom and pan freely \u2014 true 1:1 and fit are one click away",
+      "start_frame": 572,
+      "end_frame": 786
+    },
+    {
+      "kind": "zoom",
+      "label": "zoom image 3.00x",
+      "caption": "Zoom and pan freely \u2014 true 1:1 and fit are one click away",
+      "start_frame": 599,
+      "press_frame": null,
+      "activate_frame": 634,
+      "end_frame": 635,
+      "target": null,
+      "cursor_at_press": null,
+      "detail_inset": false,
+      "detail_rect": null
+    },
+    {
+      "kind": "drag",
+      "label": "pan image",
+      "caption": "Zoom and pan freely \u2014 true 1:1 and fit are one click away",
+      "start_frame": 643,
+      "press_frame": 643,
+      "activate_frame": 669,
+      "end_frame": 670,
+      "target": null,
+      "cursor_at_press": [
+        365.0,
+        156.0
+      ],
+      "detail_inset": false,
+      "detail_rect": null,
+      "button": "left"
+    },
+    {
+      "kind": "click",
+      "label": "show image at true 1:1",
+      "caption": "Zoom and pan freely \u2014 true 1:1 and fit are one click away",
+      "start_frame": 678,
+      "press_frame": 696,
+      "activate_frame": 699,
+      "end_frame": 707,
+      "target": {
+        "widget_type": "QToolButton",
+        "object_name": "",
+        "rect": [
+          596.0,
+          42.0,
+          33,
+          27
+        ],
+        "point": [
+          613.0,
+          56.0
+        ]
+      },
+      "cursor_at_press": [
+        613.0,
+        56.0
+      ],
+      "detail_inset": true,
+      "detail_rect": [
+        578.0,
+        24.0,
+        69.0,
+        63.0
+      ],
+      "detail_scale": 3.6507936507936507,
+      "detail_box": [
+        16,
+        500.0,
+        264,
+        264
+      ]
+    },
+    {
+      "kind": "click",
+      "label": "Fit",
+      "caption": "Zoom and pan freely \u2014 true 1:1 and fit are one click away",
+      "start_frame": 726,
+      "press_frame": 744,
+      "activate_frame": 747,
+      "end_frame": 755,
+      "target": {
+        "widget_type": "QToolButton",
+        "object_name": "",
+        "rect": [
+          559.0,
+          42.0,
+          33,
+          27
+        ],
+        "point": [
+          576.0,
+          56.0
+        ]
+      },
+      "cursor_at_press": [
+        576.0,
+        56.0
+      ],
+      "detail_inset": false,
+      "detail_rect": null
+    }
+  ]
+}
