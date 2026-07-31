@@ -1762,6 +1762,47 @@ def s_colormap(rec: Recorder):
     rec.hold_until_settled(1.5, tail_s=1.2)
 
 
+@scenario("operations")
+def s_operations(rec: Recorder):
+    win = rec.window(_structured_volume(192, 160, 20), size=(1100, 780))
+    rec.caption("The operation manager is the authoring surface for the shared library")
+    rec.hold(1.0)
+
+    view_menu_action = next(
+        (action for action in win.menuBar().actions() if action.text().replace("&", "") == "View"),
+        None,
+    )
+    if view_menu_action is None:
+        raise RuntimeError("menu bar has no View menu")
+    view_menu = view_menu_action.menu()
+    manager_action = next(
+        (
+            action
+            for action in view_menu.actions()
+            if action.text().replace("&", "").startswith("Operation manager")
+        ),
+        None,
+    )
+    if manager_action is None:
+        raise RuntimeError("View menu has no Operation manager entry")
+    rec.caption("Choose Operation manager… from the real View menu")
+    rec.open_overlay_menu(win.menuBar(), view_menu, placement="below", label="open View menu")
+    rec.choose_overlay_action(view_menu, manager_action, label="choose Operation manager")
+
+    dialog = getattr(win, "_operation_manager_dialog", None)
+    if dialog is None:
+        raise RuntimeError("Operation manager action did not build its dialog")
+    rec.caption("Browse shipped operations; New and Duplicate stay in the same editor")
+    rec.open_overlay_widget(
+        dialog,
+        win.display_toolbar.colormap_button,
+        placement="below",
+        label="show operation manager",
+    )
+    rec.move_to(dialog.new_button, seconds=0.6)
+    rec.hold(1.8)
+
+
 @scenario("roi")
 def s_roi(rec: Recorder):
     import dataclasses

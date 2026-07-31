@@ -192,6 +192,11 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         chosen = choices["choose viridis colormap"]
         assert chosen["target"]["display_text"] == "viridis"
         assert chosen["detail_inset"] is True
+    if name == "operations":
+        labels = {event["label"] for event in actions}
+        assert {"open View menu", "choose Operation manager", "show operation manager"} <= labels
+        manager = next(event for event in actions if event["label"] == "show operation manager")
+        assert manager["kind"] == "transition"
     if name == "workflow":
         labels = {event["label"] for event in actions}
         assert {

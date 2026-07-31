@@ -95,6 +95,16 @@ See [Invocation](docs/invocation.md) for all routes and the handoff efficiency c
 
 The operation stack supports reversible, ordered steps such as crop, reverse, reductions, centered FFT/IFFT, FFT shift, and complex-axis conversion. The document keeps the source array and operation history separate; runtime optimization does not rewrite the visible operation stack.
 
+The operation manager browses the same shared library and keeps New, Duplicate,
+runtime selection, parameters, and implementation settings in one editor.
+
+<picture>
+  <source srcset="docs/media/operations.avif" type="image/avif">
+  <img src="docs/media/operations.gif" alt="Opening the operation manager from the View menu and browsing its shared-library authoring controls" width="880">
+</picture>
+
+<sub>[operations.mp4](docs/media/operations.mp4)</sub>
+
 <picture>
   <source srcset="docs/media/fft.avif" type="image/avif">
   <img src="docs/media/fft.gif" alt="Adding centered FFT steps, viewing magnitude on a log scale and phase, and toggling a step in the operation stack" width="880">
