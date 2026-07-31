@@ -31,8 +31,10 @@ bounded progressive rendering.
 **2026-07-27 update:** the renderer decision is made and implemented. The
 WGPU backend (ADR 0057 command protocol) is the maintained GPU path
 with every payload shape, native GPU overlays incl. glyph text, GPU
-histogram/LOD compute (G6 complete), and opt-in screen presentation
-(bitmap remains default; AUTO selects WGPU when its device gate passes).
+histogram/LOD compute (G6 complete), and screen presentation (AUTO is the
+present-method default since 2026-07-31: the native-Wayland swapchain
+where the measured recipe applies, bitmap everywhere else; the separate
+backend AUTO selects WGPU when its device gate passes).
 The historical three-backend matrix reached 15/15 before the legacy VisPy
 renderer was retired; the maintained gate is now the 12-cell WGPU/PyQtGraph
 matrix. What "Now" means until further notice is continued field evidence

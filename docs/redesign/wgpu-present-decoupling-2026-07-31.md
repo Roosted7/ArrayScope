@@ -37,7 +37,9 @@ One draw pipeline per present method, both driven by
   is `context.present()` inside the draw callback (~0.1 ms p50). Camera
   is latched when the paced draw *runs*, not when it is requested (pinned
   by `test_camera_is_latched_when_the_paced_draw_runs_not_when_it_is_requested`).
-- **bitmap** (default; rendercanvas `QRenderWidget`, `ondemand`): draw
+- **bitmap** (the default when this was written, and still what every
+  non-Wayland session resolves to; rendercanvas `QRenderWidget`,
+  `ondemand`): draw
   requests go to rendercanvas's scheduler, which caps requested draws at
   `max_fps` — **which defaulted to 30 because the constructor never passed
   it**. The draw presents through a GPU→CPU readback (~4–7 ms/frame,
