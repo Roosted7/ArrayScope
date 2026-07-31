@@ -278,8 +278,12 @@ how long any scenario may become. Palette-limited ordered dithering leaves the
 largest final GIF, `showcase.gif`, at 1.91 MB; every other GIF is 1.23 MB or
 smaller.
 
-The final re-record completed seven of seven scenarios in one run. Strict
-inspection decoded all twenty-one files with no findings. Direct review covered
-all twenty-one storyboards and seven action-centred event sheets; two suspicious
-FFT GIF storyboard samples were additionally decoded at their exact timestamps
-and contained one current DETAIL inset, matching MP4, rather than retained UI.
+The corrective re-record completed seven of seven scenarios in one run. After
+rebasing onto current main, the operation-manager and workflow clips were
+refreshed individually to follow the renamed menu entry and current crop form;
+each focused refresh passed strict inspection in all three formats and direct
+storyboard/event-sheet review. The other five clips are byte-identical to the
+full run. Direct review therefore covers all twenty-one final storyboards and
+seven action-centred event sheets. Two suspicious FFT GIF storyboard samples
+were additionally decoded at their exact timestamps and contained one current
+DETAIL inset, matching MP4, rather than retained UI.
