@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 from collections import deque
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from math import ceil, exp, log2, log10
 from statistics import median
@@ -176,6 +178,25 @@ _PRESENTATION_UPLOAD_CHANNELS = frozenset(
 # this bound only governs serialized diagnostic evidence.
 _DIAGNOSTIC_UI_OBSERVATION_LIMIT = 64
 
+# Diagnostics snapshots keep only a 64-observation tail, and a phase that dies
+# mid-run never publishes its snapshot at all — both of which made the
+# 2026-07-31 pyqtgraph commit-cost attribution impossible to read from JSONL
+# rows alone (the tail was saturated by kernel_bridge_drain).  When this
+# environment variable names a file, every observation is appended to it as
+# one JSON line at record time, so the stream survives crashes and flooding.
+_UI_OBSERVATION_LOG_ENV = "ARRAYSCOPE_UI_OBSERVATION_LOG"
+
+
+def _maybe_log_ui_observation(observation: GuiCallbackObservation) -> None:
+    path = os.environ.get(_UI_OBSERVATION_LOG_ENV)
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"t_monotonic": monotonic(), **asdict(observation)}) + "\n")
+    except (OSError, TypeError, ValueError):
+        pass
+
 
 def _deque_tail(values: deque, limit: int) -> tuple:
     if len(values) <= limit:
@@ -316,6 +337,7 @@ class ResourceGovernor:
             details=tuple(str(detail) for detail in details),
         )
         self._recent_ui_work_observations.append(observation)
+        _maybe_log_ui_observation(observation)
         self._note_ui_observation_epoch(observation.elapsed_ms)
         if float(elapsed_ms) >= WARNING_THRESHOLD_MS:
             self._recent_over_warning_callbacks.append(observation)
@@ -324,6 +346,7 @@ class ResourceGovernor:
     def record_gui_callback_observation(self, observation: GuiCallbackObservation) -> None:
         diagnostics_only = _diagnostics_only_ui_observation(observation)
         self._recent_ui_work_observations.append(observation)
+        _maybe_log_ui_observation(observation)
         self._note_ui_observation_epoch(observation.elapsed_ms)
         if observation.over_warning:
             self._recent_over_warning_callbacks.append(observation)
