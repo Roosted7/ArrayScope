@@ -460,6 +460,33 @@ def timeline_findings(scenario: str, timeline: dict, media: MediaFacts) -> list[
                     findings.append(
                         Finding("error", scenario, f"{name} detail source lies outside the window")
                     )
+            detail_scale = float(event.get("detail_scale") or 0.0)
+            if detail_scale < 1.15:
+                findings.append(
+                    Finding(
+                        "error",
+                        scenario,
+                        f"{name} detail inset magnifies only {detail_scale:.2f}x",
+                    )
+                )
+            detail_box = event.get("detail_box")
+            if detail_box is None or len(detail_box) != 4:
+                findings.append(Finding("error", scenario, f"{name} has no detail destination"))
+            else:
+                box_x, box_y, box_width, box_height = (float(value) for value in detail_box)
+                if (
+                    box_x < 0
+                    or box_y < 0
+                    or box_width <= 0
+                    or box_height <= 0
+                    or box_x + box_width > width
+                    or box_y + box_height > height
+                ):
+                    findings.append(
+                        Finding(
+                            "error", scenario, f"{name} detail destination lies outside the window"
+                        )
+                    )
         target = event.get("target")
         cursor = event.get("cursor_at_press")
         if target is None:

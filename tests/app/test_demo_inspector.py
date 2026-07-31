@@ -372,6 +372,8 @@ def test_a_declared_detail_inset_must_name_an_in_frame_source(inspector):
             "cursor_at_press": None,
             "detail_inset": True,
             "detail_rect": [1050, 700, 200, 120],
+            "detail_scale": 1.5,
+            "detail_box": [16, 44, 312, 214],
         },
     ]
 
@@ -385,6 +387,38 @@ def test_a_declared_detail_inset_must_name_an_in_frame_source(inspector):
     ]
 
     assert "preview 'show export' detail source lies outside the window" in messages
+
+
+def test_a_declared_detail_inset_must_actually_magnify(inspector):
+    events = [
+        _caption("Inspect the control", 0),
+        {
+            "kind": "preview",
+            "label": "show export",
+            "caption": "Inspect the control",
+            "start_frame": 20,
+            "press_frame": None,
+            "activate_frame": 25,
+            "end_frame": 40,
+            "target": None,
+            "cursor_at_press": None,
+            "detail_inset": True,
+            "detail_rect": [100, 100, 300, 160],
+            "detail_scale": 1.0,
+            "detail_box": [600, 44, 312, 214],
+        },
+    ]
+
+    messages = [
+        finding.message
+        for finding in inspector["timeline_findings"](
+            "probe",
+            _timeline(events),
+            _facts(inspector, "probe", "mp4", width=1100, duration=200 / 30),
+        )
+    ]
+
+    assert "preview 'show export' detail inset magnifies only 1.00x" in messages
 
 
 def test_an_action_must_be_introduced_by_a_readable_caption(inspector):

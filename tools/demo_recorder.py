@@ -178,6 +178,9 @@ CAPTION_BAND_HEIGHT = 78
 CAPTION_FONT_PX = 22
 DETAIL_INSET_MAX_WIDTH = 390
 DETAIL_INSET_MAX_HEIGHT = 230
+DETAIL_INSET_MIN_SCALE = 1.15
+DETAIL_SOURCE_MARGIN = 18
+DETAIL_EDGE_MARGIN = 16
 
 # Classic arrow outline in a ~12x19 unit box, hotspot at (0, 0).
 _CURSOR_POLY = (
@@ -226,6 +229,59 @@ def _draw_ripple(painter, pos, age_fraction):
     painter.drawEllipse(pos, 3.5, 3.5)
 
 
+def _rect_intersection_area(a, b) -> float:
+    left = max(float(a[0]), float(b[0]))
+    top = max(float(a[1]), float(b[1]))
+    right = min(float(a[0] + a[2]), float(b[0] + b[2]))
+    bottom = min(float(a[1] + a[3]), float(b[1] + b[3]))
+    return max(0.0, right - left) * max(0.0, bottom - top)
+
+
+def _detail_inset_geometry(focus_rect, content_width, content_height):
+    """Return scale and a non-obscuring destination for a useful inset."""
+
+    source_x, source_y, source_width, source_height = (float(value) for value in focus_rect)
+    if source_width < 2 or source_height < 2:
+        return None
+    scale = min(
+        DETAIL_INSET_MAX_WIDTH / source_width,
+        DETAIL_INSET_MAX_HEIGHT / source_height,
+    )
+    if scale < DETAIL_INSET_MIN_SCALE:
+        return None
+    detail_width = round(source_width * scale)
+    detail_height = round(source_height * scale)
+    pad = 6
+    header = 28
+    box_width = detail_width + 2 * pad
+    box_height = detail_height + header + pad
+    margin = DETAIL_EDGE_MARGIN
+    candidates = (
+        (margin, 44.0),
+        (content_width - box_width - margin, 44.0),
+        (margin, content_height - box_height - margin),
+        (content_width - box_width - margin, content_height - box_height - margin),
+    )
+    source = (source_x, source_y, source_width, source_height)
+    source_center = (source_x + source_width / 2.0, source_y + source_height / 2.0)
+
+    def score(candidate):
+        left = max(margin, min(float(candidate[0]), content_width - box_width - margin))
+        top = max(margin, min(float(candidate[1]), content_height - box_height - margin))
+        box = (left, top, box_width, box_height)
+        overlap = _rect_intersection_area(source, box)
+        box_center = (left + box_width / 2.0, top + box_height / 2.0)
+        distance = (box_center[0] - source_center[0]) ** 2 + (box_center[1] - source_center[1]) ** 2
+        return (overlap == 0.0, -overlap, distance, box)
+
+    _clear, _negative_overlap, _distance, destination = max(score(item) for item in candidates)
+    return {
+        "scale": scale,
+        "detail_size": [detail_width, detail_height],
+        "box": list(destination),
+    }
+
+
 def _draw_detail_inset(image, focus_rect, content_width, content_height):
     """Magnify the active control without hiding the full application context."""
     from pyqtgraph.Qt import QtCore, QtGui
@@ -235,12 +291,15 @@ def _draw_detail_inset(image, focus_rect, content_width, content_height):
     )
     if source_rect.width() < 2 or source_rect.height() < 2:
         return
-    source = image.copy(source_rect.toAlignedRect())
-    scale = min(
-        DETAIL_INSET_MAX_WIDTH / source.width(),
-        DETAIL_INSET_MAX_HEIGHT / source.height(),
+    geometry = _detail_inset_geometry(
+        (source_rect.x(), source_rect.y(), source_rect.width(), source_rect.height()),
+        content_width,
+        content_height,
     )
-    scale = max(1.0, scale)
+    if geometry is None:
+        return
+    source = image.copy(source_rect.toAlignedRect())
+    scale = float(geometry["scale"])
     detail = source.scaled(
         round(source.width() * scale),
         round(source.height() * scale),
@@ -251,10 +310,7 @@ def _draw_detail_inset(image, focus_rect, content_width, content_height):
     header = 28
     box_width = detail.width() + 2 * pad
     box_height = detail.height() + header + pad
-    target_left = (
-        16 if source_rect.center().x() > content_width / 2 else content_width - box_width - 16
-    )
-    target_top = 44
+    target_left, target_top, _box_width, _box_height = geometry["box"]
 
     painter = QtGui.QPainter(image)
     try:
@@ -591,29 +647,65 @@ class Recorder:
             "point": [point.x(), point.y()],
         }
 
-    def _set_focus_target(self, target: dict | None) -> bool:
+    def _window_rect_target(self, rect, *, label: str) -> dict:
+        from pyqtgraph.Qt import QtCore
+
+        rect = QtCore.QRectF(rect)
+        return {
+            "widget_type": label,
+            "object_name": "",
+            "rect": [rect.x(), rect.y(), rect.width(), rect.height()],
+            "point": [rect.center().x(), rect.center().y()],
+        }
+
+    def _table_cells_target(self, table, row: int, first_column: int, last_column: int) -> dict:
+        from pyqtgraph.Qt import QtCore
+
+        model = table.model()
+        first = table.visualRect(model.index(row, first_column))
+        last = table.visualRect(model.index(row, last_column))
+        local = first.united(last)
+        top_left = table.viewport().mapTo(self.win, local.topLeft())
+        window_rect = QtCore.QRectF(
+            float(top_left.x()),
+            float(top_left.y()),
+            float(local.width()),
+            float(local.height()),
+        )
+        return self._window_rect_target(window_rect, label="QTableViewCells")
+
+    def _set_focus_target(self, target: dict | None) -> dict | None:
         if target is None:
             self._focus_rect = None
-            return False
-        point_x, point_y = (float(value) for value in target["point"])
-        _, _, width, height = (float(value) for value in target["rect"])
-        context_width = min(
-            float(self.win.width() - 8),
-            max(200.0, min(width + 36.0, 280.0)),
+            return None
+        x, y, width, height = (float(value) for value in target["rect"])
+        margin = float(DETAIL_SOURCE_MARGIN)
+        left = max(4.0, x - margin)
+        top = max(4.0, y - margin)
+        right = min(float(self.win.width() - 4), x + width + margin)
+        bottom = min(float(self.win.height() - 4), y + height + margin)
+        self._focus_rect = (left, top, right - left, bottom - top)
+        geometry = _detail_inset_geometry(
+            self._focus_rect,
+            float(self.win.width()),
+            float(self.win.height()),
         )
-        context_height = min(float(self.win.height() - 8), max(120.0, min(height + 36.0, 180.0)))
-        left = max(4.0, min(point_x - context_width / 2.0, self.win.width() - context_width - 4.0))
-        top = max(
-            4.0,
-            min(point_y - context_height / 2.0, self.win.height() - context_height - 4.0),
-        )
-        self._focus_rect = (left, top, context_width, context_height)
-        return True
+        if geometry is None:
+            self._focus_rect = None
+        return geometry
 
-    def _frame_event(self, event: dict, target: dict | None) -> None:
-        framed = self._set_focus_target(target)
-        event["detail_inset"] = framed
-        event["detail_rect"] = list(self._focus_rect) if framed else None
+    def _frame_event(
+        self,
+        event: dict,
+        target: dict | None,
+        *,
+        detail_target: dict | None = None,
+    ) -> None:
+        geometry = self._set_focus_target(detail_target or target)
+        event["detail_inset"] = geometry is not None
+        event["detail_rect"] = list(self._focus_rect) if geometry is not None else None
+        event["detail_scale"] = geometry["scale"] if geometry is not None else None
+        event["detail_box"] = geometry["box"] if geometry is not None else None
 
     def _map_widget_point(self, widget, local_point):
         from pyqtgraph.Qt import QtCore
@@ -887,6 +979,7 @@ class Recorder:
         hold_s: float = 0.3,
         focus_widget=None,
         focus_rel=(0.5, 0.5),
+        focus_target=None,
     ):
         """Record an honest non-pointer transition.
 
@@ -895,7 +988,10 @@ class Recorder:
         """
         event = self._start_action("transition", label)
         invoke()
-        if focus_widget is not None:
+        detail_target = focus_target() if callable(focus_target) else focus_target
+        if detail_target is not None:
+            self._frame_event(event, detail_target)
+        elif focus_widget is not None:
             self._frame_event(event, self._widget_target(focus_widget, focus_rel))
         event["activate_frame"] = self.frame_index
         if settle_after:
@@ -1095,9 +1191,19 @@ class Recorder:
         )
         target = self._widget_target(histogram, (0.5, 0.55))
         event = self._start_action("drag", "adjust histogram window and level", target=target)
-        self._frame_event(event, target)
         start_point = self.widget_point(histogram, (0.5, 0.72))
         end_point = self.widget_point(histogram, (0.5, 0.42))
+        detail_rect = QtCore.QRectF(
+            end_point.x() - 48.0,
+            end_point.y() - 28.0,
+            96.0,
+            56.0,
+        )
+        self._frame_event(
+            event,
+            target,
+            detail_target=self._window_rect_target(detail_rect, label="HistogramLevelHandle"),
+        )
         self.move_to(start_point, seconds=0.5)
         event["press_frame"] = self.frame_index
         event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
@@ -1474,8 +1580,12 @@ def s_roi(rec: Recorder):
         "open inspection panel",
         win._show_inspection_dock,
         hold_s=1.2,
-        focus_widget=win.inspection_dock.stats_table,
-        focus_rel=(0.35, 0.5),
+        focus_target=lambda: rec._table_cells_target(
+            win.inspection_dock.stats_table,
+            0,
+            0,
+            min(5, win.inspection_dock.stats_table.model().columnCount() - 1),
+        ),
     )
     rec.hold_until_settled(2.5, tail_s=1.8)
 

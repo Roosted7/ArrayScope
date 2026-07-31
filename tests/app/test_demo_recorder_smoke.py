@@ -190,6 +190,16 @@ def test_caption_wrapping_is_bounded_to_two_readable_lines(qt_app):
     assert all(metrics.horizontalAdvance(line) <= max_width for line in lines)
 
 
+def test_detail_inset_uses_a_clear_corner_and_skips_full_size_duplicates():
+    namespace = runpy.run_path(str(RECORDER), run_name="arrayscope_demo_detail_test")
+    geometry = namespace["_detail_inset_geometry"]((650, 40, 150, 50), 1100, 780)
+
+    assert geometry is not None
+    assert geometry["scale"] >= namespace["DETAIL_INSET_MIN_SCALE"]
+    assert namespace["_rect_intersection_area"]((650, 40, 150, 50), geometry["box"]) == 0
+    assert namespace["_detail_inset_geometry"]((100, 100, 700, 300), 1100, 780) is None
+
+
 def test_structured_demo_volume_has_edge_and_through_plane_evidence():
     namespace = runpy.run_path(str(RECORDER), run_name="arrayscope_demo_volume_test")
 
