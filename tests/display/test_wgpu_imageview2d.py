@@ -3503,6 +3503,50 @@ def test_factory_auto_resolution_to_bitmap_is_not_a_warning(qt_app):
         view.close()
 
 
+def test_bitmap_refresh_rate_reads_the_display_and_floors_at_sixty():
+    """The pace comes from the screen the widget sits on; a platform that
+    will not say (Qt reports 0) gets the conventional 60, never a divide by
+    zero and never rendercanvas's 30."""
+
+    from arrayscope.display.wgpu_imageview2d import _bitmap_display_refresh_rate
+
+    class _Screen:
+        def __init__(self, rate):
+            self._rate = rate
+
+        def refreshRate(self):
+            return self._rate
+
+    class _Widget:
+        def __init__(self, screen):
+            self._screen = screen
+
+        def screen(self):
+            return self._screen
+
+    assert _bitmap_display_refresh_rate(_Widget(_Screen(144.0))) == 144.0
+    assert _bitmap_display_refresh_rate(_Widget(_Screen(59.94))) == 59.94
+    assert _bitmap_display_refresh_rate(_Widget(_Screen(0.0))) == 60.0
+    assert _bitmap_display_refresh_rate(_Widget(_Screen(None))) == 60.0
+
+
+def test_bitmap_canvas_is_paced_to_the_display_not_the_rendercanvas_default(qt_app):
+    """The ondemand scheduler's cap is what the view resolved for this
+    display — proving ``max_fps`` is actually passed through.  Left unset,
+    rendercanvas caps every requested draw at 30 fps, which halved a 60 Hz
+    display's pan rate on the default (bitmap) present path."""
+
+    from arrayscope.display.wgpu_imageview2d import _bitmap_display_refresh_rate
+
+    view = _view_class("wgpu")(present_method="bitmap")
+    try:
+        scheduler = getattr(view._wgpu_canvas, "_BaseRenderCanvas__scheduler", None)
+        assert scheduler is not None
+        assert float(scheduler._max_fps) == _bitmap_display_refresh_rate(view)
+    finally:
+        view.close()
+
+
 def test_executor_pool_growth_preserves_atlas_upload_currency(qt_app):
     """Growing page capacity must not rebuild unrelated executor resources."""
 

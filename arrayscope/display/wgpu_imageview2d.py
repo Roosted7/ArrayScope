@@ -283,6 +283,27 @@ def import_qrenderwidget():
     return QRenderWidget
 
 
+def _bitmap_display_refresh_rate(widget) -> float:
+    """Draws per second the bitmap canvas's ondemand scheduler should cap at.
+
+    rendercanvas caps requested draws at its ``max_fps`` (default 30), so a
+    canvas built without one can never present faster than 30 fps no matter
+    what the display refreshes at — the same pinned-at-30 defect the screen
+    canvas already removed from its own pacer (see
+    ``WgpuScreenCanvas.max_draws_per_second`` for the full rationale: the
+    display rate IS the optimum for an on-demand cadence, not a compromise).
+    Qt reports 0 when the platform will not say; never divide by or pace to
+    it — fall back to the conventional 60.
+    """
+
+    screen = widget.screen() if widget is not None else None
+    if screen is None:
+        app = QtWidgets.QApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+    rate = float(screen.refreshRate() or 0.0) if screen is not None else 0.0
+    return rate if rate >= 1.0 else 60.0
+
+
 # Native texture-codec device features: BC (NVIDIA/AMD and Intel too) and ASTC
 # (Intel iGPUs).  Requested whenever the adapter advertises them so the shared
 # device can host block-compressed pools; a device without either simply keeps
@@ -432,10 +453,18 @@ class WgpuImageView2D(ImageViewShell):
             # import-time environment fiddling cannot change the live Qt platform.
             QRenderWidget = import_qrenderwidget()
 
+            # ``max_fps`` must be passed: rendercanvas defaults it to 30,
+            # which silently halves a 60 Hz display's pan rate on this (the
+            # default) present path.  Read once at construction — the bitmap
+            # widget owns no QWindow whose ``screenChanged`` could invalidate
+            # a cache, and a monitor move mid-run leaves a cap wrong by at
+            # most the difference between two refresh rates, never the 30 fps
+            # floor this argument removes.
             self._wgpu_canvas = QRenderWidget(
                 parent=self._display_container,
                 present_method="bitmap",
                 update_mode="ondemand",
+                max_fps=_bitmap_display_refresh_rate(self),
             )
         self._wgpu_canvas.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._display_stack.addWidget(self._wgpu_canvas)
