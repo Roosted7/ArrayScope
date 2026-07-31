@@ -175,6 +175,65 @@ a real compositor, but the workload is not the canonical gallery pass.
   default `wgpu_present_method` to AUTO so live-Wayland sessions get the
   screen path (no 4–7 ms readback, self-paced to the display); bitmap
   remains the everywhere-else fallback, now display-rate capped.
+
+### 3a. The default is BITMAP, and all three owners agree
+
+Worth stating because it is easy to assume otherwise: AUTO exists only as
+a menu choice a user must pick. The default is BITMAP in the settings
+dataclass (`settings_state.py`), in the menus' QSettings read fallback
+(`menus.py`), and in the factory's `getattr` fallback
+(`image_view_factory.py`) — plus `normalize_wgpu_present_method_choice`
+returns BITMAP for anything unparseable. So the 30 fps cap above sat on
+the **live default path**, not on a fallback nobody reaches.
+
+### 3b. AUTO's Wayland-only scope is an evidence decision, not a wall
+
+The enum comment says so outright ("Screen on other platforms (e.g. xcb)
+would be a different, unmeasured path — AUTO widens only behind new
+evidence"). Checked this session, because "unmeasured" is not "impossible":
+
+- **wgpu-py 0.31.1 supports Xlib surfaces natively.**
+  `get_surface_id_from_info` builds a `WGPUSurfaceSourceXlibWindow` for
+  `platform: "x11"` — which is even the *default* platform value on
+  Linux. (An `xcb` variant exists too, upstream-marked untested.)
+- **PySide6 exposes `QNativeInterface.QX11Application`**, and under the
+  xcb QPA `winId()` is the X11 Window XID — a documented, long-standing
+  Qt contract, i.e. *more* stable than the undocumented Wayland
+  `winId() == wl_surface*` behaviour the ring-4 test has to pin per Qt
+  minor.
+- **The recipe was run on X11 and it works.** Same shape as
+  `WgpuScreenCanvas` (paint-less `QWindow` via `createWindowContainer`),
+  `platform: "x11"` present-info, against a headless Weston started with
+  `--xwayland` (its X server on `:2`), Intel iGPU: surface created,
+  format `bgra8unorm`, present modes `immediate/mailbox/fifo/fiforelaxed`
+  — **Mailbox is available exactly as on Wayland** — acquire p50 0.09 ms,
+  present p50 0.02 ms over 120 frames. (Frame interval is meaningless
+  there: the probe loop is unpaced.)
+- **The historical blocker is plausibly already gone.** Gate B measured
+  the screen path under xcb as "journey clean" but reproduced the
+  overlay-stacking failure (backing store 5,416 px vs 0 on screen: Qt
+  cannot composite above a native child). That was solved on Wayland by
+  moving overlays *into* the wgpu frame — chip compositor, glyph atlas,
+  overlay geometry — and every one of those keys on
+  `_wgpu_present_method == "screen"`, not on the platform. Plausibly, not
+  provably: nobody has captured X11 pixels through the current machinery.
+
+On cost, the argument for X sessions is the same one that justified the
+Wayland path: bitmap's price is a GPU→CPU readback per frame (gate B:
+7.0 ms at 1300×650, 26.0 ms at 4K), and the screen path skips it on any
+platform. A compositing X11 WM redirects the child window and composites
+it GPU-side, which is not comparable to a CPU readback.
+
+What a widening chip would still owe, and why this is not a one-liner:
+(1) X11 pixel evidence for overlay compositing through the current
+in-frame machinery; (2) native-child geometry/resize behaviour on X11 —
+the Wayland subsurface pathology has an X11 analogue that has not been
+characterised here; (3) a real X.org session, since the probe above is
+XWayland only; (4) an X11 branch in `screen_present_unavailable_reason()`
+plus an x11 present-info variant in `WgpuScreenCanvas`, and an X11
+sibling for the ring-4 native-contract pin. Making AUTO the *default* on
+Wayland and widening AUTO to X11 are separable steps; the first needs no
+new evidence, the second does.
 - `arrayscope/tools/wgpu_preview.py` still builds its own QRenderWidget
   without `max_fps` (dev tool; same 30 cap; not fixed here).
 
