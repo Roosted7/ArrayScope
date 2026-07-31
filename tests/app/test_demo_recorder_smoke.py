@@ -186,6 +186,12 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         before_span = zoom["before_view_range"][0][1] - zoom["before_view_range"][0][0]
         after_span = zoom["after_view_range"][0][1] - zoom["after_view_range"][0][0]
         assert after_span < before_span
+    if name == "colormap":
+        choices = {event["label"]: event for event in actions}
+        assert {"open colormap choices", "choose viridis colormap"} <= choices.keys()
+        chosen = choices["choose viridis colormap"]
+        assert chosen["target"]["display_text"] == "viridis"
+        assert chosen["detail_inset"] is True
     if name == "workflow":
         labels = {event["label"] for event in actions}
         assert {

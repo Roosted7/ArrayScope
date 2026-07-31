@@ -68,6 +68,14 @@ See [Invocation](docs/invocation.md) for all routes and the handoff efficiency c
 - Flip axes and apply centered FFT shift semantics per dimension.
 - Use normal image, line-profile, or tiled montage presentation.
 - Preserve, fit, or restore the viewport, including true 1:1 display.
+- Choose scalar, diverging, scientific, or custom colormaps independently of source data.
+
+<picture>
+  <source srcset="docs/media/colormap.avif" type="image/avif">
+  <img src="docs/media/colormap.gif" alt="Opening the Color control and changing the displayed image from gray to viridis" width="880">
+</picture>
+
+<sub>[colormap.mp4](docs/media/colormap.mp4)</sub>
 
 ### Inspect values
 

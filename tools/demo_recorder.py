@@ -1745,6 +1745,23 @@ def s_montage(rec: Recorder):
     rec.hold_until_settled(2.5, tail_s=1.8)
 
 
+@scenario("colormap")
+def s_colormap(rec: Recorder):
+    win = rec.window(_phantom2d(320), size=(1100, 780))
+    rec.caption("Change colour without changing the array or its levels")
+    rec.hold(1.0)
+
+    button = win.display_toolbar.colormap_button
+    menu = win.display_toolbar._colormap_menu
+    viridis = next((action for action in menu.actions() if action.text() == "viridis"), None)
+    if viridis is None:
+        raise RuntimeError("scalar colormap menu has no favorite viridis action")
+    rec.caption("Open the real Color control and choose a second colormap")
+    rec.open_overlay_menu(button, menu, placement="below", label="open colormap choices")
+    rec.choose_overlay_action(menu, viridis, label="choose viridis colormap")
+    rec.hold_until_settled(1.5, tail_s=1.2)
+
+
 @scenario("roi")
 def s_roi(rec: Recorder):
     import dataclasses
