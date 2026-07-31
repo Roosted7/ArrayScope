@@ -180,12 +180,15 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         assert montage_action["target"]["widget_type"] == "SliceIndexEdit"
         assert montage_action["caption"] == "Type ':' to montage the whole dimension"
         assert montage_action["detail_inset"] is True
+        assert montage_action["detail_rect"][2] > montage_action["target"]["rect"][2]
         zoom = next(event for event in actions if event["label"] == "middle-drag montage zoom")
         assert zoom["button"] == "middle"
         assert zoom["gesture_axis"] == "vertical"
         before_span = zoom["before_view_range"][0][1] - zoom["before_view_range"][0][0]
         after_span = zoom["after_view_range"][0][1] - zoom["after_view_range"][0][0]
         assert after_span < before_span
+        fit = next(event for event in actions if event["label"] == "Fit")
+        assert fit["detail_inset"] is False
     if name == "colormap":
         choices = {event["label"]: event for event in actions}
         assert {"open colormap choices", "choose viridis colormap"} <= choices.keys()

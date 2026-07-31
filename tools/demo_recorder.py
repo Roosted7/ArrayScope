@@ -674,6 +674,15 @@ class Recorder:
         )
         return self._window_rect_target(window_rect, label="QTableViewCells")
 
+    def _context_detail_target(self, widget) -> dict | None:
+        """Promote editors to a visible semantic owner such as a dimension chip."""
+        current = widget.parentWidget()
+        while current is not None and current is not self.win:
+            if getattr(current, "slice_edit", None) is widget:
+                return self._widget_target(current, (0.5, 0.5))
+            current = current.parentWidget()
+        return None
+
     def _set_focus_target(self, target: dict | None) -> dict | None:
         if target is None:
             self._focus_rect = None
@@ -795,6 +804,7 @@ class Recorder:
             widget.click()
             self._overlay_widget = None
             self._overlay_top_left = None
+            self._focus_rect = None
 
         self.click(widget, invoke=activate, label=label)
 
@@ -877,6 +887,10 @@ class Recorder:
         self.cursor_pressed = False
         self._overlay_widget = None
         self._overlay_top_left = None
+        # The popup source no longer exists after activation. Keeping its
+        # rectangle would magnify whatever unrelated image pixels are now
+        # underneath that former popup location.
+        self._focus_rect = None
         self.settle()
         self.hold(0.3)
         self._finish_action(event)
@@ -1149,6 +1163,7 @@ class Recorder:
         move_s=0.6,
         settle_after=True,
         label=None,
+        frame_detail=True,
     ) -> None:
         """Move to ``widget`` (optional), show a press with a click ripple,
         then trigger the real behavior — ``invoke`` when given, otherwise the
@@ -1158,7 +1173,8 @@ class Recorder:
             label or self._widget_label(widget) or "scripted transition",
             target=self._widget_target(widget, rel),
         )
-        self._frame_event(event, event["target"])
+        if frame_detail:
+            self._frame_event(event, event["target"])
         if widget is not None:
             self.move_to(self.widget_point(widget, rel), seconds=move_s)
         event["press_frame"] = self.frame_index
@@ -1494,7 +1510,11 @@ class Recorder:
             settle_after=False,
             label=f"focus {control_label}",
         )
-        self._frame_event(event, event["target"])
+        self._frame_event(
+            event,
+            event["target"],
+            detail_target=self._context_detail_target(line_edit),
+        )
         event["press_frame"] = self.frame_index
         event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
         line_edit.selectAll()
@@ -1530,7 +1550,11 @@ class Recorder:
             label,
             target=self._widget_target(line_edit, (0.5, 0.5)),
         )
-        self._frame_event(event, event["target"])
+        self._frame_event(
+            event,
+            event["target"],
+            detail_target=self._context_detail_target(line_edit),
+        )
         event["press_frame"] = self.frame_index
         event["cursor_at_press"] = [self.cursor.x(), self.cursor.y()]
         for value in values:
@@ -1610,7 +1634,7 @@ def s_showcase(rec: Recorder):
     rec.click(one_to_one_widget, label="show image at true 1:1")
     rec.hold_until_settled(1.5, tail_s=0.6)
     fit_widget = rec.toolbar_action_widget(win.display_toolbar, win.display_toolbar.fit_action)
-    rec.click(fit_widget)
+    rec.click(fit_widget, frame_detail=False)
     rec.hold_until_settled(2.0, tail_s=1.0)
 
 
@@ -1733,7 +1757,7 @@ def s_montage(rec: Recorder):
     rec.caption("The montage is a real viewport — middle-drag vertically to zoom")
     fit_widget = rec.toolbar_action_widget(win.display_toolbar, win.display_toolbar.fit_action)
     if win.display_toolbar.fit_action.isChecked():
-        rec.click(fit_widget, label="unlock fitted montage")
+        rec.click(fit_widget, label="unlock fitted montage", frame_detail=False)
     rec.middle_drag_navigation(
         axis="vertical",
         distance=-72.0,
@@ -1741,7 +1765,7 @@ def s_montage(rec: Recorder):
         label="middle-drag montage zoom",
     )
     rec.hold(0.8)
-    rec.click(fit_widget)
+    rec.click(fit_widget, frame_detail=False)
     rec.hold_until_settled(2.5, tail_s=1.8)
 
 
