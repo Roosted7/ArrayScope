@@ -378,14 +378,14 @@ def _draw_caption_band(painter, width, content_height, text, alpha):
     painter.setFont(font)
     metrics = QtGui.QFontMetricsF(font)
     lines = _wrap_caption_lines(metrics, text, width - 48.0)
-    line_height = metrics.height()
-    block_height = line_height * len(lines)
+    caption_line_height = metrics.height()
+    block_height = caption_line_height * len(lines)
     y = content_height + (CAPTION_BAND_HEIGHT - block_height) / 2.0
     painter.setPen(QtGui.QColor(245, 245, 245, int(255 * alpha)))
     for line in lines:
-        rect = QtCore.QRectF(24.0, y, width - 48.0, line_height)
+        rect = QtCore.QRectF(24.0, y, width - 48.0, caption_line_height)
         painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, line)
-        y += line_height
+        y += caption_line_height
 
 
 def _ease(t: float) -> float:
