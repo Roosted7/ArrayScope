@@ -7,7 +7,7 @@ region payloads; backends differ only in physical presentation mechanics.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from time import perf_counter, thread_time
 
 import numpy as np
@@ -89,6 +89,23 @@ from arrayscope.window.render_contract import (
 )
 
 MONTAGE_VERY_SLOW_UPLOAD_MS = 100.0
+
+
+@dataclass(frozen=True)
+class MontageCacheResolutionContext:
+    """Per-retarget snapshot of the tile-from-cache lookup inputs.
+
+    Valid for exactly one retarget pass: it captures the retained-store scan
+    and the committed frame's payload map at build time, so it must not
+    outlive the pass that built it (a later commit or eviction would leave it
+    describing stale residency).
+    """
+
+    reuse_any_lod: bool
+    selected_lod_factor: int
+    retained_store: RetainedTiledPayloadStore
+    previous_payloads: dict[object, object]
+    tile_key_for: object
 
 
 class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
@@ -1442,16 +1459,20 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self.retarget_frame_pipeline(session)
         return True
 
-    def _resolve_montage_tiles_from_cache(
+    def _montage_cache_resolution_context(
         self,
-        tiles,
         *,
         document,
-        axis: int,
         colormap_lut,
         shader_display: bool,
-    ) -> tuple[list[RenderedTile], list[object]]:
-        """Resolve only the supplied tiles from semantic CPU caches."""
+    ) -> MontageCacheResolutionContext:
+        """Snapshot the shared lookup state for resolving tiles from cache.
+
+        The retained-store scan and the committed-frame payload map are
+        identical for every tile of one retarget pass; building them per tile
+        turned the budgeted viewport-additions loop into a full store copy per
+        addition (O(N^2) at field size).
+        """
 
         selected_lod_factor = 1
         # ADR 0050: under the resident policy a retained payload at any LOD
@@ -1475,16 +1496,47 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 if reuse_any_lod or _payload_lod_matches(payload, selected_lod_factor)
             }
         )
-        cached_tiles: list[RenderedTile] = []
-        missing_tiles: list[object] = []
-        total_lookup_ms = 0.0
-        last_hit = False
-        tile_tuple = tuple(tiles)
         tile_key_for = self.win.operation_evaluator.montage_tile_key_batch(
             colormap_lut=colormap_lut,
             document=document,
             shader_display=shader_display,
         )
+        return MontageCacheResolutionContext(
+            reuse_any_lod=reuse_any_lod,
+            selected_lod_factor=selected_lod_factor,
+            retained_store=retained_store,
+            previous_payloads=previous_payloads,
+            tile_key_for=tile_key_for,
+        )
+
+    def _resolve_montage_tiles_from_cache(
+        self,
+        tiles,
+        *,
+        document,
+        axis: int,
+        colormap_lut,
+        shader_display: bool,
+        context: MontageCacheResolutionContext | None = None,
+    ) -> tuple[list[RenderedTile], list[object]]:
+        """Resolve only the supplied tiles from semantic CPU caches."""
+
+        if context is None:
+            context = self._montage_cache_resolution_context(
+                document=document,
+                colormap_lut=colormap_lut,
+                shader_display=shader_display,
+            )
+        reuse_any_lod = context.reuse_any_lod
+        selected_lod_factor = context.selected_lod_factor
+        retained_store = context.retained_store
+        previous_payloads = context.previous_payloads
+        tile_key_for = context.tile_key_for
+        cached_tiles: list[RenderedTile] = []
+        missing_tiles: list[object] = []
+        total_lookup_ms = 0.0
+        last_hit = False
+        tile_tuple = tuple(tiles)
         for tile in tile_tuple:
             display_cache_start = perf_counter()
             tile_key = tile_key_for(tile.view_state)
@@ -1678,6 +1730,15 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         cached_tiles = []
         missing_tiles = []
         processed_additions = 0
+        # One lookup-state snapshot for the whole budgeted loop: nothing the
+        # snapshot captures changes between iterations (commits happen after
+        # this loop), and rebuilding it per tile made the loop quadratic in
+        # the retained-store size.
+        resolution_context = self._montage_cache_resolution_context(
+            document=session.document,
+            colormap_lut=session.colormap_lut,
+            shader_display=bool(getattr(session, "shader_display", False)),
+        )
         for tile in additions_to_process:
             display_cached, display_missing = self._resolve_montage_tiles_from_cache(
                 (tile,),
@@ -1685,6 +1746,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 axis=session.montage_axis,
                 colormap_lut=session.colormap_lut,
                 shader_display=bool(getattr(session, "shader_display", False)),
+                context=resolution_context,
             )
             cached_tiles.extend(display_cached)
             missing_tiles.extend(display_missing)

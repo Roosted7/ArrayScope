@@ -6446,6 +6446,70 @@ def test_montage_cache_resolver_uses_retained_payloads_when_current_frame_is_sin
     np.testing.assert_array_equal(cached_tiles[0].histogram_data, histogram)
 
 
+def test_montage_cache_resolution_context_is_reused_across_calls():
+    """A shared resolution context must not rescan the retained store per
+    call: the budgeted viewport-additions loop resolves one tile per
+    iteration, and rebuilding the store scan and key-batch closure for every
+    tile made that loop quadratic in the retained-store size at field size."""
+
+    from arrayscope.display.slice_engine import DisplayImage
+    from arrayscope.window.frame_controller import FrameControllerMixin
+
+    image = np.arange(4, dtype=np.float32).reshape(2, 2)
+    cached = DisplayImage(image, histogram_data=image.copy())
+    tiles = tuple(
+        SimpleNamespace(view_state=object(), source_index=index, montage_index=index)
+        for index in range(3)
+    )
+    counts = {"scans": 0, "key_batches": 0}
+
+    class _Evaluator:
+        def montage_tile_key_batch(self, **_kwargs):
+            counts["key_batches"] += 1
+            return lambda _tile_state: ("stub-key",)
+
+        def cached_montage_tile_by_key(self, _key):
+            return cached
+
+    class _Window(FrameControllerMixin):
+        def __init__(self):
+            self.win = self
+
+    win = _Window()
+    win.operation_evaluator = _Evaluator()
+    win._committed_display_frame = None
+    store = win._retained_tiled_payload_store()
+    original_scan = store.payloads_by_base_source
+
+    def counting_scan(**kwargs):
+        counts["scans"] += 1
+        return original_scan(**kwargs)
+
+    store.payloads_by_base_source = counting_scan
+
+    context = win._montage_cache_resolution_context(
+        document=object(),
+        colormap_lut=None,
+        shader_display=True,
+    )
+    resolved = []
+    for tile in tiles:
+        cached_tiles, missing_tiles = win._resolve_montage_tiles_from_cache(
+            (tile,),
+            document=object(),
+            axis=2,
+            colormap_lut=None,
+            shader_display=True,
+            context=context,
+        )
+        assert missing_tiles == []
+        resolved.extend(cached_tiles)
+
+    assert len(resolved) == len(tiles)
+    assert counts["scans"] == 1, "per-call store rescans defeat the hoist"
+    assert counts["key_batches"] == 1, "per-call key-batch closures defeat the hoist"
+
+
 def test_previous_complex_shader_payload_must_carry_complex_texture():
     from arrayscope.core.view_state import ChannelMode, ViewState
     from arrayscope.display.model.frame import DisplayTilePayload
