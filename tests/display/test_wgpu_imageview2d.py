@@ -66,6 +66,42 @@ def test_wgpu_camera_draw_publishes_presentation_ack(qt_app, monkeypatch):
         view.close()
 
 
+def test_wgpu_presentation_debt_armed_outside_a_frame_requests_the_draw(qt_app, monkeypatch):
+    """D1 latch (gui-callback-owners 2026-07-31 §5): arming the presentation
+    debt must schedule the frame that clears it.
+
+    The base class requests the matching repaint only on the QGraphics path,
+    so a late ``visible_changed`` upload used to leave ``requested==drawn``
+    with ``presentationDrawPending()`` stuck True — changed visible content
+    with no draw scheduled.
+    """
+
+    view = _view_class("wgpu")(present_method="screen")
+    requests = []
+    try:
+        monkeypatch.setattr(
+            view._wgpu_canvas,
+            "request_draw",
+            lambda *args, **kwargs: requests.append((args, kwargs)),
+        )
+
+        view._mark_presentation_draw_pending()
+
+        assert requests == [((), {})]
+        assert view.presentationDrawPending() is True
+        # A second late upload while that frame is still queued coalesces.
+        view._mark_presentation_draw_pending()
+        assert requests == [((), {})]
+
+        # The draw callback clears the update gate, then the deferred ack
+        # clears the debt — same shape as the camera-draw ack test above.
+        view._wgpu_canvas_update_pending = False
+        view._publish_wgpu_draw_ack(0)
+        assert view.presentationDrawPending() is False
+    finally:
+        view.close()
+
+
 def test_wgpu_pool_headroom_clamps_to_device_limit_but_active_pages_do_not():
     from arrayscope.display.wgpu_imageview2d import _wgpu_pool_layer_budget
 

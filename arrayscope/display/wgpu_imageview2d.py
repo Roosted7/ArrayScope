@@ -941,6 +941,20 @@ class WgpuImageView2D(ImageViewShell):
             return
         self._mark_presentation_drawn()
 
+    def _mark_presentation_draw_pending(self) -> None:
+        super()._mark_presentation_draw_pending()
+        # The base class owns the matching repaint request only on the
+        # QGraphics path; here the sole edge that clears the debt is the draw
+        # ack.  A visible-content upload that lands outside any canvas frame
+        # request (a late ``visible_changed`` commit) would otherwise arm the
+        # debt with no draw scheduled — changed pixels staying stale until
+        # external damage.  Route the request through the same coalesced
+        # pacer every other draw source uses; the pending guard both skips
+        # a frame already in flight and stops ``_request_wgpu_canvas_draw``'s
+        # own mark call from re-entering.
+        if not bool(getattr(self, "_wgpu_canvas_update_pending", False)):
+            self._request_wgpu_canvas_draw()
+
     def beginPhysicalTileTimeline(self) -> None:
         """Enable a lightweight physical-draw timeline for profiling."""
 
