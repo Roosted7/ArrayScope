@@ -323,7 +323,15 @@ def test_the_cadence_nudge_still_fires_on_a_run_that_ran_nothing(
         testmon_policy.map_path(tmp_path),
         structure={},
         baselines={},
-        sweep={"sha": "0" * 40, "at": "2026-05-01T00:00:00+00:00", "swept": True},
+        # `attributed` because this test exercises the cadence CLOCK: an
+        # unstamped record now takes the attribution branch instead, which
+        # has its own fast-path test in test_since_verification.py.
+        sweep={
+            "sha": "0" * 40,
+            "at": "2026-05-01T00:00:00+00:00",
+            "swept": True,
+            "attributed": True,
+        },
     )
 
     harness._report_nothing_to_run(config, peek)
