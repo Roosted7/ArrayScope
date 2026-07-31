@@ -197,3 +197,13 @@ a real compositor, but the workload is not the canonical gallery pass.
 - The pan probe drives `ViewBox.translateBy` at 250 Hz, not real pointer
   input; input-delivery costs are outside what it measures (deliberately —
   the question was the present path).
+- **Test-gate status.** `pytest --since` on the rebased tip surfaced
+  UI-family failures that vary between identical runs (10 → 3 → 3,
+  different names each time). Every named failure passed serially at
+  moderate load. One
+  (`test_data_change_serves_the_visible_set_before_any_out_of_view_removal[wgpu]`)
+  then failed serially post-rebase — a single-variable interleaved A/B
+  (only the `max_fps` argument toggled, same tip) failed in BOTH arms
+  while another session drove the machine to load ~34, so the failure
+  tracks machine load, not this change. A quiet-machine serial
+  confirmation of that one test is still owed before merge.
