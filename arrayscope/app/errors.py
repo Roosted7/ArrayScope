@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import traceback
@@ -13,9 +14,13 @@ def strict_ui_enabled() -> bool:
 
 def handle_ui_exception(context: str, exc: BaseException) -> None:
     logging.exception("%s failed", context, exc_info=exc)
-    try:
-        from arrayscope.core.trace import emit_trace
+    # Import outside the guard: a broken internal import is a real error the
+    # import-health guard must see, not a silently missing trace. Only the
+    # emit is allowed to fail -- this runs on the path that handles an
+    # exception, so it must never raise a second one.
+    from arrayscope.core.trace import emit_trace
 
+    with contextlib.suppress(Exception):
         emit_trace(
             "ui_exception",
             context=str(context),
@@ -24,8 +29,6 @@ def handle_ui_exception(context: str, exc: BaseException) -> None:
                 -1500:
             ],
         )
-    except Exception:
-        pass
     if strict_ui_enabled():
         raise exc
 

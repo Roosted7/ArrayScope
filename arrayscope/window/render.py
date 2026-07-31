@@ -1338,9 +1338,12 @@ class RenderOrchestrator(
             value = getattr(self, attribute, None)
             if value is not None:
                 details.append(f"{label}={float(value):.1f}")
-        try:
-            from arrayscope.display.backend_contract import image_view_backend_capabilities
+        # Import outside the guard: a broken internal import is a real error
+        # the import-health guard must see, not an unnamed backend. Only
+        # reading the live view is allowed to fail.
+        from arrayscope.display.backend_contract import image_view_backend_capabilities
 
+        try:
             backend = image_view_backend_capabilities(self.win.img_view).name
         except Exception:
             backend = ""
