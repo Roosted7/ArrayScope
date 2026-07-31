@@ -175,21 +175,6 @@ class _FakeData:
         self.all_tests = {f"tests/test_a.py::test_{index}": {} for index in range(mapped)}
 
 
-@pytest.fixture
-def as_the_controller(monkeypatch):
-    """Report as the process the fast path actually runs in.
-
-    ``_report_map_erosion`` and ``_report_function_coverage`` both return
-    immediately on an xdist worker, because one process must own the sidecar.
-    These tests execute *on* a worker, so without this they would assert against
-    a run that had declined to report — and they did, silently passing under
-    ``-n 0`` and failing under ``-n auto``. Production never hits it: the fast
-    path itself refuses on a worker before any of this.
-    """
-
-    monkeypatch.setattr(harness, "_XDIST_WORKER", None)
-
-
 def _printing_config(tmp_path, mapped=4028):
     peek = testmon_policy.MapPeek(
         environment="offscreen",

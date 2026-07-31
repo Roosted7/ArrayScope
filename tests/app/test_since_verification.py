@@ -540,7 +540,9 @@ def test_attribution_gap_reads_the_sweep_record():
     assert "never been fully recorded" in testmon_policy.attribution_gap(None)
 
 
-def test_a_real_sweep_stamps_attribution_and_an_anchor_does_not(tmp_path, monkeypatch):
+def test_a_real_sweep_stamps_attribution_and_an_anchor_does_not(
+    tmp_path, monkeypatch, as_the_controller
+):
     """The stamp exists because this code carries the batch pin: any sweep it
     records was recorded with complete edges. The anchor claims no such thing."""
 
@@ -570,7 +572,9 @@ def test_a_real_sweep_stamps_attribution_and_an_anchor_does_not(tmp_path, monkey
     assert "attributed" not in anchor
 
 
-def test_since_refuses_on_a_map_without_the_attribution_stamp(tmp_path, monkeypatch):
+def test_since_refuses_on_a_map_without_the_attribution_stamp(
+    tmp_path, monkeypatch, as_the_controller
+):
     """The gate's 'reached' set is derived from recorded edges, so a map with
     missing edges under-scopes the question itself — --fresh included. Refusal,
     with the one command that repairs it."""
@@ -613,7 +617,9 @@ def test_since_refuses_on_a_map_without_the_attribution_stamp(tmp_path, monkeypa
     harness._refuse_since_on_unattributed_map(config)
 
 
-def test_the_loop_names_the_gap_immediately_not_on_a_clock(tmp_path, monkeypatch):
+def test_the_loop_names_the_gap_immediately_not_on_a_clock(
+    tmp_path, monkeypatch, as_the_controller
+):
     """An under-attributed map under-selects on every run, so the nudge must
     not wait out the 21-day/40-commit cadence clocks."""
 
