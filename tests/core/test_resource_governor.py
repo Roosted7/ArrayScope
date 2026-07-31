@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from arrayscope.app.settings_state import AppSettingsState
 from arrayscope.core.compute_policy import ComputeLane, compute_policy_from_settings
 from arrayscope.core.gui_callback_budget import GuiCallbackObservation
@@ -15,6 +17,7 @@ from arrayscope.core.resource_governor import (
     _render_pass_extrapolation_weight,
     _render_pass_latency_cost_ms,
     _render_pass_optimal_point,
+    _render_pass_shared_terms,
     _RenderPassCostModel,
     _robust_linear_fit,
 )
@@ -455,6 +458,84 @@ def test_render_pass_linear_fit_rejects_one_high_leverage_stall():
     fixed_ms, item_ms = stalled
     assert 24.0 <= fixed_ms <= 27.0
     assert item_ms <= 0.5
+
+
+def test_fixed_dominated_pass_escapes_a_small_cohort_seed_quickly():
+    """The slow-fill attractor of 2026-07-31, encoded as a regression.
+
+    A 272-tile refinement whose commits measured fixed-dominated (~40 ms per
+    commit whether it carried 2 or 4 items) locked at 3-5 items per commit
+    for 60+ commits: the exploration guard priced anything past ~1.1x the
+    observed cohort as unexplored territory, small cohorts kept the observed
+    range small, and the state re-confirmed itself on every observation.
+    When the cost model itself says items are nearly free, exploration must
+    widen by a real multiple per decision — a few commits to the amortizing
+    cohort, not a 10% crawl the rolling window resets faster than it moves.
+    """
+
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    # A stable, tight, fixed-dominated fit over small cohorts: 40 ms plus
+    # 0.1 ms per item, measured at 2-4 items across repeated commits.
+    for count in (2, 3, 4, 2, 3, 4):
+        governor.record_ui_observation(
+            "montage_render_pass_target",
+            40.0 + 0.1 * count,
+            item_count=count,
+            byte_count=count * 1024 * 1024,
+            work_class="presentation_upsert",
+            backend="wgpu",
+        )
+        decision = governor.decide_render_pass(
+            interactive=False, pass_kind="target", remaining_items=272
+        )
+    assert decision.batch_limit >= 12, (
+        "fixed-dominated evidence must widen the cohort by a real multiple "
+        f"per decision, not pin it near the last small commit (got {decision.batch_limit})"
+    )
+    # And the escape must compound: measuring the decided cohort at the same
+    # fixed-dominated cost must keep widening toward the amortizing optimum.
+    governor.record_ui_observation(
+        "montage_render_pass_target",
+        40.0 + 0.1 * decision.batch_limit,
+        item_count=decision.batch_limit,
+        byte_count=decision.batch_limit * 1024 * 1024,
+        work_class="presentation_upsert",
+        backend="wgpu",
+    )
+    wider = governor.decide_render_pass(interactive=False, pass_kind="target", remaining_items=272)
+    assert wider.batch_limit >= decision.batch_limit, (
+        f"a measured-safe large cohort must not shrink back toward the seed "
+        f"({decision.batch_limit} -> {wider.batch_limit})"
+    )
+
+
+def test_shared_byte_terms_pool_only_locally_identified_byte_fits():
+    """A pooled byte prior must be evidence, not an echo.
+
+    Byte and item counts are nearly collinear in a tiled fill (one page per
+    tile), so most fits cannot split them. The pool once accepted byte terms
+    that were themselves inherited from the pool, and one misattributed split
+    then became every later pass's marginal cost: 4.14 ms/MiB steering vs
+    0.52 ms/MiB measured on the same workload, which is the difference
+    between 3-item and 13-item refinement cohorts (2026-07-31).
+    """
+
+    identified = _RenderPassCostModel(
+        fixed_ms=20.0,
+        item_ms=0.5,
+        byte_ms_per_mib=0.6,
+        byte_identified=True,
+        samples=6,
+        design_points=4,
+        observed_item_min=2,
+        observed_item_max=32,
+        mean_elapsed_ms=40.0,
+    )
+    inherited = replace(identified, byte_ms_per_mib=4.0, byte_identified=False)
+
+    _fixed, byte_ms = _render_pass_shared_terms((identified, inherited, inherited))
+
+    assert byte_ms == 0.6, "inherited byte values must not vote in the pool"
 
 
 def test_render_pass_weights_fill_time_against_continuous_latency_cost():

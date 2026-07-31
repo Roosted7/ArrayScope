@@ -136,6 +136,12 @@ class _RenderPassCostModel:
     observed_item_max: int = 0
     mean_elapsed_ms: float | None = None
     seeded: bool = False
+    # True only when THIS fit separated the byte term from its own design
+    # (independent item/byte variation, or byte-only variation). A byte value
+    # merely inherited from a pooled prior keeps False: pooling an inherited
+    # value back into the pool is how one misattributed fit became every
+    # pass's marginal (the 2026-07-31 slow-fill attractor).
+    byte_identified: bool = False
 
     @property
     def identifiable(self) -> bool:
@@ -543,6 +549,10 @@ class ResourceGovernor:
             and latest_elapsed_ms >= float(previous[1]) * _RENDER_PASS_ITEM_INDEPENDENCE_RATIO
         ):
             item_independent.add(channel)
+        round_item_max = getattr(self, "_render_pass_round_item_max", None)
+        if round_item_max is None:
+            round_item_max = {}
+            self._render_pass_round_item_max = round_item_max
         if new_sample:
             samples.append(sample)
             del samples[:-8]
@@ -550,6 +560,12 @@ class ResourceGovernor:
                 latest_count,
                 latest_elapsed_ms,
             )
+            # A cohort size this round has already measured stays legal
+            # evidence for the whole round. The 8-sample window alone forgot
+            # an early 32-item commit within eight callbacks, after which the
+            # extrapolation guard forbade ever exploring past ~1.1x the small
+            # recent cohorts — the self-locking slow fill (2026-07-31).
+            round_item_max[channel] = max(int(round_item_max.get(channel, 0)), int(latest_count))
         raw_models = tuple(
             _render_pass_cost_model(rows) for rows in sample_bank.values() if len(rows) >= 2
         )
@@ -639,7 +655,20 @@ class ResourceGovernor:
         if model.identifiable and local_count_span >= 2:
             self._render_pass_last_local_models[reference_key] = model
         if steering_model.identifiable:
-            observed_item_max = max(1, int(steering_model.observed_item_max))
+            observed_item_max = max(
+                1,
+                int(steering_model.observed_item_max),
+                int(round_item_max.get(channel, 0)),
+            )
+            # Fixed-dominated evidence means one more item in the chunk is
+            # (measured) nearly free: pacing such a transaction just above its
+            # observed cohort re-pays the whole-montage fixed cost per tiny
+            # chunk. The step multiple stays finite — outward over successive
+            # decisions, never a one-shot jump — but grows 4x per decision
+            # instead of 1.1x, so a fill escapes a small seed in a few commits
+            # rather than never. Byte extrapolation and the byte cap keep
+            # pricing the real upload work either way.
+            item_exploration_multiple = 4.0 if channel in item_independent else 1.0
             trusted_byte_rows = [
                 row
                 for row in byte_rows
@@ -660,9 +689,12 @@ class ResourceGovernor:
                 bytes_per_item=bytes_per_item,
                 model=steering_model,
                 responsiveness_weight=self.responsiveness_weight,
+                item_exploration_multiple=item_exploration_multiple,
             )
             steering = "weighted-fill-latency"
-            item_ratio = float(batch) / max(1.0, float(observed_item_max))
+            item_ratio = float(batch) / max(
+                1.0, float(observed_item_max) * item_exploration_multiple
+            )
             extrapolation_ms = _render_pass_extrapolation_cost_ms(
                 item_ratio
             ) * _render_pass_extrapolation_weight(steering_model)
@@ -886,6 +918,7 @@ class ResourceGovernor:
         self.latency_feedback.reset_channel(channel)
         getattr(self, "_render_pass_previous_observations", {}).pop(channel, None)
         getattr(self, "_render_pass_item_independent", set()).discard(channel)
+        getattr(self, "_render_pass_round_item_max", {}).pop(channel, None)
 
     def _decide_budget(self, channel: str, *, interactive: bool, byte_cap: int) -> UiWorkDecision:
         channel = str(channel)
@@ -1191,6 +1224,7 @@ def _render_pass_cost_model(
     robust_linear = _robust_linear_fit(counts, elapsed)
     item_ms = None if robust_linear is None else robust_linear[1]
     byte_ms_per_mib = None
+    byte_identified = False
     fixed = max(0.0, mean_elapsed) if robust_linear is None else robust_linear[0]
     item_only_residual_sum = sum(
         (duration - (fixed + float(item_ms or 0.0) * count)) ** 2
@@ -1228,8 +1262,10 @@ def _render_pass_cost_model(
                 fixed = fitted_fixed
                 item_ms = fitted_item
                 byte_ms_per_mib = fitted_byte
+                byte_identified = True
     elif item_variance <= 0.0 and byte_variance > 0.0:
         byte_ms_per_mib = max(0.0, byte_covariance / byte_variance)
+        byte_identified = True
         fixed = max(0.0, mean_elapsed - byte_ms_per_mib * mean_mib)
 
     # Shared structural knowledge is a prior with the correct ownership:
@@ -1238,6 +1274,8 @@ def _render_pass_cost_model(
     if fixed_prior_ms is not None or byte_prior_ms_per_mib is not None:
         if byte_prior_ms_per_mib is not None:
             byte_ms_per_mib = max(0.0, float(byte_prior_ms_per_mib))
+            # The value is now the pool's, not this design's.
+            byte_identified = False
         transport_adjusted = [
             duration - float(byte_ms_per_mib or 0.0) * value
             for duration, value in zip(elapsed, mib, strict=True)
@@ -1281,6 +1319,7 @@ def _render_pass_cost_model(
         fixed_ms=fixed,
         item_ms=item_ms,
         byte_ms_per_mib=byte_ms_per_mib,
+        byte_identified=byte_identified,
         residual_variance_ms2=residual_variance_ms2,
         residual_rms_ms=residual_variance_ms2**0.5,
         raw_residual_rms_ms=(raw_residual_sum / len(samples)) ** 0.5,
@@ -1306,6 +1345,15 @@ def _render_pass_reference_model_is_stable(model: _RenderPassCostModel) -> bool:
     fourth callback prevents the exact three-point interpolation that made a
     single stalled probe look certain.  The residual limit is deliberately
     relative as backend timing noise grows with callback duration.
+
+    The slope must additionally have been measured across a real cohort
+    span.  A reference's item slope is frozen for the whole next round, and
+    a slope extrapolated from a 1-4 item span steered rounds that run 8-30
+    item cohorts: too-large slopes forbade exactly the cohorts that would
+    have falsified them, and 3-5 item commits could never re-open the range
+    (the 2026-07-31 slow-fill attractor held item=4.3 ms/item for 70
+    straight commits from one such reference).  A fit without that span
+    still steers its own round locally; it just may not anchor the next.
     """
 
     return bool(
@@ -1314,6 +1362,8 @@ def _render_pass_reference_model_is_stable(model: _RenderPassCostModel) -> bool:
         and model.design_points >= 3
         and model.residual_rms_ms is not None
         and float(model.residual_rms_ms) <= max(2.0, 0.05 * float(model.mean_elapsed_ms or 0.0))
+        and int(model.observed_item_max) >= 8
+        and int(model.observed_item_max) >= 4 * max(1, int(model.observed_item_min))
     )
 
 
@@ -1489,6 +1539,11 @@ def _render_pass_shared_terms(
                 and model.byte_ms_per_mib is None
             ):
                 continue
+            if attribute == "byte_ms_per_mib" and not model.byte_identified:
+                # An inherited byte value re-entering the pool is a feedback
+                # loop, not evidence: one misattributed split then becomes
+                # every later pass's marginal cost and pins small cohorts.
+                continue
             rows.append(float(value))
         if not rows:
             return None
@@ -1640,6 +1695,7 @@ def _render_pass_optimal_point(
     bytes_per_item: float,
     model: _RenderPassCostModel | None = None,
     responsiveness_weight: float = 1.0,
+    item_exploration_multiple: float = 1.0,
 ) -> tuple[int, float, float]:
     """Minimize fill plus latency and model-risk prices in logarithmic work.
 
@@ -1668,8 +1724,10 @@ def _render_pass_optimal_point(
         count = float(items)
         return float(fixed_ms) + marginal * count
 
+    exploration_multiple = max(1.0, float(item_exploration_multiple))
+
     def extrapolation(items: float) -> float:
-        item_ratio = float(items) / max(1.0, float(observed_item_max))
+        item_ratio = float(items) / max(1.0, float(observed_item_max) * exploration_multiple)
         result = _render_pass_extrapolation_cost_ms(item_ratio) * _render_pass_extrapolation_weight(
             uncertainty_model
         )
