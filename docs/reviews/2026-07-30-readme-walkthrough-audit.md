@@ -174,21 +174,23 @@ documentation, not WGPU or real-compositor certification.
 ## Landed outcome
 
 The baseline above is retained as the before-state. The completed media set has
-five scenarios and fifteen final encodes:
+seven scenarios and twenty-one final encodes:
 
 | Scenario | Final MP4 duration | Final source frame | Closed findings |
 |---|---:|---:|---|
-| `showcase` | 28.23 s | 1100×858 | Visible slice scrub, asymmetric crop/restore, real window/level gesture, meaningful 1:1 and fit actions |
+| `showcase` | 26.20 s | 1100×858 | Live hover HUD, pointer-coupled window/level, middle-drag slice scrub, asymmetric crop/restore, meaningful 1:1 and fit actions |
 | `fft` | 26.90 s | 1100×838 | Readable menus/combos, exact stack checkbox, display mapping before the first transform |
-| `montage` | 12.50 s | 1100×858 | Caption precedes trigger, semantic `:` action, incomplete→complete presentation, zoom/fit |
-| `roi` | 18.27 s | 1100×898 | Honest panel transitions, animated rectangle/polyline, magnified live statistics and profile activation |
+| `montage` | 12.67 s | 1100×858 | Caption precedes trigger, semantic `:` action, incomplete→complete presentation, real middle-drag zoom and fit |
+| `colormap` | 5.37 s | 1100×858 | Real Color control, readable choice list, and visible gray-to-viridis result |
+| `operations` | 7.37 s | 1100×858 | Real View-menu action and composited production operation-manager dialog |
+| `roi` | 24.87 s | 1100×898 | Dock-owned rectangle creation, command-palette polyline drawing, live statistics, and per-frame profile tracking |
 | `workflow` | 13.27 s | 1100×858 | Real parameterized Crop form and highlighted dimension video/PNG export entry |
 
 All inline AVIF and GIF files are 880 px wide, so the README renders them at
 native width rather than enlarging a smaller GIF. Every format has a companion
 timeline. Strict inspection produced no structural, scale, duration,
 cursor-target, caption-timing, inline-byte-budget, or companion-file finding.
-Every one of the fifteen final-format storyboards and all five event sheets was
+Every one of the twenty-one final-format storyboards and all seven event sheets was
 also reviewed directly; the structural report was not treated as pixel
 acceptance.
 
@@ -238,10 +240,46 @@ and then checked in the decoded pixels:
 | E — broken-looking 1:1 | Use the 384×320 showcase source. | At 1:1 the image remains a meaningful pixel-exact view instead of a 128 px speck. |
 | F — missing framing | Add a bordered DETAIL inset that follows the active live or composited target while retaining the full window as context. Record and validate its source rectangle. | Control-heavy beats decode at roughly 1.9×; the wider ROI statistics table uses a focused 1.3× inset. |
 | G — omitted window/level row | Drive a real histogram range drag through the production level-setting path. | The histogram handles and image contrast visibly change in the showcase event sheet and encodes. |
-| H — media weight/history | Enforce a 3.5 MB limit for every inline AVIF/GIF and place all final generated files in one recording commit after the bounded code/docs commits. | `showcase.gif` fell from 3.73 MB to 3.19 MB; linked MP4 files remain exempt from the inline budget. |
+| H — media weight/history | Enforce a 3.5 MB limit for every inline AVIF/GIF and place all final generated files in one recording commit after the bounded code/docs commits. | `showcase.gif` fell from 3.73 MB to 1.91 MB; linked MP4 files remain exempt from the inline budget. |
 | I — stale recorded labels | Re-record all five scenarios after the widget-label correction. | Timelines use control names rather than current values or bare `QComboBox`; event sheets contain readable multiplication text rather than the former tofu glyph. |
 
 Luminance, semantic salience, and whether an operation makes an understandable
 pixel change remain human visual-review questions. The inspector deliberately
 does not pretend that geometry and timing alone prove those properties; its
 storyboards and event sheets make that review repeatable.
+
+## Closure of the third pixel review
+
+The next review identified eight remaining places where a caption described a
+capability but the recorder bypassed its shipped interaction. Each now follows
+the same production entry point a user does:
+
+| Review item | Landed closure | Pixel or gate evidence |
+|---|---|---|
+| 1 — ROI creation bypassed its tool | Choose Rectangle in the Inspection dock and press its Add button; enter polyline drawing through the production command-palette action. | The ROI event sheet shows both real entry points before either geometry appears. The dock intentionally exposes Cursor, Profile, Line, and Rectangle; polyline and freehand remain command-palette tools. |
+| 2 — live profile jumped | Convert every animated cursor point into image coordinates and feed the production marker/profile update path during the move. | The profile curve changes continuously with the cursor, rather than only at three endpoints. |
+| 3 — hover caption had no HUD | Send the synthetic scene move through the production hover signal after the viewport event filter. | The real `PixelHud` chip follows the pointer and displays coordinates and a value during the showcase hover beat. |
+| 4 — histogram gesture was independent of levels | Map the cursor through the histogram value axis and move the upper handle while retaining the lower level. | Cursor, upper handle, histogram range, and image contrast now move together. |
+| 5 — montage navigation was bypassed | Send a real middle-button press, vertical move stream, and release to the viewport. | The montage visibly zooms under the pointer; the manifest records the middle button for the complete gesture range. |
+| 6 — slice navigation was bypassed | Send the same production gesture horizontally over the showcase viewport. | The highlighted dimension and pixels scrub together while the middle button is held. |
+| 7 — colormaps had no animation | Add a topic-scoped clip that opens the real Color control and chooses viridis from the readable composited menu. | All three formats show both the choice and the changed image/LUT; the 5.37 s clip keeps the lead tour bounded. |
+| 8 — the operation manager had no animation | Add a topic-scoped clip that triggers the real View-menu action, constructs the production dialog, and composites it without entering a modal loop. | The full manager, shipped operation tree, editor, and New/Duplicate controls remain visible for inspection. |
+
+DETAIL framing now starts from the subject widget or action rectangle plus a
+margin, chooses a clear destination corner, and is omitted below 1.15×. Slice
+edits promote the subject to the complete dimension chip, popup focus is
+cleared with the popup, and icon-only Fit framing is omitted. The manifest and
+strict inspector record and validate both source geometry and achieved scale.
+
+The GIF fallback remains deliberately supported for legacy README clients,
+while AVIF stays the primary `<picture>` source. This is a bounded compatibility
+choice rather than a reason to stretch a clip: the 3.5 MB inline limit decides
+how long any scenario may become. Palette-limited ordered dithering leaves the
+largest final GIF, `showcase.gif`, at 1.91 MB; every other GIF is 1.23 MB or
+smaller.
+
+The final re-record completed seven of seven scenarios in one run. Strict
+inspection decoded all twenty-one files with no findings. Direct review covered
+all twenty-one storyboards and seven action-centred event sheets; two suspicious
+FFT GIF storyboard samples were additionally decoded at their exact timestamps
+and contained one current DETAIL inset, matching MP4, rather than retained UI.
