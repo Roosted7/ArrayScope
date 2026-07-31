@@ -58,7 +58,21 @@ PYQTGRAPH_PREVIEW_ATLAS_PAGE_EXTENT = 256
 _UI_OBSERVATION_LOG_ENV = "ARRAYSCOPE_UI_OBSERVATION_LOG"
 
 
-def _maybe_log_tile_commit_sections(record: dict[str, object]) -> None:
+def _tile_commit_sections_logged() -> bool:
+    """Whether the section log is armed — ask BEFORE building the record.
+
+    The record is not free to assemble: it reaches into the prepared-upload
+    mailbox's ``counters()``, which takes that mailbox's lock.  Passing it as
+    a call argument made Python build it on every commit no matter what the
+    log path said, so the "one environ lookup" this module advertises was
+    really a lock acquisition plus a dataclass on the GUI commit path — the
+    exact per-commit cost this file exists to remove.
+    """
+
+    return bool(os.environ.get(_UI_OBSERVATION_LOG_ENV))
+
+
+def _log_tile_commit_sections(record: dict[str, object]) -> None:
     path = os.environ.get(_UI_OBSERVATION_LOG_ENV)
     if not path:
         return
@@ -1917,51 +1931,52 @@ class MontageTileLayer:
         resident_bytes = int(self._resident_bytes)
         physically_presented = self._physically_presented_tiles()
         committed_upserts.intersection_update(physically_presented)
-        _maybe_log_tile_commit_sections(
-            {
-                "t_monotonic": monotonic(),
-                "total_ms": sum(
-                    value
-                    for key, value in section_ms.items()
-                    if not key.startswith("item_") or key == "item_loop"
-                ),
-                "upload_span_ms": (perf_counter() - update_start) * 1000.0,
-                "sections": {key: round(value, 3) for key, value in section_ms.items()},
-                "payloads": len(tile_payloads),
-                "resolved": len(resolve_items),
-                "tile_order": len(tile_order),
-                "upserts": len(requested_upserts),
-                "active": len(requested_active),
-                "created": int(items_created),
-                "updated": int(items_updated),
-                "skipped": int(items_skipped),
-                "reshown": len(reshown_tiles),
-                "resolve_deferred": len(deferred_resolves),
-                "level_updates": int(level_updates),
-                "resident": int(resident_items),
-                "assembly_hits_total": int(self._prepared_assembly_hits),
-                "mailbox": (
-                    None
-                    if self._prepared_uploads is None
-                    else {
-                        key: int(value)
-                        for key, value in vars(self._prepared_uploads.counters()).items()
-                        if key
-                        in {
-                            "submitted",
-                            "pending",
-                            "published",
-                            "hits",
-                            "stale",
-                            "misses",
-                            "skipped_stale_round",
-                            "dropped_before_start",
-                            "evicted",
+        if _tile_commit_sections_logged():
+            _log_tile_commit_sections(
+                {
+                    "t_monotonic": monotonic(),
+                    "total_ms": sum(
+                        value
+                        for key, value in section_ms.items()
+                        if not key.startswith("item_") or key == "item_loop"
+                    ),
+                    "upload_span_ms": (perf_counter() - update_start) * 1000.0,
+                    "sections": {key: round(value, 3) for key, value in section_ms.items()},
+                    "payloads": len(tile_payloads),
+                    "resolved": len(resolve_items),
+                    "tile_order": len(tile_order),
+                    "upserts": len(requested_upserts),
+                    "active": len(requested_active),
+                    "created": int(items_created),
+                    "updated": int(items_updated),
+                    "skipped": int(items_skipped),
+                    "reshown": len(reshown_tiles),
+                    "resolve_deferred": len(deferred_resolves),
+                    "level_updates": int(level_updates),
+                    "resident": int(resident_items),
+                    "assembly_hits_total": int(self._prepared_assembly_hits),
+                    "mailbox": (
+                        None
+                        if self._prepared_uploads is None
+                        else {
+                            key: int(value)
+                            for key, value in vars(self._prepared_uploads.counters()).items()
+                            if key
+                            in {
+                                "submitted",
+                                "pending",
+                                "published",
+                                "hits",
+                                "stale",
+                                "misses",
+                                "skipped_stale_round",
+                                "dropped_before_start",
+                                "evicted",
+                            }
                         }
-                    }
-                ),
-            }
-        )
+                    ),
+                }
+            )
 
         return TileLayerUpdateStats(
             visible_items=len(physically_presented),
