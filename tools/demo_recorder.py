@@ -1996,8 +1996,8 @@ def s_workflow(rec: Recorder):
         placement="above",
         label="show crop parameter popup",
     )
-    rec.edit_overlay_value(popup._spins["start"], 16, label="set crop start to 16")
-    rec.edit_overlay_value(popup._spins["stop"], 80, label="set crop stop to 80")
+    rec.edit_overlay_value(popup._editors["start"], 16, label="set crop start to 16")
+    rec.edit_overlay_value(popup._editors["stop"], 80, label="set crop stop to 80")
     rec.click_overlay_widget(popup._confirm, label="apply crop")
     rec.hold_until_settled(2.0, tail_s=1.0)
     from arrayscope.operations.registry import operation_id_for
