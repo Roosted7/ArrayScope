@@ -1803,15 +1803,15 @@ def s_operations(rec: Recorder):
         (
             action
             for action in view_menu.actions()
-            if action.text().replace("&", "").startswith("Operation manager")
+            if action.text().replace("&", "").startswith("Manage operations")
         ),
         None,
     )
     if manager_action is None:
-        raise RuntimeError("View menu has no Operation manager entry")
-    rec.caption("Choose Operation manager… from the real View menu")
+        raise RuntimeError("View menu has no Manage operations entry")
+    rec.caption("Choose Manage operations… from the real View menu")
     rec.open_overlay_menu(win.menuBar(), view_menu, placement="below", label="open View menu")
-    rec.choose_overlay_action(view_menu, manager_action, label="choose Operation manager")
+    rec.choose_overlay_action(view_menu, manager_action, label="choose Manage operations")
 
     dialog = getattr(win, "_operation_manager_dialog", None)
     if dialog is None:
