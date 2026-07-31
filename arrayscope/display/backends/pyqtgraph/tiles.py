@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import os
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from math import ceil
-from time import perf_counter
+from time import monotonic, perf_counter
 
 import numpy as np
 from pyqtgraph.graphicsItems.ImageItem import ImageItem
@@ -47,6 +49,24 @@ from arrayscope.presentation.prepared_uploads import (
 RGB_SOURCE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
 PYQTGRAPH_PREVIEW_ATLAS_MIN_TILES = 256
 PYQTGRAPH_PREVIEW_ATLAS_PAGE_EXTENT = 256
+
+# Shares the resource governor's live observation-log file: when the variable
+# names a file, each direct tile-layer commit appends one JSON line breaking
+# its wall time into named passes.  This is what attributed the ~8 ms/tile
+# pyqtgraph commit cost (2026-07-31); the write is skipped entirely when the
+# variable is unset, so steady-state cost is one os.environ lookup per commit.
+_UI_OBSERVATION_LOG_ENV = "ARRAYSCOPE_UI_OBSERVATION_LOG"
+
+
+def _maybe_log_tile_commit_sections(record: dict[str, object]) -> None:
+    path = os.environ.get(_UI_OBSERVATION_LOG_ENV)
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"channel": "tile_layer_sections", **record}) + "\n")
+    except (OSError, TypeError, ValueError):
+        pass
 
 
 @dataclass(frozen=True)
@@ -946,7 +966,9 @@ class MontageTileLayer:
                 f"scan-only={sorted(scanned - maintained)}"
             )
 
-    def _resolve_payload(self, payload: DisplayTilePayload, *, levels):
+    def _resolve_payload(
+        self, payload: DisplayTilePayload, *, levels, defer_if_unprepared: bool = False
+    ):
         """Assemble one payload, taking a worker's result when one is waiting.
 
         Page assembly is pure array work on an immutable payload — the part of
@@ -954,6 +976,12 @@ class MontageTileLayer:
         done it already; the mailbox hands the result over only under the exact
         identity and levels this commit is submitting, so a miss or a stale
         entry falls through to assembling here, exactly as before.
+
+        ``defer_if_unprepared`` returns ``None`` instead of assembling when the
+        payload is page-backed and no prepared buffer is waiting: the caller's
+        resolve budget is spent, and assembling anyway is exactly the work the
+        budget exists to bound.  A mailbox hit is still taken — it costs
+        microseconds and a prepared buffer left behind only goes stale.
         """
 
         mailbox = self._prepared_uploads
@@ -968,6 +996,8 @@ class MontageTileLayer:
             if prepared is not None:
                 self._prepared_assembly_hits += 1
                 return prepared
+        if defer_if_unprepared and payload.page_backing is not None:
+            return None
         started = perf_counter()
         try:
             return _resolve_page_backed_payload(payload, levels=levels)
@@ -1294,25 +1324,59 @@ class MontageTileLayer:
         drawable_payloads: dict[int, DisplayTilePayload] = {}
         page_assemblies: dict[int, _PageAssembly] = {}
         identity_rejected_tiles: list[int] = []
+        section_ms: dict[str, float] = {}
+        section_start = perf_counter()
         # A governed delta does not touch other resident tiles' pixels.
         # Resolving every active payload was the whole per-commit cost on a
         # large complex montage. Restrict resolution to the admitted upserts;
         # remaining resident tiles keep their drawn pixels through the
         # resident-visibility seed below.
         if tile_delta is not None and requested_upserts:
+            # Delta-author order, not set order: the item loop consumes upserts
+            # in this order too, so a budget-cut prefix here is the same prefix
+            # the deadline-governed loop would have reached.
             resolve_items = tuple(
                 (int(tile), tile_payloads[int(tile)])
-                for tile in requested_upserts
+                for tile in dict(getattr(tile_delta, "upserts", {}) or {})
                 if int(tile) in tile_payloads
             )
         else:
             resolve_items = tuple(tile_payloads.items())
+        # Assembly used to run eagerly over the whole admitted batch while only
+        # the item loop honored `cold_deadline_ms` — measured 2026-07-31: one
+        # commit assembled 49 FFT payloads (~30 ms each, 1.45 s in the callback)
+        # and then applied 5 of them; the discarded assemblies were redone by
+        # the following commits.  Spend the same deadline here: once it is
+        # burned (and at least one payload resolved, so the commit still makes
+        # progress), an unprepared page-backed upsert is deferred to the next
+        # commit exactly like a deadline-cut tile.  An atomic handoff is
+        # all-or-nothing physical truth and is never cut.
+        resolve_deadline_ms = None
+        if (
+            tile_delta is not None
+            and requested_upserts
+            and not bool(getattr(tile_delta, "atomic_handoff", False))
+            # Kill switch for perf bisection and controlled A/B: "0" restores
+            # the old eager whole-batch assembly.
+            and os.environ.get("ARRAYSCOPE_PYQTGRAPH_RESOLVE_BUDGET", "1") != "0"
+        ):
+            resolve_deadline_ms = getattr(tile_delta, "cold_deadline_ms", None)
+        deferred_resolves: set[int] = set()
+        resolve_start = perf_counter()
         for tile, payload in resolve_items:
             if acknowledged_identity_satisfies_target(
                 getattr(payload, "tile_identity", None) or payload.source_id,
                 target_identities.get(int(tile)),
             ):
-                assembly = self._resolve_payload(payload, levels=levels)
+                defer = bool(
+                    resolve_deadline_ms is not None
+                    and drawable_payloads
+                    and (perf_counter() - resolve_start) * 1000.0 >= float(resolve_deadline_ms)
+                )
+                assembly = self._resolve_payload(payload, levels=levels, defer_if_unprepared=defer)
+                if assembly is None:
+                    deferred_resolves.add(int(tile))
+                    continue
                 drawable_payloads[int(tile)] = assembly.payload
                 page_assemblies[int(tile)] = assembly
             elif int(tile) in requested_upserts:
@@ -1326,6 +1390,7 @@ class MontageTileLayer:
                 # re-commit backoff and the trace invariant.
                 identity_rejected_tiles.append(int(tile))
         identity_rejected_tiles.sort()
+        section_ms["resolve"] = (perf_counter() - section_start) * 1000.0
         if bool(getattr(tile_delta, "atomic_handoff", False)) and identity_rejected_tiles:
             # An atomic handoff is all-or-nothing physical truth. A stale
             # prepared successor must report its rejected identities without
@@ -1352,6 +1417,7 @@ class MontageTileLayer:
                 ),
             )
         states = tuple(getattr(geometry, "montage_tile_states", ()) or ())
+        section_start = perf_counter()
         active = {
             int(tile)
             for tile in requested_active
@@ -1363,6 +1429,7 @@ class MontageTileLayer:
             )
         }
         reshown_tiles: set[int] = set()
+        section_ms["active_seed"] = (perf_counter() - section_start) * 1000.0
         if (
             tile_delta is not None
             and requested_upserts
@@ -1379,6 +1446,7 @@ class MontageTileLayer:
             # back plus a round trip through admission.  Residency satisfies
             # R2; it does not satisfy the lifecycle's physical first-pixel
             # obligation, so present it here.  Display only, zero production.
+            section_start = perf_counter()
             reshown_tiles = self._reshow_retained_active_tiles(
                 requested_active
                 - active
@@ -1394,10 +1462,13 @@ class MontageTileLayer:
                 transposed=bool(transposed),
             )
             active |= reshown_tiles
+            section_ms["reshow"] = (perf_counter() - section_start) * 1000.0
+        section_start = perf_counter()
         for tile in requested_active - active:
             state = self._states.get(int(tile))
             if state is not None and bool(getattr(state, "visible", False)):
                 self._hide_tile(int(tile))
+        section_ms["hide_inactive"] = (perf_counter() - section_start) * 1000.0
         dirty_set = None if dirty_tiles is None else {int(tile) for tile in dirty_tiles}
         cold_deadline_ms = (
             None if tile_delta is None else getattr(tile_delta, "cold_deadline_ms", None)
@@ -1429,6 +1500,7 @@ class MontageTileLayer:
         storage_evictions = 0
         updated_tiles: list[int] = []
         committed_upserts: set[int] = set()
+        section_start = perf_counter()
         tile_order = _direct_tile_order(
             layout,
             drawable_payloads,
@@ -1438,6 +1510,8 @@ class MontageTileLayer:
             tile_source_ids=tile_source_ids,
             rgb_already_windowed=bool(rgb_already_windowed),
         )
+        section_ms["tile_order"] = (perf_counter() - section_start) * 1000.0
+        section_start = perf_counter()
         level_update_pending_items = sum(
             1
             for tile in requested_active
@@ -1454,6 +1528,8 @@ class MontageTileLayer:
         )
         if level_update_tiles:
             tile_order = tuple(dict.fromkeys(tuple(tile_order) + tuple(level_update_tiles)))
+        section_ms["level_scan"] = (perf_counter() - section_start) * 1000.0
+        section_start = perf_counter()
         # Match the GPU residency path's ordering: resolve active payloads to
         # resident identities, bind tile placement to resident storage, then
         # decide whether any data upload is needed.  For PyQtGraph the
@@ -1491,6 +1567,11 @@ class MontageTileLayer:
                     local_rect=spec[2],
                     rgb_already_windowed=spec_rgb_already_windowed,
                 )
+        section_ms["preclaim"] = (perf_counter() - section_start) * 1000.0
+        item_qt_ms = 0.0
+        item_upload_ms = 0.0
+        item_levels_ms = 0.0
+        section_start = perf_counter()
         for tile_number in tile_order:
             region = layout.get(int(tile_number))
             if region is None:
@@ -1503,6 +1584,15 @@ class MontageTileLayer:
                 state_value = str(getattr(states[tile_number], "value", states[tile_number]))
             payload = None if state_value == "skipped" else drawable_payloads.get(int(tile_number))
             if payload is None:
+                if int(tile_number) in deferred_resolves:
+                    # Deferred by the resolve budget, not absent: keep whatever
+                    # the deadline-cut path would keep and let re-admission
+                    # bring the tile back — hiding it here would turn a budget
+                    # decision into a blink.
+                    state = self._states.get(int(tile_number))
+                    if state is not None and bool(getattr(state, "visible", False)):
+                        active.add(int(tile_number))
+                    continue
                 self._hide_tile(tile_number)
                 continue
 
@@ -1659,6 +1749,7 @@ class MontageTileLayer:
                 continue
 
             created_item = False
+            qt_start = perf_counter()
             if item_state is None:
                 item_state = self._hijack_direct_reuse_state(protected_tiles=near_tiles)
                 if item_state is None:
@@ -1701,8 +1792,10 @@ class MontageTileLayer:
             self._touch_resident_state(item_state)
             item_state.item.setPos(float(world_x), float(world_y))
             _apply_item_lod_scale(item_state, scale_x, scale_y)
+            item_qt_ms += (perf_counter() - qt_start) * 1000.0
             if should_upload:
                 previous_source_id = item_state.source_array_id
+                upload_item_start = perf_counter()
                 updated, windowed = self._set_tile_data(
                     item_state,
                     tile_data,
@@ -1715,6 +1808,7 @@ class MontageTileLayer:
                     rgb_already_windowed=payload_rgb_already_windowed,
                     source_payload=payload,
                 )
+                item_upload_ms += (perf_counter() - upload_item_start) * 1000.0
                 item_state.world_rect = world_rect
                 item_state.acknowledged_identity = (
                     getattr(payload, "tile_identity", None) or payload.source_id
@@ -1748,12 +1842,14 @@ class MontageTileLayer:
                     if item_state is not None and item_state.visible:
                         active.add(int(tile_number))
                     continue
+                levels_item_start = perf_counter()
                 updated, windowed = self._update_tile_levels(
                     item_state,
                     levels,
                     image=tile_data,
                     histogram_data=tile_hist,
                 )
+                item_levels_ms += (perf_counter() - levels_item_start) * 1000.0
                 item_state.world_rect = world_rect
                 self._touch_resident_state(item_state)
                 level_updates += int(existing_item)
@@ -1789,6 +1885,11 @@ class MontageTileLayer:
             else:
                 self._hide_tile(int(tile_number))
 
+        section_ms["item_loop"] = (perf_counter() - section_start) * 1000.0
+        section_ms["item_qt"] = item_qt_ms
+        section_ms["item_upload"] = item_upload_ms
+        section_ms["item_levels"] = item_levels_ms
+        section_start = perf_counter()
         for tile_number in tuple(self._states):
             if int(tile_number) not in active:
                 self._hide_tile(tile_number)
@@ -1811,10 +1912,56 @@ class MontageTileLayer:
             active_tiles=active,
             near_tiles=near_tiles,
         )
+        section_ms["hide_and_prune"] = (perf_counter() - section_start) * 1000.0
         resident_items = self._resident_count()
         resident_bytes = int(self._resident_bytes)
         physically_presented = self._physically_presented_tiles()
         committed_upserts.intersection_update(physically_presented)
+        _maybe_log_tile_commit_sections(
+            {
+                "t_monotonic": monotonic(),
+                "total_ms": sum(
+                    value
+                    for key, value in section_ms.items()
+                    if not key.startswith("item_") or key == "item_loop"
+                ),
+                "upload_span_ms": (perf_counter() - update_start) * 1000.0,
+                "sections": {key: round(value, 3) for key, value in section_ms.items()},
+                "payloads": len(tile_payloads),
+                "resolved": len(resolve_items),
+                "tile_order": len(tile_order),
+                "upserts": len(requested_upserts),
+                "active": len(requested_active),
+                "created": int(items_created),
+                "updated": int(items_updated),
+                "skipped": int(items_skipped),
+                "reshown": len(reshown_tiles),
+                "resolve_deferred": len(deferred_resolves),
+                "level_updates": int(level_updates),
+                "resident": int(resident_items),
+                "assembly_hits_total": int(self._prepared_assembly_hits),
+                "mailbox": (
+                    None
+                    if self._prepared_uploads is None
+                    else {
+                        key: int(value)
+                        for key, value in vars(self._prepared_uploads.counters()).items()
+                        if key
+                        in {
+                            "submitted",
+                            "pending",
+                            "published",
+                            "hits",
+                            "stale",
+                            "misses",
+                            "skipped_stale_round",
+                            "dropped_before_start",
+                            "evicted",
+                        }
+                    }
+                ),
+            }
+        )
 
         return TileLayerUpdateStats(
             visible_items=len(physically_presented),

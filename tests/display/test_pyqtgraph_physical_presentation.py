@@ -439,3 +439,119 @@ def test_reentering_tile_with_stale_retained_identity_stays_hidden(qt_app):
     # is not looping on it.
     assert back.identity_rejected_tiles == ()
     layer.assert_presented_index_matches_scan()
+
+
+def test_resolve_budget_defers_unprepared_page_backed_upserts(qt_app, monkeypatch):
+    """The commit-cost attribution finding (S3 follow-up, 2026-07-31).
+
+    Page assembly used to run eagerly over every admitted upsert while only
+    the item loop honored ``cold_deadline_ms``: one measured commit assembled
+    49 FFT payloads (~30 ms each) inside the GUI callback and then applied 5
+    of them.  With the budget shared, an exhausted deadline defers the
+    remaining unprepared page-backed upserts to the next commit — at least one
+    payload always resolves so the commit makes progress, deferred tiles are
+    neither hidden nor reported as rejected, and an atomic handoff is never
+    cut.
+    """
+
+    from arrayscope.display.backends.pyqtgraph import tiles as tiles_module
+    from arrayscope.display.backends.pyqtgraph.tiles import (
+        _resolve_page_backed_payload,
+    )
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import PageBackedPresentation
+    from arrayscope.display.pyramid import materialize_lod_page, plan_source_grid_pages
+    from arrayscope.gpu.keys import SCALAR_R32F
+
+    assemblies = []
+
+    def counting_assembly(payload, *, levels=None):
+        assemblies.append(int(payload.tile_number))
+        return _resolve_page_backed_payload(payload, levels=levels)
+
+    monkeypatch.setattr(tiles_module, "_resolve_page_backed_payload", counting_assembly)
+
+    def page_backed_payload(tile: int) -> DisplayTilePayload:
+        native = np.full((8, 8), float(tile + 1), dtype=np.float32)
+        plans = plan_source_grid_pages(
+            content_key=(("budget", tile), None),
+            valid_source_rect_yx=(0, 8, 0, 8),
+            reduction_yx=(2, 2),
+            stored_page_shape=(256, 256),
+            dtype="float32",
+            representation=SCALAR_R32F,
+            reducer="mean",
+        )
+        pages = tuple(
+            materialize_lod_page(native, source_origin_yx=(0, 0), plan=plan) for plan in plans
+        )
+        lod = LodInfo(level=2, factor=4, source_shape=(8, 8), texture_shape=(2, 2), gutter=0)
+        return DisplayTilePayload(
+            tile,
+            tile,
+            pages[0].values,
+            None,
+            ("tile", tile),
+            texture_data=pages[0].values,
+            source_shape=(8, 8),
+            lod=lod,
+            tile_identity=_row_identity(tile),
+            page_backing=PageBackedPresentation(plans, pages, (0, 8, 0, 8), lod),
+        )
+
+    geometry = _row_geometry(4, tile=8)
+    payloads = {tile: page_backed_payload(tile) for tile in range(4)}
+    targets = {tile: _row_identity(tile) for tile in range(4)}
+    layer = _make_layer(_real_image_upload)
+
+    def commit(upsert_tiles, *, deadline, atomic=False):
+        delta = SimpleNamespace(
+            upserts={tile: payloads[tile] for tile in upsert_tiles},
+            active_tiles=(0, 1, 2, 3),
+            planned_tiles=(0, 1, 2, 3),
+            target_identities=dict(targets),
+            removals=(),
+            near_tile_source_ids={},
+            cold_deadline_ms=deadline,
+            atomic_handoff=atomic,
+            force_refresh=False,
+        )
+        return layer.update_presentation(
+            None,
+            histogram_data=None,
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            rgb_already_windowed=False,
+            dirty_tiles=tuple(upsert_tiles),
+            tile_payloads=dict(payloads),
+            tile_delta=delta,
+        )
+
+    first = commit((0, 1, 2, 3), deadline=0.0)
+    # The budget is already burned when the loop starts, so exactly the
+    # progress-guarantee payload assembled; the others deferred — invisible to
+    # the rejection channel but visible through committed_upserts.
+    assert assemblies == [0]
+    assert first.committed_upserts == (0,)
+    assert first.identity_rejected_tiles == ()
+    assert first.presented_tiles == (0,)
+
+    # Re-admission carries only the still-uncommitted tiles, as the session
+    # does once an upsert is acknowledged.
+    second = commit((1, 2, 3), deadline=0.0)
+    assert assemblies == [0, 1]
+    assert set(second.committed_upserts) == {1}
+    # The tile committed by the previous round keeps its pixels.
+    assert set(second.presented_tiles) == {0, 1}
+
+    # An atomic handoff's RESOLVE is never budget-cut: both remaining tiles
+    # assemble even though the deadline is already burned.  (The item loop's
+    # own deadline handling is untouched here — production atomic deltas do
+    # not carry one.)
+    atomic = commit((2, 3), deadline=0.0, atomic=True)
+    assert assemblies == [0, 1, 2, 3]
+    assert {0, 1, 2}.issubset(set(atomic.presented_tiles))
+
+    final = commit((3,), deadline=None)
+    assert set(final.presented_tiles) == {0, 1, 2, 3}
+    layer.assert_presented_index_matches_scan()
