@@ -61,7 +61,31 @@ RECORD_FPS = 30
 # noisy content, where animated WebP ballooned to 10+ MB.
 GIF_FPS = 12
 GIF_WIDTH = 880
-GIF_LOSSY = 70
+# The GIF is the fallback nobody with a current browser sees -- the <picture>
+# element serves AVIF, which is ~7x smaller for identical content. Spend the
+# fallback's fidelity rather than the walkthrough's length.
+#
+# Measured on the 845 real frames of the 30 s showcase, encoding each variant
+# from the same frames rather than re-squeezing an already-lossy GIF:
+#
+#   ffmpeg bayer      + gifsicle -O3 --lossy=70                 3.50 MB
+#   ffmpeg bayer      + gifsicle -O3 --lossy=100 --colors 96    2.11 MB
+#   ffmpeg sierra2_4a + gifsicle -O3 --lossy=100 --colors 96    1.99 MB
+#
+# The last line is why the dither stays ordered rather than error-diffusing.
+# Measured on the showcase alone, sierra2_4a looks like a 6% win; measured on
+# all five it is a net loss, because error diffusion adds entropy exactly
+# where the content is already noise -- fft's k-space costs 13% (1.34 ->
+# 1.51 MB) and swamps the showcase's gain. One scenario is not the suite.
+#
+# Three things that look like they should help and do not:
+# gifsicle's own `--dither` costs 25% (the frames are already dithered, and
+# the added noise defeats LZW); `--optimize=9000` is byte-identical to `-O3`,
+# which is gifsicle's maximum level; and `-j14` changes neither size nor
+# measured time. Reducing the palette in ffmpeg's palettegen instead of in
+# gifsicle is worse (2.51 MB) -- gifsicle picks the better 96 colours.
+GIF_LOSSY = 100
+GIF_COLORS = 96
 AVIF_FPS = 20
 AVIF_WIDTH = 880
 AVIF_CRF = 34
@@ -74,9 +98,16 @@ AVIF_CRF = 34
 SCENARIOS: dict[str, dict] = {}
 
 
-def scenario(name, *, theme="dark"):
+def scenario(name, *, theme="dark", expects_status=()):
+    """Register a walkthrough.
+
+    ``expects_status`` names the status-bar messages this scenario means to
+    put on screen. Anything else the application says during a recording is
+    an unplanned message the viewer will read, so it fails inspection.
+    """
+
     def register(fn):
-        SCENARIOS[name] = {"fn": fn, "theme": theme}
+        SCENARIOS[name] = {"fn": fn, "theme": theme, "expects_status": tuple(expects_status)}
         return fn
 
     return register
@@ -341,6 +372,9 @@ class Recorder:
         self._caption_born_frame = 0
         self._events: list[dict] = []
         self._open_caption_event: dict | None = None
+        self._status_text = ""
+        self._open_status_event: dict | None = None
+        self.expected_status: tuple[str, ...] = ()
         self._overlay_widget = None
         self._overlay_top_left = None
         self._focus_rect = None
@@ -419,6 +453,38 @@ class Recorder:
                 return
             time.sleep(min(0.004, remaining))
 
+    def _current_status(self) -> str:
+        """What the status bar is showing this frame, if anything.
+
+        ``arrayscope.ui.toasts`` parks the text on a right-aligned label
+        rather than in ``showMessage``, so that is where it has to be read.
+        """
+
+        label = getattr(self.win, "_arrayscope_status_message_widget", None)
+        if label is None or not label.isVisible():
+            return ""
+        return str(label.property("arrayscope_status_message_text") or "")
+
+    def _track_status(self) -> None:
+        text = self._current_status()
+        if text == self._status_text:
+            return
+        if self._open_status_event is not None:
+            self._open_status_event["end_frame"] = self.frame_index
+            self._open_status_event = None
+        self._status_text = text
+        if not text:
+            return
+        event = {
+            "kind": "status",
+            "text": text,
+            "caption": self._caption,
+            "start_frame": self.frame_index,
+            "end_frame": None,
+        }
+        self._events.append(event)
+        self._open_status_event = event
+
     def capture(self, *, pump: bool = True) -> None:
         from pyqtgraph.Qt import QtGui
 
@@ -426,6 +492,7 @@ class Recorder:
             # Let asynchronous evaluation advance roughly in video time so
             # progressive rendering shows up naturally in the recording.
             self._pump_events(1.0 / self.fps)
+        self._track_status()
         window_image = self.win.grab().toImage().convertToFormat(QtGui.QImage.Format.Format_RGB32)
         image = QtGui.QImage(
             window_image.width(),
@@ -860,6 +927,9 @@ class Recorder:
         if self._open_caption_event is not None:
             self._open_caption_event["end_frame"] = self.frame_index
             self._open_caption_event = None
+        if self._open_status_event is not None:
+            self._open_status_event["end_frame"] = self.frame_index
+            self._open_status_event = None
         size = self.win.size() if self.win is not None else None
         manifest = {
             "schema_version": 1,
@@ -867,6 +937,7 @@ class Recorder:
             "record_fps": self.fps,
             "speed": self.speed,
             "frame_count": self.frame_index,
+            "expected_status": list(self.expected_status),
             "window_size": [size.width(), size.height()] if size is not None else None,
             "capture_size": (
                 [size.width(), size.height() + CAPTION_BAND_HEIGHT] if size is not None else None
@@ -1170,7 +1241,8 @@ class Recorder:
 
 @scenario("showcase")
 def s_showcase(rec: Recorder):
-    win = rec.window(_structured_volume(384, 320, 36), size=(1100, 780))
+    volume = _structured_volume(384, 320, 36)
+    win = rec.window(volume, size=(1100, 780))
     rec.caption("asc(data) — a structured 384×320×36 volume, one call away")
     rec.hold(2.0)
 
@@ -1184,9 +1256,18 @@ def s_showcase(rec: Recorder):
 
     rec.caption("Scrub through any dimension")
     chip = win.dimension_strip.chip(2)
+    # Derived from the axis, never a literal sweep: a hard-coded range outlived
+    # the volume it was written for once already, and every index past the end
+    # put "Could not understand slice selection" on screen for a second and a
+    # half of the lead walkthrough.
+    depth = volume.shape[2]
     rec.scrub_text_values(
         chip.slice_edit,
-        list(range(24, 43, 2)) + list(range(42, 9, -3)) + list(range(10, 25, 2)),
+        [
+            *range(depth // 2, depth - 1, 2),
+            *range(depth - 1, 2, -3),
+            *range(3, depth // 2 + 1, 2),
+        ],
         on_text=lambda text: win._on_slice_text_changed(2, text),
         per_value_s=0.09,
         label="scrub axis 2 slices",
@@ -1236,7 +1317,9 @@ def s_showcase(rec: Recorder):
     rec.hold_until_settled(2.0, tail_s=1.0)
 
 
-@scenario("fft")
+# The phase channel legitimately announces that it forces a linear scale;
+# it explains the beat rather than reporting a fault.
+@scenario("fft", expects_status=("Phase channel uses a linear scale",))
 def s_fft(rec: Recorder):
     from pyqtgraph.Qt import QtWidgets
 
@@ -1541,6 +1624,7 @@ def run_child(name: str, frames_root: Path, *, fps: int, speed: float) -> None:
     frames_dir.mkdir(parents=True, exist_ok=True)
 
     rec = Recorder(app, frames_dir, scenario_name=name, fps=fps, speed=speed)
+    rec.expected_status = SCENARIOS[name]["expects_status"]
     try:
         SCENARIOS[name]["fn"](rec)
     finally:
@@ -1644,7 +1728,18 @@ def encode(
             ]
         )
         if shutil.which("gifsicle"):
-            _run(["gifsicle", "-O3", f"--lossy={GIF_LOSSY}", str(out), "-o", str(out)])
+            _run(
+                [
+                    "gifsicle",
+                    "-O3",
+                    f"--lossy={GIF_LOSSY}",
+                    "--colors",
+                    str(GIF_COLORS),
+                    str(out),
+                    "-o",
+                    str(out),
+                ]
+            )
         outputs["gif"] = out
 
     return outputs

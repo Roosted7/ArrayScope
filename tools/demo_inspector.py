@@ -276,7 +276,7 @@ def render_event_sheet(
     # typed action opens before the focus click nested inside it, so the raw
     # list would show the later frames first.
     actions = sorted(
-        (event for event in timeline["events"] if event["kind"] != "caption"),
+        (event for event in timeline["events"] if event["kind"] not in ("caption", "status")),
         key=lambda event: _event_frame_triplet(event)[1][1],
     )
     if not actions:
@@ -411,6 +411,7 @@ def timeline_findings(scenario: str, timeline: dict, media: MediaFacts) -> list[
         )
     width, height = (float(value) for value in window_size)
     min_lead_frames = CAPTION_LEAD_MIN_S * fps / max(1.0, float(timeline.get("speed") or 1.0))
+    expected_status = tuple(timeline.get("expected_status") or ())
     captions: list[dict] = []
     for index, event in enumerate(timeline.get("events", ())):
         start = event.get("start_frame")
@@ -421,6 +422,20 @@ def timeline_findings(scenario: str, timeline: dict, media: MediaFacts) -> list[
         kind = event.get("kind")
         if kind == "caption":
             captions.append(event)
+            continue
+        if kind == "status":
+            # The viewer reads whatever the application says. A message the
+            # scenario did not plan for is a fault it is putting on screen.
+            text = str(event.get("text") or "")
+            if not any(allowed in text for allowed in expected_status):
+                seconds = (int(end) - int(start)) / fps
+                findings.append(
+                    Finding(
+                        "error",
+                        scenario,
+                        f"undeclared status message on screen for {seconds:.2f}s: {text!r}",
+                    )
+                )
             continue
         name = f"{kind} {event.get('label', index)!r}"
         findings.extend(_caption_findings(scenario, name, event, captions, min_lead_frames))

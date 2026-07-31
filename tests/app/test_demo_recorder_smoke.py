@@ -65,7 +65,14 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
     with Image.open(frames[0]) as first_frame:
         assert list(first_frame.size) == manifest["capture_size"]
     captions = [event for event in manifest["events"] if event["kind"] == "caption"]
-    actions = [event for event in manifest["events"] if event["kind"] != "caption"]
+    actions = [event for event in manifest["events"] if event["kind"] not in ("caption", "status")]
+    undeclared = [
+        event["text"]
+        for event in manifest["events"]
+        if event["kind"] == "status"
+        and not any(allowed in event["text"] for allowed in manifest["expected_status"])
+    ]
+    assert not undeclared, f"{name} put an unplanned status message on screen: {undeclared}"
     assert captions, f"{name} recorded no caption beats"
     assert actions, f"{name} recorded no action beats"
     assert all(event["end_frame"] is not None for event in manifest["events"])

@@ -467,3 +467,52 @@ def test_event_evidence_is_ordered_by_the_frame_it_shows(inspector):
     triplet = inspector["_event_frame_triplet"]
 
     assert triplet(focus)[1][1] < triplet(typed)[1][1]
+
+
+def test_an_unplanned_status_message_fails_inspection(inspector):
+    """What the application says on screen is part of the walkthrough."""
+    events = [
+        _caption("Scrub through any dimension", 0),
+        {
+            "kind": "status",
+            "text": "Could not understand slice selection: 42",
+            "caption": "Scrub through any dimension",
+            "start_frame": 30,
+            "end_frame": 68,
+        },
+    ]
+    timeline = _timeline(events)
+
+    messages = [
+        finding.message
+        for finding in inspector["timeline_findings"](
+            "probe",
+            timeline,
+            _facts(inspector, "probe", "mp4", width=1100, duration=200 / 30),
+        )
+    ]
+
+    assert messages == [
+        "undeclared status message on screen for 1.27s: 'Could not understand slice selection: 42'"
+    ]
+
+
+def test_a_declared_status_message_is_part_of_the_story(inspector):
+    events = [
+        _caption("...or phase", 0),
+        {
+            "kind": "status",
+            "text": "Phase channel uses a linear scale.",
+            "caption": "...or phase",
+            "start_frame": 30,
+            "end_frame": 68,
+        },
+    ]
+    timeline = _timeline(events)
+    timeline["expected_status"] = ["Phase channel uses a linear scale"]
+
+    assert not inspector["timeline_findings"](
+        "probe",
+        timeline,
+        _facts(inspector, "probe", "mp4", width=1100, duration=200 / 30),
+    )
