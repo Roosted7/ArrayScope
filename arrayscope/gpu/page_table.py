@@ -322,6 +322,29 @@ class PageTable:
             if not entry.pinned
         )
 
+    def eviction_candidate(self, match=None) -> DataChunkKey | None:
+        """Least recently used unpinned chunk satisfying ``match(key, slot)``.
+
+        The executor asks this once per forced eviction, which under pool
+        pressure means once per upload.  Building the fully sorted candidate
+        tuple there made every pressured upload pay O(resident log resident)
+        for an answer that is a single minimum: ``last_use`` stamps are
+        unique, so the first matching entry of the sorted order is exactly
+        the matching entry with the smallest stamp.  One pass, no sort, no
+        tuple — ``eviction_candidates`` remains for diagnostics and tests.
+        """
+
+        best_key: DataChunkKey | None = None
+        best_use: int | None = None
+        for key, entry in self._entries.items():
+            if entry.pinned:
+                continue
+            if match is not None and not match(key, entry.slot):
+                continue
+            if best_use is None or entry.last_use < best_use:
+                best_key, best_use = key, entry.last_use
+        return best_key
+
 
 _LEGACY_PIN_OWNER = object()
 

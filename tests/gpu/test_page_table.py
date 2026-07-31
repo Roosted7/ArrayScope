@@ -74,6 +74,22 @@ class TestPageTable:
         with pytest.raises(KeyError):
             table.pin(chunk(9))
 
+    def test_single_candidate_agrees_with_the_sorted_order(self):
+        # ``eviction_candidate`` is the executor's per-eviction query; it must
+        # name exactly the victim the full sorted tuple would have yielded
+        # first, both unfiltered and under the executor's pool filter.  The
+        # sort-free path exists because a pressured upload pays this query
+        # once per page; the tuple stays as the diagnostic form.
+        table = PageTable()
+        for n in range(4):
+            table.bind(chunk(n), PageSlot("a" if n % 2 else "b", 0, n), nbytes=1)
+        table.touch(chunk(0))
+        table.pin(chunk(1))
+        assert table.eviction_candidate() == table.eviction_candidates()[0]
+        pool_a = [key for key in table.eviction_candidates() if table.lookup(key).pool_id == "a"]
+        assert table.eviction_candidate(lambda key, slot: slot.pool_id == "a") == pool_a[0]
+        assert table.eviction_candidate(lambda key, slot: slot.pool_id == "z") is None
+
     def test_every_binding_pinned_leaves_no_eviction_candidate(self):
         # The condition the executor reads before it grows or gives up: a
         # fully pinned table offers nothing to evict, so the caller must widen
@@ -82,6 +98,7 @@ class TestPageTable:
         table.bind(chunk(0), PageSlot("p", 0, 0), nbytes=1)
         table.pin(chunk(0))
         assert table.eviction_candidates() == ()
+        assert table.eviction_candidate() is None
 
     def test_superseded_generation_releases_its_slot_for_the_successor(self):
         # A document revision bump mints different chunk keys; superseded

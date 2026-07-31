@@ -3214,10 +3214,14 @@ class WgpuPlaneExecutor:
             slot = self.page_table.lookup(key)
             return slot is not None and slot.pool_id == pool_id
 
-        for key in self.page_table.eviction_candidates():
-            if not _matches(key):
-                continue
-            self._evict(EvictChunk(key))
+        candidate = self.page_table.eviction_candidate(
+            lambda key, slot: (
+                key.representation == representation
+                and (pool_id is None or slot.pool_id == pool_id)
+            )
+        )
+        if candidate is not None:
+            self._evict(EvictChunk(candidate))
             return
         # Pool pressure inside one submission may exceed the histogram
         # frontier shield.  Yielding the least-recently-used shield-only pin
