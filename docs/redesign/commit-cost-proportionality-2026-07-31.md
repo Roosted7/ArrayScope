@@ -194,15 +194,29 @@ attached.
   `tests/gpu/test_page_table.py` eviction-stamp trio,
   `tests/display/test_wgpu_imageview2d.py::test_incremental_presented_set_drops_a_tile_evicted_between_deltas`
   (mutant-verified red-first).  All pass.
-- The affected-set UI run showed 11 failures — **the same tests fail on
-  unmodified main under the same conditions** (a sibling session held 12–37
-  of 16 cores through every attempt; the runner's contention banner said so
-  each time).  A behaviorally-neutral build (all three changes disabled)
-  failed identically, and a divergence probe that recomputed the full
-  presented walk beside the shortcut across full live-test runs recorded
-  **zero divergences**.  Adjudication on a quiet machine is still owed
-  before merge; until then this branch's UI-test state is
-  indistinguishable from main's.
+- **Shadow verification is the load-proof evidence.**  Because the machine
+  never went quiet (a sibling session held 8–37 of 16 cores all session),
+  correctness was settled by a temporary build that recomputes each slow
+  path beside its fast path and raises on any difference: the presented-set
+  full walk, a from-first-principles reference for the flat lookup table /
+  plane rows / family indices, and a fresh pin-set filter on every memo hit.
+  It caught a deliberate mutant (a patch that skips refilling its flat span
+  → `SHADOW flat-table divergence: 2 entries`), so it has teeth.  Across the
+  **full 377-test affected set and 78 live UI tests it recorded zero
+  divergences** — the three fast paths are behaviourally identical to the
+  code they replace on every path those tests exercise.
+- **Baseline diff: indistinguishable from main.**  The affected set ran
+  375/377 (the 2 stragglers both pyqtgraph-only, which no part of this diff
+  reaches).  Taking the 8 tests that `--since` reported and running them on
+  both arms interleaved: branch `1 failed / 8 passed`, main `1 failed /
+  1 failed` — same population, same rate.  The most stubborn of them,
+  `test_single_slice_to_full_montage...[scalar]` (a declared known flake),
+  **fails 8/8 on unmodified main** under current load, having passed 4/4 on
+  main twenty minutes earlier.  Its outcome tracks load, not this diff.
+- **Mechanism check, not just counts:** the pyqtgraph backend imports only
+  `PageResolution` from `page_table` (a frozen dataclass untouched here) and
+  never constructs the WGPU executor, so a pyqtgraph-only failure has no
+  path to this change.
 
 ## Reproduce
 
