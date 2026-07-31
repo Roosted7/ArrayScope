@@ -30,13 +30,19 @@ Each scenario is then encoded three ways:
 | Format | Purpose | Settings |
 |---|---|---|
 | `.avif` | Primary inline animation (all current browsers; near-MP4 sizes) | AV1, 20 fps, 880 px wide, CRF 34 |
-| `.gif` | Inline fallback for viewers without AVIF | 12 fps, 880 px wide, diff palette + bayer dither, `gifsicle -O3 --lossy` |
+| `.gif` | Inline fallback for viewers without AVIF | 12 fps, 880 px wide, diff palette + bayer dither, `gifsicle -O3 --lossy=100 --colors 96` |
 | `.mp4` | Full-quality video (link/download) | H.264 CRF 21, native size and fps |
 
 The README embeds `<picture>` blocks with the AVIF as primary source and the
 GIF as fallback, plus an MP4 link. (Animated WebP was tried and rejected: on
 the noisy k-space segments it came out at 10+ MB, an order of magnitude
 larger than AVIF at comparable quality.)
+
+The GIF fallback remains deliberate. AVIF is dramatically smaller and is the
+primary source for current browsers, but deleting the `<img>` fallback would
+silently narrow the README compatibility contract. The 3.5 MB per-clip gate,
+the measured 96-colour palette, and topic-scoped scenarios bound that cost;
+the budget decides when a walkthrough must be shortened or split.
 
 ## Regenerating
 
@@ -84,7 +90,8 @@ Use `--only <substring>` for one scenario and increase `--samples` when an
 interaction needs closer inspection. `--strict` fails when a companion format
 is missing, encoded durations/aspect ratios disagree, an action's cursor
 misses (or a click lacks) its recorded target, or an action starts before its
-caption can be read. It also refuses any inline format narrower than the
+caption can be read. Drag ranges must declare which button is held. It also
+refuses any inline format narrower than the
 README's 880 px slot or larger than the 3.5 MB byte budget, because browser
 enlargement damages small text and palette edges while oversized fallback
 media makes the README expensive. A declared DETAIL inset must also carry a
@@ -121,13 +128,14 @@ lead-in before the described action begins. The timeline distinguishes the
 application `window_size` from the final `capture_size`, so target checks
 remain in the application's coordinate system.
 
-Control-heavy actions add a bordered DETAIL inset sourced from the active
-control, popup, or focused result. The full application remains visible as
-context while labels, values, menu rows, histogram handles, and export entries
-are enlarged. The source rectangle is stored in the action manifest so strict
-inspection can reject missing or out-of-frame framing evidence.
+Control-heavy actions add a bordered DETAIL inset fitted to the active widget,
+menu row, table cells, graph handle, or focused result plus a small margin. The
+full application remains visible as context; the inset chooses a clear corner
+instead of covering its own source. Insets below 1.15× are omitted rather than
+drawing a full-size duplicate. Source, destination, and scale are stored in the
+action manifest so strict inspection can reject dishonest framing evidence.
 
-All five walkthrough windows are 1100 px wide and both inline encodes are
+All seven walkthrough windows are 1100 px wide and both inline encodes are
 880 px. This gives every scenario the same 0.8× application-to-README scale;
 control-heavy FFT and ROI scenes no longer shrink from 1280 px, and the GIF
 fallback is never enlarged.
