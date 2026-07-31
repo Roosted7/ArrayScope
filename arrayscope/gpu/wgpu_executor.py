@@ -1803,6 +1803,15 @@ class WgpuPlaneExecutor:
         self._plane_rows: list[tuple[int, int, int, int]] = []
         self._plane_family_indices: dict[tuple[object, ...], tuple[int, ...]] = {}
         self._plane_lookup_candidates_total = 0
+        # How BindContentPlanes resolved: reused prefix / patched in place /
+        # rebuilt everything.  A bounded montage delta should read as a patch;
+        # a rebuild there means the commit paid whole-montage plane cost.
+        self._plane_bind_prefix_reuses_total = 0
+        self._plane_bind_patches_total = 0
+        self._plane_bind_rebuilds_total = 0
+        #: per-owner (keys_tuple, page_table generation, resident frozenset)
+        #: memo for replace_resident_pin_set — see that method.
+        self._resident_pin_memo: dict[object, tuple[tuple, int, frozenset]] = {}
         self._flat_table = np.full(1, -1, dtype=np.int32)
         # Parallel per-flat-entry codec metadata (only consulted when the
         # compressed shader is live).  ``_flat_codec[i] == 1`` means the page at
@@ -2481,11 +2490,20 @@ class WgpuPlaneExecutor:
     def _bind_planes(self, cmd: BindContentPlanes) -> None:
         planes = tuple(cmd.planes)
         if self._bound_planes and planes[: len(self._bound_planes)] == self._bound_planes:
+            self._plane_bind_prefix_reuses_total += 1
             if len(planes) > len(self._bound_planes):
                 self._append_bound_planes(planes[len(self._bound_planes) :])
             if cmd.committed_page_keys is not None:
                 self.replace_bound_content_pin_set(cmd.committed_page_keys)
             return
+        if self._patch_bound_planes(planes):
+            self._plane_bind_patches_total += 1
+            if cmd.committed_page_keys is not None:
+                self.replace_bound_content_pin_set(cmd.committed_page_keys)
+            else:
+                self._refresh_bound_plane_pins()
+            return
+        self._plane_bind_rebuilds_total += 1
 
         self._bound_planes = planes
         self._plane_grids = []
@@ -2629,6 +2647,113 @@ class WgpuPlaneExecutor:
         self._ensure_flat_buffer_capacity()
         self._table_dirty = True
 
+    def _patch_bound_planes(self, planes: tuple) -> bool:
+        """Rebind changed planes in place; ``False`` means "rebuild instead".
+
+        A bounded montage commit replaces a handful of plane descriptors and
+        keeps the rest — the plane list arrives as the previous list with a
+        few indices swapped (plus optional appends).  The general rebind used
+        to re-derive grids, family indices, and the whole flat lookup table
+        for every plane in the montage, so a one-tile delta paid whole-montage
+        plane cost.  This path patches exactly the changed indices.
+
+        Only footprint-preserving swaps qualify: ``plane_shape`` and
+        ``max_lod`` fix a plane's flat-table span and every later plane's
+        base, so any footprint change shifts the layout and takes the honest
+        rebuild.  A wide swap also rebuilds — re-deriving most of the table
+        through the patch loop would just be the rebuild with worse constants.
+        """
+
+        bound = self._bound_planes
+        if not bound or len(planes) < len(bound):
+            return False
+        changed = [
+            index for index, plane in enumerate(planes[: len(bound)]) if plane != bound[index]
+        ]
+        if not changed or len(changed) * 4 > len(bound):
+            return False
+        for index in changed:
+            old, new = bound[index], planes[index]
+            if old.plane_shape != new.plane_shape or int(old.max_lod) != int(new.max_lod):
+                return False
+        for index in changed:
+            old, new = bound[index], planes[index]
+            old_base = (
+                old.document_generation,
+                old.operation_key,
+                old.representation,
+            )
+            new_base = (
+                new.document_generation,
+                new.operation_key,
+                new.representation,
+            )
+            old_families = ((*old_base, None), (*old_base, old.lod_reducer))
+            new_families = ((*new_base, None), (*new_base, new.lod_reducer))
+            if old_families != new_families:
+                for family in old_families:
+                    indices = self._plane_family_indices.get(family, ())
+                    if index in indices:
+                        remaining = tuple(value for value in indices if value != index)
+                        if remaining:
+                            self._plane_family_indices[family] = remaining
+                        else:
+                            self._plane_family_indices.pop(family, None)
+                for family in new_families:
+                    indices = self._plane_family_indices.get(family, ())
+                    if index not in indices:
+                        self._plane_family_indices[family] = tuple(sorted((*indices, index)))
+            lod_base = self._plane_rows[index][2]
+            row = (
+                _REP_INDEX[new.representation],
+                new.max_lod,
+                lod_base,
+                int(new.lod_reducer == REDUCER_PHASE_VECTOR),
+            )
+            if row != self._plane_rows[index]:
+                self._plane_rows[index] = row
+                self.device.queue.write_buffer(
+                    self._planes_buf,
+                    index * 16,
+                    np.asarray([row], np.uint32).tobytes(),
+                )
+            grids = self._plane_grids[index]
+            start = grids[0].base
+            stop = grids[-1].base + grids[-1].grid_w * grids[-1].grid_h
+            self._flat_table[start:stop] = -1
+            self._flat_codec[start:stop] = 0
+            self._flat_norm[start:stop] = 0.0
+            for key in self.page_table.resident_keys_for_plane(
+                new.document_generation,
+                new.operation_key,
+                new.representation,
+            ):
+                if not (key.lod.is_native or key.lod.reducer == new.lod_reducer):
+                    continue
+                lod = int(key.lod.level)
+                if lod >= len(grids):
+                    continue
+                grid = grids[lod]
+                oy, ox = key.chunk_origin
+                source_page = PAGE << lod
+                cx, cy = ox // source_page, oy // source_page
+                if not (0 <= cx < grid.grid_w and 0 <= cy < grid.grid_h):
+                    continue
+                slot = self.page_table.lookup(key)
+                if slot is None:  # pragma: no cover - resident keys always resolve
+                    continue
+                flat = grid.base + cy * grid.grid_w + cx
+                codec_flag, norm = self._page_codec.get(key, (0, (0.0, 0.0, 0.0, 0.0)))
+                self._flat_table[flat] = slot.page_index
+                self._flat_codec[flat] = codec_flag
+                self._flat_norm[flat] = norm
+        self._bound_planes = planes[: len(bound)]
+        self._table_dirty = True
+        appended = planes[len(bound) :]
+        if appended:
+            self._append_bound_planes(appended)
+        return True
+
     def _ensure_plane_buffer_capacity(self) -> None:
         wgpu = self._wgpu
         d = self.device
@@ -2690,7 +2815,10 @@ class WgpuPlaneExecutor:
         bound_keys = tuple(
             key for key in self.page_table.resident_keys() if self._flat_indices(key)
         )
-        self.page_table.replace_pin_set(_BOUND_PLANES_PIN_OWNER, bound_keys)
+        # Through the memoized owner path, never page_table directly: a direct
+        # write would leave replace_resident_pin_set's memo describing a pin
+        # set this method just replaced.
+        self.replace_resident_pin_set(_BOUND_PLANES_PIN_OWNER, bound_keys)
 
     def _flat_indices(self, key: DataChunkKey) -> tuple[int, ...]:
         """Flat-table entries for ``key`` across every bound plane it feeds."""
@@ -3845,6 +3973,18 @@ class WgpuPlaneExecutor:
         return int(self._plane_lookup_candidates_total)
 
     @property
+    def plane_bind_prefix_reuses_total(self) -> int:
+        return int(self._plane_bind_prefix_reuses_total)
+
+    @property
+    def plane_bind_patches_total(self) -> int:
+        return int(self._plane_bind_patches_total)
+
+    @property
+    def plane_bind_rebuilds_total(self) -> int:
+        return int(self._plane_bind_rebuilds_total)
+
+    @property
     def glyph_atlas_uploads_total(self) -> int:
         return self._glyph_atlas_uploads_total
 
@@ -4065,10 +4205,26 @@ class WgpuPlaneExecutor:
         before every page has arrived.  Let that owner refresh its protection
         after each bounded upload batch without asking :class:`PageTable` to
         pin not-yet-resident pages.
+
+        A bounded montage commit re-sends the SAME key tuple here up to three
+        times per transaction (predecessor pins, bind-time pins, committed
+        pins), and each send used to re-hash every page in the montage.  The
+        memo below skips the re-filter when the keys and the page table's
+        binding generation are both unchanged — the generation moves on every
+        bind/unbind, so any residency change (pages arriving OR leaving)
+        invalidates it.  Pin ownership itself does not move the generation,
+        and this method is the only writer for a given owner, so an unchanged
+        (keys, generation) pair proves the previous answer still holds.
         """
 
+        keys = tuple(keys)
+        generation = int(self.page_table.generation)
+        memo = self._resident_pin_memo.get(owner)
+        if memo is not None and memo[1] == generation and memo[0] == keys:
+            return memo[2]
         resident = frozenset(key for key in keys if key in self.page_table)
         self.page_table.replace_pin_set(owner, resident)
+        self._resident_pin_memo[owner] = (keys, generation, resident)
         return resident
 
     def replace_bound_content_pin_set(self, keys) -> frozenset[DataChunkKey]:
