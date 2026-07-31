@@ -738,23 +738,24 @@ class TileLifecycle:
             active_scope=tuple(tile for tile, rec in self._records.items() if rec.active),
             presented_identities=merged_backend,
         )
-        for tile, ref in backend_refs.items():
-            emit_trace(
-                "backend_ack",
-                tile=int(tile),
-                source_index=int(ref.source_index),
-                identity=_trace_reference(ref.acknowledged_identity),
-                quality=str(ref.quality),
-                level=int(ref.lod_level),
-                accepted=bool(tile in confirmed),
-                session_id=int(self._trace_session_id),
-            )
-            _trace_lifecycle(
-                self.record(tile),
-                "backend_ack",
-                payload=ref,
-                accepted=bool(tile in confirmed),
-            )
+        if trace_enabled():
+            for tile, ref in backend_refs.items():
+                emit_trace(
+                    "backend_ack",
+                    tile=int(tile),
+                    source_index=int(ref.source_index),
+                    identity=_trace_reference(ref.acknowledged_identity),
+                    quality=str(ref.quality),
+                    level=int(ref.lod_level),
+                    accepted=bool(tile in confirmed),
+                    session_id=int(self._trace_session_id),
+                )
+                _trace_lifecycle(
+                    self.record(tile),
+                    "backend_ack",
+                    payload=ref,
+                    accepted=bool(tile in confirmed),
+                )
         return tuple(sorted(confirmed))
 
     def presentation_changes(
@@ -1037,16 +1038,17 @@ class TileLifecycle:
         self._presented.add(rec.tile_number)
         if rec.semantic is Semantic.EVALUATED:
             self._load_cleared(rec)
-        emit_trace(
-            "backend_ack",
-            tile=int(rec.tile_number),
-            source_index=None if rec.target is None else int(rec.target.source_index),
-            identity=_trace_reference(payload_identity),
-            quality=str(rec.presented_quality),
-            level=rec.presented_level,
-            accepted=True,
-            session_id=int(self._trace_session_id),
-        )
+        if trace_enabled():
+            emit_trace(
+                "backend_ack",
+                tile=int(rec.tile_number),
+                source_index=None if rec.target is None else int(rec.target.source_index),
+                identity=_trace_reference(payload_identity),
+                quality=str(rec.presented_quality),
+                level=rec.presented_level,
+                accepted=True,
+                session_id=int(self._trace_session_id),
+            )
         _trace_lifecycle(rec, "presented", identity=payload_identity)
         if rec.target_settled:
             if (

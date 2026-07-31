@@ -475,6 +475,7 @@ def test_repeated_identical_presentation_confirmation_is_not_a_new_ack(monkeypat
         "emit_trace",
         lambda kind, **fields: events.append((kind, fields)),
     )
+    monkeypatch.setattr(tile_lifecycle, "trace_enabled", lambda: True)
 
     assert lc.acknowledge_presented(2, "payload-v1", "exact", 0)
     assert not lc.acknowledge_presented(2, "payload-v1", "exact", 0)

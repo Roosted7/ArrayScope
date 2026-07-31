@@ -11,7 +11,7 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception, traceback_text
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS, GuiCallbackBudget
-from arrayscope.core.trace import emit_trace
+from arrayscope.core.trace import emit_trace, trace_enabled
 from arrayscope.core.window_levels import WindowLevelController
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
@@ -3472,9 +3472,6 @@ class FramePipelineEffects:
             getattr(session, "rearm_visible_parked_payloads", lambda: ())() or ()
         )
         renderer._last_montage_tile_commit_ms = (perf_counter() - commit_start) * 1000.0
-        priority_ranks = dict(getattr(tile_delta, "priority_ranks", {}) or {})
-        lod_decision = getattr(session, "lod_policy_decision", None)
-        lod_demand = getattr(lod_decision, "demand", None)
         chunk_qualities = {
             str(getattr(payload, "quality", "exact") or "exact")
             for payload in dict(getattr(tile_delta, "upserts", {}) or {}).values()
@@ -3489,190 +3486,208 @@ class FramePipelineEffects:
             else "metadata"
         )
         renderer._last_montage_pass_kind = pass_kind
-        pass_chunk_budget_ms = getattr(renderer, "_last_montage_pass_budget_ms", None)
-        required_tiles = tuple(int(tile) for tile in session.required_tile_numbers())
-        pass_completed_atomically = bool(
-            pass_kind in {"preview", "target"}
-            and len(required_tiles) > 1
-            and {int(tile) for tile in tile_delta.upserts} == set(required_tiles)
-        )
-        emit_trace(
-            "commit_batch",
-            phase="backend_complete",
-            session_id=int(getattr(session, "session_id", 0) or 0),
-            revision=int(getattr(tile_state, "revision", 0) or 0),
-            elapsed_ms=float(renderer._last_montage_tile_commit_ms),
-            pass_kind=pass_kind,
-            pass_chunk_items=len(tuple(tile_delta.upserts)),
-            pass_chunk_budget_ms=pass_chunk_budget_ms,
-            governor_details=tuple(getattr(renderer, "_last_montage_governor_details", ()) or ()),
-            pass_chunk_within_50ms=bool(renderer._last_montage_tile_commit_ms <= 50.0),
-            pass_completed_atomically=pass_completed_atomically,
-            presented_tiles=tuple(getattr(report, "presented_tiles", ()) or ()),
-            committed_upserts=tuple(getattr(report, "committed_upserts", ()) or ()),
-            cold_upsert_tiles=tuple(sorted(getattr(report, "cold_upsert_tiles", ()) or ())),
-            identity_rejected=tuple(sorted(getattr(report, "identity_rejected_tiles", ()) or ())),
-            delta_upserts=tuple(int(tile) for tile in tile_delta.upserts),
-            delta_qualities=tuple(
-                (
-                    int(tile),
-                    str(getattr(payload, "quality", "exact") or "exact"),
-                    int(getattr(getattr(payload, "lod", None), "level", 0) or 0),
-                )
-                for tile, payload in tile_delta.upserts.items()
-            ),
-            delta_priority_ranks=tuple(
-                (int(tile), priority_ranks.get(int(tile))) for tile in tile_delta.upserts
-            ),
-            max_upserts=int(getattr(renderer, "_last_montage_commit_max_upserts", 0) or 0),
-            unbounded_reason=str(
-                getattr(renderer, "_last_montage_commit_unbounded_reason", "") or ""
-            ),
-            # What made this batch this size. `max_upserts` is the cap in
-            # force; `admission_limit` is the cap that BIT — "" means none did,
-            # so the batch carried everything on offer and any smallness is
-            # supply, not pacing. Read it with `admission_candidates`.
-            admission_limit=str(getattr(session, "_last_admission_limit", "") or ""),
-            admission_deferred=int(getattr(session, "_last_admission_deferred", 0) or 0),
-            admission_candidates=int(getattr(session, "_last_admission_candidates", 0) or 0),
-            first_display_commit=bool(
-                getattr(renderer, "_last_montage_commit_first_display", False)
-            ),
-            # Compatibility fields consumed by the journey oracle. Their
-            # value now comes directly from the scheduling-policy verdict;
-            # neither commit tracing nor the oracle reconstructs coverage
-            # from payload or lifecycle counters.
-            preview_pass_open_before=bool(coverage_phase_before),
-            coverage_pass_closed=bool(
-                coverage_phase_before and not session.scheduling_policy.verdict.coverage_open
-            ),
-            scheduling_phase_before=("coverage" if coverage_phase_before else "refine"),
-            required_tile_count=len(session.required_tile_numbers()),
-            preview_missing_tile_count=sum(
-                1
-                for tile in session.required_tile_numbers()
-                if int(tile) not in presented_before_commit
-            ),
-            first_pass_quality=getattr(session, "first_pass_quality", None),
-            first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
-            desired_level=(
-                None if lod_demand is None else int(getattr(lod_demand, "desired_level", 0) or 0)
-            ),
-            applied_level=(
-                None
-                if lod_decision is None
-                else int(getattr(lod_decision, "applied_level", 0) or 0)
-            ),
-            uploads=int(getattr(report, "texture_uploads", 0) or 0),
-            upload_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
-            backend_cold_work_ms=float(getattr(report, "cold_work_ms", 0.0) or 0.0),
-            backend_visibility_work_ms=float(getattr(report, "visibility_work_ms", 0.0) or 0.0),
-            backend_total_ms=float(getattr(report, "total_ms", 0.0) or 0.0),
-            backend_storage_rebuilds=int(getattr(report, "storage_rebuilds", 0) or 0),
-            backend_pool_growth_ms=float(getattr(report, "pool_growth_ms", 0.0) or 0.0),
-            backend_executor_initialization_ms=float(
-                getattr(report, "executor_initialization_ms", 0.0) or 0.0
-            ),
-            prepare_ms=float(getattr(renderer, "_last_montage_tile_prepare_apply_ms", 0.0) or 0.0),
-            payload_build_ms=float(
-                getattr(renderer, "_last_montage_tile_payload_build_ms", 0.0) or 0.0
-            ),
-            payload_seed_ms=float(
-                getattr(renderer, "_last_montage_tile_payload_seed_ms", 0.0) or 0.0
-            ),
-            payload_level_ms=float(
-                getattr(renderer, "_last_montage_tile_payload_level_ms", 0.0) or 0.0
-            ),
-            payload_state_ms=float(
-                getattr(renderer, "_last_montage_tile_payload_state_ms", 0.0) or 0.0
-            ),
-            payload_build_call_ms=float(
-                getattr(renderer, "_last_montage_tile_payload_build_call_ms", 0.0) or 0.0
-            ),
-            payload_priority_ms=float(
-                getattr(renderer, "_last_montage_tile_payload_priority_ms", 0.0) or 0.0
-            ),
-            payload_active_ms=float(
-                getattr(renderer, "_last_montage_tile_payload_active_ms", 0.0) or 0.0
-            ),
-            prepare_stats_ms=float(
-                getattr(renderer, "_last_montage_tile_prepare_stats_ms", 0.0) or 0.0
-            ),
-            prepare_metadata_ms=float(
-                getattr(renderer, "_last_montage_tile_prepare_metadata_ms", 0.0) or 0.0
-            ),
-            prepare_source_ms=float(
-                getattr(renderer, "_last_montage_tile_prepare_source_ms", 0.0) or 0.0
-            ),
-            prepare_histogram_ms=float(
-                getattr(renderer, "_last_montage_tile_prepare_histogram_ms", 0.0) or 0.0
-            ),
-            backend_apply_ms=float(
-                getattr(renderer, "_last_montage_tile_layer_apply_ms", 0.0) or 0.0
-            ),
-            # The hand-off split inside the backend callback: what a worker
-            # could have prepared, and what only the GUI thread can submit.
-            backend_texture_prepare_ms=float(getattr(report, "texture_prepare_ms", 0.0) or 0.0),
-            backend_texture_submit_ms=float(getattr(report, "texture_submit_ms", 0.0) or 0.0),
-            backend_texture_pack_ms=float(getattr(report, "texture_pack_ms", 0.0) or 0.0),
-            # Whether the worker hand-off is actually landing. A commit that
-            # packs inline because preparation never arrived looks identical to
-            # one with no preparation at all, so say which it was.
-            **_prepared_upload_counters(renderer),
-            acknowledge_ms=float(
-                getattr(renderer, "_last_montage_tile_acknowledge_ms", 0.0) or 0.0
-            ),
-            state_publish_ms=float(
-                getattr(renderer, "_last_montage_tile_state_publish_ms", 0.0) or 0.0
-            ),
-            geometry_sync_ms=float(
-                getattr(renderer, "_last_montage_tile_geometry_sync_ms", 0.0) or 0.0
-            ),
-            resident_rebinds=int(getattr(report, "resident_rebinds", 0) or 0),
-            binding_fast_path_commits=int(getattr(report, "binding_fast_path_commits", 0) or 0),
-            binding_incremental_commits=int(getattr(report, "binding_incremental_commits", 0) or 0),
-            binding_full_republications=int(getattr(report, "binding_full_republications", 0) or 0),
-            vertex_uploads=int(getattr(report, "vertex_uploads", 0) or 0),
-            level_revision=int(
-                getattr(getattr(session, "level_generation", None), "revision", 0) or 0
-            ),
-            level_target=getattr(getattr(session, "level_generation", None), "target_levels", None),
-            decision_levels=getattr(renderer, "_last_montage_decision_levels", None),
-            decision_source_rank=int(
-                getattr(renderer, "_last_montage_decision_source_rank", 0) or 0
-            ),
-            physical_levels=getattr(renderer, "_last_montage_physical_levels", None),
-            stale_level_tiles=tuple(
-                sorted(
-                    getattr(
-                        getattr(session, "level_generation", None),
-                        "stale_active_tiles",
-                        (),
+        if trace_enabled():
+            priority_ranks = dict(getattr(tile_delta, "priority_ranks", {}) or {})
+            lod_decision = getattr(session, "lod_policy_decision", None)
+            lod_demand = getattr(lod_decision, "demand", None)
+            pass_chunk_budget_ms = getattr(renderer, "_last_montage_pass_budget_ms", None)
+            required_tiles = tuple(int(tile) for tile in session.required_tile_numbers())
+            pass_completed_atomically = bool(
+                pass_kind in {"preview", "target"}
+                and len(required_tiles) > 1
+                and {int(tile) for tile in tile_delta.upserts} == set(required_tiles)
+            )
+            emit_trace(
+                "commit_batch",
+                phase="backend_complete",
+                session_id=int(getattr(session, "session_id", 0) or 0),
+                revision=int(getattr(tile_state, "revision", 0) or 0),
+                elapsed_ms=float(renderer._last_montage_tile_commit_ms),
+                pass_kind=pass_kind,
+                pass_chunk_items=len(tuple(tile_delta.upserts)),
+                pass_chunk_budget_ms=pass_chunk_budget_ms,
+                governor_details=tuple(
+                    getattr(renderer, "_last_montage_governor_details", ()) or ()
+                ),
+                pass_chunk_within_50ms=bool(renderer._last_montage_tile_commit_ms <= 50.0),
+                pass_completed_atomically=pass_completed_atomically,
+                presented_tiles=tuple(getattr(report, "presented_tiles", ()) or ()),
+                committed_upserts=tuple(getattr(report, "committed_upserts", ()) or ()),
+                cold_upsert_tiles=tuple(sorted(getattr(report, "cold_upsert_tiles", ()) or ())),
+                identity_rejected=tuple(
+                    sorted(getattr(report, "identity_rejected_tiles", ()) or ())
+                ),
+                delta_upserts=tuple(int(tile) for tile in tile_delta.upserts),
+                delta_qualities=tuple(
+                    (
+                        int(tile),
+                        str(getattr(payload, "quality", "exact") or "exact"),
+                        int(getattr(getattr(payload, "lod", None), "level", 0) or 0),
                     )
-                    or ()
-                )
-            ),
-            atomic_successor_pending=bool(session.atomic_successor_pending),
-            atomic_successor_pending_before=bool(
-                getattr(
-                    renderer,
-                    "_last_montage_atomic_successor_pending_before",
-                    False,
-                )
-            ),
-            shader_atomic_successor=bool(
-                getattr(renderer, "_last_montage_shader_atomic_successor", False)
-            ),
-            atomic_successor=bool(getattr(renderer, "_last_montage_atomic_successor", False)),
-            atomic_fast_built=bool(getattr(renderer, "_last_montage_atomic_fast_built", False)),
-            atomic_fast_reject_reason=str(
-                getattr(renderer, "_last_montage_atomic_fast_reject_reason", "") or ""
-            ),
-            atomic_prepared_reused=bool(
-                getattr(renderer, "_last_montage_atomic_prepared_reused", False)
-            ),
-            preview_transition=bool(preview_transition),
-        )
+                    for tile, payload in tile_delta.upserts.items()
+                ),
+                delta_priority_ranks=tuple(
+                    (int(tile), priority_ranks.get(int(tile))) for tile in tile_delta.upserts
+                ),
+                max_upserts=int(getattr(renderer, "_last_montage_commit_max_upserts", 0) or 0),
+                unbounded_reason=str(
+                    getattr(renderer, "_last_montage_commit_unbounded_reason", "") or ""
+                ),
+                # What made this batch this size. `max_upserts` is the cap in
+                # force; `admission_limit` is the cap that BIT — "" means none did,
+                # so the batch carried everything on offer and any smallness is
+                # supply, not pacing. Read it with `admission_candidates`.
+                admission_limit=str(getattr(session, "_last_admission_limit", "") or ""),
+                admission_deferred=int(getattr(session, "_last_admission_deferred", 0) or 0),
+                admission_candidates=int(getattr(session, "_last_admission_candidates", 0) or 0),
+                first_display_commit=bool(
+                    getattr(renderer, "_last_montage_commit_first_display", False)
+                ),
+                # Compatibility fields consumed by the journey oracle. Their
+                # value now comes directly from the scheduling-policy verdict;
+                # neither commit tracing nor the oracle reconstructs coverage
+                # from payload or lifecycle counters.
+                preview_pass_open_before=bool(coverage_phase_before),
+                coverage_pass_closed=bool(
+                    coverage_phase_before and not session.scheduling_policy.verdict.coverage_open
+                ),
+                scheduling_phase_before=("coverage" if coverage_phase_before else "refine"),
+                required_tile_count=len(session.required_tile_numbers()),
+                preview_missing_tile_count=sum(
+                    1
+                    for tile in session.required_tile_numbers()
+                    if int(tile) not in presented_before_commit
+                ),
+                first_pass_quality=getattr(session, "first_pass_quality", None),
+                first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
+                desired_level=(
+                    None
+                    if lod_demand is None
+                    else int(getattr(lod_demand, "desired_level", 0) or 0)
+                ),
+                applied_level=(
+                    None
+                    if lod_decision is None
+                    else int(getattr(lod_decision, "applied_level", 0) or 0)
+                ),
+                uploads=int(getattr(report, "texture_uploads", 0) or 0),
+                upload_bytes=int(getattr(report, "texture_upload_bytes", 0) or 0),
+                backend_cold_work_ms=float(getattr(report, "cold_work_ms", 0.0) or 0.0),
+                backend_visibility_work_ms=float(getattr(report, "visibility_work_ms", 0.0) or 0.0),
+                backend_total_ms=float(getattr(report, "total_ms", 0.0) or 0.0),
+                backend_storage_rebuilds=int(getattr(report, "storage_rebuilds", 0) or 0),
+                backend_pool_growth_ms=float(getattr(report, "pool_growth_ms", 0.0) or 0.0),
+                backend_executor_initialization_ms=float(
+                    getattr(report, "executor_initialization_ms", 0.0) or 0.0
+                ),
+                prepare_ms=float(
+                    getattr(renderer, "_last_montage_tile_prepare_apply_ms", 0.0) or 0.0
+                ),
+                payload_build_ms=float(
+                    getattr(renderer, "_last_montage_tile_payload_build_ms", 0.0) or 0.0
+                ),
+                payload_seed_ms=float(
+                    getattr(renderer, "_last_montage_tile_payload_seed_ms", 0.0) or 0.0
+                ),
+                payload_level_ms=float(
+                    getattr(renderer, "_last_montage_tile_payload_level_ms", 0.0) or 0.0
+                ),
+                payload_state_ms=float(
+                    getattr(renderer, "_last_montage_tile_payload_state_ms", 0.0) or 0.0
+                ),
+                payload_build_call_ms=float(
+                    getattr(renderer, "_last_montage_tile_payload_build_call_ms", 0.0) or 0.0
+                ),
+                payload_priority_ms=float(
+                    getattr(renderer, "_last_montage_tile_payload_priority_ms", 0.0) or 0.0
+                ),
+                payload_active_ms=float(
+                    getattr(renderer, "_last_montage_tile_payload_active_ms", 0.0) or 0.0
+                ),
+                prepare_stats_ms=float(
+                    getattr(renderer, "_last_montage_tile_prepare_stats_ms", 0.0) or 0.0
+                ),
+                prepare_metadata_ms=float(
+                    getattr(renderer, "_last_montage_tile_prepare_metadata_ms", 0.0) or 0.0
+                ),
+                prepare_source_ms=float(
+                    getattr(renderer, "_last_montage_tile_prepare_source_ms", 0.0) or 0.0
+                ),
+                prepare_histogram_ms=float(
+                    getattr(renderer, "_last_montage_tile_prepare_histogram_ms", 0.0) or 0.0
+                ),
+                backend_apply_ms=float(
+                    getattr(renderer, "_last_montage_tile_layer_apply_ms", 0.0) or 0.0
+                ),
+                # The hand-off split inside the backend callback: what a worker
+                # could have prepared, and what only the GUI thread can submit.
+                backend_texture_prepare_ms=float(getattr(report, "texture_prepare_ms", 0.0) or 0.0),
+                backend_texture_submit_ms=float(getattr(report, "texture_submit_ms", 0.0) or 0.0),
+                backend_texture_pack_ms=float(getattr(report, "texture_pack_ms", 0.0) or 0.0),
+                # Whether the worker hand-off is actually landing. A commit that
+                # packs inline because preparation never arrived looks identical to
+                # one with no preparation at all, so say which it was.
+                **_prepared_upload_counters(renderer),
+                acknowledge_ms=float(
+                    getattr(renderer, "_last_montage_tile_acknowledge_ms", 0.0) or 0.0
+                ),
+                state_publish_ms=float(
+                    getattr(renderer, "_last_montage_tile_state_publish_ms", 0.0) or 0.0
+                ),
+                geometry_sync_ms=float(
+                    getattr(renderer, "_last_montage_tile_geometry_sync_ms", 0.0) or 0.0
+                ),
+                resident_rebinds=int(getattr(report, "resident_rebinds", 0) or 0),
+                binding_fast_path_commits=int(getattr(report, "binding_fast_path_commits", 0) or 0),
+                binding_incremental_commits=int(
+                    getattr(report, "binding_incremental_commits", 0) or 0
+                ),
+                binding_full_republications=int(
+                    getattr(report, "binding_full_republications", 0) or 0
+                ),
+                vertex_uploads=int(getattr(report, "vertex_uploads", 0) or 0),
+                level_revision=int(
+                    getattr(getattr(session, "level_generation", None), "revision", 0) or 0
+                ),
+                level_target=getattr(
+                    getattr(session, "level_generation", None), "target_levels", None
+                ),
+                decision_levels=getattr(renderer, "_last_montage_decision_levels", None),
+                decision_source_rank=int(
+                    getattr(renderer, "_last_montage_decision_source_rank", 0) or 0
+                ),
+                physical_levels=getattr(renderer, "_last_montage_physical_levels", None),
+                stale_level_tiles=tuple(
+                    sorted(
+                        getattr(
+                            getattr(session, "level_generation", None),
+                            "stale_active_tiles",
+                            (),
+                        )
+                        or ()
+                    )
+                ),
+                atomic_successor_pending=bool(session.atomic_successor_pending),
+                atomic_successor_pending_before=bool(
+                    getattr(
+                        renderer,
+                        "_last_montage_atomic_successor_pending_before",
+                        False,
+                    )
+                ),
+                shader_atomic_successor=bool(
+                    getattr(renderer, "_last_montage_shader_atomic_successor", False)
+                ),
+                atomic_successor=bool(getattr(renderer, "_last_montage_atomic_successor", False)),
+                atomic_fast_built=bool(getattr(renderer, "_last_montage_atomic_fast_built", False)),
+                atomic_fast_reject_reason=str(
+                    getattr(renderer, "_last_montage_atomic_fast_reject_reason", "") or ""
+                ),
+                atomic_prepared_reused=bool(
+                    getattr(renderer, "_last_montage_atomic_prepared_reused", False)
+                ),
+                preview_transition=bool(preview_transition),
+            )
         complete_inline_work(
             renderer,
             WorkItem(
