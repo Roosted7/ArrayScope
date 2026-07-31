@@ -754,3 +754,34 @@ def test_reload_clears_stale_hover_focus(qtbot, monkeypatch):
         assert win.renderer._last_image_hover_focus_frame_key is None
     finally:
         win.close()
+
+
+def test_render_entry_reports_gui_callback_observation(qtbot):
+    # The render pipeline is one synchronous GUI-thread callback.  Until it
+    # reported an observation, its cost was invisible to the governor and
+    # showed up only as an unexplained event-loop heartbeat gap
+    # (docs/redesign/gui-callback-owners-2026-07-31.md, rank 1).
+    _clear_arrayscope_settings()
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
+    qtbot.addWidget(win)
+    try:
+        _process_events(qtbot, count=20)
+        governor = win.resource_governor
+        governor._recent_ui_work_observations.clear()
+
+        win.render(reason="render-entry-observation")
+
+        observations = [
+            observation
+            for observation in governor._recent_ui_work_observations
+            if observation.channel == "render_entry"
+        ]
+        assert observations, "render() must report a render_entry observation"
+        observation = observations[-1]
+        assert observation.elapsed_ms >= 0.0
+        assert "reason=render-entry-observation" in observation.details
+        assert observation.work_class == "render"
+    finally:
+        win.close()

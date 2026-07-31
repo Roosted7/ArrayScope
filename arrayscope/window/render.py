@@ -1254,6 +1254,27 @@ class RenderOrchestrator(
         defer_side_panels: bool = False,
     ):
         render_start = perf_counter()
+        try:
+            self._render_synchronous(
+                reason=reason,
+                force_autolevel=force_autolevel,
+                defer_side_panels=defer_side_panels,
+                render_start=render_start,
+            )
+        finally:
+            self._record_render_entry_observation(
+                reason=reason,
+                elapsed_ms=(perf_counter() - render_start) * 1000.0,
+            )
+
+    def _render_synchronous(
+        self,
+        *,
+        reason: str,
+        force_autolevel: bool,
+        defer_side_panels: bool,
+        render_start: float,
+    ):
         self._cancel_render_dependent_work_for_interactive_change()
         self._advance_render_generation(f"render:{reason}")
         self.win._set_view_state(
@@ -1294,6 +1315,42 @@ class RenderOrchestrator(
             self.win._deferred_side_panel_refresh_pending = False
         self._last_side_panel_sync_ms = (perf_counter() - side_panel_start) * 1000.0
         self._last_render_sync_ms = (perf_counter() - render_start) * 1000.0
+
+    def _record_render_entry_observation(self, *, reason: str, elapsed_ms: float) -> None:
+        """Report the whole render entry as one GUI-callback observation.
+
+        The render pipeline is a single synchronous GUI-thread callback, and
+        until this observation existed it was invisible to the governor: a
+        cold-entry stage plan owned the loop for over a second and showed up
+        only as an unexplained heartbeat gap
+        (docs/redesign/gui-callback-owners-2026-07-31.md §1a).
+        """
+
+        record = getattr(self.win, "_record_ui_work", None)
+        if not callable(record):
+            return
+        details = [f"reason={reason}"]
+        for label, attribute in (
+            ("stage_plan_ms", "_last_montage_stage_plan_ms"),
+            ("frame_update_ms", "_last_frame_update_ms"),
+            ("side_panel_ms", "_last_side_panel_sync_ms"),
+        ):
+            value = getattr(self, attribute, None)
+            if value is not None:
+                details.append(f"{label}={float(value):.1f}")
+        try:
+            from arrayscope.display.backend_contract import image_view_backend_capabilities
+
+            backend = image_view_backend_capabilities(self.win.img_view).name
+        except Exception:
+            backend = ""
+        record(
+            "render_entry",
+            max(0.0, float(elapsed_ms)),
+            work_class="render",
+            backend=str(backend or ""),
+            details=tuple(details),
+        )
 
     # Interactive scrub reasons whose per-step control sync is satisfied by the
     # immediate single-axis sync in ``_apply_slice_state`` (scalar slice-index
