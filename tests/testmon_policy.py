@@ -97,6 +97,17 @@ OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
         "arrayscope/__init__.py",
         "arrayscope/app/qt_binding.py",
     ),
+    # `python -c "... from arrayscope.app.launch import _prepare_qt_environment"`
+    # — the Qt logging-category rules are process-global mutable state, so the
+    # only honest place to assert on them is a fresh interpreter. Both files are
+    # named because both are only *half* covered in-process: the two in-process
+    # tests here call `install_wgpu_log_noise_filter`, but
+    # `apply_qt_logging_noise_rules` and the `_prepare_qt_environment` wiring
+    # that reaches it run nowhere except this child.
+    "tests/app/test_log_noise.py": (
+        "arrayscope/app/launch.py",
+        "arrayscope/app/log_noise.py",
+    ),
     # `python -c "import arrayscope.io.numpy_save"` (asserts pyqtgraph stays out
     # of sys.modules).
     "tests/io/test_numpy_save.py": ("arrayscope/io/numpy_save.py",),
