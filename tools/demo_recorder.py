@@ -1279,8 +1279,22 @@ class Recorder:
         event["activate_frame"] = max(event["start_frame"], self.frame_index - 1)
         self._finish_action(event)
 
-    def drag_window_levels(self, *, low_fraction: float, high_fraction: float) -> None:
-        """Animate an honest histogram-window gesture and its pixel response."""
+    def _histogram_window_point(self, histogram, value: float):
+        from pyqtgraph.Qt import QtCore
+
+        view_box = histogram.item.vb
+        x_range = view_box.viewRange()[0]
+        x = float(x_range[0]) + 0.55 * (float(x_range[1]) - float(x_range[0]))
+        scene_pos = view_box.mapViewToScene(QtCore.QPointF(x, float(value)))
+        return QtCore.QPointF(histogram.mapTo(self.win, histogram.mapFromScene(scene_pos)))
+
+    def _histogram_value_at_window_point(self, histogram, window_point) -> float:
+        local = histogram.mapFrom(self.win, window_point.toPoint())
+        scene_pos = histogram.mapToScene(local)
+        return float(histogram.item.vb.mapSceneToView(scene_pos).y())
+
+    def drag_window_levels(self, *, high_fraction: float) -> None:
+        """Drag the upper window handle; its cursor position owns the value."""
         from pyqtgraph.Qt import QtCore
 
         view = self.win.img_view
@@ -1288,17 +1302,17 @@ class Recorder:
         bounds = view.getHistogramDataBounds() or view.getLevels()
         lower, upper = (float(value) for value in bounds)
         span = upper - lower
-        if span <= 0 or not (0.0 <= low_fraction < high_fraction <= 1.0):
-            raise RuntimeError(f"invalid histogram bounds/fractions: {bounds!r}")
+        if span <= 0 or not (0.0 < high_fraction <= 1.0):
+            raise RuntimeError(f"invalid histogram bounds/fraction: {bounds!r}")
         start_levels = tuple(float(value) for value in view.getLevels())
-        end_levels = (
-            lower + low_fraction * span,
-            lower + high_fraction * span,
-        )
+        target_upper = lower + high_fraction * span
+        if target_upper <= start_levels[0]:
+            raise RuntimeError(f"upper target {target_upper} does not clear lower level")
         target = self._widget_target(histogram, (0.5, 0.55))
         event = self._start_action("drag", "adjust histogram window and level", target=target)
-        start_point = self.widget_point(histogram, (0.5, 0.72))
-        end_point = self.widget_point(histogram, (0.5, 0.42))
+        event["button"] = "left"
+        start_point = self._histogram_window_point(histogram, start_levels[1])
+        end_point = self._histogram_window_point(histogram, target_upper)
         detail_rect = QtCore.QRectF(
             end_point.x() - 48.0,
             end_point.y() - 28.0,
@@ -1316,18 +1330,22 @@ class Recorder:
         self._ripples.append((self.frame_index, QtCore.QPointF(self.cursor)))
         self.cursor_pressed = True
         steps = self._frames_for(1.1)
+        cursor_values = []
         for index in range(1, steps + 1):
             t = _ease(index / steps)
-            view.setLevels(
-                start_levels[0] + (end_levels[0] - start_levels[0]) * t,
-                start_levels[1] + (end_levels[1] - start_levels[1]) * t,
-            )
             self.cursor = QtCore.QPointF(
                 start_point.x() + (end_point.x() - start_point.x()) * t,
                 start_point.y() + (end_point.y() - start_point.y()) * t,
             )
+            cursor_upper = self._histogram_value_at_window_point(histogram, self.cursor)
+            cursor_values.append(cursor_upper)
+            view.setLevels(start_levels[0], cursor_upper)
             self.capture()
         self.cursor_pressed = False
+        end_levels = tuple(float(value) for value in view.getLevels())
+        event["start_levels"] = list(start_levels)
+        event["end_levels"] = list(end_levels)
+        event["cursor_values"] = cursor_values
         event["activate_frame"] = self.frame_index - 1
         self.settle()
         self.hold(0.55)
@@ -1463,8 +1481,8 @@ def s_showcase(rec: Recorder):
     rec.hover_image([(30, 64), (74, 44), (96, 82), (64, 64)], seconds=2.2)
     rec.hold(0.25)
 
-    rec.caption("Drag the histogram handles to adjust window and level")
-    rec.drag_window_levels(low_fraction=0.08, high_fraction=0.72)
+    rec.caption("Drag the upper histogram handle to narrow the window")
+    rec.drag_window_levels(high_fraction=0.72)
 
     rec.caption("Scrub through any dimension")
     chip = win.dimension_strip.chip(2)

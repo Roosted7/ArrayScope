@@ -161,6 +161,12 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
         hover = next(event for event in actions if event["label"] == "hover image values")
         assert hover["hud_visible_frames"] > 0
         assert any("=" in text for text in hover["hud_texts"])
+        levels = next(
+            event for event in actions if event["label"] == "adjust histogram window and level"
+        )
+        assert levels["button"] == "left"
+        assert levels["end_levels"][0] == pytest.approx(levels["start_levels"][0])
+        assert levels["end_levels"][1] == pytest.approx(levels["cursor_values"][-1])
     if name == "montage":
         montage_action = next(
             event for event in actions if event["label"] == "enter montage range on axis 2"
