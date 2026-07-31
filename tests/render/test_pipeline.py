@@ -267,6 +267,28 @@ def test_converged_retarget_submits_nothing():
     assert effects.evaluated == []
 
 
+def test_retarget_against_closed_kernel_takes_no_claims():
+    """A replan outliving its kernel must stop at the plan.
+
+    Sessions replan on coalesced timers, and a session cached across window
+    teardown kept planning against the closed kernel forever: every submit
+    died silently at the door, but only after ``prepare_rung`` had taken a
+    lifecycle claim for it — so the ladder saw the tile as in flight, the
+    next replan re-planned it, and the loop sustained itself on the GUI
+    thread (2026-07-31 stranded-fill trace). Refusing at retarget leaves no
+    claims and no churn.
+    """
+
+    kernel, effects, pipeline = make_pipeline(tiles=2)
+    kernel.shutdown(timeout=1.0)
+
+    submitted = pipeline.retarget(intent(target_level=1), demand(1), scope(0, 1, missing=2))
+
+    assert submitted == 0
+    assert effects.prepared == [], "no lifecycle claim may be taken for unsubmittable work"
+    assert effects.dropped == []
+
+
 def test_semantic_change_clears_previous_scope():
     kernel, effects, pipeline = make_pipeline(tiles=1)
     pipeline.retarget(intent(semantic="doc-v1", target_level=1), demand(1), scope(0))

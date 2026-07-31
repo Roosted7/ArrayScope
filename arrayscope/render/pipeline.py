@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from time import perf_counter_ns
 from typing import Any, Protocol
 
+from arrayscope.core.trace import emit_trace
 from arrayscope.kernel import Kernel, Lane, Priority, Supersession, TaskSpec
 from arrayscope.render.ladder import LodLadder, Rung, RungStep, TileLodState
 from arrayscope.render.progressive_scheduling import SchedulingVerdict
@@ -178,6 +179,15 @@ class FramePipeline:
         work is superseded by family, never hunted down by ad-hoc flags.
         """
 
+        if bool(getattr(self.kernel, "is_shutting_down", False)):
+            # A replan against a closed kernel cannot submit anything: every
+            # kernel.submit returns None at the door. Planning anyway took
+            # lifecycle claims for work that could never run, and the replan
+            # gate then re-fired on the resulting "missing" tiles — a silent,
+            # self-sustaining loop on the GUI thread of a window that no
+            # longer exists (2026-07-31 stranded-fill trace:
+            # kernel_submit_refused_shutdown x1901 in one process).
+            return 0
         previous = self._current_intent
         self._current_intent = intent
         self._admission_generation += 1
@@ -403,6 +413,19 @@ class FramePipeline:
             self.effects.rung_admitted(intent, step, step_key)
             self.counters.tasks_submitted += 1
             return True
+        # A None handle is the kernel refusing at the door (shutdown). The
+        # retarget-level guard makes this unreachable for a planned replan,
+        # but a shutdown racing an in-flight admission continuation still
+        # lands here — and a silent drop here once sustained a stranded fill
+        # for three whole profile passes. Name it.
+        emit_trace(
+            "submit_step_no_handle",
+            tile=int(step.tile_number),
+            rung=int(step.rung),
+            level=int(step.level),
+            session_id=int(getattr(getattr(self.effects, "session", None), "session_id", 0) or 0),
+            kernel_id=id(self.kernel),
+        )
         self.effects.rung_dropped(intent, step)
         return False
 

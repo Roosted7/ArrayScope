@@ -151,6 +151,22 @@ class Kernel:
 
     # ------------------------------------------------------------------ API
 
+    @property
+    def is_shutting_down(self) -> bool:
+        """Whether this kernel refuses all new work.
+
+        Producers that replan on timers (the frame pipeline's coalesced
+        replan gate) outlive their window's kernel: a session cached across
+        teardown kept planning, claiming, and submitting into a closed kernel
+        forever, and every submission died silently at the door
+        (2026-07-31, the zero-submission stranded fill).  Exposing the flag
+        lets those producers stop at the plan, before any lifecycle claim is
+        taken for work that can never run.
+        """
+
+        with self._lock:
+            return bool(self._shutting_down)
+
     def submit(
         self,
         spec: TaskSpec,
@@ -164,6 +180,11 @@ class Kernel:
 
         with self._lock:
             if self._shutting_down:
+                emit_trace(
+                    "kernel_submit_refused_shutdown",
+                    kernel_id=id(self),
+                    key=repr(spec.key)[:160],
+                )
                 return None
             seq = next(self._seq)
             record = _Record(
