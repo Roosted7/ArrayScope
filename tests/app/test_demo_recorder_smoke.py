@@ -145,6 +145,7 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
     if name == "showcase":
         labels = {event["label"] for event in actions}
         assert {
+            "hover image values",
             "adjust histogram window and level",
             "scrub axis 2 slices",
             "crop axis 0 to 72:352",
@@ -157,6 +158,9 @@ def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
             "crop axis 0 to 72:352",
             "show image at true 1:1",
         } <= framed_labels
+        hover = next(event for event in actions if event["label"] == "hover image values")
+        assert hover["hud_visible_frames"] > 0
+        assert any("=" in text for text in hover["hud_texts"])
     if name == "montage":
         montage_action = next(
             event for event in actions if event["label"] == "enter montage range on axis 2"

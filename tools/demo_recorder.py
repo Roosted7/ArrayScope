@@ -1193,6 +1193,8 @@ class Recorder:
 
         view = self.win.img_view
         action_event = self._start_action("hover", "hover image values")
+        hud_visible_frames = 0
+        hud_texts = []
         # Piecewise-linear sweep through the given image points.
         segments = max(1, len(points) - 1)
         per_segment = max(2, self._frames_for(seconds) // segments)
@@ -1211,10 +1213,23 @@ class Recorder:
                     QtCore.Qt.KeyboardModifier.NoModifier,
                 )
                 view.eventFilter(view.graphicsView.viewport(), mouse_event)
+                # Calling an event filter directly does not perform the
+                # QGraphicsView's normal post-filter scene dispatch. Emit the
+                # same production scene signal a delivered mouse move emits;
+                # the window owns value lookup and PixelHud presentation.
+                view.getView().scene().sigMouseMoved.emit(scene_pos)
                 self.cursor = QtCore.QPointF(
                     view.graphicsView.viewport().mapTo(self.win, local.toPoint())
                 )
+                hud = self.win.pixel_hud
+                if hud.isVisible() and hud.text():
+                    hud_visible_frames += 1
+                    hud_texts.append(hud.text())
                 self.capture()
+        if not hud_visible_frames:
+            raise RuntimeError("hover sweep never made the production PixelHud visible")
+        action_event["hud_visible_frames"] = hud_visible_frames
+        action_event["hud_texts"] = list(dict.fromkeys(hud_texts))
         action_event["activate_frame"] = self.frame_index - 1
         self._finish_action(action_event)
 
