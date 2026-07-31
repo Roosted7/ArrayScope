@@ -212,17 +212,18 @@ def test_settings_round_trip_defaults_and_values():
         settings_state.RenderResponsivenessChoice.THROUGHPUT,
     }
     assert "render_responsiveness" not in settings_state.settings_to_mapping(defaults)
-    # Screen presentation is opt-in (queue row 3): bitmap default, unknown
-    # values normalize back to bitmap, and auto (screen where the measured
-    # native-Wayland path exists) round-trips.
-    assert defaults.wgpu_present_method == settings_state.WgpuPresentMethodChoice.BITMAP
+    # Presentation resolves per session: AUTO is the default (screen exactly
+    # where the measured native-Wayland path exists, bitmap everywhere else),
+    # unknown values normalize back to that same default, and an explicit
+    # bitmap pin round-trips.
+    assert defaults.wgpu_present_method == settings_state.WgpuPresentMethodChoice.AUTO
     assert (
         settings_state.settings_from_mapping({"wgpu_present_method": "unknown"}).wgpu_present_method
-        == settings_state.WgpuPresentMethodChoice.BITMAP
+        == settings_state.WgpuPresentMethodChoice.AUTO
     )
-    auto = settings_state.settings_from_mapping({"wgpu_present_method": "auto"})
-    assert auto.wgpu_present_method == settings_state.WgpuPresentMethodChoice.AUTO
-    assert settings_state.settings_to_mapping(auto)["wgpu_present_method"] == "auto"
+    bitmap = settings_state.settings_from_mapping({"wgpu_present_method": "bitmap"})
+    assert bitmap.wgpu_present_method == settings_state.WgpuPresentMethodChoice.BITMAP
+    assert settings_state.settings_to_mapping(bitmap)["wgpu_present_method"] == "bitmap"
     assert defaults.memory_profile == settings_state.MemoryProfileChoice.BALANCED
     assert defaults.render_memory_budget_mb == 512
     assert defaults.qt_platform == settings_state.QtPlatformChoice.AUTO
@@ -274,6 +275,40 @@ def test_settings_round_trip_defaults_and_values():
     assert (
         unknown_quality.montage_quality_policy == settings_state.MontageQualityPolicyChoice.RESIDENT
     )
+
+
+def test_every_present_method_default_owner_names_the_same_choice():
+    """One default, stated in four places, pinned so they cannot drift apart.
+
+    This setting has more default owners than it looks: the dataclass field,
+    the normalizer's fallback (which is what a mapping *without* the key
+    reaches, since ``settings_from_mapping`` feeds ``None`` through it), the
+    menus' QSettings read fallback, and the factory's ``getattr`` fallback.
+    A disagreement between any two of them is invisible in normal use — it
+    only shows up as "the app behaves differently depending on whether the
+    setting was ever written", which is exactly the bug shape this repo has
+    hit before with other settings.
+    """
+
+    import inspect
+
+    from arrayscope.display import image_view_factory
+    from arrayscope.ui import menus
+
+    expected = settings_state.WgpuPresentMethodChoice.AUTO
+
+    # 1. the dataclass field, and 2. the normalizer's fallback (via a mapping
+    # that does not carry the key at all).
+    assert settings_state.AppSettingsState().wgpu_present_method == expected
+    assert settings_state.settings_from_mapping({}).wgpu_present_method == expected
+    assert settings_state.normalize_wgpu_present_method_choice(None) == expected
+
+    # 3. and 4. are literal fallback arguments rather than call results, so
+    # they are read from the source that states them.
+    menus_source = inspect.getsource(menus.WindowMenuMixin._load_app_settings)
+    assert f'"wgpu_present_method", WgpuPresentMethodChoice.{expected.name}.value' in menus_source
+    factory_source = inspect.getsource(image_view_factory.create_image_view)
+    assert f'"wgpu_present_method", WgpuPresentMethodChoice.{expected.name}' in factory_source
 
 
 def test_performance_settings_normalize_unknowns_and_clamp_budget():

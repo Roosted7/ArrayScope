@@ -3,12 +3,13 @@
 Queue row 3 slice (b): a live rendering backend driven purely by the
 renderer command protocol (ADR 0057). The widget composes shared interaction
 at the shell seam — PyQtGraph keeps the histogram widget and the
-transparent interaction overlay; a rendercanvas ``QRenderWidget`` in bitmap
-present mode owns the pixels by default, and the ``wgpu_present_method``
-setting can pin the native-Wayland screen path instead
+transparent interaction overlay; who owns the pixels is the
+``wgpu_present_method`` setting's decision, which defaults to AUTO: the
+native-Wayland screen path where the measured gate-B recipe applies
 (:mod:`arrayscope.display.backends.wgpu.screen_canvas`: a paint-less native
 child driving its own swapchain, bypassing rendercanvas and the per-frame
-bitmap readback) — but every pixel decision is expressed as
+bitmap readback), and a rendercanvas ``QRenderWidget`` in bitmap present
+mode everywhere else — but every pixel decision is expressed as
 :class:`~arrayscope.gpu.command_protocol.FrameSubmission` commands into one
 :class:`~arrayscope.gpu.wgpu_executor.WgpuPlaneExecutor`.
 

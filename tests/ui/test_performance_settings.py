@@ -275,10 +275,10 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
         screen = _submenu_action(
             win, "Performance", "wgpu Presentation", "Screen (native swapchain pin)"
         )
-        # Bitmap is the default and the menu reflects it.
-        assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.BITMAP
-        assert bitmap.isChecked()
-        assert not auto.isChecked()
+        # Auto is the default and the menu reflects it.
+        assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.AUTO
+        assert auto.isChecked()
+        assert not bitmap.isChecked()
         assert not screen.isChecked()
         # Enabled under the default AUTO backend (AUTO resolves to wgpu on
         # GPU-capable devices) and under an explicit wgpu pin.
@@ -293,6 +293,15 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
         ).trigger()
         _process_events(qtbot)
         assert win._wgpu_present_method_menu.isEnabled()
+
+        # Away from the default first, so every step below is a real
+        # transition rather than a rewrite of the choice already in force.
+        bitmap.trigger()
+        _process_events(qtbot)
+        assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.BITMAP
+        assert win._settings.value("wgpu_present_method") == "bitmap"
+        assert bitmap.isChecked()
+        assert not auto.isChecked()
 
         auto.trigger()
         _process_events(qtbot)

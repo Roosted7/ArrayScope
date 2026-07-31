@@ -55,7 +55,7 @@ class WindowMenuMixin:
                     "image_rendering_backend", ImageRenderingBackendChoice.AUTO.value
                 ),
                 "wgpu_present_method": self._settings.value(
-                    "wgpu_present_method", WgpuPresentMethodChoice.BITMAP.value
+                    "wgpu_present_method", WgpuPresentMethodChoice.AUTO.value
                 ),
                 "texture_codec": self._settings.value(
                     "texture_codec", TextureCodecChoice.OFF.value

@@ -55,7 +55,9 @@
   keep painting normally, so a chip overhanging the canvas (the hints chip
   overlaps the histogram) still shows there, from the same rendering. Screen
   presentation landed 2026-07-19 behind the `wgpu_present_method` setting
-  (bitmap default, explicit opt-in): a bare `QWindow` embedded through
+  (explicit opt-in then; the AUTO resolution rule became the default on
+  2026-07-31, so a native-Wayland session gets this path without asking
+  and every other session still gets bitmap): a bare `QWindow` embedded through
   `QWidget.createWindowContainer`
   (`arrayscope/display/backends/wgpu/screen_canvas.py`) drives its own
   swapchain from the gate-B recipe (QNativeInterface wl_display +

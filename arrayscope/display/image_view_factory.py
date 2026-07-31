@@ -146,7 +146,7 @@ def create_image_view(settings=None, *, notify=None):
         if callable(notify):
             notify(f"Image rendering backend: {choice_value} | {reason}")
     if choice_value == ImageRenderingBackendChoice.WGPU.value:
-        present_method = getattr(settings, "wgpu_present_method", WgpuPresentMethodChoice.BITMAP)
+        present_method = getattr(settings, "wgpu_present_method", WgpuPresentMethodChoice.AUTO)
         present_method_value = getattr(present_method, "value", present_method)
         texture_codec = getattr(settings, "texture_codec", TextureCodecChoice.OFF)
         texture_codec_value = getattr(texture_codec, "value", texture_codec)

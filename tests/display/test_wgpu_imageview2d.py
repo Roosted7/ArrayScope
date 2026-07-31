@@ -3433,9 +3433,12 @@ def test_screen_request_falls_back_to_bitmap_off_wayland(qt_app):
 def test_present_method_request_normalizes_unknown_values(qt_app):
     view = _view_class("wgpu")(present_method="garbage")
     try:
-        # Unknown values normalize to the bitmap default; nothing "fell back".
+        # Unknown values normalize to the AUTO default rather than to a
+        # method: off Wayland that resolves to bitmap with the reason
+        # recorded, which is the resolution rule working, not a fallback.
+        assert view._wgpu_present_method_requested == "auto"
         assert view.wgpuPresentMethod() == "bitmap"
-        assert view.wgpuPresentMethodFallbackReason() == ""
+        assert "wayland" in view.wgpuPresentMethodFallbackReason()
     finally:
         view.close()
 

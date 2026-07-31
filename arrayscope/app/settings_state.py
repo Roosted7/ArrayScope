@@ -59,7 +59,10 @@ class WgpuPresentMethodChoice(Enum):
     # AUTO resolves per session: the screen swapchain exactly where the
     # measured gate-B recipe applies (native Wayland), bitmap everywhere
     # else.  Screen on other platforms (e.g. xcb) would be a different,
-    # unmeasured path — AUTO widens only behind new evidence.
+    # unmeasured path — AUTO widens only behind new evidence.  It is the
+    # DEFAULT: the resolution rule already declines everywhere the recipe
+    # does not apply, so defaulting to bitmap only denied the measured
+    # path to the sessions it was measured on.
     AUTO = "auto"
     BITMAP = "bitmap"
     # SCREEN is the explicit pin (native-Wayland swapchain; the view falls
@@ -104,8 +107,8 @@ class AppSettingsState:
     # Provenance only, not another user setting. A detected default must not
     # become a persisted override when an unrelated preference is saved.
     render_responsiveness_explicit: bool = False
-    # wgpu backend only; screen is an explicit experimental pin (queue row 3).
-    wgpu_present_method: WgpuPresentMethodChoice = WgpuPresentMethodChoice.BITMAP
+    # wgpu backend only; screen is an explicit pin, AUTO the resolution rule.
+    wgpu_present_method: WgpuPresentMethodChoice = WgpuPresentMethodChoice.AUTO
     montage_quality_policy: MontageQualityPolicyChoice = MontageQualityPolicyChoice.RESIDENT
     # G7: explicit lossless host-cache experiment; RAW is the production path.
     chunk_transport_codec: ChunkTransportCodecChoice = ChunkTransportCodecChoice.RAW
@@ -313,7 +316,11 @@ def normalize_wgpu_present_method_choice(value) -> WgpuPresentMethodChoice:
     try:
         return WgpuPresentMethodChoice(str(value))
     except Exception:
-        return WgpuPresentMethodChoice.BITMAP
+        # This branch is also the effective default: ``settings_from_mapping``
+        # feeds a missing key through here as ``None``, so it must name the
+        # same choice as the dataclass field or the two would disagree about
+        # what "unset" means.
+        return WgpuPresentMethodChoice.AUTO
 
 
 def normalize_montage_quality_policy_choice(value) -> MontageQualityPolicyChoice:

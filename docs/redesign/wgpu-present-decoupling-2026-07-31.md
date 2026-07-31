@@ -171,10 +171,16 @@ a real compositor, but the workload is not the canonical gallery pass.
   transaction is atomic by design).
 - The pacer needs no further work (phase-2 verdict stands); present-mode
   and acquire costs are already negligible under Mailbox.
-- Recommendation (not done — behavioral default change, Thomas's call):
-  default `wgpu_present_method` to AUTO so live-Wayland sessions get the
-  screen path (no 4–7 ms readback, self-paced to the display); bitmap
-  remains the everywhere-else fallback, now display-rate capped.
+- **DONE (2026-07-31, Thomas's call):** `wgpu_present_method` now defaults
+  to AUTO, so live-Wayland sessions get the screen path (no 4–7 ms
+  readback, self-paced to the display) and bitmap — now display-rate
+  capped rather than pinned at 30 — remains the everywhere-else
+  resolution. Verified by building the view through the factory from a
+  settings mapping that does not mention the key: under the managed
+  Weston it resolves to `screen` with no fallback reason and no status
+  message; under the offscreen QPA it resolves to `bitmap` with the
+  reason recorded and still no message, because AUTO declining is the
+  rule working rather than a fallback.
 
 ### 3a. The default is BITMAP, and all three owners agree
 
