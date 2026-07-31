@@ -253,25 +253,65 @@ def axis_in_region_result(region: RegionSpec, original_axis: int) -> int:
     )
 
 
+def _axis_index_range(axis_region: AxisRegion, size: int) -> range | None:
+    """The axis' index progression as a ``range``; ``None`` for POINT/INDICES."""
+
+    kind = axis_region_kind(axis_region.kind)
+    if kind == AxisRegionKind.ALL:
+        return range(size)
+    if kind != AxisRegionKind.SLICE:
+        return None
+    start, stop, step = axis_region.value
+    return range(*slice(int(start), None if stop is None else int(stop), int(step)).indices(size))
+
+
+def _range_contains_range(container: range, contained: range) -> bool:
+    if len(contained) == 0:
+        return True
+    if len(container) == 0:
+        return False
+    if contained[0] not in container or contained[-1] not in container:
+        return False
+    # Endpoints are on the container's progression; every interior element is
+    # too exactly when the contained stride is a multiple of the container's.
+    return len(contained) == 1 or contained.step % container.step == 0
+
+
 def _axis_contains(container: AxisRegion, contained: AxisRegion, size: int) -> bool:
-    container_indices = _axis_indices(container, size)
-    contained_indices = _axis_indices(contained, size)
-    if isinstance(container_indices, int):
-        if isinstance(contained_indices, int):
-            return int(container_indices) == int(contained_indices)
-        contained_values = tuple(
-            int(index) for index in np.asarray(contained_indices, dtype=np.int64).ravel()
+    # Membership is answered arithmetically on ``range`` progressions wherever
+    # both sides allow it. The stage-plan match loop asks this per tile per
+    # cache entry inside one GUI callback, and materializing full index arrays
+    # here (a prior vectorized shape) priced one containment probe at ~240 µs.
+    size = int(size)
+    contained_kind = axis_region_kind(contained.kind)
+    container_range = _axis_index_range(container, size)
+    if container_range is not None:
+        if contained_kind == AxisRegionKind.POINT:
+            return _normalize_index(int(contained.value), size) in container_range
+        if contained_kind == AxisRegionKind.INDICES:
+            return all(
+                _normalize_index(int(index), size) in container_range for index in contained.value
+            )
+        return _range_contains_range(container_range, _axis_index_range(contained, size))
+    if axis_region_kind(container.kind) == AxisRegionKind.POINT:
+        container_index = _normalize_index(int(container.value), size)
+        if contained_kind == AxisRegionKind.POINT:
+            return container_index == _normalize_index(int(contained.value), size)
+        if contained_kind == AxisRegionKind.INDICES:
+            contained_values = tuple(
+                _normalize_index(int(index), size) for index in contained.value
+            )
+            return len(contained_values) == 1 and contained_values[0] == container_index
+        contained_range = _axis_index_range(contained, size)
+        return len(contained_range) == 1 and contained_range[0] == container_index
+    container_values = {_normalize_index(int(index), size) for index in container.value}
+    if contained_kind == AxisRegionKind.POINT:
+        return _normalize_index(int(contained.value), size) in container_values
+    if contained_kind == AxisRegionKind.INDICES:
+        return all(
+            _normalize_index(int(index), size) in container_values for index in contained.value
         )
-        return len(contained_values) == 1 and int(container_indices) == contained_values[0]
-    # Vectorized on purpose: this is asked once per payload per axis while a
-    # crop settles, and building a Python set of the container then testing
-    # each contained index through the interpreter made one call cost the sum
-    # of both axis extents. Same membership question, answered in C.
-    container_values = np.asarray(container_indices, dtype=np.int64).ravel()
-    if isinstance(contained_indices, int):
-        return bool((container_values == int(contained_indices)).any())
-    contained_values = np.asarray(contained_indices, dtype=np.int64).ravel()
-    return bool(np.isin(contained_values, container_values).all())
+    return all(index in container_values for index in _axis_index_range(contained, size))
 
 
 def _local_axis_region(source_axis: AxisRegion, target_axis: AxisRegion, size: int) -> AxisRegion:
