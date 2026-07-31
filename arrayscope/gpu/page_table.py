@@ -9,8 +9,13 @@ answer (``lookup`` returns ``None``), never an implicit upload.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import count
 
 from arrayscope.gpu.keys import DataChunkKey
+
+# Epoch half of ``PageTable.eviction_stamp``: unique per table instance so a
+# stamp can never validate against a table other than the one that issued it.
+_EVICTION_EPOCHS = count(1)
 
 
 @dataclass(frozen=True)
@@ -76,10 +81,27 @@ class PageTable:
     _generation: int = 0
     _use_counter: int = 0
     _pin_sets: dict[object, frozenset[DataChunkKey]] = field(default_factory=dict)
+    _eviction_serial: int = 0
+    _eviction_epoch: int = field(default_factory=lambda: next(_EVICTION_EPOCHS))
 
     @property
     def generation(self) -> int:
         return self._generation
+
+    @property
+    def eviction_stamp(self) -> tuple[int, int]:
+        """Token proving "no residency was LOST since this stamp was taken".
+
+        ``bind`` only adds coverage, so a key verified resident stays resident
+        until ``unbind`` — the single removal path — bumps the serial.  The
+        epoch half is unique per table instance (and deliberately NOT adopted
+        by :meth:`rebind_from`), so a stamp taken against one table can never
+        validate reads against another.  ``remap_slots`` moves slots without
+        dropping residency and leaves the stamp alone on purpose: consumers of
+        this stamp re-``lookup`` keys, they do not cache slots.
+        """
+
+        return (self._eviction_epoch, self._eviction_serial)
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -108,6 +130,10 @@ class PageTable:
         self._pin_sets = dict(other._pin_sets)
         self._generation = other._generation
         self._use_counter = other._use_counter
+        # Adopting replaces residency wholesale, which can silently DROP keys
+        # this table used to hold; any outstanding stamp must stop validating.
+        # The epoch stays this instance's own — see ``eviction_stamp``.
+        self._eviction_serial += 1
 
     def __contains__(self, key: DataChunkKey) -> bool:
         return key in self._entries
@@ -194,6 +220,7 @@ class PageTable:
         entry = self._entries.pop(key, None)
         if entry is None:
             return None
+        self._eviction_serial += 1
         del self._slots[entry.slot]
         if isinstance(key, DataChunkKey):
             family_key = _value_family_key(key)
@@ -309,6 +336,31 @@ class PageTable:
 
     def resident_keys(self) -> tuple[DataChunkKey, ...]:
         return tuple(self._entries)
+
+    def resident_keys_for_plane(
+        self,
+        document_generation: object,
+        operation_key: object,
+        representation: str,
+    ) -> tuple[DataChunkKey, ...]:
+        """Resident 2-D keys belonging to one content plane's value families.
+
+        The family index is keyed finer than a plane (it also splits on dtype,
+        reducer, and gutter), so this scans family KEYS — one entry per
+        distinct family, not per page — and chains the matching families'
+        pages.  Lets a consumer that rebinds a single plane refill just that
+        plane's lookup entries instead of walking every resident page.
+        """
+
+        out: list[DataChunkKey] = []
+        for family, entries in self._family_entries.items():
+            rank, doc, op, _dtype, rep, _reducer, _gutter = family
+            if rank != 2:
+                continue
+            if doc != document_generation or op != operation_key or rep != representation:
+                continue
+            out.extend(entries)
+        return tuple(out)
 
     def resident_bytes(self) -> int:
         return sum(entry.nbytes for entry in self._entries.values())

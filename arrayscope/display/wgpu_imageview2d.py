@@ -529,6 +529,9 @@ class WgpuImageView2D(ImageViewShell):
         self._wgpu_binding_fast_path_commits = 0
         self._wgpu_binding_incremental_commits = 0
         self._wgpu_binding_full_republications = 0
+        # (serial, (executor id, eviction stamp), presented tuple) of the last
+        # verified commit — the delta-proportional presented walk's evidence.
+        self._wgpu_presented_cache: tuple[object, tuple, tuple[int, ...]] | None = None
         self._wgpu_tile_instances_cache: (
             tuple[int, tuple[TileInstance, ...], tuple[int, ...]] | None
         ) = None
@@ -736,6 +739,7 @@ class WgpuImageView2D(ImageViewShell):
         )
         # Rebuild discards residency; committed evidence must not survive it.
         self._wgpu_committed = None
+        self._wgpu_presented_cache = None
         self._wgpu_tiled_binding_signature = None
         self._wgpu_overlay_geometry_dirty = True
         # EVERY atlas upload-currency tracker belongs here: a fresh executor
@@ -2428,16 +2432,47 @@ class WgpuImageView2D(ImageViewShell):
             # Physical truth per tile: acknowledge only tiles whose pages the
             # page table actually holds after the submit — partial residency
             # acknowledges the resident subset, never the request.
-            presented = tuple(
-                tile
-                for tile in sorted(committed_tiles)
-                if all(
-                    executor.page_table.lookup(key) is not None
-                    for key in committed_tiles[tile]["page_keys"]
+            #
+            # The full walk is O(presented); a bounded delta earns a
+            # delta-proportional walk that answers IDENTICALLY: the eviction
+            # stamp moves on every residency loss, so an unchanged stamp
+            # proves every page the predecessor verified is still held, and
+            # only the tiles this commit rewrote — plus any the predecessor
+            # could NOT present — need their pages looked up again.
+            stamp = (id(executor), executor.page_table.eviction_stamp)
+            cache = self._wgpu_presented_cache
+            presented = None
+            if (
+                binding_incremental
+                and cache is not None
+                and cache[0] == committed.get("base_serial")
+                and cache[1] == stamp
+            ):
+                previously_presented = set(cache[2])
+                recheck = (set(committed_tiles) - previously_presented) | set(
+                    committed.get("changed_tiles") or ()
                 )
-            )
+                verified = {
+                    tile
+                    for tile in recheck
+                    if all(
+                        executor.page_table.lookup(key) is not None
+                        for key in committed_tiles[tile]["page_keys"]
+                    )
+                }
+                presented = tuple(sorted((previously_presented - recheck) | verified))
+            if presented is None:
+                presented = tuple(
+                    tile
+                    for tile in sorted(committed_tiles)
+                    if all(
+                        executor.page_table.lookup(key) is not None
+                        for key in committed_tiles[tile]["page_keys"]
+                    )
+                )
             committed["presented_tiles"] = presented
             self._wgpu_committed = committed
+            self._wgpu_presented_cache = (committed.get("serial"), stamp, presented)
         presented_identities = {tile: committed_tiles[tile]["identity"] for tile in presented}
         delta_upserts = dict(getattr(tile_delta, "upserts", {}) or {})
         committed_upserts = tuple(
@@ -2776,6 +2811,7 @@ class WgpuImageView2D(ImageViewShell):
 
     def hide_tiled_presentation(self, reason: str) -> None:
         self._wgpu_committed = None
+        self._wgpu_presented_cache = None
         self._wgpu_tiled_binding_signature = None
         self._wgpu_histogram_evidence.clear()
         self._wgpu_histogram_evidence_ready.clear()
@@ -2795,6 +2831,7 @@ class WgpuImageView2D(ImageViewShell):
         if not hide_pixels:
             return
         self._wgpu_committed = None
+        self._wgpu_presented_cache = None
         self._wgpu_tiled_binding_signature = None
         self._clear_wgpu_tiles()
         self._montage_display_mode = "none"
@@ -2867,6 +2904,7 @@ class WgpuImageView2D(ImageViewShell):
             self._submit_wgpu((*evictions, UpdateTileInstances(())))
             self._request_wgpu_canvas_draw()
         self._wgpu_committed = None
+        self._wgpu_presented_cache = None
         self._wgpu_tiled_binding_signature = None
         self._wgpu_histogram_evidence.clear()
         self._wgpu_histogram_evidence_ready.clear()
@@ -3575,6 +3613,15 @@ class WgpuImageView2D(ImageViewShell):
             "wgpu_power_preference": _SHARED_WGPU_POWER_PREFERENCE,
             "wgpu_plane_lookup_candidates_total": int(
                 getattr(executor, "plane_lookup_candidates_total", 0) or 0
+            ),
+            "wgpu_plane_bind_prefix_reuses_total": int(
+                getattr(executor, "plane_bind_prefix_reuses_total", 0) or 0
+            ),
+            "wgpu_plane_bind_patches_total": int(
+                getattr(executor, "plane_bind_patches_total", 0) or 0
+            ),
+            "wgpu_plane_bind_rebuilds_total": int(
+                getattr(executor, "plane_bind_rebuilds_total", 0) or 0
             ),
             "wgpu_last_report_uploads": int(getattr(self, "_wgpu_last_report_uploads", 0) or 0),
             "wgpu_last_draw_error": str(getattr(self, "_wgpu_last_draw_error", "") or ""),

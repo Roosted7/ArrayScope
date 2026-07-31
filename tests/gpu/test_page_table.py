@@ -116,3 +116,41 @@ class TestPageTable:
         assert len(table) == 1
         assert table.lookup(chunk(0, generation=2)) == slot
         assert table.lookup(chunk(0, generation=1)) is None
+
+    def test_eviction_stamp_moves_only_when_residency_can_be_lost(self):
+        # The stamp is the "nothing I verified resident has gone away" proof
+        # a bounded commit uses to skip re-walking the whole presented set.
+        # Anything that only ADDS coverage or moves slots must therefore leave
+        # it alone, and anything that can DROP coverage must move it.
+        table = PageTable()
+        stamp = table.eviction_stamp
+        table.bind(chunk(0), PageSlot("p", 0, 0), nbytes=1)
+        table.touch(chunk(0))
+        table.pin(chunk(0))
+        assert table.eviction_stamp == stamp
+        table.remap_slots(lambda slot: PageSlot("p", 1, slot.slot_index))
+        assert table.eviction_stamp == stamp
+        table.unbind(chunk(0))
+        assert table.eviction_stamp != stamp
+
+    def test_eviction_stamp_never_validates_across_tables(self):
+        # Same serial value, different table: the per-instance epoch keeps a
+        # stamp from one table from proving anything about another — including
+        # a table that wholesale-adopted this one's bindings.
+        first = PageTable()
+        second = PageTable()
+        assert first.eviction_stamp != second.eviction_stamp
+        first.bind(chunk(0), PageSlot("p", 0, 0), nbytes=1)
+        stamp = first.eviction_stamp
+        second.rebind_from(first)
+        assert second.eviction_stamp != stamp
+
+    def test_rebind_from_invalidates_the_adopters_own_stamps(self):
+        # Adoption replaces residency wholesale, which can drop keys the
+        # adopter used to hold without ever calling unbind on them.
+        table = PageTable()
+        table.bind(chunk(0), PageSlot("p", 0, 0), nbytes=1)
+        stamp = table.eviction_stamp
+        table.rebind_from(PageTable())
+        assert table.eviction_stamp != stamp
+        assert table.lookup(chunk(0)) is None

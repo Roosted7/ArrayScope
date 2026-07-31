@@ -3867,3 +3867,65 @@ def test_app_settings_default_renders_a_minified_montage_filtered(qt_app):
         assert changed > 100_000, changed
     finally:
         view.close()
+
+
+def test_incremental_presented_set_drops_a_tile_evicted_between_deltas(qt_app):
+    """The delta-proportional presented walk must track evictions physically.
+
+    A bounded delta reuses its predecessor's verified presented set instead of
+    re-walking the whole montage — but only under an unchanged page-table
+    eviction stamp.  This is the red-first case for that guard: evict an
+    UNCHANGED tile's pages between two one-item deltas.  The next commit never
+    names that tile, yet it must fall out of ``presented_tiles``; a shortcut
+    keyed on anything weaker than the eviction stamp would keep reporting it
+    presented while the shader has nothing to sample.
+    """
+
+    from arrayscope.gpu.command_protocol import EvictChunk
+
+    geometry = _montage_geometry((32, 32), 3, 3, loaded=9)
+    payloads = {
+        tile: _typed_scalar_payload(tile, np.full((32, 32), 0.1 * (tile + 1), dtype=np.float32))
+        for tile in range(9)
+    }
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        first = _commit(view, geometry, dict(payloads), levels=(0.0, 1.0))
+        assert first.binding_full_republications == 1
+        assert frozenset(first.presented_tiles) == frozenset(range(9))
+
+        def upsert(tile):
+            payloads[tile] = _typed_scalar_payload(
+                tile,
+                np.full((32, 32), 0.05 * (tile + 1), dtype=np.float32),
+                presentation_generation=2,
+            )
+            canvas = np.zeros(geometry.display_shape, dtype=np.float32)
+            return _present_tiled(
+                view,
+                canvas,
+                geometry=geometry,
+                levels=(0.0, 1.0),
+                histogramRange=(0.0, 1.0),
+                montage_dirty_tiles=(tile,),
+                montage_tile_payloads=dict(payloads),
+            )
+
+        second = upsert(0)
+        assert second.binding_incremental_commits == 1
+        assert frozenset(second.presented_tiles) == frozenset(range(9))
+
+        victim_keys = tuple((view._wgpu_committed["tiles"][5] or {})["page_keys"])
+        assert victim_keys
+        view._submit_wgpu(tuple(EvictChunk(key) for key in victim_keys))
+
+        third = upsert(1)
+        assert third.binding_incremental_commits == 1
+        assert frozenset(third.presented_tiles) == frozenset(range(9)) - {5}
+
+        # Re-upserting the victim restores it through the ordinary delta path.
+        fourth = upsert(5)
+        assert fourth.binding_incremental_commits == 1
+        assert frozenset(fourth.presented_tiles) == frozenset(range(9))
+    finally:
+        view.close()
