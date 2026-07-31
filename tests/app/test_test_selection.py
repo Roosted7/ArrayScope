@@ -1499,3 +1499,126 @@ def test_an_explicitly_named_baseline_is_reported_as_named(monkeypatch):
     monkeypatch.setattr(testmon_policy, "_git", lambda rootdir, *args: "3")
 
     assert "--since origin/main (named)" in testmon_policy.describe_baseline("/repo", "origin/main")
+
+
+# --- Per-test dependency batches ---------------------------------------------
+# testmon reads a test's dependency edges out of coverage dynamic contexts,
+# batching up to 250 tests into one live Coverage object. The sysmon core
+# (coverage's default on CPython 3.14+) reports each line location once per
+# Coverage lifetime, so inside a batch only the FIRST test to execute a line
+# is credited with it — every later test records a subset of what it ran, and
+# a missing edge means the test is silently never selected again for changes
+# to that file. tests/conftest.py gives every test its own batch at import
+# time; these tests hold both the pin and the behaviour it exists to buy.
+# (Pinning COVERAGE_CORE=ctrace instead would also attribute correctly, but
+# measured 388 s against sysmon's 267 s for the full suite and flipped 13
+# timing-sensitive tests/ui settle tests red — see
+# testmon_policy.pin_per_test_dependency_batches.)
+
+
+def test_every_test_gets_its_own_dependency_batch():
+    """The live invariant: by the time any test executes, the pin has run."""
+
+    from testmon import testmon_core
+
+    assert testmon_core.TEST_BATCH_SIZE == 1
+
+
+def test_the_pin_survives_without_testmon(monkeypatch):
+    """Absence is decide()'s problem, not an import error at conftest time."""
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def refuse_testmon(name, *args, **kwargs):
+        if name.startswith("testmon"):
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_testmon)
+    assert testmon_policy.pin_per_test_dependency_batches() is False
+
+
+def test_a_later_test_still_records_the_dependency_an_earlier_one_executed(tmp_path):
+    """The oracle behind the pin, through a real testmon recording.
+
+    Two tests in one process execute the same helper; the map must credit
+    *both* with the helper file. With testmon's stock 250-test batches under
+    the sysmon core the second loses the edge — exactly the failure that
+    slimmed ``test_session_fixture_shape_mismatch_raises_actionable_error``'s
+    record from 69 dependency files to 8 and let the 2026-07-31
+    ``view_recipe`` regression through every ``--since`` run. In a subprocess
+    because a second live testmon session inside this pytest process would
+    fight the one recording this very test.
+    """
+
+    import sqlite3
+    import subprocess
+    import sys
+    import textwrap
+
+    (tmp_path / "shared_mod.py").write_text("def shared():\n    return 42\n", encoding="utf-8")
+    (tmp_path / "test_two_share.py").write_text(
+        textwrap.dedent(
+            """
+            import shared_mod
+
+            def test_first():
+                assert shared_mod.shared() == 42
+
+            def test_second():
+                assert shared_mod.shared() == 42
+            """
+        ),
+        encoding="utf-8",
+    )
+    # The pin, applied the way production applies it: from a conftest, at
+    # import time, before testmon builds its first Coverage.
+    (tmp_path / "conftest.py").write_text(
+        textwrap.dedent(
+            f"""
+            import sys
+
+            sys.path.insert(0, {str(testmon_policy.REPO_ROOT)!r})
+            from tests import testmon_policy
+
+            testmon_policy.pin_per_test_dependency_batches()
+            """
+        ),
+        encoding="utf-8",
+    )
+    # A clean pytest environment: the outer run's PYTEST_* variables describe
+    # *this* session (xdist worker identity, addopts) and must not leak in.
+    child_environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")
+    }
+    child_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    result = subprocess.run(
+        (sys.executable, "-m", "pytest", "--testmon", "-q"),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env=child_environment,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    with sqlite3.connect(tmp_path / ".testmondata") as connection:
+        rows = connection.execute(
+            """
+            SELECT te.test_name, f.filename
+            FROM test_execution te
+            JOIN test_execution_file_fp tef ON tef.test_execution_id = te.id
+            JOIN file_fp f ON f.id = tef.fingerprint_id
+            """
+        ).fetchall()
+    edges = {}
+    for test_name, filename in rows:
+        edges.setdefault(test_name.split("::")[-1], set()).add(filename)
+    assert "shared_mod.py" in edges["test_first"]
+    assert "shared_mod.py" in edges["test_second"], (
+        "the second test lost the dependency the first already executed — "
+        "per-test batching is no longer protecting the map"
+    )

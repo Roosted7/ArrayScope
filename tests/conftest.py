@@ -50,6 +50,15 @@ if _XDIST_WORKER:
 
 from tests import coverage_map, load_report, red_ledger, testmon_policy
 
+# testmon reads each test's dependency edges out of coverage dynamic contexts,
+# and coverage's sysmon core (its default on CPython 3.14+) credits a line only
+# to the FIRST test in a batch that executes it — silently slimming every later
+# test's record until selection stops reaching it. Give each test its own
+# batch here, at import time, before testmon builds its first Coverage at
+# first-test setup. See testmon_policy.pin_per_test_dependency_batches for the
+# incident write-up and why a trace-based core is NOT the remedy.
+testmon_policy.pin_per_test_dependency_batches()
+
 #: Written by the controller (or a serial run) only; workers read the file.
 _red_ledger = None
 #: Same writer, same lifetime: the flake ledger and the two map facts it needs

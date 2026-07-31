@@ -440,6 +440,51 @@ If the map is missing or unreadable, every code path degrades to running
 everything. There is no state in which selection silently skips more than it
 should because the map broke.
 
+### The map is only as honest as the tracer's context attribution
+
+testmon batches up to 250 tests into one live `Coverage` object and switches a
+dynamic context per test; a test's dependency edges are read back from
+`contexts_by_lineno`. coverage's `sysmon` core — its **default on CPython
+3.14+** — uses `sys.monitoring`'s DISABLE optimization: each line location
+reports once per `Coverage` lifetime, so a line an earlier test in the batch
+already executed is never attributed to a later one. Every test after the
+first then records a *subset* of what it ran. A missing edge is the silent
+kind of wrong: the file changes, the test is not selected, `--since` never
+reaches it, and `status` shows nothing — the test looks recorded and stable.
+
+This shipped a real regression on 2026-07-31 (`28140661`): recorded alone,
+`test_session_fixture_shape_mismatch_raises_actionable_error` depends on 69
+files; recorded as part of its file in one process under sysmon, on 8 — with
+`view_session.py` and `view_recipe.py` gone, so an R6 change to
+`view_state_from_mapping` selected none of the tests it broke, every
+`--since` on the branch stayed green, and only `--testmon-noselect` caught it.
+(Cross-worktree map adoption was suspected first; it was innocent — the
+donor's record was already slim at recording time. The pre-fix maps averaged
+**2.8 recorded dependency files per test** in that test's file; honest records
+run 15–70.)
+
+coverage refuses sysmon itself when a *config* declares dynamic contexts, but
+testmon switches contexts at runtime, after the core is chosen, so nothing
+inside coverage can catch it. The remedy is **not** pinning a trace-based
+core: `COVERAGE_CORE=ctrace` attributes correctly but measured 388 s for the
+full suite against sysmon's 267 s and flipped 13 timing-sensitive `tests/ui`
+settle/quiescence tests red (2 red under sysmon, different families) — a
+tracer's per-line cost is itself a scheduling perturbation. Instead
+`tests/conftest.py` gives **every test its own batch**
+(`testmon_policy.pin_per_test_dependency_batches`, import time, before testmon
+builds its first `Coverage`): testmon ends a batch with
+stop → collect → erase → start, and a fresh start resets the DISABLE state, so
+a one-test batch is attributed completely while sysmon's near-zero per-line
+cost is kept. Measured: the full run went 267 s → 303 s (+13%, ~8 ms per
+test), with an identical failure population — that is the price of records
+that are per-test true.
+`tests/app/test_test_selection.py` holds the oracle — two tests record through
+a real testmon run, both must be credited with the helper they share — that
+fails if a future testmon or coverage change reopens the hole. A map recorded
+before the pin cannot heal itself (the tests with missing edges are exactly
+the ones selection no longer runs): re-record it with
+`pytest --testmon-noselect`.
+
 ### Adding a function does not re-run the file's world
 
 testmon puts a module's **whole top-level body in one AST block spanning line 1

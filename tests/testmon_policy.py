@@ -117,6 +117,12 @@ OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "tests/gpu_interaction/test_wgpu_native_wayland_pin.py": (
         "experiments/wgpu_gate_b/probe_native_wayland.py",
     ),
+    # The per-test-batch oracle runs a real pytest+testmon session over files
+    # generated in tmp_path: a second live testmon inside this process would
+    # fight the one recording the oracle itself. The child's only repo-tracked
+    # code is `tests/testmon_policy.py`, which the tests here already execute
+    # in-process, so there is nothing to re-attach.
+    "tests/app/test_test_selection.py": (),
 }
 
 #: Command-line flags that mean "the developer already chose"; the default
@@ -130,6 +136,56 @@ _EXPLICIT_OPTIONS = (
 )
 
 _whole_file_line_cache: dict[str, frozenset[int]] = {}
+
+
+def pin_per_test_dependency_batches() -> bool:
+    """Give every test its own coverage batch, so its record is its own.
+
+    testmon batches up to 250 tests into one live ``Coverage`` object and
+    switches a dynamic context per test; the map's dependency edges are read
+    back from ``contexts_by_lineno``. coverage's ``sysmon`` core — its default
+    on CPython 3.14+ — uses ``sys.monitoring``'s DISABLE optimization: each
+    line location reports once per ``Coverage`` lifetime, so a line an earlier
+    test in the batch already executed is never attributed to a later one.
+    Every test after the first then records a *subset* of what it ran, and a
+    missing edge is the silent kind of wrong: the file changes, the test is
+    not selected, and ``--since`` calls the branch verified without ever
+    reaching it. Measured on
+    ``test_session_fixture_shape_mismatch_raises_actionable_error``: 69
+    dependency files recorded alone, 8 when its file ran in one process —
+    neither ``view_session.py`` nor ``view_recipe.py`` among them, which is
+    how the 2026-07-31 ``view_recipe`` regression (``28140661``) passed every
+    ``--since`` on its branch and surfaced only under ``--testmon-noselect``.
+
+    The remedy is *not* pinning a trace-based core: ``COVERAGE_CORE=ctrace``
+    attributes correctly but was measured to turn a 267 s full run into 388 s
+    and to flip 13 timing-sensitive ``tests/ui`` settle/quiescence tests red
+    (2 red under sysmon, different families) — the tracer's per-line cost is
+    itself a scheduling perturbation. Batch size 1 keeps sysmon's near-zero
+    per-line cost and is sufficient: testmon ends a batch with
+    ``stop → collect → erase → start``, and a fresh start resets the DISABLE
+    state, so attribution within a one-test batch is complete (probed against
+    both cores; the guard in ``tests/app/test_test_selection.py`` records two
+    real tests through a real testmon run and fails if either loses its shared
+    dependency). The cycle costs ~5 ms per test, noise against this suite.
+
+    Pinned from ``tests/conftest.py`` at import time, which precedes testmon's
+    first ``Coverage`` construction (first-test setup) and reaches xdist
+    workers the same way. Returns whether testmon was importable; without it
+    there is nothing to record and :func:`decide` already reports why.
+
+    A map recorded before this pin under-reports dependencies for most of the
+    suite and cannot heal itself — the tests with missing edges are exactly
+    the ones selection no longer runs. Re-record it:
+    ``pytest --testmon-noselect``.
+    """
+
+    try:
+        from testmon import testmon_core
+    except ImportError:
+        return False
+    testmon_core.TEST_BATCH_SIZE = 1
+    return True
 
 
 @dataclass(frozen=True)
@@ -588,6 +644,13 @@ def adopt_map_from_identical_worktree(rootdir: os.PathLike[str] | str) -> str | 
 
     Newest wins, because a merge is not the only way two checkouts sit on one
     commit and the map that ran most recently is the one that knows most.
+
+    When adoption is suspected of smuggling in a wrong record, look at the
+    *recording* first: the 2026-07-31 ``view_recipe`` miss (``28140661``) was
+    blamed on adoption across agent worktrees, and refuted — the donor's record
+    was already missing its edges the moment it was written, because the sysmon
+    coverage core credits a shared line only to the first test in a batch. See
+    :func:`pin_per_test_dependency_batches`. The same-HEAD gate above held.
     """
 
     rootdir = Path(rootdir).resolve()
