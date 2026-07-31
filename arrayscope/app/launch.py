@@ -60,6 +60,17 @@ def _prepare_qt_environment():
     # (measured: 11.6 s -> 30.5 s on one settle-budget test, deterministic).
     pin_wayland_appearance()
 
+    # Known-harmless terminal noise (wgpu's optional-Vulkan-extension probe,
+    # QtWayland text-input leave events): silenced here so the very first
+    # adapter request and Wayland surface are already covered.
+    from arrayscope.app.log_noise import (
+        apply_qt_logging_noise_rules,
+        install_wgpu_log_noise_filter,
+    )
+
+    apply_qt_logging_noise_rules()
+    install_wgpu_log_noise_filter()
+
 
 def _qt_application_exists():
     """Return True if Qt has already created a QApplication in this process."""
