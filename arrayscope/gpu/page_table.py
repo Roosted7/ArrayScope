@@ -128,12 +128,19 @@ class PageTable:
             family: dict(entries) for family, entries in other._family_entries.items()
         }
         self._pin_sets = dict(other._pin_sets)
-        self._generation = other._generation
         self._use_counter = other._use_counter
         # Adopting replaces residency wholesale, which can silently DROP keys
         # this table used to hold; any outstanding stamp must stop validating.
         # The epoch stays this instance's own — see ``eviction_stamp``.
         self._eviction_serial += 1
+        # Adopt the source's counter but never stand still on it.  Consumers
+        # memoise against ``generation`` as "residency has not moved" (the
+        # executor's resident-pin memo does), and a wholesale adoption moves
+        # residency by definition — landing on the source's number could hand
+        # such a memo an unchanged generation across a changed table.  Staying
+        # ABOVE the adopted entries' generations is what the counter owes;
+        # equalling the source is not part of that.
+        self._generation = max(self._generation, other._generation) + 1
 
     def __contains__(self, key: DataChunkKey) -> bool:
         return key in self._entries

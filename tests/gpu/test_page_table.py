@@ -154,3 +154,26 @@ class TestPageTable:
         table.rebind_from(PageTable())
         assert table.eviction_stamp != stamp
         assert table.lookup(chunk(0)) is None
+
+    def test_rebind_from_advances_the_generation_it_adopts(self):
+        # ``generation`` is read as "residency has not moved" by memoising
+        # consumers (WgpuPlaneExecutor.replace_resident_pin_set keys its memo
+        # on it).  Adoption moves residency wholesale, so landing back on a
+        # number such a consumer has already seen would hand it an unchanged
+        # generation across a changed table.  Both directions of adoption have
+        # to advance it, including from a table whose counter is behind.
+        source = PageTable()
+        source.bind(chunk(0), PageSlot("p", 0, 0), nbytes=1)
+
+        adopter = PageTable()
+        adopter.bind(chunk(1), PageSlot("p", 0, 1), nbytes=1)
+        adopter.bind(chunk(2), PageSlot("p", 0, 2), nbytes=1)
+        seen = adopter.generation
+        assert seen > source.generation  # the counter it would have adopted
+
+        adopter.rebind_from(source)
+        assert adopter.generation > seen
+        # And a fresh adopter never reports the source's own number either.
+        successor = PageTable()
+        successor.rebind_from(source)
+        assert successor.generation > source.generation
