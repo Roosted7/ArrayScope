@@ -21,11 +21,23 @@
 # harnesses reset cwd between commands, and the whole point of one venv per
 # checkout is that `tools/env` in *this* tree uses *this* tree's install.
 #
+# The same rule decides which *source* tree gets imported: this checkout's root
+# goes on PYTHONPATH ahead of the venv's editable-install pointer, so a worktree
+# borrowing the parent's venv still runs its own code from any cwd.
+#
 # An unusual layout states its location once:
 #
 #     export ARRAYSCOPE_ENV_PREFIX=/wherever/.venv
+#
+# To import the installed package instead of this tree (frozen/wheel checks):
+#
+#     export ARRAYSCOPE_ENV_NO_PYTHONPATH=1
 
 set -euo pipefail
+
+# The checkout that owns this script — same rule as the venv walk-up below:
+# this tree's `tools/env`, this tree's code.
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 prefix="${ARRAYSCOPE_ENV_PREFIX:-}"
 
@@ -57,5 +69,24 @@ fi
 
 export VIRTUAL_ENV="$prefix"
 export PATH="$prefix/bin:$PATH"
+
+# Make this checkout's source win over whatever the venv's editable install
+# points at. A worktree has no `.venv` of its own, so it borrows the parent
+# checkout's — and that venv's editable finder resolves `arrayscope` to the
+# parent's tree. `pytest` hid this by inserting its rootdir, so the trap only
+# fired away from the suite: `tools/env python …` from a scratchpad, or a
+# pytest `-p` plugin imported before rootdir insertion, silently ran main
+# while both A/B arms claimed to compare a branch.
+#
+# Only the source root goes on, never $PWD, and only when it really is one.
+# Anything already on PYTHONPATH is preserved after it, and re-entering
+# (`tools/env git commit` -> hook -> `tools/env ruff`) is idempotent.
+if [[ -z "${ARRAYSCOPE_ENV_NO_PYTHONPATH:-}" && -f "$root/arrayscope/__init__.py" ]]; then
+	case "${PYTHONPATH:-}" in
+	"$root" | "$root":*) ;;
+	"") export PYTHONPATH="$root" ;;
+	*) export PYTHONPATH="$root:$PYTHONPATH" ;;
+	esac
+fi
 
 exec "$@"

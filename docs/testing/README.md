@@ -320,10 +320,18 @@ empty.
   imported WIP — and for a stretch in July 2026 the pointer sat at
   `.worktrees/g5-sparse-pyramid`, so field sessions were testing that branch
   while everyone believed they were testing `main`. Per-checkout venvs remove
-  the class: there is no shared pointer left to mis-set, and a worktree's venv
-  can only point at itself. The check is still worth one line when a result
-  looks impossible:
+  the class: there is no shared pointer left to mis-set. The check is still
+  worth one line when a result looks impossible:
   `tools/env python -c "import arrayscope; print(arrayscope.__file__)"`.
+- **A worktree has no `.venv` of its own** — `tools/env` walks up and borrows
+  the parent checkout's, whose editable finder resolves `arrayscope` to the
+  *parent's* tree. `pytest` masked this by inserting its rootdir, so the trap
+  only fired away from the suite (`tools/env python …` from a scratchpad, a
+  pytest `-p` plugin imported before rootdir insertion) — and it fired twice,
+  each time as an A/B whose arms both silently ran `main`. Since 2026-07-31
+  `tools/env` puts its own checkout root on `PYTHONPATH` ahead of that
+  pointer, so the tree owning the script is the tree that gets imported, from
+  any cwd. `ARRAYSCOPE_ENV_NO_PYTHONPATH=1` opts out for wheel/frozen checks.
 - Migrating a checkout to `.venv` changes testmon's environment identity, so
   the **first `pytest` there is a full traced re-record (~4 min)**. Once per
   checkout, expected, not a defect.
