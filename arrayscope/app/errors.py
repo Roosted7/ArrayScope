@@ -13,6 +13,19 @@ def strict_ui_enabled() -> bool:
 
 def handle_ui_exception(context: str, exc: BaseException) -> None:
     logging.exception("%s failed", context, exc_info=exc)
+    try:
+        from arrayscope.core.trace import emit_trace
+
+        emit_trace(
+            "ui_exception",
+            context=str(context),
+            error=repr(exc)[:300],
+            trace_tail="".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[
+                -1500:
+            ],
+        )
+    except Exception:
+        pass
     if strict_ui_enabled():
         raise exc
 

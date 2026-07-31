@@ -981,11 +981,29 @@ class FramePipelineEffects:
         renderer._resident_crop_canonical_planes_document_key = key
 
     def prepare_rung(self, intent, step) -> bool:
+        admitted = self._prepare_rung_probe(intent, step)
+        if isinstance(admitted, tuple):
+            admitted, reason = admitted
+        else:
+            reason = "admitted" if admitted else "unknown"
+        emit_trace(
+            "rung_prepare",
+            tile=int(getattr(step, "tile_number", -1)),
+            rung=int(step.rung),
+            level=int(step.level),
+            admitted=bool(admitted),
+            reason=str(reason),
+            session_id=int(getattr(self.session, "session_id", 0) or 0),
+            renderer_id=id(self.renderer),
+        )
+        return bool(admitted)
+
+    def _prepare_rung_probe(self, intent, step):
         tile = self._tile_for_step(step)
         if tile is None or not self._session_is_current(intent):
-            return False
+            return False, "no-tile-or-stale-session"
         if not self.scheduling_verdict().admits_lane(step.lane):
-            return False
+            return False, "lane-not-admitted"
         tile_number = int(tile.montage_index)
         semantic_key = self._preview_claim_identity(intent, tile)
         if bool(getattr(step, "presentation_only", False)):
@@ -1011,30 +1029,30 @@ class FramePipelineEffects:
                 )
                 if presentation_armed:
                     self.request_presentation()
-                    return False
+                    return False, "presentation-armed"
         if self._step_produces_page_payload(step, tile):
             if step.rung == Rung.FLOOR and self._display_payload_covers_preview_step(
                 tile_number, tile, step
             ):
-                return False
+                return False, "floor-covered"
             if step.rung == Rung.DESIRED and self._display_payload_covers_display_target(
                 tile_number, tile, step
             ):
-                return False
+                return False, "display-target-covered"
             if self.session.lifecycle.preview_claim_matches(
                 tile_number,
                 int(step.rung),
                 int(step.level),
                 semantic_key,
             ):
-                return False
+                return False, "preview-claim-matches"
             if step.rung == Rung.DESIRED and self.session.lifecycle.preview_claim_matches(
                 tile_number,
                 int(Rung.FLOOR),
                 int(step.level),
                 semantic_key,
             ):
-                return False
+                return False, "floor-claim-matches"
             claimed = self.session.lifecycle.preview_claimed(
                 tile_number,
                 int(step.rung),
@@ -1050,7 +1068,7 @@ class FramePipelineEffects:
                 note_quality = getattr(self.session, "note_first_pass_quality", None)
                 if callable(note_quality):
                     note_quality("preview")
-            return claimed
+            return claimed, ("page-claimed" if claimed else "page-claim-refused")
         if (
             step.rung == Rung.DESIRED
             and int(step.level) > 0
@@ -1058,7 +1076,7 @@ class FramePipelineEffects:
         ):
             pyramid = getattr(self.session, "lod_page_cache", None)
             if pyramid is None:
-                return False
+                return False, "no-pyramid"
             rendered = self.session.rendered_tiles.get(tile_number)
             demand = self.session.lod_policy_decision.demand
             try:
@@ -1066,15 +1084,15 @@ class FramePipelineEffects:
                     rendered, demand=demand, level=int(step.level)
                 )
             except ValueError:
-                return False
+                return False, "level-key-valueerror"
             if (
                 self.session.lifecycle.materialization_request_for(tile_number, level_key)
                 is not None
             ):
-                return False
+                return False, "materialization-in-flight"
             if render_lod._page_set_exact(pyramid, level_key):
                 self.session.lifecycle.level_resident(tile_number, level_key)
-                return False
+                return False, "level-resident"
             request = self.session._lod_materialization_request(
                 rendered,
                 demand=demand,
@@ -1082,16 +1100,16 @@ class FramePipelineEffects:
                 key=level_key,
             )
             if not request.claimed_plans:
-                return False
+                return False, "no-claimed-plans"
             self.session.pending_rung_materializations.append(request)
             self.session.pending_rung_materializations.mark_started(request)
-            return True
+            return True, "materialization-started"
         if step.rung in (Rung.DESIRED, Rung.EXACT):
             if (
                 tile_number in self.session.rendered_tiles
                 or tile_number in self.session.skipped_tiles
             ):
-                return False
+                return False, "already-rendered-or-skipped"
             if tile_number in self.session.active_tile_requests:
                 claim = self.session.lifecycle.evaluation_claim_for(tile_number)
                 current_claim = self._evaluation_claim(intent, step, tile)
@@ -1099,11 +1117,11 @@ class FramePipelineEffects:
                     intent, step, tile, current_claim.source_id
                 ):
                     if self._tile_task_is_live(tile_number):
-                        return False
+                        return False, "task-live"
                     self._release_evaluation_claim(tile_number, marker=claim, request_replan=False)
                 else:
                     self._release_evaluation_claim(tile_number, marker=claim, request_replan=False)
-        return True
+        return True, "evaluate"
 
     def rung_admitted(self, intent, step, task_key) -> None:
         tile = self._tile_for_step(step)
