@@ -214,18 +214,30 @@ def _probe_auto_backend_choice() -> tuple[ImageRenderingBackendChoice, str]:
     # Prefer wgpu whenever a real GPU device can be created. The probe pins
     # Vulkan and caches the shared device the WgpuImageView2D reuses, so it is
     # not wasted work.
-    wgpu_device = _probe_wgpu_device()
+    wgpu_device, failure = _probe_wgpu_device()
     if wgpu_device is not None:
         return (ImageRenderingBackendChoice.WGPU, f"wgpu device [{wgpu_device}]")
-    return (ImageRenderingBackendChoice.PYQTGRAPH, "no usable wgpu device")
+    # Name the failure. "no usable wgpu device" reads as "this machine has no
+    # GPU", so when a launch-time logging hook made `import wgpu` raise
+    # AssertionError (2026-07-31) the bare message sent the search to drivers
+    # instead of to the one line that broke. A machine genuinely without
+    # Vulkan still falls back exactly as before -- it just says why.
+    return (
+        ImageRenderingBackendChoice.PYQTGRAPH,
+        "no usable wgpu device" if not failure else f"no usable wgpu device ({failure})",
+    )
 
 
-def _probe_wgpu_device() -> str | None:
-    """Return a short device label if a wgpu device can be created, else None.
+def _probe_wgpu_device() -> tuple[str | None, str]:
+    """``(device label, failure)`` — the label is ``None`` when unusable.
 
     Reuses the shared Vulkan-pinned device the WgpuImageView2D would use;
     importing the module is side-effect-free (it does not force ``xcb`` and
     imports rendercanvas only lazily via ``import_qrenderwidget``).
+
+    The failure string is for the human reading the fallback explanation; it
+    is empty when a device was created.  Swallowing it entirely is what let a
+    broken ``import wgpu`` masquerade as absent hardware.
     """
 
     # Import outside the try: a failure to import our own module is a real
@@ -236,10 +248,10 @@ def _probe_wgpu_device() -> str | None:
 
     try:
         device = _shared_wgpu_device()
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"[:200]
     if device is None:
-        return None
+        return None, "probe returned no device"
     adapter = getattr(device, "adapter", None)
     info = {}
     if adapter is not None:
@@ -247,4 +259,4 @@ def _probe_wgpu_device() -> str | None:
         if callable(get_info):
             with contextlib.suppress(Exception):
                 info = get_info() or {}
-    return str(info.get("device") or info.get("description") or "gpu")
+    return str(info.get("device") or info.get("description") or "gpu"), ""

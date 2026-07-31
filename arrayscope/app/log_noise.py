@@ -56,15 +56,37 @@ class _KnownNoiseFilter(logging.Filter):
 _WGPU_NOISE_FILTER = _KnownNoiseFilter()
 
 
-def install_wgpu_log_noise_filter() -> None:
+def install_wgpu_log_noise_filter() -> bool:
     """Drop the known-harmless wgpu-native messages; keep everything else.
 
     Attached to the ``"wgpu"`` logger itself (the one wgpu-py emits native
     records on), so the drop happens before propagation and applies whatever
-    handlers the process ends up with.  Safe to call before wgpu is imported
-    and safe to call repeatedly.
+    handlers the process ends up with.  Idempotent; returns whether the filter
+    is now attached.
+
+    NEVER creates that logger.  wgpu-py installs its own ``Logger`` subclass
+    at import time by wrapping ``getLogger("wgpu")`` in ``setLoggerClass``,
+    and ``getLogger`` returns an already-registered logger unchanged -- so
+    pre-creating a plain ``Logger`` here left wgpu's own
+    ``assert isinstance(logger, WGPULogger)`` failing, ``import wgpu`` raising
+    ``AssertionError``, and the AUTO backend probe (which catches everything
+    around device creation) reporting "no usable wgpu device" on a machine
+    whose GPU was fine.  Calling this before wgpu is imported was the one
+    thing that was never safe.
+
+    So the install is deferred instead: nothing to attach to means nothing to
+    filter yet, and :func:`arrayscope.display.wgpu_imageview2d._shared_wgpu_device`
+    calls this again immediately after ``import wgpu`` -- before any adapter
+    request, which is what emits the message.
     """
-    logging.getLogger("wgpu").addFilter(_WGPU_NOISE_FILTER)
+
+    # A PlaceHolder (left by a child logger such as "wgpu.foo") is not a
+    # logger and materializing it through getLogger would recreate the bug.
+    existing = logging.Logger.manager.loggerDict.get("wgpu")
+    if not isinstance(existing, logging.Logger):
+        return False
+    existing.addFilter(_WGPU_NOISE_FILTER)
+    return True
 
 
 def apply_qt_logging_noise_rules() -> None:

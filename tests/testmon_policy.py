@@ -109,9 +109,21 @@ OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     # tests here call `install_wgpu_log_noise_filter`, but
     # `apply_qt_logging_noise_rules` and the `_prepare_qt_environment` wiring
     # that reaches it run nowhere except this child.
+    # wgpu_imageview2d joins them for the deferred-install tests: the hook's
+    # ordering contract against `import wgpu` is only reproducible in a fresh
+    # interpreter (the damage is done at first import), so the child is the
+    # ONLY place that guard runs.
     "tests/app/test_log_noise.py": (
         "arrayscope/app/launch.py",
         "arrayscope/app/log_noise.py",
+        "arrayscope/display/wgpu_imageview2d.py",
+    ),
+    # `python experiments/wgpu_gate_b/probe_native_x11.py <out>` — the tier-0
+    # native-child probe needs its own Qt + wgpu instance, so it cannot share
+    # this interpreter. The probe is the thing under test; nothing in-process
+    # covers it.
+    "tests/gpu_interaction/test_wgpu_native_x11_pin.py": (
+        "experiments/wgpu_gate_b/probe_native_x11.py",
     ),
     # `python -c "import arrayscope.io.numpy_save"` (asserts pyqtgraph stays out
     # of sys.modules).

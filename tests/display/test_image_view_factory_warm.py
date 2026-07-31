@@ -79,7 +79,7 @@ def test_auto_resolver_prefers_wgpu_and_caches_probe(monkeypatch):
 
     def probe():
         calls.append("probe")
-        return "test Vulkan adapter"
+        return "test Vulkan adapter", ""
 
     monkeypatch.setattr(fac, "_probe_wgpu_device", probe)
 
@@ -127,7 +127,7 @@ def test_auto_resolver_falls_back_to_pyqtgraph_when_wgpu_probe_fails(monkeypatch
     monkeypatch.setattr(fac, "_auto_resolution_cache", None)
     monkeypatch.setattr(fac.platform, "system", lambda: "Linux")
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
-    monkeypatch.setattr(fac, "_probe_wgpu_device", lambda: None)
+    monkeypatch.setattr(fac, "_probe_wgpu_device", lambda: (None, ""))
 
     choice, explanation = fac.resolve_auto_backend_choice()
 
@@ -252,3 +252,33 @@ def test_warm_skips_when_backend_not_wgpu(monkeypatch):
     fac.warm_image_backend_async(_settings(ImageRenderingBackendChoice.PYQTGRAPH))
     assert called == []
     assert fac._warm_started is False
+
+
+def test_probe_failure_reason_reaches_the_fallback_explanation(monkeypatch):
+    # "no usable wgpu device" alone reads as "this machine has no GPU", which
+    # is what sent the 2026-07-31 launch-hook regression hunting drivers.
+    monkeypatch.setattr(fac, "_auto_resolution_cache", None)
+    monkeypatch.setattr(fac.platform, "system", lambda: "Linux")
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setattr(fac, "_probe_wgpu_device", lambda: (None, "AssertionError: broken import"))
+
+    choice, explanation = fac.resolve_auto_backend_choice()
+
+    assert choice is ImageRenderingBackendChoice.PYQTGRAPH
+    assert "no usable wgpu device" in explanation
+    assert "AssertionError: broken import" in explanation
+
+
+def test_probe_reports_the_exception_instead_of_swallowing_it(monkeypatch):
+    import arrayscope.display.wgpu_imageview2d as wgpu_view
+
+    def explode():
+        raise AssertionError("wgpu logger class assertion")
+
+    monkeypatch.setattr(wgpu_view, "_shared_wgpu_device", explode)
+
+    label, failure = fac._probe_wgpu_device()
+
+    assert label is None
+    assert "AssertionError" in failure
+    assert "wgpu logger class assertion" in failure

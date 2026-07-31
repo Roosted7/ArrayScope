@@ -341,6 +341,15 @@ def _shared_wgpu_device():
         import wgpu
         from wgpu.backends.wgpu_native.extras import set_instance_extras
 
+        # Now that wgpu owns its logger, the launch-time noise hook has
+        # something to attach to.  It deliberately did nothing earlier:
+        # creating the "wgpu" logger before this import breaks wgpu's own
+        # logger-class assertion.  Here is still before the adapter request
+        # below, which is what emits the message being filtered.
+        from arrayscope.app.log_noise import install_wgpu_log_noise_filter
+
+        install_wgpu_log_noise_filter()
+
         with contextlib.suppress(RuntimeError):
             # Vulkan-only instance: the GL backend's EGL re-init is fatal under
             # Wayland (gate-B Tier 0).  Harmless if the instance already exists.
