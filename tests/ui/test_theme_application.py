@@ -11,9 +11,20 @@ restyle stops restyling.
 
 import numpy as np
 
-from arrayscope.app import theme
-from arrayscope.app.theme import ThemeChoice
-from arrayscope.window.main import ArrayScopeWindow
+
+# Imported inside each test, not here, which is what every other file in
+# ``tests/ui`` does (37 of them, none at module scope).  The reason is
+# ``tests/app/test_theme_settings.py``: it loads ``arrayscope.app.theme`` and
+# ``arrayscope.app.settings_state`` straight from their paths and REPLACES the
+# ``sys.modules`` entries with fresh copies.  Any module that already bound
+# names from the originals keeps the old classes, so two enum members print
+# identically and compare unequal.  Importing the package at collection time
+# put the originals in place before that loader ran and broke a sibling test
+# that had nothing to do with this change.
+def _theme():
+    from arrayscope.app import theme
+
+    return theme
 
 
 def _data():
@@ -34,12 +45,14 @@ def _sheet_writes(app, monkeypatch):
 
 
 def test_reapplying_the_same_theme_does_not_restyle_the_application(qt_app, monkeypatch):
-    theme.apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
+    from arrayscope.app.theme import ThemeChoice
+
+    _theme().apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
     installed = qt_app.styleSheet()
     assert installed, "dark theme should install a stylesheet"
 
     writes = _sheet_writes(qt_app, monkeypatch)
-    theme.apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
+    _theme().apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
 
     assert writes == [], "an unchanged theme must not re-set the application stylesheet"
     assert qt_app.styleSheet() == installed
@@ -48,44 +61,50 @@ def test_reapplying_the_same_theme_does_not_restyle_the_application(qt_app, monk
     # copies of this module can be live at once and an identity check would
     # fall back to DARK_TOKENS and pass even when the theme is wrong. The hex
     # strings are equal across copies, and the sheet is what decides the look.
-    assert theme.DARK_TOKENS.window in installed
-    assert theme.LIGHT_TOKENS.window not in installed
+    assert _theme().DARK_TOKENS.window in installed
+    assert _theme().LIGHT_TOKENS.window not in installed
 
 
 def test_a_theme_change_still_restyles_the_application(qt_app, monkeypatch):
-    theme.apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
+    from arrayscope.app.theme import ThemeChoice
+
+    _theme().apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
     dark_sheet = qt_app.styleSheet()
 
     writes = _sheet_writes(qt_app, monkeypatch)
-    theme.apply_theme_to_qapplication(qt_app, ThemeChoice.LIGHT)
+    _theme().apply_theme_to_qapplication(qt_app, ThemeChoice.LIGHT)
 
     assert len(writes) == 1, "a changed theme must re-set the application stylesheet"
     light_sheet = qt_app.styleSheet()
     assert light_sheet != dark_sheet
-    assert theme.LIGHT_TOKENS.window in light_sheet
-    assert theme.DARK_TOKENS.window not in light_sheet
+    assert _theme().LIGHT_TOKENS.window in light_sheet
+    assert _theme().DARK_TOKENS.window not in light_sheet
 
     # ...and switching back restores the original sheet exactly, so the skip
     # cannot latch the application into whichever theme it saw first.
-    theme.apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
+    _theme().apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
     assert qt_app.styleSheet() == dark_sheet
 
 
 def test_a_cleared_stylesheet_is_repaired_by_the_next_apply(qt_app):
+    from arrayscope.app.theme import ThemeChoice
+
     # The guard compares against the sheet the QApplication actually carries
     # rather than against the tokens it stores, so a sheet dropped by anything
     # else (another apply path, a test, a dialog) is reinstalled rather than
     # skipped as "already current".
-    theme.apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
+    _theme().apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
     dark_sheet = qt_app.styleSheet()
 
     qt_app.setStyleSheet("")
-    theme.apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
+    _theme().apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
 
     assert qt_app.styleSheet() == dark_sheet
 
 
 def test_a_second_window_is_themed_without_reinstalling_the_stylesheet(qt_app, monkeypatch):
+    from arrayscope.window.main import ArrayScopeWindow
+
     first = ArrayScopeWindow(_data())
     try:
         installed = qt_app.styleSheet()
