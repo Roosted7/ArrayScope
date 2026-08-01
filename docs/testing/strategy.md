@@ -115,6 +115,19 @@ the coalesced render to arrive would assert the opposite thing. Its module
 docstring records the reasoning; a new fixed pause should say which throttle
 bounds it.
 
+"Should" is now checked, and checked structurally: `tests/timing_guard.py`
+requires the duration to be **read** from the throttle — a constant the product
+or the toolkit publishes, or the live object owning the timer — rather than
+typed. `qtbot.wait(2 * PUBLISH_COALESCE_MS)` states its reason in a form that
+breaks when the throttle is deleted, where a comment saying the same thing
+outlives the mechanism it describes. A comment marker was the obvious
+alternative and was rejected for that, and because fifty-odd of them is an
+excuse list with the entries scattered through the tree rather than gathered at
+the top of a file — the shape `819789f8` deleted three of. The settlement
+budget is deliberately not a throttle for this purpose: a pause bounded by
+`INTERACTION_SETTLE_HARD_LIMIT_MS` is a five-second sleep with a respectable
+import in front of it.
+
 The alternative it replaced was `qtbot.waitUntil(pred,
 timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)`, which asks two questions and
 reports one answer: "did the product get there?" and "within five seconds of
@@ -185,6 +198,20 @@ and largely cancels — the arm that was flaking was the arm least able to fail
 for the reason it named. Check that a relocated timing assertion could ever
 have failed before deciding where its replacement belongs; "it went red under
 load" is evidence about the box, not evidence that the test was doing work.
+
+None of that survived contact with a hurried commit on its own, so
+`tests/app/test_timing_guard.py` reads the tree for it in ring 0. **A clock
+reading may not reach a verdict**: not an `assert`, and not an `if elapsed >
+...: pytest.fail()` either, since an assert-only rule steps straight over that.
+The tree is at nought and the gate says nought, with no allowance to widen —
+recording a duration beside a result stays free, and `tests/conftest.py`,
+`tests/load_report.py` and `tests/seams.py` all still do it. The fixed-pause
+half cannot be at nought yet, so it is a counted backlog that is only ever
+revised downwards, printed in full by path and line on either failure; it is a
+number rather than a list of paths precisely so that no file is grandfathered.
+Both mutations were forced back to check the gate can fail: a bare
+`qtbot.wait(250)` in `test_toasts.py` and `empty_ms <= working_ms` restored in
+`test_commit_cost_scaling.py` were each named with their line.
 
 Record separately:
 
