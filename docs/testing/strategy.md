@@ -159,6 +159,33 @@ versus `action="timeout"`, a bounded `join` that returns already proves
 cancellation reached the child, and "it refused before spawning" is best said
 by a child that never wrote its start marker.
 
+**"Ratio-free and threshold-free" is not the same as "not a stopwatch."** The
+last wall-clock comparison in the suite,
+`test_empty_delta_commit_is_cheaper_than_one_that_does_work`, compared two
+measurements of the same thing — `empty_ms <= working_ms` — with no constant
+anywhere in it. That made the *comparison* machine-independent and left the
+*measurement* exactly as fragile as any other: both numbers are 1–7 ms, so
+under three concurrent suites either one can absorb a scheduling delay big
+enough to invert them, and the `[pyqtgraph]` arm did while passing serially.
+The test to be suspicious of is any that reads a clock, whatever it then does
+with the reading.
+
+Restating it followed the rule above and found something the duration was
+hiding. The claim was structural — an empty delta must stay on the incremental
+path — and both backends already publish which path a commit took, so it is now
+read rather than timed (`tests/render/test_commit_cost_scaling.py`; the
+durations stay in `docs/architecture/progressive-render-contract.md` as
+evidence, gating nothing). Forcing the defect back three ways showed the
+stopwatch caught the WGPU form comfortably (14.8 ms against 7.5), caught one
+PyQtGraph form by 14% (4.54 against 3.97 — the margin load inverts), and
+**missed the other entirely**: 4.29 against 6.69 ms with the delta dropped, the
+whole-active-set republication, still "cheaper", still green. PyQtGraph has no
+empty-delta-only fast path, so a regained fixed cost lands on both arms of a `≤`
+and largely cancels — the arm that was flaking was the arm least able to fail
+for the reason it named. Check that a relocated timing assertion could ever
+have failed before deciding where its replacement belongs; "it went red under
+load" is evidence about the box, not evidence that the test was doing work.
+
 Record separately:
 
 - submission time;

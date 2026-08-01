@@ -116,10 +116,12 @@ default_targets=(
   "tests/ui/test_montage_interactions.py::test_wgpu_expanded_montage_never_hides_retained_sixty"
   "tests/ui/test_montage_interactions.py::test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto[pyqtgraph]"
   "tests/app/test_open_flow.py::test_streaming_rec_updates_viewer_before_completion"
-  # A wall-clock comparison (`empty_ms <= working_ms`) between two small
-  # measurements: passes serially, inverts under parallel load. Its claim is
-  # structural, not temporal — see the queue row.
-  "tests/render/test_commit_cost_scaling.py::test_empty_delta_commit_is_cheaper_than_one_that_does_work[pyqtgraph]"
+  # Was a wall-clock comparison (`empty_ms <= working_ms`) between two small
+  # measurements: passed serially, inverted under parallel load. Restated on
+  # the commit counters 2026-08-01 and renamed; kept here because the row is
+  # the regression handle, not a to-do. The stopwatch it replaced could not
+  # fail for the reason it named on this backend at all.
+  "tests/render/test_commit_cost_scaling.py::test_an_empty_delta_stays_on_the_incremental_path[pyqtgraph]"
   # Seen once each in the 2026-08-01 verification runs, cause not yet pinned.
   "tests/ui/test_lod_demand_freshness.py::test_zoom_in_rederives_lod_demand"
   "tests/ui/test_viewport_convergence_latch.py"

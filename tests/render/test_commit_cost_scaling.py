@@ -16,8 +16,41 @@ exact, machine-independent, and separates the two regimes cleanly (measured
 pre-change: 272 and 816 layout regions and 272 tile instances rebuilt for a
 ONE-tile commit).
 
-One wall-clock assertion survives, and it needs no threshold: a commit with
-nothing to present must not cost more than one presenting 32 tiles.
+**No wall-clock assertion survives.**  One did until 2026-08-01 — ``a commit
+with nothing to present must not cost more than one presenting 32 tiles`` —
+and it called itself ratio-free and threshold-free.  That was true of the
+comparison and false of the measurement: both numbers are ~1-7 ms, so under
+three concurrent suites either could absorb a scheduling delay large enough to
+invert them, and the ``[pyqtgraph]`` arm did exactly that while passing
+serially.  No threshold was involved and it was still a stopwatch.
+
+What it was standing in for is structural: an empty delta must stay on the
+incremental path.  Both backends already publish that verdict, so the
+restatement below asserts the fact instead of its duration.
+
+Forcing the named defect back three ways on this machine — WGPU
+``_wgpu_tiled_binding_reusable`` pinned to ``False`` (the historical
+no-``TileIdentity`` shape), PyQtGraph committing with ``force_refresh``, and
+PyQtGraph committing with no delta at all (the whole-active-set republication)
+— every counter this test reads goes 0 -> 272, and the stopwatch it replaces
+managed:
+
+- WGPU binding reuse refused: **red**, 14.8 ms against 7.5 ms.
+- PyQtGraph ``force_refresh``: **red by 14%**, 4.54 ms against 3.97 ms — the
+  same margin three concurrent suites invert.
+- PyQtGraph delta dropped: **green**, 4.29 ms against 6.69 ms, still
+  "cheaper".
+
+That last row is the finding.  PyQtGraph has no empty-delta-only fast path, so
+a fixed cost it regains lands on *both* arms of a ``<=`` and largely cancels;
+the arm that was flaking under load was the arm least able to fail for the
+reason it named.
+
+The commit *durations* are not lost and are not a gate: the field-scale table
+lives in ``docs/architecture/progressive-render-contract.md``.  Per
+``docs/testing/strategy.md``, a duration whose fact the product already
+publishes needs neither a benchmark nor a looser constant — it needs the
+counter.
 
 Field scale is the point.  A 3-tile fixture cannot see any of this: the
 whole-montage term and the per-delta term are the same size there.  Neither
@@ -41,8 +74,6 @@ from __future__ import annotations
 import contextlib
 import os
 from dataclasses import replace
-from statistics import median
-from time import perf_counter
 
 import numpy as np
 import pytest
@@ -157,6 +188,8 @@ class _Montage:
         self.geometry, self.payloads = _montage(tiles)
         self.tiles = tiles
         self.revision = 1
+        #: The backend's own acknowledgement of the most recent commit.
+        self.report = None
         if present is None:
             self._commit(range(tiles))
         else:
@@ -191,7 +224,7 @@ class _Montage:
             active_tiles=active_tiles,
             planned_tiles=tuple(range(self.tiles)),
         )
-        self.view.setTiledPresentation(
+        self.report = self.view.setTiledPresentation(
             geometry=self.geometry,
             tile_state=TilePresentationState(self.payloads, revision=self.revision - 1),
             tile_delta=delta,
@@ -204,16 +237,28 @@ class _Montage:
 
     def commit(self, upsert_tiles, **kwargs):
         self._commit(upsert_tiles, **kwargs)
+        return self.report
 
-    def commit_ms(self, upsert_tiles, *, samples: int = 9) -> float:
-        timings = []
-        for _ in range(samples):
-            start = perf_counter()
-            self._commit(upsert_tiles)
-            timings.append((perf_counter() - start) * 1000.0)
-        # Discard the first two: the first bounded commit after a full one
-        # still installs binding state a steady stream does not repay.
-        return median(timings[2:])
+    def per_tile_work(self):
+        """What this commit published about the tiles it touched.
+
+        ``items_skipped`` is deliberately absent: the two backends do not mean
+        the same thing by it.  PyQtGraph increments it per tile that entered
+        the item loop and needed nothing — a walk.  WGPU derives it as
+        ``len(committed_tiles) - len(updated)``, so it reads 272 on a commit
+        that walked nothing at all.  Each backend's own reading of it is
+        asserted where it means something, not here.
+        """
+
+        timing = self.view.lastImageUploadTiming()
+        return {
+            "items_created": int(timing.tile_layer_items_created),
+            "items_updated": int(timing.tile_layer_items_updated),
+            "image_replacements": int(timing.tile_layer_image_replacements),
+            "texture_uploads": int(timing.tile_layer_texture_uploads),
+            "existing_items_shown": int(timing.tile_layer_existing_items_shown),
+            "relocated_tiles": int(timing.tile_layer_relocated_tiles),
+        }
 
 
 class _Counter:
@@ -669,25 +714,82 @@ def test_empty_delta_takes_the_production_fast_path(qt_app, monkeypatch):
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
-def test_empty_delta_commit_is_cheaper_than_one_that_does_work(backend, qt_app):
-    """An empty delta must not cost more than a delta that presents tiles.
+def test_an_empty_delta_stays_on_the_incremental_path(backend, qt_app):
+    """A commit with nothing to present must touch no tile.
 
-    Ratio-free and threshold-free: whatever a commit costs on this machine, a
-    commit with nothing to present cannot cost more than one presenting 32
-    tiles.  It did before this change — an empty delta fell off the
-    incremental path and rebuilt the whole montage binding.
+    This is what the wall-clock comparison it replaces was standing in for
+    (see the module docstring).  It asks the same question in two steps: which
+    path the commit took, in the vocabulary that backend decides in, and then
+    what that path cost in tiles.
+
+    The two backends reach the same place by different mechanisms, so the
+    first step is per backend.  WGPU has a whole-binding fast path only an
+    empty delta is eligible for and publishes which of its three paths it
+    took.  PyQtGraph has no such path — its incremental commit is an empty
+    item order — so the reading is the item loop's own: a tile that enters it
+    and turns out to need nothing.
+
+    The second step is shared and is the claim proper.  Forced off the
+    incremental path on this machine (three ways: WGPU binding reuse refused,
+    PyQtGraph committing with ``force_refresh``, PyQtGraph committing with no
+    delta at all), every one of these counters goes 0 -> 272.
+
+    The predecessor is a 32-tile commit rather than the initial full one, on
+    purpose: reuse after a *bounded* commit is the state a refining montage is
+    actually in, and ``test_empty_delta_takes_the_production_fast_path``
+    already covers reuse straight after a full build.
     """
 
     montage = _Montage(backend, FIELD_TILES)
 
-    empty_ms = montage.commit_ms(())
-    working_ms = montage.commit_ms(range(32))
+    working = montage.commit(range(32))
+    working_work = montage.per_tile_work()
+    empty = montage.commit(())
+    empty_work = montage.per_tile_work()
+    empty_skipped = int(montage.view.lastImageUploadTiming().tile_layer_items_skipped)
 
-    assert empty_ms <= working_ms, (
-        f"[{backend}] an empty-delta commit into a {FIELD_TILES}-tile montage "
-        f"cost {empty_ms:.2f} ms while a 32-tile commit cost {working_ms:.2f} "
-        "ms; the commit is paying a whole-montage fixed cost that its delta "
-        "does not justify"
+    # Control.  Every assertion below is a zero, and a zero proves nothing
+    # about a commit path that presents nothing under any delta.  The 32-tile
+    # commit has to be seen doing 32 tiles of work first, or this test is
+    # reporting confidence it has not earned.
+    control = (working.texture_uploads, working_work["items_updated"])
+    assert control == (32, 32), (
+        f"[{backend}] a 32-tile commit reported {working.texture_uploads} presented "
+        f"tiles and {working_work['items_updated']} item updates, not 32 and 32; the "
+        "empty-delta zeros below would then be the zeros of a backend that "
+        "presents nothing, and this test cannot see the defect it names"
+    )
+
+    # 1. The path.
+    if backend == "wgpu":
+        paths = (
+            empty.binding_fast_path_commits,
+            empty.binding_incremental_commits,
+            empty.binding_full_republications,
+        )
+        assert paths == (1, 0, 0), (
+            "an empty delta did not reuse the submitted WGPU binding "
+            f"(fast_path, incremental, full_republication) = {paths}; it left the "
+            "fast path and re-established the montage binding"
+        )
+    else:
+        assert empty_skipped == 0, (
+            f"an empty delta walked {empty_skipped} tiles of a {FIELD_TILES}-tile "
+            "montage in the PyQtGraph item loop and needed none of them; the delta "
+            "names the tiles to visit and it named none"
+        )
+
+    # 2. What the path cost, in tiles.
+    assert empty_work == dict.fromkeys(empty_work, 0), (
+        f"[{backend}] an empty delta into a {FIELD_TILES}-tile montage touched "
+        f"tiles: { ({name: count for name, count in empty_work.items() if count}) }; "
+        "it has nothing to present, so it must leave every presented tile alone"
+    )
+    acknowledged = (empty.cold_count, empty.resident_rebinds)
+    assert acknowledged == (0, 0), (
+        f"[{backend}] the report for an empty delta claims {empty.cold_count} cold "
+        f"tiles and {empty.resident_rebinds} resident rebinds; a commit that "
+        "presents nothing acknowledges nothing"
     )
 
 

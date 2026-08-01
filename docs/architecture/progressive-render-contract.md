@@ -612,9 +612,34 @@ main those counters read:
 | Pin ownerships re-derived over a 272-page set | 818 | ≤32 |
 | Payload histogram sources inspected | 272 | 1 |
 
+The **empty** delta is pinned the same way, and was not until 2026-08-01. It
+had a wall-clock gate instead — *a commit with nothing to present must not cost
+more than one presenting 32 tiles* — which called itself threshold-free and was
+still a stopwatch over two ~1–7 ms measurements; its `[pyqtgraph]` arm inverted
+under three concurrent suites. The path it was standing in for is published by
+both backends, so it is now read rather than timed: WGPU must report
+`binding_fast_path_commits` (not `binding_full_republications`), PyQtGraph must
+walk no tile in its item loop, and neither may re-bind a resident tile. Forced
+off that path three ways, each counter reads 272 against 0.
+
+| Empty-delta commit | Off the incremental path | On it |
+|---|---:|---:|
+| Resident tiles re-bound (`existing_items_shown`, both backends) | 272 | 0 |
+| WGPU binding decision | full republication | whole-binding reuse |
+| PyQtGraph item-loop tiles visited | 272 | 0 |
+
+The stopwatch it replaced managed: WGPU binding reuse refused, **red** at
+14.8 ms against 7.5; PyQtGraph `force_refresh`, **red by 14%** at 4.54 against
+3.97 — the margin three concurrent suites invert; PyQtGraph delta dropped
+entirely, **green** at 4.29 against 6.69, still "cheaper". PyQtGraph has no
+empty-delta-only fast path, so a fixed cost it regains lands on both arms of a
+`≤` and largely cancels. The arm that was flaking under load was the arm least
+able to fail for the reason it named.
+
 Bounded-commit cost at 272 tiles, medians of six order-balanced interleaved
 rounds against main, every after-sample separated from every before-sample
-except where noted:
+except where noted. **These are evidence for a change that landed, not a gate**
+— nothing asserts them, and per `docs/testing/strategy.md` nothing should:
 
 | Delta | PyQtGraph | WGPU |
 |---|---|---|
