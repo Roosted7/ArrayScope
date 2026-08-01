@@ -42,44 +42,49 @@ class WindowMenuMixin:
         bart_path = self._settings.value("bart_toolbox_path", "")
         if bart_path and not os.environ.get("BART_TOOLBOX_PATH"):
             os.environ["BART_TOOLBOX_PATH"] = str(bart_path)
-        return settings_from_mapping(
-            {
-                "theme": self._settings.value("theme", ThemeChoice.SYSTEM.value),
-                "prefetch_nearby_slices": self._settings.value("prefetch_nearby_slices", False),
-                "panel_resize_behavior": self._settings.value(
-                    "panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT.value
-                ),
-                "fft_backend": self._settings.value("fft_backend", FFTBackendChoice.AUTO.value),
-                "fft_workers": self._settings.value("fft_workers", FFTWorkersChoice.AUTO.value),
-                "image_rendering_backend": self._settings.value(
-                    "image_rendering_backend", ImageRenderingBackendChoice.AUTO.value
-                ),
-                "wgpu_present_method": self._settings.value(
-                    "wgpu_present_method", WgpuPresentMethodChoice.AUTO.value
-                ),
-                "texture_codec": self._settings.value(
-                    "texture_codec", TextureCodecChoice.OFF.value
-                ),
-                "wgpu_pixel_grid": self._settings.value("wgpu_pixel_grid", False),
-                "wgpu_clip_indicator": self._settings.value("wgpu_clip_indicator", False),
-                "wgpu_minification_filter": self._settings.value("wgpu_minification_filter", False),
-                "resident_crop_rebind": self._settings.value("resident_crop_rebind", True),
-                "chunk_transport_codec": self._settings.value(
-                    "chunk_transport_codec", ChunkTransportCodecChoice.RAW.value
-                ),
-                "memory_profile": self._settings.value(
-                    "memory_profile", MemoryProfileChoice.BALANCED.value
-                ),
-                "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
-                "montage_quality_policy": self._settings.value(
-                    "montage_quality_policy", MontageQualityPolicyChoice.RESIDENT.value
-                ),
-                "qt_platform": self._settings.value("qt_platform", QtPlatformChoice.AUTO.value),
-                "python_free_threading": self._settings.value(
-                    "python_free_threading", FreeThreadingChoice.ENABLED.value
-                ),
-            }
-        )
+        values = {
+            "theme": self._settings.value("theme", ThemeChoice.SYSTEM.value),
+            "prefetch_nearby_slices": self._settings.value("prefetch_nearby_slices", False),
+            "panel_resize_behavior": self._settings.value(
+                "panel_resize_behavior", PanelResizeBehavior.BEST_EFFORT.value
+            ),
+            "fft_backend": self._settings.value("fft_backend", FFTBackendChoice.AUTO.value),
+            "fft_workers": self._settings.value("fft_workers", FFTWorkersChoice.AUTO.value),
+            "image_rendering_backend": self._settings.value(
+                "image_rendering_backend", ImageRenderingBackendChoice.AUTO.value
+            ),
+            "wgpu_present_method": self._settings.value(
+                "wgpu_present_method", WgpuPresentMethodChoice.AUTO.value
+            ),
+            "texture_codec": self._settings.value("texture_codec", TextureCodecChoice.OFF.value),
+            "wgpu_pixel_grid": self._settings.value("wgpu_pixel_grid", False),
+            "wgpu_clip_indicator": self._settings.value("wgpu_clip_indicator", False),
+            "wgpu_minification_filter": self._settings.value("wgpu_minification_filter", False),
+            "resident_crop_rebind": self._settings.value("resident_crop_rebind", True),
+            "chunk_transport_codec": self._settings.value(
+                "chunk_transport_codec", ChunkTransportCodecChoice.RAW.value
+            ),
+            "memory_profile": self._settings.value(
+                "memory_profile", MemoryProfileChoice.BALANCED.value
+            ),
+            "render_memory_budget_mb": self._settings.value("render_memory_budget_mb", 512),
+            "montage_quality_policy": self._settings.value(
+                "montage_quality_policy", MontageQualityPolicyChoice.RESIDENT.value
+            ),
+            "qt_platform": self._settings.value("qt_platform", QtPlatformChoice.AUTO.value),
+            "python_free_threading": self._settings.value(
+                "python_free_threading", FreeThreadingChoice.ENABLED.value
+            ),
+        }
+        # Presence, not a fallback value: ``settings_from_mapping`` reads the
+        # *key* to tell "the user picked a preset" from "nobody ever did", and
+        # derives ``render_responsiveness_explicit`` from the same test. Give it
+        # a default here and every session would look explicit, which would then
+        # persist the detected seed as an override; omit it unconditionally and
+        # the user's own choice is re-detected away on every restart.
+        if self._settings.contains("render_responsiveness"):
+            values["render_responsiveness"] = self._settings.value("render_responsiveness")
+        return settings_from_mapping(values)
 
     def _save_app_settings(self):
         for key, value in settings_to_mapping(self.app_settings).items():

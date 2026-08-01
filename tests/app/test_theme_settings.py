@@ -422,6 +422,55 @@ def test_render_responsiveness_default_detects_remote_but_explicit_choice_wins()
     )
 
 
+class _RecordedQSettings:
+    """The two QSettings methods ``_load_app_settings`` actually calls."""
+
+    def __init__(self, stored=None):
+        self._stored = dict(stored or {})
+
+    def contains(self, key):
+        return key in self._stored
+
+    def value(self, key, default=None):
+        return self._stored.get(key, default)
+
+
+def test_explicit_render_responsiveness_is_restored_across_a_restart():
+    """A preset chosen from the menu must still be that preset next launch.
+
+    This setting is carried by key *presence*, not by a value: both
+    ``render_responsiveness`` and the ``render_responsiveness_explicit``
+    provenance flag come out of the same ``"render_responsiveness" in values``
+    test.  So the QSettings read has to preserve presence in both directions.
+    Reading it with a fallback like every other key would make every session
+    look explicit — and then persist a merely *detected* seed as a user
+    override.  Omitting it unconditionally (the original bug) sent the saved
+    choice through detection again on every launch and dropped it from the
+    next save, so it never survived a restart at all.
+    """
+
+    from types import SimpleNamespace
+
+    from arrayscope.ui import menus
+
+    chosen = menus.WindowMenuMixin._load_app_settings(
+        SimpleNamespace(_settings=_RecordedQSettings({"render_responsiveness": "responsive"}))
+    )
+
+    assert chosen.render_responsiveness == settings_state.RenderResponsivenessChoice.RESPONSIVE
+    assert chosen.render_responsiveness_explicit is True
+    # ...and it is still written back, so the choice does not decay after one
+    # unrelated settings save.
+    assert settings_state.settings_to_mapping(chosen)["render_responsiveness"] == "responsive"
+
+    never_set = menus.WindowMenuMixin._load_app_settings(
+        SimpleNamespace(_settings=_RecordedQSettings())
+    )
+
+    assert never_set.render_responsiveness_explicit is False
+    assert "render_responsiveness" not in settings_state.settings_to_mapping(never_set)
+
+
 def test_panel_resize_behavior_accepts_strong_wayland():
     settings = settings_state.settings_from_mapping({"panel_resize_behavior": "strong_wayland"})
 
