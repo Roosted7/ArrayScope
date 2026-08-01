@@ -112,6 +112,11 @@ from arrayscope.gpu.keys import (
     RGB_WINDOWED_RGBA32F,
     SCALAR_R32F,
 )
+from arrayscope.gpu.wgpu_adapter import (
+    configure_shared_wgpu_power_preference,
+    shared_wgpu_adapter,
+    shared_wgpu_power_preference,
+)
 from arrayscope.presentation.prepared_uploads import prepared_upload_key
 
 #: Complex shader components → protocol mapping modes.
@@ -310,7 +315,6 @@ def _bitmap_display_refresh_rate(widget) -> float:
 # device can host block-compressed pools; a device without either simply keeps
 # the raw path (AUTO degrades silently).
 _TEXTURE_CODEC_FEATURES = ("texture-compression-bc", "texture-compression-astc")
-_SHARED_WGPU_POWER_PREFERENCE = "low-power"
 # Physical framebuffer evidence rejects a lower global threshold: a deterministic
 # 39.99 dB page renders at only 39.91 dB under a valid window (see the GPU test).
 _WGPU_CODEC_MIN_PSNR_DB = 40.0
@@ -319,13 +323,7 @@ _WGPU_CODEC_MIN_PSNR_DB = 40.0
 def configure_wgpu_adapter_for_profile(power_preference: str) -> None:
     """Select the adapter before device creation for a fresh benchmark process."""
 
-    global _SHARED_WGPU_POWER_PREFERENCE
-    value = str(power_preference)
-    if value not in {"low-power", "high-performance"}:
-        raise ValueError(f"unknown wgpu power preference {power_preference!r}")
-    if _SHARED_WGPU_DEVICE is not None and value != _SHARED_WGPU_POWER_PREFERENCE:
-        raise RuntimeError("the shared wgpu device already exists; use a fresh benchmark process")
-    _SHARED_WGPU_POWER_PREFERENCE = value
+    configure_shared_wgpu_power_preference(power_preference)
 
 
 def _shared_wgpu_device():
@@ -338,23 +336,11 @@ def _shared_wgpu_device():
         # warm-up thread) may have finished creating it while we waited.
         if _SHARED_WGPU_DEVICE is not None:
             return _SHARED_WGPU_DEVICE
-        import wgpu
-        from wgpu.backends.wgpu_native.extras import set_instance_extras
-
-        # Now that wgpu owns its logger, the launch-time noise hook has
-        # something to attach to.  It deliberately did nothing earlier:
-        # creating the "wgpu" logger before this import breaks wgpu's own
-        # logger-class assertion.  Here is still before the adapter request
-        # below, which is what emits the message being filtered.
-        from arrayscope.app.log_noise import install_wgpu_log_noise_filter
-
-        install_wgpu_log_noise_filter()
-
-        with contextlib.suppress(RuntimeError):
-            # Vulkan-only instance: the GL backend's EGL re-init is fatal under
-            # Wayland (gate-B Tier 0).  Harmless if the instance already exists.
-            set_instance_extras(backends=["Vulkan"])
-        adapter = wgpu.gpu.request_adapter_sync(power_preference=_SHARED_WGPU_POWER_PREFERENCE)
+        # The adapter (and with it the Vulkan-only instance pin, the power
+        # preference and the post-import noise-filter install) belongs to the
+        # one owner in arrayscope.gpu -- the topology probe takes the same one,
+        # so the process enumerates adapters once.
+        adapter = shared_wgpu_adapter()
         # Enable the block-compression features the adapter actually has, so the
         # G7 Phase B BC/ASTC texture pools can be created on this shared device.
         available = {str(f) for f in adapter.features}
@@ -3619,7 +3605,7 @@ class WgpuImageView2D(ImageViewShell):
             "wgpu_adapter": str(adapter_info.get("device", "") or ""),
             "wgpu_adapter_type": str(adapter_info.get("adapter_type", "") or ""),
             "wgpu_backend_type": str(adapter_info.get("backend_type", "") or ""),
-            "wgpu_power_preference": _SHARED_WGPU_POWER_PREFERENCE,
+            "wgpu_power_preference": shared_wgpu_power_preference(),
             "wgpu_plane_lookup_candidates_total": int(
                 getattr(executor, "plane_lookup_candidates_total", 0) or 0
             ),

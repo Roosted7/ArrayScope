@@ -107,21 +107,19 @@ def _adapter_info_from_shared_device() -> dict | None:
 
 
 def _adapter_info_from_probe() -> dict | None:
-    """Cheap one-shot adapter probe -- one adapter, no device created."""
+    """The process's shared adapter -- created here if nothing asked for it yet.
+
+    No device is created either way.  Asking the shared owner rather than
+    requesting an adapter of our own is what keeps the process at one adapter:
+    a second request re-enumerates (printing the driver's warnings again) and,
+    worse, whichever request comes first fixes the wgpu instance -- so a
+    private one here would silently defeat the display's Vulkan-only pin.
+    """
 
     try:
-        import wgpu
-    except Exception:
-        return None
-    # Second wgpu entry point of the process (the display's shared device is the
-    # other one), so it owes the same post-import filter install: the noise
-    # filter can only attach once wgpu-py has registered its own logger class,
-    # and the adapter request below is what emits the messages it drops.
-    from arrayscope.app.log_noise import install_wgpu_log_noise_filter
+        from arrayscope.gpu.wgpu_adapter import shared_wgpu_adapter
 
-    install_wgpu_log_noise_filter()
-    try:
-        adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
+        adapter = shared_wgpu_adapter()
     except Exception:
         return None
     if adapter is None:

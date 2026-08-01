@@ -27,11 +27,21 @@ def wgpu_logger():
     logger.removeFilter(_WGPU_NOISE_FILTER)
 
 
-def test_wgpu_noise_filter_drops_only_the_known_message(wgpu_logger, caplog):
+def test_wgpu_noise_filter_drops_only_the_known_messages(wgpu_logger, caplog):
     install_wgpu_log_noise_filter()
 
     with caplog.at_level(logging.WARNING, logger="wgpu"):
         wgpu_logger.warning("Unable to find extension: VK_EXT_physical_device_drm")
+        wgpu_logger.warning(
+            "Detected skylake derivative running on mesa i915. "
+            "Clears to srgb textures will use manual shader clears."
+        )
+        # Same workaround notice, different chip family: the tail is what the
+        # filter matches, so a machine that names another derivative is quiet too.
+        wgpu_logger.warning(
+            "Detected tigerlake derivative running on mesa i915. "
+            "Clears to srgb textures will use manual shader clears."
+        )
         wgpu_logger.warning("Unable to find extension: VK_KHR_swapchain")
         wgpu_logger.error("device lost")
 
