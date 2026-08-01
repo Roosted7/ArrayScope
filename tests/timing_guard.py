@@ -784,16 +784,3 @@ def problems(root: Path = REPO_ROOT) -> list[str]:
             refusals.append("  -> you removed some: set UNJUSTIFIED_PAUSE_BACKLOG in")
             refusals.append(f"     tests/timing_guard.py to {len(pauses)}. It only ever goes down.")
     return refusals
-
-
-def report(collected: list[Finding]) -> str:
-    """The findings as a failure message: every one of them by path and line."""
-
-    by_kind: dict[str, list[Finding]] = {}
-    for finding in collected:
-        by_kind.setdefault(finding.kind, []).append(finding)
-    lines = []
-    for kind in sorted(by_kind):
-        lines.append(f"{len(by_kind[kind])} {kind}:")
-        lines.extend(f"  {finding}" for finding in by_kind[kind])
-    return "\n".join(lines)
