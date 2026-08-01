@@ -4,7 +4,14 @@
 #
 #     tools/load_fragility                 # the known set, 3 repeats
 #     tools/load_fragility -r 5            # 5 repeats
+#     tools/load_fragility -t 24           # hold the box at 24 runnable
 #     tools/load_fragility tests/ui/x.py::test_y   # something specific
+#
+# The load is CO-OPERATIVE: -t names a total for the machine, not a number of
+# loops to add, and the script fills only the gap between that and what is
+# already running. Two sessions asking for the same target get that target, not
+# twice it, and a session that finds the box already loaded by somebody else
+# runs no loops at all.
 #
 # Why this exists: the reproduction recipe used to be "three concurrent full
 # suites in three worktrees", which is 15 minutes per observation and re-runs
@@ -27,16 +34,21 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 repeats=3
-loaders=$(( $(nproc) * 3 / 2 ))
+# The TOTAL runnable count to hold the box at, foreign work included -- not a
+# count of our own loops. See ``start_load``.
+target=$(( $(nproc) * 3 / 2 ))
+max_loaders=0   # 0 means "whatever the target needs"
 
-while getopts "r:l:h" opt; do
+while getopts "r:l:t:h" opt; do
   case "$opt" in
     r) repeats="$OPTARG" ;;
-    l) loaders="$OPTARG" ;;
-    h) sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    t) target="$OPTARG" ;;
+    l) max_loaders="$OPTARG" ;;
+    h) sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) exit 2 ;;
   esac
 done
+[ "$max_loaders" -gt 0 ] 2>/dev/null || max_loaders="$target"
 shift $((OPTIND - 1))
 
 # Every test observed to fail under the 2026-08-01 three-suite experiment, plus
@@ -85,20 +97,72 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
+# The supervisor holds the BOX at ``target`` runnable processes, rather than
+# adding a fixed number of loops to whatever is already there.
+#
+# This machine normally has several agent sessions on it, and more than one of
+# them may want the box loaded. A fixed loop count makes those requests add up:
+# two scripts asking for 24 get 48, which is not the regime either of them
+# meant to test and is how a 62 GB box got OOM-killed. Reading the load and
+# filling only the gap makes the requests *compose* — if somebody else is
+# already loading the machine, this backs off, and can legitimately run zero
+# loops. Their load is as good as ours; only the total matters.
+#
+# ``procs_running`` from /proc/stat, not the 1-minute load average: the average
+# lags by a minute, so a script reacting to it would spend the first minute
+# over-loading and the last minute idle. procs_running is the instantaneous
+# runnable count, which is exactly the quantity being held.
 start_load() {
   setsid bash -c '
-    for _ in $(seq '"$loaders"'); do
-      bash -c "while :; do :; done # arrayscope-load-fragility-loop" &
+    target=$1
+    max=$2
+    pids=()
+    stop_all() { [ ${#pids[@]} -gt 0 ] && kill -9 "${pids[@]}" 2>/dev/null; exit 0; }
+    trap stop_all TERM INT HUP
+    while :; do
+      # Drop the ones that have gone, so "ours" is a live count.
+      alive=()
+      for p in ${pids[@]+"${pids[@]}"}; do
+        kill -0 "$p" 2>/dev/null && alive+=("$p")
+      done
+      pids=(${alive[@]+"${alive[@]}"})
+
+      # Three samples: procs_running is instantaneous and jitters by a couple
+      # of processes as workers block on IO and wake again.
+      total=0
+      for _ in 1 2 3; do
+        total=$(( total + $(awk "/^procs_running/{print \$2}" /proc/stat) ))
+        sleep 0.1
+      done
+      running=$(( total / 3 ))
+
+      ours=${#pids[@]}
+      foreign=$(( running - ours ))
+      [ "$foreign" -lt 0 ] && foreign=0
+      want=$(( target - foreign ))
+      [ "$want" -lt 0 ] && want=0
+      [ "$want" -gt "$max" ] && want="$max"
+
+      while [ "${#pids[@]}" -lt "$want" ]; do
+        bash -c "while :; do :; done # arrayscope-load-fragility-loop" &
+        pids+=("$!")
+      done
+      while [ "${#pids[@]}" -gt "$want" ]; do
+        kill -9 "${pids[-1]}" 2>/dev/null || true
+        unset "pids[-1]"
+        pids=(${pids[@]+"${pids[@]}"})
+      done
+      sleep 1
     done
-    wait
-  ' &
+  ' _ "$target" "$max_loaders" &
   load_pgid=$!
-  # setsid makes the child its own group leader, so its pid is its pgid.
-  sleep 1
+  # setsid makes the child its own group leader, so its pid is its pgid, and the
+  # cleanup trap above kills the supervisor and every loop it owns in one go.
+  sleep 2
 }
 
-printf 'load: %s busy loops on %s cores; %s repeat(s) over %s target(s)\n' \
-  "$loaders" "$(nproc)" "$repeats" "${#targets[@]}"
+printf 'load: holding %s runnable on %s cores (foreign load counts; max %s of our own); %s repeat(s) over %s target(s)\n' \
+  "$target" "$(nproc)" "$max_loaders" "$repeats" "${#targets[@]}"
 
 start_load
 trap 'echo; echo "interrupted — stopping load"; exit 130' INT
@@ -115,6 +179,6 @@ for ((run = 1; run <= repeats; run++)); do
   fi
 done
 
-printf '\n=== load-fragility summary (%s loaders)\n' "$loaders"
+printf '\n=== load-fragility summary (held %s runnable)\n' "$target"
 printf '%s\n' "${results[@]}"
 exit $status
