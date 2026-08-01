@@ -180,7 +180,12 @@ def window_work_in_flight(win) -> int:
             in_flight += 1
     coordinator = getattr(win, "render_coordinator", None)
     if coordinator is not None and coordinator.has_pending_render:
-        in_flight += 1
+        # A pending render counts only while something is armed to flush it.
+        # Pending-and-unscheduled is precisely a lost wakeup, so treating the
+        # request alone as work in progress would make this gate unable to
+        # report the failure it exists for.
+        armed = coordinator._render_timer.isActive() or coordinator._quiet_timer.isActive()
+        in_flight += int(bool(armed))
     return in_flight
 
 

@@ -66,12 +66,38 @@ contract).
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
+- **Settle waits no longer fail on a busy machine — DONE 2026-08-01.** Three
+  concurrent full suites on `ea9c5ec4` reddened fourteen tests that all pass in
+  41 s quiet, and **eleven of those failures were the single sentence
+  `waitUntil timed out`** — which is also what a real regression prints, so the
+  cost was whole sessions spent bisecting phantoms. The deadline was the defect,
+  not its length: `qtbot.waitUntil(pred, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)`
+  asks "did the product get there?" and "within five seconds of *this machine's*
+  wall clock?" and reports one answer for both. `tests/settle.py` separates
+  them — it re-arms its budget on every counter the kernel and presentation path
+  publish and while any task is queued, running or awaiting delivery, so what is
+  left when the budget expires is an idle kernel with an unmet goal and no armed
+  timer: a lost wakeup, which reads identically on a loaded and an idle box. The
+  5 s constant is unchanged and now **unwidenable — `settle_until` takes no
+  budget parameter at all**, which also retired the hand-picked 1×/2×/4× caps in
+  `test_resident_crop_rebind` that had been hiding from the interaction-budget
+  guard because it does not recognise `_busy_pump_until` as a settle wrapper.
+  The pump also stopped spinning on `processEvents`: a spin holds the GIL and
+  starves the worker threads it waits for, so the wait was partly manufacturing
+  the stall it reported. Two tests turned out to depend on that slowness for
+  their preconditions and now observe events instead of sampling for them. **The
+  same conversion is what exposed the montage pan wedge below** — the tests that
+  stay red under load are now the ones with a product defect behind them.
+
 - **ADR 0059 exclusive dynamic preview-first — RAW + WGPU FFT MEDIAN GATES DONE
   2026-07-27; PyQtGraph complex preview correctness pass DONE, latency RED
-  (the 272-tile post-FFT physical-union row is narrowly xfailed only for a
-  timeout at the unchanged 5 s interaction cap; measured 5.38 s serial but
-  straddles the cap offscreen, so the deterministic R5 harness remains the
-  latency authority);
+  (the 272-tile post-FFT physical-union row **is no longer xfailed as of
+  2026-08-01**: it was `xfail(raises=QtBotTimeoutError)`, so the expired wait
+  itself was the expected outcome and the row's correctness assertions had
+  never once executed on the complex path. The wait now bounds a wedge instead
+  of a duration, the parameter is ordinary, and the physical-union claim passes.
+  Latency stays RED and stays owned by the deterministic R5 harness, which is
+  the only place a 5 s bar can be adjudicated);
   product default.**
   Root cause was the successor rule itself: a FLOOR-backed `DESIRED` task still
   used `DISPLAY_PREVIEW`, so phase-only experiments delayed ACK while target
@@ -280,6 +306,30 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   and PyQtGraph in 3178 ms, versus no preview ACKs on the parent. Target
   settlement remained beyond 5 s on both and the standing R1/R2 failures did
   not increase ([evidence](redesign/unconditional-native-output-preview-2026-07-27.md)).
+- **A WGPU montage pan wedges the pipeline under CPU load — OPEN, found
+  2026-08-01.** Panning the 64-tile `gpu_atlas` montage of
+  `test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope` on a
+  loaded box leaves the session with unsettled tiles and **nothing at all
+  scheduled to finish them**. Census taken repeatedly inside the stall, with a
+  pump that is not itself holding the GIL: 8–10 required tiles unsettled,
+  `commit_batches` and `tile_presentation_state.revision` frozen, kernel
+  `queued`/`running`/`parked` all zero, `completions.empty()` true, the bridge
+  fallback timer stopped, `stage_active`/`stage_attached`/`loading`/`dirty`/
+  `upserts` all zero, `flush_pending` and `final_commit_pending` both false —
+  and **zero active `QTimer`s anywhere in the application**, not just under the
+  window. The montage watchdog asserts (`STALL ASSERTION PROBE FIRED (ADR
+  0051)`) and, being observation-only by design, changes nothing. The session
+  resumes only when the *next* gesture retargets it, which is why the test used
+  to pass: each `_goto` leg pokes the pipeline the previous leg wedged. In the
+  application that reads as a pan whose tiles never fill until the user touches
+  the view again. This is the lost-wakeup class the watchdog exists to catch,
+  and it is reachable on unmodified `ea9c5ec4`. Reproduce with ~32 busy loops
+  on 16 cores and a single-node run of that test; `tests/settle.py` now reports
+  it as a wedge with the watchdog's own signature rather than as
+  `waitUntil timed out`. Intermittent — one quiet 14-test batch run reproduced
+  it at load average 2.1 and another passed at 6. Start from the trace the
+  watchdog dumps (`ARRAYSCOPE_STALL_DUMP_DIR`), whose `owner_chain` names the
+  strand; do not widen a wait to hide it.
 - **WGPU odd-origin resident-crop geometry is rejected — OPEN.** The
   managed-Weston 336×336×272 `display_x_axis_slice`/`display_y_axis_slice`
   matrix reproducibly reaches `tiledPayloadResident()` with a globally

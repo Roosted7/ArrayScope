@@ -75,6 +75,10 @@ def test_montage_tile_residency_reuses_its_working_set_on_a_second_walk(qtbot):
     )
     qtbot.addWidget(win)
     accounted_samples = []
+    # Enough repeats of the same three windows for a correctly keyed cache to
+    # reach its plateau, so the final comparison is between two saturated
+    # passes rather than against a pass that was still warming.
+    PASSES = 4
     try:
         win.show()
         settle_window(win, lambda: presentation_is_settled(win, require_quiescent=True))
@@ -106,7 +110,9 @@ def test_montage_tile_residency_reuses_its_working_set_on_a_second_walk(qtbot):
         win.render(reason="rss-stress")
         wait_and_sample_residency(previous_target=initial_target)
         rows = (1, 3, 5)
-        for _pass in range(2):
+        walks = []
+        for _pass in range(PASSES):
+            start = len(accounted_samples)
             for row in rows:
                 previous_target = presentation_target_token(win)
                 assert previous_target is not None
@@ -118,14 +124,22 @@ def test_montage_tile_residency_reuses_its_working_set_on_a_second_walk(qtbot):
                 )
                 win.update_image_view()
                 wait_and_sample_residency(previous_target=previous_target)
+            walks.append(accounted_samples[start:])
 
-        # The first traversal is allowed to populate the working set. Repeating
-        # the exact same semantic windows must reuse or evict within that
-        # high-water mark; a cache keyed by transient session/view objects would
-        # grow again on the second traversal.
-        first_walk = accounted_samples[1 : 1 + len(rows)]
-        second_walk = accounted_samples[1 + len(rows) :]
-        assert len(first_walk) == len(second_walk) == len(rows)
-        assert max(second_walk) <= max(first_walk)
+        # The property is CONVERGENCE, not "the second pass fits inside the
+        # first".  Two passes is not enough for the working set to reach its
+        # plateau -- under three concurrent suites the first pass measured
+        # 1.37/1.90/2.42 MB, still filling, and the second sat flat at 2.95 MB,
+        # so "second <= first" failed 3/3 with nothing wrong in the product.
+        # A cache keyed by transient session or view objects never plateaus: it
+        # adds a fresh generation for every pass, forever.  A correctly keyed
+        # one stops growing once the windows repeat, whatever the machine is
+        # doing, so the last pass adding nothing over its predecessor is the
+        # claim that both means something and holds under load.
+        assert all(len(walk) == len(rows) for walk in walks)
+        assert max(walks[-1]) <= max(walks[-2]), (
+            f"the accounted working set was still growing on the last pass: "
+            f"{[max(walk) for walk in walks]}"
+        )
     finally:
         win.close()

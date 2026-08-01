@@ -23,13 +23,13 @@ from time import perf_counter
 
 import numpy as np
 import pytest
-from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.tools.framebuffer_reference import (
     assert_qt_raster_matches_cpu_reference,
     assert_wgpu_frame_matches_cpu_reference,
 )
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from tests.settle import settle_window
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
@@ -681,27 +681,23 @@ def test_wgpu_cropped_scrub_bounds_preview_producer_work(qtbot):
                 return False
             return frame_session_settled(win)
 
-        def busy_pump_until(predicate, budget_s: float, label: str) -> None:
-            # A BUSY pump, not qtbot.waitUntil: a real session's event loop
-            # never idles (paints, input, control sync), so low-priority
-            # continuations only run against sustained queue pressure.  The
-            # idle qtbot loop dispatches them instantly and hides the field
-            # starvation entirely — this polling loop is the deterministic
-            # stand-in for a busy GUI.
-            app = QtWidgets.QApplication.instance()
-            deadline = perf_counter() + budget_s
-            while not predicate():
-                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
-                assert perf_counter() < deadline, f"{label} failed to settle within {budget_s:.1f}s"
+        def busy_pump_until(predicate, label: str) -> None:
+            # A BUSY pump, not the idle one: a real session's event loop never
+            # idles (paints, input, control sync), so low-priority continuations
+            # only run against sustained queue pressure.  An idle loop dispatches
+            # them instantly and hides the field starvation entirely — this
+            # polling loop is the deterministic stand-in for a busy GUI.
+            #
+            # The two budgets it used to take were 4x and 1x the interaction cap,
+            # picked per call site; the cap now bounds a stalled pipeline rather
+            # than a slow one, so a "give the cold fill headroom" multiplier has
+            # nothing left to express.
+            settle_window(win, predicate, label=label, allow_idle=False)
 
         win._set_view_state(crop_state(94))
         win.update_image_view()
         # The cold 100-tile first fill is not the gate; give it headroom.
-        busy_pump_until(
-            lambda: crop_settled(94),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "cold cropped montage fill",
-        )
+        busy_pump_until(lambda: crop_settled(94), "cold cropped montage fill")
 
         def preview_completed() -> int:
             lanes = win.kernel.diagnostics().lanes
@@ -713,11 +709,7 @@ def test_wgpu_cropped_scrub_bounds_preview_producer_work(qtbot):
         # field freeze lived (reason="slice-range" render requests).
         win._on_slice_text_changed(0, "96:2:296")
         # The scrub step IS the gate: the broken loop needed ~20 s to settle.
-        busy_pump_until(
-            lambda: crop_settled(96),
-            INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
-            "cropped scrub step",
-        )
+        busy_pump_until(lambda: crop_settled(96), "cropped scrub step")
 
         # One scrub step re-evaluates each tile a bounded number of times
         # (floor plus coverage rungs).  The broken loop completed well over

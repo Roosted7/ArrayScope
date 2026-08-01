@@ -37,20 +37,60 @@ Location: `tests/ui`.
 
 Use `pytest-qt` to exercise dimension controls, viewport, montage, ROI/profile, panels, settings, coalescing, and scheduler integration. Assert semantic state and committed result rather than fragile pixel coordinates whenever possible.
 
-High-frequency tests should process events in bounded loops with explicit conditions/timeouts. A passing interaction test does not establish good feel or frame pacing.
+High-frequency tests should process events in bounded loops with explicit conditions. A passing interaction test does not establish good feel or frame pacing.
 
-Every user-visible step has one repository-wide acceptance budget: 2 s target,
-5 s hard failure, owned by `arrayscope.tools.interaction_budget`. The limit is
-per open/render/zoom/pan/scroll/scrub/level/refinement step, not per multi-step
-scenario. Local budgets may be shorter only through the shared cap. Never
-widen a timeout to make slow settlement pass; a longer process-deadlock guard
-may terminate a whole child but is not evidence of successful settlement.
+**Wait with `tests/settle.py`, not with a stopwatch.** `settle_window(win,
+predicate)` pumps the event loop and watches the counters the kernel and the
+presentation path already publish, re-arming its budget on every advance and
+while any task is queued, running, or waiting to be delivered. It therefore
+fails on exactly one thing: an idle kernel, an empty completion queue and no
+armed timer with the goal still unmet — a lost wakeup (ADR 0051), which looks
+the same on a saturated machine as on an idle one. There is no parameter for
+the budget, deliberately.
+
+The alternative it replaced was `qtbot.waitUntil(pred,
+timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)`, which asks two questions and
+reports one answer: "did the product get there?" and "within five seconds of
+*this machine's* wall clock?". Measured 2026-08-01, three concurrent suites
+turned that into fourteen red tests that all pass quiet, eleven of them
+reporting `waitUntil timed out` — the same sentence a real regression prints.
+
+Every user-visible step still has one repository-wide acceptance budget: 2 s
+target, 5 s hard failure, owned by `arrayscope.tools.interaction_budget`. The
+limit is per open/render/zoom/pan/scroll/scrub/level/refinement step, not per
+multi-step scenario. **It is an acceptance criterion, and pytest is not where
+it is adjudicated** — a worker sharing sixteen cores with fifteen others cannot
+measure a 5 s bar. `arrayscope.tools.profile_montage_workflow` measures it, on
+a quiet machine, with per-step settlement recorded. Never widen a timeout to
+make slow settlement pass; a longer process-deadlock guard may terminate a
+whole child but is not evidence of successful settlement.
 
 ## Stress and benchmark tests
 
 Locations: `tests/app/test_memory_stress.py`, `tests/app/test_operation_benchmarks.py`, `tests/display/test_rendering_benchmarks.py`, diagnostics/trace tools.
 
 Use them to prove bounded allocations, deterministic upload/rebind behavior, callback work counts, and relative algorithmic properties. Wall-clock gates are optional and environment-specific.
+
+**An absolute size or duration does not belong in pytest.** A threshold derived
+from the machine measures the machine. The clearest case:
+`test_montage_tile_residency_rss_stays_bounded` compared process RSS and cache
+bytes against caps that `arrayscope.core.memory_policy` computes as *fractions
+of `psutil.virtual_memory().available`*, so a second workload shrank the caps
+under a working set that was already resident and the gate failed
+(`assert 2948096 <= 2423808`) with nothing having changed in the product. What
+stayed in pytest is the relative claim — a second walk over the same semantic
+windows must not grow the accounted set — and the numbers moved to
+`arrayscope.tools.montage_residency_memory_benchmark`, which records the policy
+inputs and the load average beside every result so a reading taken on a busy
+box is identifiable rather than silently comparable.
+
+The same rule catches durations wearing a correctness test's clothes. Before
+relocating one, check whether the product already publishes the fact the
+duration stood for — it usually does, and then the answer is neither a
+benchmark nor a looser constant: kernel shutdown emits `action="complete"`
+versus `action="timeout"`, a bounded `join` that returns already proves
+cancellation reached the child, and "it refused before spawning" is best said
+by a child that never wrote its start marker.
 
 Record separately:
 
