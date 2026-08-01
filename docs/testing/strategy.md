@@ -163,11 +163,13 @@ before believing a per-build number**: a build that gets more expensive as a
 process ages is that shape, and it inflates whichever file happens to run last.
 
 At 110 ms the 322 sites are ~35 s of the 745 s the map records — 4.7%, and at
-most ~22% of any one file. The files on the critical path under
-`--dist loadfile` are not the build-heavy ones: `test_resident_crop_rebind.py`
-(58 s) and `test_montage_interactions.py` (56 s) are 4% and 7% construction,
-because what they cost is rendering. Sharing therefore cannot move the number
-that sets the suite's wall time, only total CPU.
+most ~22% of any one file. The suite is throughput-bound rather than
+straggler-bound (763 s of work over 8 workers is 95 s each against a 63 s
+largest block), so total CPU is the right target — but 35 s of it is ~4 s per
+worker, well inside the ±15 s run-to-run noise that the same measurement
+records. And it is not concentrated where the work is: the two largest blocks,
+`test_resident_crop_rebind.py` and `test_montage_interactions.py`, are 4% and
+7% construction, because what they cost is rendering.
 
 **What sharing spends.** A probe that transparently returned one cached window
 per (module, shape, dtype) — the most favourable possible version, with no test
