@@ -2660,7 +2660,6 @@ class WgpuImageView2D(ImageViewShell):
         """
 
         prepared = self.preparedTiledUploads.take(
-            int(payload.tile_number),
             prepared_upload_key(payload, representation),
         )
         if prepared is not None:

@@ -1554,7 +1554,7 @@ class FramePipelineEffects:
             return
         for task, prepare in preparations:
             slot, key = task.slot, task.key
-            if mailbox.holds(slot, key):
+            if mailbox.holds(key):
                 mailbox.note_deduped()
                 continue
             # Record admission before submit: Kernel.submit() wakes its backend
@@ -5134,7 +5134,7 @@ def _shader_successor_transaction_payload_marker(payload) -> tuple:
 
 
 def _prepared_upload_counters(renderer) -> dict[str, int]:
-    """Mailbox hit/stale/miss counts for the commit trace, or nothing."""
+    """Mailbox hit/miss counts for the commit trace, or nothing."""
 
     view = getattr(getattr(renderer, "win", None), "img_view", None)
     mailbox = getattr(view, "_prepared_tiled_uploads", None)
@@ -5164,7 +5164,6 @@ def _prepared_upload_counters(renderer) -> dict[str, int]:
         "prepared_upload_evicted": int(counters.evicted),
         "prepared_upload_reset_discarded": int(counters.reset_discarded),
         "prepared_upload_hits": int(counters.hits),
-        "prepared_upload_stale": int(counters.stale),
         "prepared_upload_misses": int(counters.misses),
         "prepared_upload_inline_fallbacks": int(counters.inline_fallbacks),
         "prepared_upload_resident": int(counters.resident_entries),

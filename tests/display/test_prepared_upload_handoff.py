@@ -33,6 +33,7 @@ from arrayscope.display.wgpu_imageview2d import (
 )
 from arrayscope.gpu.keys import COMPLEX_RG32F, SCALAR_R32F
 from arrayscope.presentation.prepared_uploads import (
+    AssemblyRetention,
     PreparedUploadMailbox,
     cpu_mapping_preparation_variant,
     prepared_upload_key,
@@ -83,10 +84,10 @@ def test_pyqtgraph_takes_a_prepared_assembly_instead_of_assembling_inline():
     layer._payload_prepare_ms = 0.0
     layer._prepared_uploads = mailbox
     layer._prepared_assembly_hits = 0
+    layer._assembly_retention = AssemblyRetention()
 
     prepared = resolve_page_backed_assembly(payload, levels=levels)
     mailbox.publish(
-        0,
         prepared_upload_key(payload, cpu_mapping_preparation_variant(payload, levels)),
         prepared,
         nbytes=page_assembly_nbytes(prepared),
@@ -121,13 +122,13 @@ def test_pyqtgraph_refuses_a_stale_assembly_and_assembles_inline(stale_source_id
     layer._payload_prepare_ms = 0.0
     layer._prepared_uploads = mailbox
     layer._prepared_assembly_hits = 0
+    layer._assembly_retention = AssemblyRetention()
 
     other = _page_backed_payload(source_id=stale_source_id, fill=9.0)
     stale = resolve_page_backed_assembly(other, levels=stale_levels)
     # Published into THIS payload's slot under a key that does not match what
     # the commit will ask for -- exactly the race the mailbox exists to lose.
     mailbox.publish(
-        0,
         prepared_upload_key(
             other,
             cpu_mapping_preparation_variant(other, stale_levels),
@@ -140,7 +141,7 @@ def test_pyqtgraph_refuses_a_stale_assembly_and_assembles_inline(stale_source_id
 
     assert resolved is not stale
     assert layer._prepared_assembly_hits == 0
-    assert mailbox.counters().stale == 1
+    assert mailbox.counters().misses == 1
     # The pixels are this payload's, not the stale buffer's.
     assert float(np.asarray(resolved.payload.image).ravel()[0]) == pytest.approx(1.0)
     # And it was genuinely assembled here.
@@ -155,6 +156,7 @@ def test_pyqtgraph_assembles_inline_when_the_mailbox_is_empty():
     layer._payload_prepare_ms = 0.0
     layer._prepared_uploads = PreparedUploadMailbox()
     layer._prepared_assembly_hits = 0
+    layer._assembly_retention = AssemblyRetention()
 
     resolved = layer._resolve_payload(payload, levels=(0.0, 2.0))
 
@@ -187,7 +189,7 @@ def test_wgpu_takes_a_prepared_plane_only_under_its_own_representation():
     view._prepared_tiled_uploads = mailbox
 
     prepared = wgpu_packed_payload_texture(payload, SCALAR_R32F)
-    mailbox.publish(0, prepared_upload_key(payload, SCALAR_R32F), prepared)
+    mailbox.publish(prepared_upload_key(payload, SCALAR_R32F), prepared)
 
     assert view._wgpu_payload_texture(payload, SCALAR_R32F) is prepared
     assert mailbox.counters().hits == 1
@@ -204,12 +206,12 @@ def test_wgpu_refuses_a_plane_prepared_for_another_representation():
     view._prepared_tiled_uploads = mailbox
 
     prepared = wgpu_packed_payload_texture(payload, SCALAR_R32F)
-    mailbox.publish(0, prepared_upload_key(payload, COMPLEX_RG32F), prepared)
+    mailbox.publish(prepared_upload_key(payload, COMPLEX_RG32F), prepared)
 
     packed = view._wgpu_payload_texture(payload, SCALAR_R32F)
 
     assert packed is not prepared
-    assert mailbox.counters().stale == 1
+    assert mailbox.counters().misses == 1
     np.testing.assert_array_equal(packed, wgpu_packed_payload_texture(payload, SCALAR_R32F))
 
 
@@ -223,14 +225,13 @@ def test_wgpu_refuses_a_plane_prepared_for_another_payload():
     view._prepared_tiled_uploads = mailbox
 
     mailbox.publish(
-        0,
         prepared_upload_key(other, SCALAR_R32F),
         wgpu_packed_payload_texture(other, SCALAR_R32F),
     )
 
     packed = view._wgpu_payload_texture(committing, SCALAR_R32F)
 
-    assert mailbox.counters().stale == 1
+    assert mailbox.counters().misses == 1
     assert float(packed.ravel()[0]) == pytest.approx(1.0)
 
 
@@ -322,6 +323,7 @@ def test_a_skipped_preparation_still_bakes_the_current_mapping_inline():
     layer._payload_prepare_ms = 0.0
     layer._prepared_uploads = mailbox
     layer._prepared_assembly_hits = 0
+    layer._assembly_retention = AssemblyRetention()
 
     # Nothing was prepared for this round: planning skipped it as resident.
     mailbox.note_resident()
@@ -429,7 +431,7 @@ def test_the_wgpu_planner_still_prepares_a_payload_with_real_work():
     assert task.slot == 2
     task.submitted()
     prepare()
-    assert view.preparedTiledUploads.take(2, task.key) is not None
+    assert view.preparedTiledUploads.take(task.key) is not None
     counters = view.preparedTiledUploads.counters()
     assert counters.published == 1
     assert counters.task_accounting_error() == 0

@@ -42,7 +42,9 @@ from arrayscope.display.tile_layout import tile_layout_map
 from arrayscope.gpu.keys import REDUCER_PHASE_VECTOR, DataChunkKey
 from arrayscope.gpu.page_table import PageResolution
 from arrayscope.presentation.prepared_uploads import (
+    AssemblyRetention,
     cpu_mapping_preparation_variant,
+    page_binding_token,
     prepared_upload_key,
 )
 
@@ -70,6 +72,17 @@ def _tile_commit_sections_logged() -> bool:
     """
 
     return bool(os.environ.get(_UI_OBSERVATION_LOG_ENV))
+
+
+def _assembly_retention_enabled() -> bool:
+    """Kill switch for perf bisection and controlled A/B.
+
+    "0" restores the pre-2026-08-01 behaviour: every commit re-derives every
+    page-backed payload it presents, even one whose pixels it built last
+    commit and is still drawing one slot over.
+    """
+
+    return os.environ.get("ARRAYSCOPE_PYQTGRAPH_ASSEMBLY_RETENTION", "1") != "0"
 
 
 def _log_tile_commit_sections(record: dict[str, object]) -> None:
@@ -895,6 +908,7 @@ class MontageTileLayer:
         self._payload_prepare_ms = 0.0
         self._prepared_uploads = prepared_uploads
         self._prepared_assembly_hits = 0
+        self._assembly_retention = AssemblyRetention()
 
     # ------------------------------------------- presented-visibility index
 
@@ -991,32 +1005,64 @@ class MontageTileLayer:
         identity and levels this commit is submitting, so a miss or a stale
         entry falls through to assembling here, exactly as before.
 
+        A previously built assembly is retained under the same identity, so an
+        index scroll — where slot *i* now shows what slot *i+1* showed — gets
+        the *same array object* back rather than re-deriving it.  That matters
+        twice: the assembly is skipped, and because item residency is keyed on
+        that array's identity, the item the pixels are already on is found and
+        the upload is skipped too.
+
         ``defer_if_unprepared`` returns ``None`` instead of assembling when the
-        payload is page-backed and no prepared buffer is waiting: the caller's
+        payload is page-backed and nothing is waiting for it: the caller's
         resolve budget is spent, and assembling anyway is exactly the work the
-        budget exists to bound.  A mailbox hit is still taken — it costs
-        microseconds and a prepared buffer left behind only goes stale.
+        budget exists to bound.  A retained or prepared assembly is still
+        returned — it costs microseconds, and a prepared buffer left behind
+        only goes stale.
         """
 
+        page_backed = payload.page_backing is not None
+        retaining = page_backed and _assembly_retention_enabled()
+        key = prepared_upload_key(
+            payload,
+            cpu_mapping_preparation_variant(payload, levels),
+        )
+        if retaining:
+            retained = self._assembly_retention.get(key)
+            if retained is not None:
+                self._prepared_assembly_hits += 1
+                return _PageAssembly(replace(payload, **retained.fields), *retained.extras)
         mailbox = self._prepared_uploads
+        if defer_if_unprepared and page_backed and not (mailbox is not None and mailbox.holds(key)):
+            # Ask without consuming: a deferral packs nothing, so recording it
+            # as a mailbox miss counted commits that never fell back to
+            # anything (it is most of the "765 misses" of 2026-07-31).
+            return None
         if mailbox is not None:
-            prepared = mailbox.take(
-                int(payload.tile_number),
-                prepared_upload_key(
-                    payload,
-                    cpu_mapping_preparation_variant(payload, levels),
-                ),
-            )
+            prepared = mailbox.take(key)
             if prepared is not None:
                 self._prepared_assembly_hits += 1
+                if retaining:
+                    self._retain_assembly(key, payload, prepared)
                 return prepared
-        if defer_if_unprepared and payload.page_backing is not None:
-            return None
         started = perf_counter()
         try:
-            return _resolve_page_backed_payload(payload, levels=levels)
+            assembly = _resolve_page_backed_payload(payload, levels=levels)
         finally:
             self._payload_prepare_ms += (perf_counter() - started) * 1000.0
+        if retaining:
+            self._retain_assembly(key, payload, assembly)
+        return assembly
+
+    def _retain_assembly(self, key, payload: DisplayTilePayload, assembly: _PageAssembly) -> None:
+        """Index one assembly's derived pixels so a later slot can reuse them."""
+
+        self._assembly_retention.put(
+            key,
+            source=payload,
+            derived=assembly.payload,
+            extras=(assembly.resolutions, assembly.missing, assembly.fallback_reason),
+            nbytes=page_assembly_nbytes(assembly),
+        )
 
     def consume_payload_prepare_ms(self) -> float:
         """Read and reset the assembly time charged since the last commit."""
@@ -1192,6 +1238,9 @@ class MontageTileLayer:
         self._direct_reuse_pool_ids.clear()
         self._rgb_source_cache_bytes = 0
         self._resident_bytes = 0
+        # No item holds these pixels any more, so the index is now pure
+        # residency for a round that has ended.
+        self._assembly_retention.clear()
 
     def hide_all(self) -> None:
         """Hide every mapped tile while retaining its physical residency."""
@@ -1955,6 +2004,10 @@ class MontageTileLayer:
                     "level_updates": int(level_updates),
                     "resident": int(resident_items),
                     "assembly_hits_total": int(self._prepared_assembly_hits),
+                    "retention": {
+                        key: int(value)
+                        for key, value in vars(self._assembly_retention.counters()).items()
+                    },
                     "mailbox": (
                         None
                         if self._prepared_uploads is None
@@ -1967,8 +2020,10 @@ class MontageTileLayer:
                                 "pending",
                                 "published",
                                 "hits",
-                                "stale",
                                 "misses",
+                                "skipped_resident",
+                                "skipped_no_work",
+                                "deduped",
                                 "skipped_stale_round",
                                 "dropped_before_start",
                                 "evicted",
@@ -3331,22 +3386,14 @@ def _direct_payload_source_id(
 
 
 def _page_binding_source_token(payload: DisplayTilePayload) -> object | None:
-    """Canonical CPU residency identity for PyQtGraph item reuse."""
+    """Canonical CPU residency identity for PyQtGraph item reuse.
 
-    backing = getattr(payload, "page_backing", None)
-    if backing is None:
-        return None
-    return tuple(
-        (
-            target,
-            None if resolution is None else resolution.actual_key,
-        )
-        for target, resolution in zip(
-            backing.requested_keys,
-            backing.candidate_resolutions,
-            strict=True,
-        )
-    )
+    The same token the prepared-upload/retention key uses: item residency and
+    "are these the pixels I asked for" must not be able to disagree about which
+    pages a payload resolves to.
+    """
+
+    return page_binding_token(payload)
 
 
 def _delta_near_tiles(tile_delta) -> frozenset[int]:

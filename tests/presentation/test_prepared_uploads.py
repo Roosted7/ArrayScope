@@ -1,15 +1,23 @@
-"""Ring 1. The prepared-upload mailbox must drop stale buffers, never show them.
+"""Ring 1. The prepared-upload mailbox answers by identity, never by destination.
 
 Pins the correctness rule of the GUI-thread hand-off seam
 (`docs/architecture/progressive-render-contract.md`, R5 "the budget is a
 bookkeeping budget"): a buffer prepared on a worker is a promise about *which
 pixels these are*. Handing one back under a different identity is a torn frame,
-so a mismatch must return nothing and let the caller prepare inline.
+so a key that is not present must return nothing and let the caller prepare
+inline.
+
+Also pins the half that made the seam not pay (2026-08-01). The mailbox used to
+be keyed by *slot*, and a montage index scroll moves content between slots: the
+buffer slot i wanted was the one slot i+1 had just been given, so it was refused
+as stale and re-packed inline. Content keying is what makes "prepared" and
+"wanted" able to meet.
 """
 
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -22,12 +30,21 @@ from arrayscope.presentation.prepared_uploads import (
 )
 
 
+class _PageBacking:
+    """Just enough page backing for `page_binding_token` to describe it."""
+
+    def __init__(self, requested_keys, actual_keys):
+        self.requested_keys = tuple(requested_keys)
+        self.candidate_resolutions = tuple(SimpleNamespace(actual_key=key) for key in actual_keys)
+
+
 class _Payload:
-    """The two attributes `prepared_upload_key` reads, and nothing else."""
+    """The attributes `prepared_upload_key` reads, and nothing else."""
 
     def __init__(self, tile_identity=None, source_id=None):
         self.tile_identity = tile_identity
         self.source_id = source_id
+        self.page_backing = None
 
 
 def _buffer(value: float = 1.0, size: int = 4) -> np.ndarray:
@@ -37,53 +54,64 @@ def _buffer(value: float = 1.0, size: int = 4) -> np.ndarray:
 def test_take_under_the_publishing_key_returns_the_buffer():
     mailbox = PreparedUploadMailbox()
     buffer = _buffer()
-    assert mailbox.publish(7, ("id-a", "scalar"), buffer)
+    assert mailbox.publish(("id-a", "scalar"), buffer)
 
-    assert mailbox.take(7, ("id-a", "scalar")) is buffer
+    assert mailbox.take(("id-a", "scalar")) is buffer
     assert mailbox.counters().hits == 1
 
 
-def test_take_under_a_different_key_drops_the_buffer_and_reports_stale():
-    """The core rule: a stale prepared buffer is refused, not presented."""
+def test_take_under_a_different_key_returns_nothing_and_keeps_the_buffer():
+    """The core rule, and the half slot keying got wrong.
+
+    Asking for pixels nobody prepared must hand back nothing — that part never
+    changed. What changed is what happens to the buffer that *was* prepared:
+    it is not this asker's, but it is somebody's, and on a montage scroll that
+    somebody is the very next commit. Dropping it here is what produced 179
+    stale takes against 3 hits on a measured scrub.
+    """
 
     mailbox = PreparedUploadMailbox()
-    mailbox.publish(7, ("id-a", "scalar"), _buffer(1.0))
+    prepared = _buffer(1.0)
+    mailbox.publish(("id-a", "scalar"), prepared)
 
-    # The slot moved on: this commit is submitting a different payload identity.
-    assert mailbox.take(7, ("id-b", "scalar")) is None
+    assert mailbox.take(("id-b", "scalar")) is None
     counters = mailbox.counters()
-    assert counters.stale == 1
+    assert counters.misses == 1
     assert counters.hits == 0
-    # And the refused buffer is gone, so a later commit cannot resurrect it
-    # by asking under the key it was originally prepared for.
-    assert mailbox.take(7, ("id-a", "scalar")) is None
-    assert mailbox.counters().resident_entries == 0
+    # Still there for the commit it was prepared for.
+    assert mailbox.take(("id-a", "scalar")) is prepared
+    assert mailbox.counters().hits == 1
 
 
-def test_a_changed_variant_is_as_stale_as_a_changed_identity():
+def test_a_changed_variant_is_as_much_a_miss_as_a_changed_identity():
     """Round levels / representation are part of what the buffer promises."""
 
     mailbox = PreparedUploadMailbox()
-    mailbox.publish(3, ("id-a", (0.0, 1.0)), _buffer())
+    mailbox.publish(("id-a", (0.0, 1.0)), _buffer())
 
-    assert mailbox.take(3, ("id-a", (0.0, 2.0))) is None
-    assert mailbox.counters().stale == 1
+    assert mailbox.take(("id-a", (0.0, 2.0))) is None
+    assert mailbox.counters().misses == 1
 
 
-def test_keep_latest_replaces_an_older_preparation_for_the_same_slot():
-    """Under load the newest ready buffer wins; intermediates are not queued."""
+def test_a_buffer_prepared_for_one_slot_is_found_by_the_slot_that_wants_it():
+    """The scroll case, stated directly.
+
+    A worker prepares tile 7's pixels while tile 7 is showing source index 12.
+    One index step later source index 12 is tile 6's job. Nothing about the
+    pixels changed, so the hand-off must still pay.
+    """
 
     mailbox = PreparedUploadMailbox()
-    stale_buffer = _buffer(1.0)
-    fresh_buffer = _buffer(2.0)
-    mailbox.publish(2, ("id-a", "scalar"), stale_buffer)
-    mailbox.publish(2, ("id-b", "scalar"), fresh_buffer)
+    payload_at_seven = _Payload(tile_identity=("index", 12), source_id=("plane", 12))
+    prepared = _buffer(12.0)
+    task = mailbox.plan(7, prepared_upload_key(payload_at_seven, "scalar"))
+    task.submitted()
+    with task:
+        task.publish(prepared)
 
-    assert mailbox.counters().replaced == 1
-    # The superseded preparation is unreachable even under its own key.
-    assert mailbox.take(2, ("id-a", "scalar")) is None
-    mailbox.publish(2, ("id-b", "scalar"), fresh_buffer)
-    assert mailbox.take(2, ("id-b", "scalar")) is fresh_buffer
+    payload_at_six = _Payload(tile_identity=("index", 12), source_id=("plane", 12))
+    assert mailbox.take(prepared_upload_key(payload_at_six, "scalar")) is prepared
+    assert mailbox.counters().hits == 1
 
 
 def test_holds_reports_an_exact_waiting_preparation_only():
@@ -95,23 +123,24 @@ def test_holds_reports_an_exact_waiting_preparation_only():
     """
 
     mailbox = PreparedUploadMailbox()
-    mailbox.publish(4, ("id-a", "scalar"), _buffer())
+    mailbox.publish(("id-a", "scalar"), _buffer())
 
-    assert mailbox.holds(4, ("id-a", "scalar")) is True
-    assert mailbox.holds(4, ("id-b", "scalar")) is False
-    assert mailbox.holds(5, ("id-a", "scalar")) is False
-    # Asking does not consume: the commit still gets its buffer.
-    assert mailbox.take(4, ("id-a", "scalar")) is not None
-    assert mailbox.holds(4, ("id-a", "scalar")) is False
+    assert mailbox.holds(("id-a", "scalar")) is True
+    assert mailbox.holds(("id-b", "scalar")) is False
+    # Asking does not consume, and does not count as a fallback either: a
+    # caller that asks and then declines the work packed nothing.
+    assert mailbox.counters().misses == 0
+    assert mailbox.take(("id-a", "scalar")) is not None
+    assert mailbox.holds(("id-a", "scalar")) is False
 
 
 def test_a_miss_is_an_ordinary_outcome_and_is_counted_separately():
     mailbox = PreparedUploadMailbox()
 
-    assert mailbox.take(11, ("id-a", "scalar")) is None
+    assert mailbox.take(("id-a", "scalar")) is None
     counters = mailbox.counters()
     assert counters.misses == 1
-    assert counters.stale == 0
+    assert counters.inline_fallbacks == 1
 
 
 def test_the_budget_bounds_residency_and_never_evicts_the_newest_publish():
@@ -120,28 +149,28 @@ def test_the_budget_bounds_residency_and_never_evicts_the_newest_publish():
     one = _buffer(1.0, size=64)  # 16 KiB
     mailbox = PreparedUploadMailbox(budget_bytes=int(one.nbytes) * 2)
     for slot in range(6):
-        assert mailbox.publish(slot, (f"id-{slot}", "scalar"), _buffer(float(slot), size=64))
+        assert mailbox.publish((f"id-{slot}", "scalar"), _buffer(float(slot), size=64))
 
     counters = mailbox.counters()
     assert counters.resident_bytes <= int(one.nbytes) * 2
     assert counters.evicted > 0
     # The most recent publish survives: it is the one a governed fill wants next.
-    assert mailbox.take(5, ("id-5", "scalar")) is not None
+    assert mailbox.take(("id-5", "scalar")) is not None
 
 
 def test_a_buffer_larger_than_the_whole_budget_is_declined_not_hoarded():
     mailbox = PreparedUploadMailbox(budget_bytes=1024)
 
-    assert mailbox.publish(0, ("id-a", "scalar"), _buffer(1.0, size=64)) is False
+    assert mailbox.publish(("id-a", "scalar"), _buffer(1.0, size=64)) is False
     assert mailbox.counters().resident_entries == 0
 
 
 def test_discard_and_clear_release_their_bytes():
     mailbox = PreparedUploadMailbox()
-    mailbox.publish(1, ("id-a", "scalar"), _buffer())
-    mailbox.publish(2, ("id-b", "scalar"), _buffer())
+    mailbox.publish(("id-a", "scalar"), _buffer())
+    mailbox.publish(("id-b", "scalar"), _buffer())
 
-    mailbox.discard(1)
+    mailbox.discard(("id-a", "scalar"))
     assert mailbox.counters().resident_entries == 1
     mailbox.clear()
     counters = mailbox.counters()
@@ -159,7 +188,7 @@ def test_concurrent_publishers_and_one_taker_never_yield_a_mismatched_buffer():
     def publisher(index: int) -> None:
         while not stop.is_set():
             key = (f"id-{index}", "scalar")
-            mailbox.publish(0, key, np.full((8, 8), float(index), dtype=np.float32))
+            mailbox.publish(key, np.full((8, 8), float(index), dtype=np.float32))
 
     threads = [threading.Thread(target=publisher, args=(index,)) for index in range(4)]
     for thread in threads:
@@ -167,7 +196,7 @@ def test_concurrent_publishers_and_one_taker_never_yield_a_mismatched_buffer():
     try:
         for _ in range(4000):
             for index in range(4):
-                taken = mailbox.take(0, (f"id-{index}", "scalar"))
+                taken = mailbox.take((f"id-{index}", "scalar"))
                 if taken is not None and float(taken[0, 0]) != float(index):
                     mismatches.append((index, float(taken[0, 0])))
     finally:
@@ -191,20 +220,39 @@ def test_the_key_prefers_the_acknowledgement_identity(payload, expected_identity
     assert prepared_upload_key(payload, "scalar") == (
         expected_identity if payload.tile_identity is not None else None,
         payload.source_id,
+        None,
         "scalar",
     )
 
 
-def test_same_acknowledgement_identity_with_new_actual_pages_is_stale():
+def test_same_acknowledgement_identity_with_new_actual_pages_is_a_miss():
     """Fallback page improvements may share TileIdentity but not pixels."""
 
     mailbox = PreparedUploadMailbox()
     older = _Payload(tile_identity="same-target", source_id=("actual-pages", "coarse"))
     newer = _Payload(tile_identity="same-target", source_id=("actual-pages", "fine"))
-    mailbox.publish(4, prepared_upload_key(older, "scalar"), _buffer(1.0))
+    mailbox.publish(prepared_upload_key(older, "scalar"), _buffer(1.0))
 
-    assert mailbox.take(4, prepared_upload_key(newer, "scalar")) is None
-    assert mailbox.counters().stale == 1
+    assert mailbox.take(prepared_upload_key(newer, "scalar")) is None
+    assert mailbox.counters().misses == 1
+
+
+def test_refined_pages_under_one_source_id_are_a_different_key():
+    """Progressive refinement keeps identity AND source id; only pages move.
+
+    This is the case ``source_id`` was assumed to cover and does not: the
+    coarse and the fine payload are the same tile of the same plane, and their
+    derived pixels are completely different. A store that retains would serve
+    the coarse pixels forever (`test_pyqtgraph_replaces_coarse_page_pixels_
+    when_fine_pages_arrive`).
+    """
+
+    coarse = _Payload(tile_identity="same-target", source_id="same-plane")
+    coarse.page_backing = _PageBacking(("target",), ("coarse-page",))
+    fine = _Payload(tile_identity="same-target", source_id="same-plane")
+    fine.page_backing = _PageBacking(("target",), ("fine-page",))
+
+    assert prepared_upload_key(coarse, "scalar") != prepared_upload_key(fine, "scalar")
 
 
 def test_cpu_mapping_variant_includes_symlog_and_lut_inputs():
@@ -239,16 +287,17 @@ def test_a_late_superseded_preparation_does_not_displace_the_newer_buffer():
 
     mailbox = PreparedUploadMailbox()
     newer_buffer = _buffer(2.0)
-    assert mailbox.publish(3, ("id-new", "scalar"), newer_buffer, generation=2)
+    assert mailbox.publish(("id-a", "scalar"), newer_buffer, generation=2)
 
-    # The straggler was planned first (generation 1) and lands second.
-    assert not mailbox.publish(3, ("id-old", "scalar"), _buffer(1.0), generation=1)
+    # The straggler was planned first (generation 1) and lands second. Same
+    # key, so same pixels: what the refusal protects is the allocation the
+    # next commit is about to take, not its correctness.
+    assert not mailbox.publish(("id-a", "scalar"), _buffer(1.0), generation=1)
 
-    assert mailbox.take(3, ("id-new", "scalar")) is newer_buffer
+    assert mailbox.take(("id-a", "scalar")) is newer_buffer
     counters = mailbox.counters()
     assert counters.superseded_publish == 1
     assert counters.hits == 1
-    assert counters.stale == 0
 
 
 def test_generations_are_handed_out_in_planning_order():
@@ -256,15 +305,15 @@ def test_generations_are_handed_out_in_planning_order():
     assert [mailbox.next_generation() for _ in range(3)] == [1, 2, 3]
 
 
-def test_an_equal_or_newer_generation_still_replaces_its_slot():
+def test_an_equal_or_newer_generation_still_replaces_its_entry():
     """The keep-latest rule survives: only strictly older publishes are refused."""
 
     mailbox = PreparedUploadMailbox()
-    mailbox.publish(5, ("id-a", "scalar"), _buffer(1.0), generation=4)
+    mailbox.publish(("id-a", "scalar"), _buffer(1.0), generation=4)
     newer = _buffer(3.0)
-    assert mailbox.publish(5, ("id-b", "scalar"), newer, generation=5)
+    assert mailbox.publish(("id-a", "scalar"), newer, generation=5)
 
-    assert mailbox.take(5, ("id-b", "scalar")) is newer
+    assert mailbox.take(("id-a", "scalar")) is newer
     assert mailbox.counters().replaced == 1
 
 
@@ -284,9 +333,9 @@ def test_counters_account_for_every_planned_preparation():
         with task:
             task.publish(_buffer())
     tasks[3].dropped()
-    mailbox.take(0, ("id", 0))  # consumed
-    mailbox.take(1, ("id", "other"))  # stale
-    mailbox.take(99, ("id", 99))  # miss
+    mailbox.take(("id", 0))  # consumed
+    mailbox.take(("id", "nobody-prepared-this"))  # miss
+    mailbox.take(("id", 99))  # miss
 
     counters = mailbox.counters()
     assert counters.skipped_resident == 3
@@ -299,10 +348,9 @@ def test_counters_account_for_every_planned_preparation():
     assert counters.dropped_before_start == 1
     assert counters.pending == 0
     assert counters.hits == 1
-    assert counters.stale == 1
-    assert counters.misses == 1
+    assert counters.misses == 2
     assert counters.inline_fallbacks == 2
-    assert counters.resident_entries == 1
+    assert counters.resident_entries == 2
     assert counters.task_accounting_error() == 0
     assert counters.buffer_accounting_error() == 0
 
@@ -408,7 +456,7 @@ def test_discarded_and_cleared_buffers_take_a_terminal_outcome():
         with task:
             task.publish(_buffer())
 
-    mailbox.discard(0)
+    mailbox.discard(("id", 0))
     assert mailbox.counters().reset_discarded == 1
     mailbox.clear()
 

@@ -555,3 +555,181 @@ def test_resolve_budget_defers_unprepared_page_backed_upserts(qt_app, monkeypatc
     final = commit((3,), deadline=None)
     assert set(final.presented_tiles) == {0, 1, 2, 3}
     layer.assert_presented_index_matches_scan()
+
+
+def _scroll_page_backed_payload(tile_number: int, source_index: int, *, pages_by_index: dict):
+    """One slot's wrapper over immutable pages a scroll step re-parents."""
+
+    from arrayscope.display.lod import LodInfo
+    from arrayscope.display.model.frame import PageBackedPresentation
+    from arrayscope.display.pyramid import materialize_lod_page, plan_source_grid_pages
+    from arrayscope.gpu.keys import SCALAR_R32F
+
+    if source_index not in pages_by_index:
+        native = np.full((8, 8), float(source_index + 1), dtype=np.float32)
+        plans = plan_source_grid_pages(
+            content_key=(("scroll", source_index), None),
+            valid_source_rect_yx=(0, 8, 0, 8),
+            reduction_yx=(1, 1),
+            stored_page_shape=(8, 8),
+            dtype="float32",
+            representation=SCALAR_R32F,
+            reducer="mean",
+        )
+        pages = tuple(
+            materialize_lod_page(native, source_origin_yx=(0, 0), plan=plan) for plan in plans
+        )
+        pages_by_index[source_index] = (plans, pages)
+    plans, pages = pages_by_index[source_index]
+    lod = LodInfo(level=1, factor=2, source_shape=(8, 8), texture_shape=(4, 4), gutter=0)
+    return DisplayTilePayload(
+        int(tile_number),
+        int(source_index),
+        pages[0].values,
+        None,
+        ("scroll-source", int(source_index)),
+        texture_data=pages[0].values,
+        source_shape=(8, 8),
+        lod=lod,
+        tile_identity=_row_identity(source_index),
+        page_backing=PageBackedPresentation(plans, pages, (0, 8, 0, 8), lod),
+    )
+
+
+def test_an_index_scroll_step_reassembles_and_reuploads_only_the_entering_tile(qt_app, monkeypatch):
+    """The atomic FFT scroll finding (dossier 2026-07-31 §2 shape 2, fixed 2026-08-01).
+
+    Every index step of the LOD-paced scroll is an ``atomic_fast`` whole-montage
+    handoff: a complete successor for all N slots, in one GUI callback. Between
+    two steps only one tile's *content* is new — slot i now shows what slot i+1
+    showed — yet the commit assembled all N and uploaded all N, measured at
+    585–867 ms per callback at N = 60.
+
+    Two independent things caused that, and this pins both:
+      * page assembly was re-derived because nothing retained it under its
+        content identity, and
+      * the re-derivation minted a fresh array, so ``_direct_payload_source_id``
+        (which keys item residency on that array's identity) missed the resident
+        item that already held those exact pixels, and paid a second upload.
+
+    The physical assertion at the end is the one that matters: reuse must not
+    cost correctness. Every slot draws the pixels its own source index implies.
+    """
+
+    from arrayscope.display.backends.pyqtgraph import tiles as tiles_module
+    from arrayscope.display.backends.pyqtgraph.tiles import _resolve_page_backed_payload
+
+    tiles = 4
+    pages_by_index: dict = {}
+    assembled: list[int] = []
+    uploaded: list[int] = []
+
+    def counting_assembly(payload, *, levels=None):
+        assembled.append(int(payload.source_index))
+        return _resolve_page_backed_payload(payload, levels=levels)
+
+    monkeypatch.setattr(tiles_module, "_resolve_page_backed_payload", counting_assembly)
+
+    def counting_upload(item, data, levels, **_kwargs):
+        uploaded.append(1)
+        return _real_image_upload(item, data, levels)
+
+    layer = _make_layer(counting_upload)
+    geometry = _row_geometry(tiles, tile=8)
+
+    def step(offset: int):
+        payloads = {
+            tile: _scroll_page_backed_payload(tile, tile + offset, pages_by_index=pages_by_index)
+            for tile in range(tiles)
+        }
+        delta = SimpleNamespace(
+            upserts=dict(payloads),
+            active_tiles=tuple(range(tiles)),
+            planned_tiles=tuple(range(tiles)),
+            target_identities={tile: payloads[tile].tile_identity for tile in range(tiles)},
+            removals=(),
+            near_tile_source_ids={},
+            cold_deadline_ms=None,
+            atomic_handoff=True,
+            force_refresh=False,
+        )
+        assembled.clear()
+        uploaded.clear()
+        stats = layer.update_presentation(
+            None,
+            histogram_data=None,
+            geometry=geometry,
+            levels=(0.0, 1.0),
+            rgb_already_windowed=False,
+            dirty_tiles=tuple(range(tiles)),
+            tile_payloads=dict(payloads),
+            tile_delta=delta,
+        )
+        return stats, payloads
+
+    first, _ = step(0)
+    assert set(first.presented_tiles) == set(range(tiles))
+    # The cold build genuinely has to do all of it.
+    assert sorted(assembled) == list(range(tiles))
+    assert len(uploaded) == tiles
+
+    for offset in (1, 2, 3):
+        stats, payloads = step(offset)
+        assert set(stats.presented_tiles) == set(range(tiles))
+        # Only the newly entering source index is new work — in both currencies.
+        assert assembled == [tiles - 1 + offset], f"step {offset} re-assembled {assembled}"
+        assert len(uploaded) == 1, f"step {offset} re-uploaded {len(uploaded)} tiles"
+        # Physical truth: every slot draws its own source index's pixels.
+        for tile in range(tiles):
+            drawn = np.asarray(layer.states[tile].item.image)
+            expected = np.asarray(
+                _resolve_page_backed_payload(payloads[tile], levels=(0.0, 1.0)).payload.image
+            )
+            assert np.array_equal(drawn, expected), f"step {offset} slot {tile} draws wrong pixels"
+    layer.assert_presented_index_matches_scan()
+
+
+def test_a_residency_reset_drops_retained_assemblies(qt_app):
+    """Retained pixels are a claim about live residency, not a cache of history.
+
+    ``clear()`` is the boundary where no item holds these arrays any more.
+    Keeping them past it would hold bytes for a round that has ended — which is
+    the one cost this index is supposed not to have.
+    """
+
+    pages_by_index: dict = {}
+    layer = _make_layer(_real_image_upload)
+    geometry = _row_geometry(2, tile=8)
+    payloads = {
+        tile: _scroll_page_backed_payload(tile, tile, pages_by_index=pages_by_index)
+        for tile in range(2)
+    }
+    delta = SimpleNamespace(
+        upserts=dict(payloads),
+        active_tiles=(0, 1),
+        planned_tiles=(0, 1),
+        target_identities={tile: payloads[tile].tile_identity for tile in range(2)},
+        removals=(),
+        near_tile_source_ids={},
+        cold_deadline_ms=None,
+        atomic_handoff=True,
+        force_refresh=False,
+    )
+    layer.update_presentation(
+        None,
+        histogram_data=None,
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        rgb_already_windowed=False,
+        dirty_tiles=(0, 1),
+        tile_payloads=dict(payloads),
+        tile_delta=delta,
+    )
+    assert layer._assembly_retention.counters().resident_entries == 2
+
+    layer.clear()
+
+    counters = layer._assembly_retention.counters()
+    assert counters.resident_entries == 0
+    assert counters.resident_bytes == 0
+    assert counters.reset_discarded == 2

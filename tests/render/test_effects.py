@@ -1820,7 +1820,7 @@ def test_backend_upload_preparation_is_submitted_as_superseded_prefetch():
     assert (counters.submitted, counters.pending) == (1, 1)
     assert counters.task_accounting_error() == 0
     spec.fn()
-    assert mailbox.take(2, ("identity", "source", "variant")) is not None
+    assert mailbox.take(("identity", "source", "variant")) is not None
     # And the task settled exactly once, with the publication as its outcome.
     counters = mailbox.counters()
     assert (counters.pending, counters.published, counters.in_flight) == (0, 1, 0)
