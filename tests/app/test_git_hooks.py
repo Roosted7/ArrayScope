@@ -59,8 +59,11 @@ def _repo(tmp_path: Path, hook: str, *, env_supplies_tools: bool) -> Path:
         for tool in ("ruff", "python"):
             _stub(root / "envbin" / tool, f'echo "{tool} $*" >> "{root}/calls"\nexit 0')
 
-    # Reached only if the hook gets as far as its real work.
-    (root / "tools" / "dead_code.py").write_text("")
+    # Reached only if the hook gets as far as its real work. Every scan the
+    # hook shells out to needs a file here, or the recovery under test is
+    # masked by a missing-file failure from the scan after it.
+    for scan in ("dead_code.py", "timing_guard.py"):
+        (root / "tools" / scan).write_text("")
     return root
 
 
@@ -101,7 +104,12 @@ def test_pre_commit_recovers_its_tools_through_tools_env(tmp_path):
 
     assert result.returncode == 0, result.stderr
     calls = (root / "calls").read_text().splitlines()
-    assert calls == ["ruff check .", "ruff format --check .", f"python {root}/tools/dead_code.py"]
+    assert calls == [
+        "ruff check .",
+        "ruff format --check .",
+        f"python {root}/tools/dead_code.py",
+        f"python {root}/tools/timing_guard.py",
+    ]
 
 
 def test_pre_commit_hands_off_once_and_then_reports_the_missing_tool(tmp_path):
