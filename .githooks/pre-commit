@@ -23,22 +23,67 @@
 # catches a deletion's *cascade*, where removing a caller strands the helper
 # below it.
 #
+# The tools come from this checkout's environment, and the hook finds it
+# itself. `git commit` from a plain shell has no venv on PATH, so this gate
+# used to refuse the commit and print "commit through tools/env" -- and the
+# same commit, retyped, then passed. A step whose only outcome is a retry that
+# always succeeds should not be asked for. The hook now performs that recovery
+# rather than delegating it.
+#
+# Missing is still a hard failure, never a skip. What changed is only that the
+# hook exhausts the recovery it used to recommend before it reports one.
+#
 # Bypass with `git commit --no-verify` when you mean to; enable with
 #   git config core.hooksPath .githooks
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
 
-if ! command -v ruff >/dev/null 2>&1; then
-	# Not found is a hard failure, never a skip. A hook that waves the commit
-	# through when its tool is missing reports green for the one situation it
-	# cannot actually check.
-	echo "pre-commit: ruff is not on PATH, so the lint gate cannot run." >&2
-	echo "  Commit through the maintained environment:" >&2
-	echo "    tools/env git commit ..." >&2
-	echo "  (no environment yet? create it with: uv sync)" >&2
+# Absolute, because the re-exec below has to name this script from whatever
+# cwd it lands in, and git invokes a hook by a path relative to the worktree.
+self="${BASH_SOURCE[0]}"
+[[ "$self" == /* ]] || self="$PWD/$self"
+
+if [[ -z "${ARRAYSCOPE_HOOK_ENV:-}" ]] &&
+	{ ! command -v ruff >/dev/null 2>&1 || ! command -v python >/dev/null 2>&1; } &&
+	[[ -x "$root/tools/env" ]]; then
+	# Re-run this hook inside the checkout's environment, once.
+	#
+	# `tools/env` is the same handoff the old message asked for, so this
+	# resolves to the identical tools -- and to *this* checkout's, since it
+	# walks up from its own location: a worktree keeps its own source on
+	# PYTHONPATH while borrowing the parent's venv, which is what the
+	# dead-code scan below needs to read the tree being committed.
+	#
+	# The guard is what makes it once. Without it, an environment that has
+	# no ruff would hand the hook back to itself forever; with it, the second
+	# pass falls through to the reports below and names what is missing.
+	ARRAYSCOPE_HOOK_ENV=1 exec "$root/tools/env" "$self" "$@"
+fi
+
+# Not found is a hard failure, never a skip. A hook that waves the commit
+# through when its tool is missing reports green for the one situation it
+# cannot actually check.
+missing_tool() {
+	local tool="$1" gate="$2"
+	echo "pre-commit: $tool is not on PATH, so the $gate cannot run." >&2
+	if [[ -n "${ARRAYSCOPE_HOOK_ENV:-}" ]]; then
+		echo "  This checkout's environment does not have it either." >&2
+		echo "  Repair it with: uv sync" >&2
+	else
+		echo "  There is no tools/env here to recover through." >&2
+		echo "  Create the environment with: uv sync" >&2
+	fi
 	echo "  Or bypass deliberately with --no-verify." >&2
 	exit 1
+}
+
+if ! command -v ruff >/dev/null 2>&1; then
+	missing_tool ruff "lint gate"
+fi
+
+if ! command -v python >/dev/null 2>&1; then
+	missing_tool python "dead-code gate"
 fi
 
 status=0
@@ -51,12 +96,6 @@ fi
 if ! ruff format --check .; then
 	echo "pre-commit: ruff format check failed. Fix with: ruff format ." >&2
 	status=1
-fi
-
-if ! command -v python >/dev/null 2>&1; then
-	# Same rule as ruff above: missing tool is a failure, never a skip.
-	echo "pre-commit: python is not on PATH, so the dead-code gate cannot run." >&2
-	exit 1
 fi
 
 if ! python "$root/tools/dead_code.py"; then

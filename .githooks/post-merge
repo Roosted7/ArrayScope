@@ -21,6 +21,27 @@ set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
 
+self="${BASH_SOURCE[0]}"
+[[ "$self" == /* ]] || self="$PWD/$self"
+
+if [[ -z "${ARRAYSCOPE_HOOK_ENV:-}" ]] && ! command -v python >/dev/null 2>&1 &&
+	[[ -x "$root/tools/env" ]]; then
+	# One recovery attempt through the checkout's environment, guarded so it
+	# cannot hand off to itself twice -- the same rule as the lint gate.
+	#
+	# A merge run from a plain shell is precisely the case this hook was
+	# built for (landing a worktree branch in the main checkout), and it was
+	# also the case where `python` was least likely to be on PATH, so the
+	# adoption it exists to perform was skipped exactly when it was wanted.
+	#
+	# Not `exec`, and failure is swallowed: `tools/env` reports loudly when
+	# there is no environment at all, which is the right answer for the lint
+	# gate and mere noise on a merge. The rule above still holds -- this hook
+	# neither fails the merge nor says anything when it has nothing to say.
+	ARRAYSCOPE_HOOK_ENV=1 "$root/tools/env" "$self" "$@" 2>/dev/null || true
+	exit 0
+fi
+
 if ! command -v python >/dev/null 2>&1; then
 	# Unlike the lint gate, this one is an optimisation: a missing interpreter
 	# costs a re-record, never a wrong answer, so it must not fail the merge.
