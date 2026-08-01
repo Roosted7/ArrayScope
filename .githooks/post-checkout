@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+#
+# Make a freshly created worktree usable, at the moment it is created.
+#
+# Almost all work here happens in a throwaway worktree, and each one started
+# life needing the same four things done by hand or discovered the hard way.
+# Every one of them already had a mechanism; what none of them had was a
+# moment. This hook is the moment.
+#
+# The selection map is the one with a real deadline. `seed_map` already copies
+# the main checkout's map into a checkout that has none, but it runs on the
+# first `pytest` -- which is minutes or hours after the split, by which time
+# main may have moved and the donor describes a tree the branch never had. The
+# same function called here copies the map main had *at the split*, which is
+# the map that actually describes this worktree's parent. Same tooling, no
+# hand copy; only the timing changes, and the timing was the defect.
+#
+# Nothing here may fail the checkout. `git worktree add` producing a broken
+# tree because an optional convenience errored would be far worse than the
+# convenience being absent, so every step is independent, non-fatal, and
+# reports for itself. That is also why `set -e` is deliberately absent.
+#
+# Opt out with ARRAYSCOPE_WORKTREE_SETUP=0 (scripted bulk creation).
+set -uo pipefail
+
+old_head="${1:-}"
+branch_checkout="${3:-0}"
+
+# git fires post-checkout for every checkout, so the gate has to be exact.
+# Worktree creation is a *branch* checkout with no previous HEAD -- a null old
+# sha, which it shares only with `git clone` -- landing in a tree whose `.git`
+# is a FILE, the gitdir pointer that only a linked worktree has. A branch
+# switch passes a real old sha and a file checkout passes 0, so neither ever
+# reaches the work below. Measured against git rather than assumed.
+[[ "$old_head" =~ ^0+$ ]] || exit 0
+[[ "$branch_checkout" == "1" ]] || exit 0
+[[ -f .git ]] || exit 0
+[[ "${ARRAYSCOPE_WORKTREE_SETUP:-1}" != "0" ]] || exit 0
+
+root="$(git rev-parse --show-toplevel)"
+
+# The main checkout is always the first entry, and it is the donor for both
+# the map and the dataset below. Read with bash rather than head/cut: a hook
+# runs on whatever PATH the caller had, and git is the only external command
+# this one is entitled to assume.
+main=""
+while read -r key value; do
+	if [[ "$key" == "worktree" ]]; then
+		main="$value"
+		break
+	fi
+done < <(git worktree list --porcelain)
+
+# One venv per checkout, the same rule `.envrc` states: an editable install is
+# a pointer, and a shared environment means one pointer decides which checkout
+# every process imports. `.envrc` builds it on the first `cd`, but only for a
+# shell that uses direnv -- an agent driving `tools/env` never gets one and
+# silently borrows the parent's. ~1.7 s from uv's warm cache, near-zero disk
+# because uv hardlinks.
+if [[ ! -x "$root/.venv/bin/python" ]]; then
+	if command -v uv >/dev/null 2>&1; then
+		if (cd "$root" && uv sync -q); then
+			echo "worktree: created .venv"
+		else
+			echo "worktree: uv sync failed; run \`uv sync\` here to see why" >&2
+		fi
+	else
+		echo "worktree: no uv on PATH, so this checkout has no venv of its own" >&2
+	fi
+fi
+
+# direnv refuses an .envrc it has not been shown, and a brand new worktree's
+# is always new to it. Without this the shell that lands here has no
+# environment and `.envrc`'s own uv-sync fallback never runs either.
+if [[ -f "$root/.envrc" ]] && command -v direnv >/dev/null 2>&1; then
+	if (cd "$root" && direnv allow . >/dev/null 2>&1); then
+		echo "worktree: direnv allowed"
+	else
+		echo "worktree: direnv allow failed; run it here by hand" >&2
+	fi
+fi
+
+# The map, seeded from main as it stands right now. See the header: this is
+# the whole reason the hook exists at this moment rather than at first run.
+if command -v python >/dev/null 2>&1 || [[ -x "$root/tools/env" ]]; then
+	runner=(python)
+	command -v python >/dev/null 2>&1 || runner=("$root/tools/env" python)
+	"${runner[@]}" - "$root" <<'PY' || true
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+try:
+    from tests import testmon_policy
+except Exception:
+    raise SystemExit(0)
+
+donor = testmon_policy.seed_map(root)
+if donor:
+    print(f"worktree: seeded the selection map from {donor}")
+PY
+fi
+
+# The dataset is gitignored, so a worktree has none, and the harnesses default
+# to the relative `data/<file>`: the journey matrix reported `instances: 0` and
+# `profile_montage_workflow` died FileNotFoundError before rendering anything,
+# both of which read as a code failure rather than a missing symlink.
+if [[ ! -e "$root/data" && -d "$main/data" ]]; then
+	if ln -s "$main/data" "$root/data"; then
+		echo "worktree: linked data/ from the main checkout"
+	fi
+fi
+
+exit 0

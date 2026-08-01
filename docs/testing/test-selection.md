@@ -780,7 +780,31 @@ registered by pytest's cache plugin, and testmon indexes it rather than
 
 A fresh worktree has no map, so its first run would be a full traced suite —
 exactly when selection would help most, since an agent branch usually touches a
-handful of files. So the first run **copies** a map in, and says so:
+handful of files. So a map is **copied** in when the worktree is created, by
+`.githooks/post-checkout`:
+
+```
+worktree: seeded the selection map from /home/you/projects/ArrayScope/.testmondata
+```
+
+That is the same copy described in the rest of this section, taken at a better
+moment. At creation the main checkout is by construction sitting on the commit
+the branch was cut from, so the donor describes this worktree's actual parent.
+Deferred to the first `pytest` — minutes or hours later — main may have moved
+on, and the donor then describes a tree the branch never had. Seeding is safe
+either way, for the reason given below, so this is about how much the map buys
+rather than about whether it can be trusted.
+
+The hook does three other things at that moment, each of them previously manual
+and each previously discovered by its absence: `uv sync` for this checkout's own
+venv, `direnv allow` so the brand new `.envrc` is trusted, and a symlink to the
+main checkout's gitignored `data/`, without which the journey matrix reports
+`instances: 0` and `profile_montage_workflow` dies before rendering anything.
+None of it can fail a `git worktree add`; `ARRAYSCOPE_WORKTREE_SETUP=0` skips
+the lot.
+
+The first run still seeds when the hook did not — hooks not enabled, or a
+checkout made some other way — and says so:
 
 ```
 test selection: seeded this checkout's map from /home/you/projects/ArrayScope/.testmondata
