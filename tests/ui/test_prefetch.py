@@ -1262,6 +1262,20 @@ def test_idle_prefetch_walks_the_retention_halo_before_the_rest_of_the_montage(q
 
     win, session, halo = _halo_montage_window(qtbot)
     try:
+        # State the idle regime instead of racing the fixture's render for it.
+        # `_candidate_tiles` excludes tiles already rendered/loading, and the
+        # fixture renders the whole montage before it retargets the viewport,
+        # so how many candidates survive depended purely on how much of that
+        # render had finished when we got here: `rendered` measured 1 of 64 in
+        # August 2026 and 64 of 64 once the level-evidence and assembly-reuse
+        # fixes landed, which emptied the candidate set and failed the regime
+        # assertion below. Idle prefetch is defined over the whole montage
+        # (docstring, first line), so clear the production bookkeeping and let
+        # the walk see it — the ORDER under test is unaffected either way.
+        session.rendered_tiles.clear()
+        session.loading_tiles.clear()
+        session.skipped_tiles.clear()
+
         candidates = montage_prefetch._candidate_tiles(session)
         numbers = [int(t.montage_index) for t in candidates]
         assert numbers, "regime: the walk must have candidates to order"
