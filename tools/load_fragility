@@ -4,7 +4,8 @@
 #
 #     tools/load_fragility                 # the known set, 3 repeats
 #     tools/load_fragility -r 5            # 5 repeats
-#     tools/load_fragility -t 24           # hold the box at 24 runnable
+#     tools/load_fragility -t 12           # hold the box at 12 runnable
+#                                          # (clamped to nproc-1; see below)
 #     tools/load_fragility tests/ui/x.py::test_y   # something specific
 #
 # The load is CO-OPERATIVE: -t names a total for the machine, not a number of
@@ -12,6 +13,29 @@
 # already running. Two sessions asking for the same target get that target, not
 # twice it, and a session that finds the box already loaded by somebody else
 # runs no loops at all.
+#
+# Two rules keep that from turning into a fight over the machine.
+#
+# 1. The target is CLAMPED to nproc-1. Past saturation an extra runnable process
+#    buys no additional contention, it only takes a core the test itself needs,
+#    and a target well above nproc silently imposes that regime on every other
+#    session (they see the box already over their own target and run nothing).
+#    Asking for more is not an error, it is just rounded down and said so.
+# 2. While ANOTHER instance's loops are on the box, this one starts none of its
+#    own. Whoever gets there first owns the load; the other defers entirely.
+#    Deference is checked every interval, so if the owner exits, the deferring
+#    instance ramps up to fill the gap it left.
+#
+# Two edge cases are knowingly left open, because neither is worth the
+# co-ordination it would take to close:
+#
+# - The owning instance may be holding a LOWER target than we asked for, and we
+#   inherit its lighter regime rather than topping it up. Pass -t and read the
+#   summary line to see what was actually held.
+# - The owning instance may itself have scaled to zero loops (because foreign
+#   work already met its target). Then it has no loop processes, we do not see
+#   it, and we start loading. That is self-correcting: it sees ours and stays
+#   at zero, so exactly one instance owns the loops either way.
 #
 # Why this exists: the reproduction recipe used to be "three concurrent full
 # suites in three worktrees", which is 15 minutes per observation and re-runs
@@ -34,6 +58,11 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 repeats=3
+# Saturation, not the sky, is the ceiling: past nproc-1 runnable an extra spinner
+# steals a core from the test under observation without adding contention the
+# test can feel. One core is left for the observer itself.
+load_cap=$(( $(nproc) - 1 ))
+[ "$load_cap" -lt 1 ] && load_cap=1
 # The TOTAL runnable count to hold the box at, foreign work included -- not a
 # count of our own loops. See ``start_load``.
 target=$(( $(nproc) * 3 / 2 ))
@@ -44,12 +73,28 @@ while getopts "r:l:t:h" opt; do
     r) repeats="$OPTARG" ;;
     t) target="$OPTARG" ;;
     l) max_loaders="$OPTARG" ;;
-    h) sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    h) sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) exit 2 ;;
   esac
 done
+# Clamp rather than reject: the default is itself above the cap on every machine
+# with more than two cores, so refusing would make the no-argument form an error.
+# Say so when it bites, or the summary line reads as a target nobody asked for.
+if [ "$target" -gt "$load_cap" ]; then
+  printf 'load: target %s exceeds nproc-1; holding %s instead\n' "$target" "$load_cap"
+  target="$load_cap"
+fi
 [ "$max_loaders" -gt 0 ] 2>/dev/null || max_loaders="$target"
+[ "$max_loaders" -gt "$load_cap" ] && max_loaders="$load_cap"
 shift $((OPTIND - 1))
+
+# Loop processes carry this plus our PID, so "another instance's loops" and "our
+# loops" are answerable from the process table alone -- no lockfile to go stale
+# when a session is killed. The "-loop-" half is assembled inside the supervisor
+# so that neither this script's nor the supervisor's own command line matches the
+# pattern used to find loops; only real loops do.
+load_marker="arrayscope-load-fragility"
+load_tag="$$"
 
 # Every test observed to fail under the 2026-08-01 three-suite experiment, plus
 # the ones the fixes to those touched. Add a row when a new one is found; do not
@@ -90,9 +135,15 @@ cleanup() {
     sleep 0.2
     kill -9 -- "-$load_pgid" 2>/dev/null || true
   fi
-  # Belt and braces: this script's own loaders are the only processes running
-  # this exact loop body, so a stragging one is ours and is not wanted.
-  pkill -9 -f 'arrayscope-load-fragility-loop' 2>/dev/null || true
+  # Belt and braces for a straggler whose process group died under it. Scoped to
+  # OUR tag, never the bare marker: now that a second instance legitimately runs
+  # its own loops beside ours, killing every loop on the box on our way out would
+  # cut the other session's load out from under it mid-measurement, and it would
+  # then ramp straight back up -- the exact oscillation the co-operative
+  # supervisor exists to prevent.
+  # Anchored for the same reason the supervisor anchors: unanchored, this would
+  # also match any process whose command line merely quotes our tag.
+  pkill -9 -f "${load_marker}-loop-${load_tag}\$" 2>/dev/null || true
   return $status
 }
 trap cleanup EXIT INT TERM HUP
@@ -116,6 +167,20 @@ start_load() {
   setsid bash -c '
     target=$1
     max=$2
+    marker=$3
+    tag=$4
+    # Assembled here rather than passed in whole, so this supervisor own command
+    # line does not match the pattern that finds loops.
+    #
+    # ANCHORED, and that anchor is load-bearing. A loop carries its tag as the
+    # last argv element, so requiring the match to end the command line is what
+    # separates a real loop from any process that merely mentions the marker --
+    # an agent harness echoing the command, a `pgrep -af arrayscope-...` someone
+    # typed, this script quoted in a log tail. Unanchored, every one of those
+    # reads as "another instance is loading" and this one defers forever, which
+    # is a silent zero-load run rather than the regime that was asked for.
+    ours_pattern="${marker}-loop-${tag}\$"
+    any_pattern="${marker}-loop-[0-9]+\$"
     pids=()
     stop_all() { [ ${#pids[@]} -gt 0 ] && kill -9 "${pids[@]}" 2>/dev/null; exit 0; }
     trap stop_all TERM INT HUP
@@ -143,8 +208,27 @@ start_load() {
       [ "$want" -lt 0 ] && want=0
       [ "$want" -gt "$max" ] && want="$max"
 
+      # Defer to an instance that is already loading. Two supervisors each
+      # filling "the gap" both count the other loops as foreign, so they do
+      # converge on the total -- but they converge by fighting, each trimming
+      # against the other on every interval. One owner is steadier and the
+      # regime is identical. Re-checked every interval rather than once at
+      # startup: when the owner exits, its loops leave the process table and
+      # this becomes an ordinary gap fill on the next pass.
+      #
+      # Only ever a reason not to START. Once we own loops we keep managing
+      # them, otherwise two instances that came up together would both see the
+      # other and both back down to zero.
+      loops_now=$(pgrep -fc "$any_pattern" 2>/dev/null || true)
+      [ -z "$loops_now" ] && loops_now=0
+      foreign_loops=$(( loops_now - ours ))
+      [ "$foreign_loops" -lt 0 ] && foreign_loops=0
+      if [ "$ours" -eq 0 ] && [ "$foreign_loops" -gt 0 ]; then
+        want=0
+      fi
+
       while [ "${#pids[@]}" -lt "$want" ]; do
-        bash -c "while :; do :; done # arrayscope-load-fragility-loop" &
+        bash -c "while :; do :; done" "$ours_pattern" &
         pids+=("$!")
       done
       while [ "${#pids[@]}" -gt "$want" ]; do
@@ -154,7 +238,7 @@ start_load() {
       done
       sleep 1
     done
-  ' _ "$target" "$max_loaders" &
+  ' _ "$target" "$max_loaders" "$load_marker" "$load_tag" &
   load_pgid=$!
   # setsid makes the child its own group leader, so its pid is its pgid, and the
   # cleanup trap above kills the supervisor and every loop it owns in one go.
