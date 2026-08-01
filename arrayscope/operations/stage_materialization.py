@@ -25,10 +25,6 @@ class StageMaterializationResult:
     request: StageMaterializationRequest | None = None
     reason: str = ""
 
-    @property
-    def should_schedule(self) -> bool:
-        return self.decision == "scheduled"
-
 
 @dataclass(frozen=True)
 class StageMaterializationDiagnostics:
@@ -187,13 +183,6 @@ class StageMaterializationManager:
                 return value
             if not finished:
                 return None
-
-    def invalidate_document(self, document_key) -> None:
-        with self._lock:
-            keys = tuple(self._in_flight)
-        for key in keys:
-            if key.document_key == document_key:
-                self.cancel(key)
 
     def clear(self) -> None:
         with self._lock:

@@ -48,12 +48,10 @@ __all__ = [
     "Blosc2Codec",
     "ChunkCodec",
     "CodecError",
-    "CompressedChunkCache",
     "RawCodec",
     "ZfpCodec",
     "available_codec_names",
     "get_codec",
-    "gpu_decodable_codec_names",
     "resolve_codec",
 ]
 
@@ -427,26 +425,6 @@ class BitpackCodec:
 
     # -- GPU-path helpers -----------------------------------------------------
 
-    @staticmethod
-    def is_packed(data: bytes) -> bool:
-        """Whether ``data`` is a genuinely bit-packed (GPU-unpackable) blob."""
-
-        header = np.frombuffer(data, dtype=_BITPACK_HEADER, count=1)[0]
-        return int(header["mode"]) == _BITPACK_MODE_PACKED
-
-    @staticmethod
-    def read_header(data: bytes) -> tuple[int, int, int, int]:
-        """Return ``(mode, bits, n_samples, offset)`` from a bitpack blob."""
-
-        h = np.frombuffer(data, dtype=_BITPACK_HEADER, count=1)[0]
-        return int(h["mode"]), int(h["bits"]), int(h["n_samples"]), int(h["offset"])
-
-    @staticmethod
-    def payload_words(data: bytes) -> np.ndarray:
-        """Return the packed u32 word array (the bytes uploaded to the GPU)."""
-
-        return np.frombuffer(memoryview(data)[_BITPACK_HEADER.itemsize :], dtype=np.uint32)
-
     HEADER_BYTES = _BITPACK_HEADER.itemsize
 
 
@@ -475,16 +453,6 @@ def available_codec_names() -> tuple[str, ...]:
     return tuple(name for name, factory in _BUILTIN_FACTORIES.items() if factory().available())
 
 
-def gpu_decodable_codec_names() -> tuple[str, ...]:
-    """Codec names whose decode can run on the GPU (``bitpack``), if available."""
-
-    return tuple(
-        name
-        for name, factory in _BUILTIN_FACTORIES.items()
-        if getattr(factory(), "gpu_decodable", False) and factory().available()
-    )
-
-
 def resolve_codec(name: str, dtype, **kwargs) -> ChunkCodec:
     """Pick a concrete *lossless* codec for ``dtype``.
 
@@ -507,54 +475,3 @@ def resolve_codec(name: str, dtype, **kwargs) -> ChunkCodec:
     if not codec.supports(np.dtype(dtype)):
         return RawCodec()
     return codec
-
-
-class CompressedChunkCache:
-    """Host cache holding chunk payloads compressed, decoded on fetch.
-
-    This is the opt-in host-cache-compression path: ``store`` encodes a chunk's
-    ndarray with the dtype-appropriate codec and keeps only the bytes; ``load``
-    decodes them back to the exact ndarray the transport would have uploaded.
-    With the default ``raw`` codec every entry is stored via the identity codec,
-    so the cache is a byte-for-byte pass-through and the production path is
-    unchanged.
-
-    The GPU upload path (``wgpu_executor``) is intentionally *not* wired to this
-    cache in G7 -- correctness of the resident-texture upload is not risked.
-    Callers opt in explicitly; the benchmark exercises this component directly.
-    """
-
-    def __init__(self, codec_name: str = "raw", **codec_kwargs) -> None:
-        self.codec_name = str(codec_name)
-        self._codec_kwargs = codec_kwargs
-        self._entries: dict[object, tuple[bytes, tuple[int, ...], np.dtype, str]] = {}
-
-    def is_active(self) -> bool:
-        """True when a real (non-identity) codec may be used for some dtype."""
-
-        return self.codec_name != "raw"
-
-    def store(self, key: object, array: np.ndarray) -> int:
-        """Encode and retain ``array``; return the stored (compressed) byte count."""
-
-        dtype = np.dtype(array.dtype)
-        codec = resolve_codec(self.codec_name, dtype, **self._codec_kwargs)
-        data = codec.encode(array)
-        self._entries[key] = (data, tuple(array.shape), dtype, codec.name)
-        return len(data)
-
-    def load(self, key: object) -> np.ndarray:
-        """Decode the exact ndarray previously stored under ``key``."""
-
-        data, shape, dtype, codec_name = self._entries[key]
-        codec = get_codec(codec_name, **self._codec_kwargs)
-        return codec.decode(data, shape=shape, dtype=dtype)
-
-    def stored_bytes(self, key: object) -> int:
-        return len(self._entries[key][0])
-
-    def __contains__(self, key: object) -> bool:
-        return key in self._entries
-
-    def __len__(self) -> int:
-        return len(self._entries)

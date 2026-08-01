@@ -3617,6 +3617,24 @@ class WgpuImageView2D(ImageViewShell):
             "wgpu_plane_bind_rebuilds_total": int(
                 getattr(executor, "plane_bind_rebuilds_total", 0) or 0
             ),
+            "wgpu_histogram_dispatches_total": int(
+                getattr(executor, "histogram_dispatches_total", 0) or 0
+            ),
+            "wgpu_histogram_batch_readbacks_total": int(
+                getattr(executor, "histogram_batch_readbacks_total", 0) or 0
+            ),
+            "wgpu_histogram_readback_resolves_total": int(
+                getattr(executor, "histogram_readback_resolves_total", 0) or 0
+            ),
+            "wgpu_overlay_buffer_writes_total": int(
+                getattr(executor, "overlay_buffer_writes_total", 0) or 0
+            ),
+            "wgpu_glyph_atlas_uploads_total": int(
+                getattr(executor, "glyph_atlas_uploads_total", 0) or 0
+            ),
+            "wgpu_widget_atlas_uploads_total": int(
+                getattr(executor, "widget_atlas_uploads_total", 0) or 0
+            ),
             "wgpu_last_report_uploads": int(getattr(self, "_wgpu_last_report_uploads", 0) or 0),
             "wgpu_last_draw_error": str(getattr(self, "_wgpu_last_draw_error", "") or ""),
             "wgpu_histogram_evidence_pending": len(

@@ -35,7 +35,7 @@ from arrayscope.operations.pipeline import (
 )
 from arrayscope.operations.regions import AxisRegion, AxisRegionKind, RegionSpec, apply_subregion
 from arrayscope.operations.slabs import (
-    evaluate_slab,
+    evaluate_slab_from_plan,
     evaluate_slab_from_stage,
     materialize_stage_candidate,
     plan_slab,
@@ -46,6 +46,12 @@ from arrayscope.operations.slabs import (
     stage_key_for_candidate,
 )
 from arrayscope.operations.stage_cache import StageCache
+
+
+def evaluate_slab(document, request, **kwargs):
+    """Plan then evaluate -- the two steps every production caller takes."""
+
+    return evaluate_slab_from_plan(document, request, plan_slab(document, request), **kwargs)
 
 
 def test_image_snapshot_plans_slab_once(monkeypatch):

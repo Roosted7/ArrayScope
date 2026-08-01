@@ -17,6 +17,7 @@ from arrayscope.sync.messages import (
     request_message,
     state_message,
 )
+from tests import seams
 
 
 def test_state_message_round_trip_through_codec():
@@ -74,14 +75,14 @@ def test_merged_slice_indices_keeps_own_index_for_missing_dimensions():
 
 
 def test_dimension_state_payload_round_trips_full_view_state_subset():
-    incoming = (
+    incoming = seams.with_axis_fftshifted(
         ViewState.from_shape((4, 5, 6))
         .with_image_axes(1, 2)
         .with_slice(0, 3)
-        .with_axis_flipped(2, True)
-        .with_axis_fftshifted(1, True)
-        .with_axis_range(1, (0, 2, 4), "0:2:5")
-    )
+        .with_axis_flipped(2, True),
+        1,
+        True,
+    ).with_axis_range(1, (0, 2, 4), "0:2:5")
     current = (
         ViewState.from_shape((4, 5, 6)).with_channel(ChannelMode.ABS).with_scale(ScaleMode.LOG)
     )

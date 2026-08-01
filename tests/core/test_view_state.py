@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import arrayscope.core.view_state as view_state_module
+from tests import seams
 
 VIEW_STATE_PATH = Path(view_state_module.__file__)
 
@@ -127,11 +128,10 @@ def test_lengths_and_shape_are_validated():
 
 def test_channel_scale_and_axis_flags_are_validated_and_updated():
     state = ViewState.from_shape((3, 4))
-    updated = (
-        state.with_channel(ChannelMode.ABS)
-        .with_scale(ScaleMode.SYMLOG)
-        .with_axis_flipped(0, True)
-        .with_axis_fftshifted(1, True)
+    updated = seams.with_axis_fftshifted(
+        state.with_channel(ChannelMode.ABS).with_scale(ScaleMode.SYMLOG).with_axis_flipped(0, True),
+        1,
+        True,
     )
 
     assert updated.channel == ChannelMode.ABS
@@ -142,12 +142,13 @@ def test_channel_scale_and_axis_flags_are_validated_and_updated():
 
 
 def test_for_shape_preserves_surviving_flags_and_clamps_slices():
-    state = (
+    state = seams.with_axis_fftshifted(
         ViewState.from_shape((3, 4, 5))
         .with_slice(0, 2)
         .with_slice(1, 3)
-        .with_axis_flipped(1, True)
-        .with_axis_fftshifted(2, True)
+        .with_axis_flipped(1, True),
+        2,
+        True,
     )
 
     migrated = state.for_shape((3, 2))

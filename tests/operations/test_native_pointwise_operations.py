@@ -20,7 +20,7 @@ from arrayscope.operations.pipeline import (
     Scale,
     SoftThreshold,
 )
-from arrayscope.operations.plugin_conformance import verify_region_conformance
+from tests.operations.test_plugin_conformance import verify_region_conformance
 
 
 @dataclass(frozen=True)

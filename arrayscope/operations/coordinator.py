@@ -5,9 +5,6 @@ from __future__ import annotations
 import numpy as np
 
 from arrayscope.operations.cost import (
-    OperationCost,
-    PipelineCost,
-    estimate_pipeline_cost,
     operation_output_dtype,
 )
 from arrayscope.operations.evaluator import OperationEvaluator
@@ -45,29 +42,6 @@ class OperationCoordinator:
         self.document = document
         self.evaluator.set_document(document)
         return self.document
-
-    def append_operation(
-        self,
-        operation_id,
-        axis=None,
-        parameters=None,
-        *,
-        axes=None,
-        slot_bindings=None,
-        slot_resolver=None,
-    ):
-        operation = create_operation(
-            operation_id,
-            axis=axis,
-            parameters=parameters or {},
-            axes=axes,
-            # The current derived shape is what the new step will see, so an
-            # out-of-range axis set is named here rather than at first evaluate.
-            ndim=len(self.document.current_shape),
-            slot_bindings=slot_bindings,
-            slot_resolver=slot_resolver,
-        )
-        return self.append_created_operation(operation)
 
     def append_created_operation(self, operation):
         """Append an operation object that the caller already built.
@@ -176,26 +150,6 @@ class OperationCoordinator:
                 dtype = _operation_output_dtype(dtype, step.operation)
             dtypes.append(dtype)
         return tuple(dtypes)
-
-    def operation_cost_estimates(self) -> tuple[OperationCost, ...]:
-        costs = []
-        shape = tuple(self.base_data.shape)
-        dtype = getattr(self.base_data, "dtype", None)
-        for step in self.document.steps:
-            if step.enabled:
-                pipeline_cost = estimate_pipeline_cost(shape, dtype, (step.operation,))
-                cost = pipeline_cost.operation_costs[0]
-                shape = cost.output_shape
-                dtype = cost.output_dtype
-                costs.append(cost)
-        return tuple(costs)
-
-    def pipeline_cost_estimate(self) -> PipelineCost:
-        return estimate_pipeline_cost(
-            self.base_data.shape,
-            getattr(self.base_data, "dtype", None),
-            self.document.enabled_operations,
-        )
 
     def _reject_scalar(self, document):
         """Refuse a 0-D document, and only a 0-D one.

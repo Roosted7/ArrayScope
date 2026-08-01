@@ -2314,11 +2314,5 @@ def _interactive_active(window) -> bool:
     )
 
 
-def _should_defer_montage_side_panels(window, session) -> bool:
-    return bool(
-        getattr(session, "defer_side_panels", False) or _viewport_interaction_active(window)
-    )
-
-
 def _viewport_interaction_active(window) -> bool:
     return bool(getattr(window.win, "_viewport_interaction_active", False))

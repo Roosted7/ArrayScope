@@ -1,4 +1,12 @@
-"""Region-first payload sources for tiled display materialization."""
+"""Region-first payload source used only by tests.
+
+The adapter that turned an already-materialized ``DisplayImage`` into the
+region-first contract. Production no longer reads regions this way -- source-
+anchored identity now travels the canonical LOD page route
+(``display/pyramid.py`` plus ``render/lod.py``'s ``"src-anchored"`` content
+keys) -- so it lives here, beside the tests that use it to state the identity
+rules a region read must satisfy.
+"""
 
 from __future__ import annotations
 

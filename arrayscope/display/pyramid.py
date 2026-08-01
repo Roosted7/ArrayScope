@@ -55,13 +55,6 @@ def reduction_yx_to_xy(reduction_yx: tuple[int, int]) -> tuple[int, int]:
     return (reduction_x, reduction_y)
 
 
-def reduction_xy_to_yx(reduction_xy: tuple[int, int]) -> tuple[int, int]:
-    """Convert the legacy numeric reducer convention back to source ``(y, x)``."""
-
-    reduction_x, reduction_y = _reduction_vector_xy(reduction_xy, name="reduction")
-    return (reduction_y, reduction_x)
-
-
 def _content_identity(content_key: object) -> tuple[object, object]:
     if (
         isinstance(content_key, tuple)
@@ -314,27 +307,6 @@ class ResolvedLodPageSet:
         return tuple(max(reduction, default=0) for reduction in self.actual_reductions_yx)
 
     @property
-    def target_actual_levels(self) -> tuple[tuple[DataChunkKey, int], ...]:
-        """Canonical target key paired with its physically sampled level."""
-
-        return tuple(
-            (resolution.target_key, level)
-            for resolution, level in zip(
-                self.resolutions,
-                self.actual_levels,
-                strict=True,
-            )
-        )
-
-    @property
-    def uniform_actual_level(self) -> int | None:
-        """The physical level only when every target samples one level."""
-
-        levels = self.actual_levels
-        first = levels[0]
-        return first if all(level == first for level in levels[1:]) else None
-
-    @property
     def coarsest_actual_level(self) -> int:
         """Conservative physical-quality summary for floor policy ranking."""
 
@@ -507,109 +479,11 @@ class SourceGridReduction:
 
 
 @dataclass(frozen=True)
-class SourceGridPageIdentity:
-    """Identity of one uniform stored-sample page and its valid footprint."""
-
-    source_rect_yx: tuple[int, int, int, int]
-    reduction_vector_xy: tuple[int, int]
-    reducer: str = "mean"
-    algo_version: int = ALGO_VERSION
-
-
-@dataclass(frozen=True)
 class SourceGridDrawBlock:
     """Rectangular stored-sample run with one uniform native mapping."""
 
     stored_rect_yx: tuple[int, int, int, int]
     source_rect_yx: tuple[int, int, int, int]
-
-
-@dataclass(frozen=True)
-class SourceGridPage:
-    """One page of reduced values with exact per-sample draw coverage."""
-
-    identity: SourceGridPageIdentity
-    source_rect_yx: tuple[int, int, int, int]
-    values: np.ndarray
-    draw_source_rects: tuple[tuple[int, int, int, int], ...]
-    draw_blocks: tuple[SourceGridDrawBlock, ...]
-
-
-def partition_source_grid_pages(
-    reduction: SourceGridReduction,
-    *,
-    stored_page_shape: tuple[int, int],
-) -> tuple[SourceGridPage, ...]:
-    """Partition reduced samples without losing their native draw spans.
-
-    Page alignment is global native-source alignment.  Values are grouped by
-    the page containing their bin origin; clipped first/last pages keep their
-    exact valid footprint in identity, and every sample retains its own
-    source rectangle for later backend geometry construction.
-    """
-
-    values = np.asarray(reduction.values)
-    if values.ndim < 2:
-        raise ValueError("source-grid page partition requires a 2D reduction")
-    stored_h, stored_w = (int(value) for value in stored_page_shape)
-    if stored_h <= 0 or stored_w <= 0:
-        raise ValueError(f"stored page shape must be positive, got {stored_page_shape}")
-    level_x, level_y = reduction.reduction_vector_xy
-    source_page_h = stored_h * (1 << int(level_y))
-    source_page_w = stored_w * (1 << int(level_x))
-    rect_grid = np.asarray(reduction.source_rects, dtype=np.int64).reshape(
-        values.shape[0], values.shape[1], 4
-    )
-    groups: dict[tuple[int, int], list[tuple[int, int]]] = {}
-    for row in range(values.shape[0]):
-        for column in range(values.shape[1]):
-            rect = rect_grid[row, column]
-            page_origin = (
-                (int(rect[0]) // source_page_h) * source_page_h,
-                (int(rect[2]) // source_page_w) * source_page_w,
-            )
-            groups.setdefault(page_origin, []).append((row, column))
-    pages: list[SourceGridPage] = []
-    for page_origin in sorted(groups):
-        positions = groups[page_origin]
-        rows = tuple(sorted({row for row, _column in positions}))
-        columns = tuple(sorted({column for _row, column in positions}))
-        if len(positions) != len(rows) * len(columns):
-            raise ValueError("source-grid page samples must form one rectangular block")
-        row_slice = slice(rows[0], rows[-1] + 1)
-        column_slice = slice(columns[0], columns[-1] + 1)
-        page_rects = rect_grid[row_slice, column_slice].reshape(-1, 4)
-        source_rect = (
-            int(np.min(page_rects[:, 0])),
-            int(np.max(page_rects[:, 1])),
-            int(np.min(page_rects[:, 2])),
-            int(np.max(page_rects[:, 3])),
-        )
-        identity = SourceGridPageIdentity(
-            source_rect_yx=source_rect,
-            reduction_vector_xy=tuple(reduction.reduction_vector_xy),
-        )
-        pages.append(
-            SourceGridPage(
-                identity=identity,
-                source_rect_yx=source_rect,
-                values=np.ascontiguousarray(values[row_slice, column_slice]),
-                draw_source_rects=tuple(tuple(int(value) for value in rect) for rect in page_rects),
-                draw_blocks=_source_grid_draw_blocks(rect_grid[row_slice, column_slice]),
-            )
-        )
-    return tuple(pages)
-
-
-def _source_grid_draw_blocks(rect_grid: np.ndarray) -> tuple[SourceGridDrawBlock, ...]:
-    """Coalesce equal-width sample spans into a bounded Cartesian grid."""
-
-    rows, columns = rect_grid.shape[:2]
-    y_spans = tuple((int(rect_grid[row, 0, 0]), int(rect_grid[row, 0, 1])) for row in range(rows))
-    x_spans = tuple(
-        (int(rect_grid[0, column, 2]), int(rect_grid[0, column, 3])) for column in range(columns)
-    )
-    return _source_grid_draw_blocks_from_axes(y_spans, x_spans)
 
 
 def _source_grid_draw_blocks_from_axes(
@@ -647,102 +521,6 @@ def _equal_width_runs(
         runs.append((start, stop, spans[start][0], spans[stop - 1][1]))
         start = stop
     return tuple(runs)
-
-
-def reduce_source_grid_mean(
-    array,
-    *,
-    source_origin_yx: tuple[int, int],
-    valid_source_rect_yx: tuple[int, int, int, int],
-    reduction_vector_xy: tuple[int, int],
-    input_reduction_vector_xy: tuple[int, int] = (0, 0),
-) -> SourceGridReduction:
-    """Reduce on the global native-source grid, independent of window origin.
-
-    The reduction vectors are absolute log2 steps in ``(x, y)`` order.
-    ``source_origin_yx`` locates input sample ``[0, 0]`` in native source
-    coordinates. Recursive reduction is accepted only for a fully aligned
-    input grid, which makes the result identical to direct source reduction;
-    clipped partial parents are rejected instead of making cache history part
-    of the values.
-    """
-
-    values = np.asarray(array)
-    if values.ndim < 2 or values.ndim > 3:
-        raise ValueError("source-grid mean requires 2D data plus at most one component axis")
-    level_x, level_y = _reduction_vector(reduction_vector_xy, name="reduction")
-    input_level_x, input_level_y = _reduction_vector(
-        input_reduction_vector_xy,
-        name="input reduction",
-    )
-    if level_x < input_level_x or level_y < input_level_y:
-        raise ValueError("output reduction must not be finer than the input reduction")
-    factor_x, factor_y = (1 << level_x, 1 << level_y)
-    input_factor_x, input_factor_y = (1 << input_level_x, 1 << input_level_y)
-    source_y, source_x = (int(source_origin_yx[0]), int(source_origin_yx[1]))
-    valid_y0, valid_y1, valid_x0, valid_x1 = (int(value) for value in valid_source_rect_yx)
-    if valid_y1 <= valid_y0 or valid_x1 <= valid_x0:
-        raise ValueError("valid source rectangle must be non-empty")
-    input_y1 = source_y + int(values.shape[0]) * input_factor_y
-    input_x1 = source_x + int(values.shape[1]) * input_factor_x
-    if not (
-        source_y <= valid_y0 < valid_y1 <= input_y1 and source_x <= valid_x0 < valid_x1 <= input_x1
-    ):
-        raise ValueError("valid source rectangle lies outside the input sample coverage")
-    if (input_level_x or input_level_y) and (
-        source_y % input_factor_y
-        or source_x % input_factor_x
-        or valid_y0 % input_factor_y
-        or valid_y1 % input_factor_y
-        or valid_x0 % input_factor_x
-        or valid_x1 % input_factor_x
-    ):
-        raise ValueError("recursive input and valid coverage must align to its source grid")
-
-    y_rects = _source_grid_axis_rects(valid_y0, valid_y1, factor_y)
-    x_rects = _source_grid_axis_rects(valid_x0, valid_x1, factor_x)
-    output_shape = (len(y_rects), len(x_rects), *values.shape[2:])
-    output_dtype = np.complex64 if np.iscomplexobj(values) else np.float32
-    reduced = np.empty(output_shape, dtype=output_dtype)
-    source_rects: list[tuple[int, int, int, int]] = []
-    identities: list[SourceGridBinIdentity] = []
-    accumulated = values.astype(output_dtype, copy=False)
-    for out_y, (rect_y0, rect_y1) in enumerate(y_rects):
-        local_y0 = (rect_y0 - source_y) // input_factor_y
-        local_y1 = (rect_y1 - source_y) // input_factor_y
-        for out_x, (rect_x0, rect_x1) in enumerate(x_rects):
-            local_x0 = (rect_x0 - source_x) // input_factor_x
-            local_x1 = (rect_x1 - source_x) // input_factor_x
-            source_rect = (rect_y0, rect_y1, rect_x0, rect_x1)
-            sample = accumulated[local_y0:local_y1, local_x0:local_x1]
-            if sample.size == 0:
-                raise ValueError("source-grid bin has no input samples")
-            reduced[out_y, out_x] = np.mean(sample, axis=(0, 1), dtype=output_dtype)
-            source_rects.append(source_rect)
-            identities.append(
-                SourceGridBinIdentity(
-                    source_rect_yx=source_rect,
-                    reduction_vector_xy=(level_x, level_y),
-                )
-            )
-    return SourceGridReduction(
-        values=reduced,
-        source_rects=tuple(source_rects),
-        identities=tuple(identities),
-        grid_origin_yx=(
-            (valid_y0 // factor_y) * factor_y,
-            (valid_x0 // factor_x) * factor_x,
-        ),
-        reduction_vector_xy=(level_x, level_y),
-        valid_source_rect_yx=(valid_y0, valid_y1, valid_x0, valid_x1),
-    )
-
-
-def _reduction_vector(value, *, name: str) -> tuple[int, int]:
-    level_x, level_y = (int(value[0]), int(value[1]))
-    if level_x < 0 or level_y < 0:
-        raise ValueError(f"{name} steps must be non-negative")
-    return (level_x, level_y)
 
 
 def _source_grid_axis_rects(start: int, stop: int, factor: int) -> tuple[tuple[int, int], ...]:
@@ -921,119 +699,6 @@ def materialize_source_grid_pages(
     )
 
 
-def reduce_source_grid(
-    array,
-    *,
-    content_key: object = ("standalone-source-grid",),
-    source_origin_yx: tuple[int, int],
-    valid_source_rect_yx: tuple[int, int, int, int],
-    reduction_yx: tuple[int, int],
-    reducer: str,
-    stored_page_shape: tuple[int, int] | None = None,
-) -> SourceGridReduction:
-    """Direct source-grid oracle shared by every reducer family.
-
-    Zero-magnitude phase samples contribute the zero vector and still count
-    in the bin denominator. This keeps coverage/count policy deterministic;
-    all-zero and exactly opposed-phase bins produce a zero resultant.
-    """
-
-    source = np.asarray(array)
-    valid_rect = _rect(valid_source_rect_yx, name="valid_source_rect_yx")
-    reduction = _reduction_vector_yx(reduction_yx, name="reduction")
-    factor_y, factor_x = (1 << reduction[0], 1 << reduction[1])
-    if stored_page_shape is None:
-        stored_page_shape = (
-            len(_source_grid_axis_rects(valid_rect[0], valid_rect[1], factor_y)),
-            len(_source_grid_axis_rects(valid_rect[2], valid_rect[3], factor_x)),
-        )
-    output_dtype, representation = _reducer_output_format(str(reducer), source)
-    plans = plan_source_grid_pages(
-        content_key=content_key,
-        valid_source_rect_yx=valid_rect,
-        reduction_yx=reduction,
-        stored_page_shape=stored_page_shape,
-        dtype=output_dtype.name,
-        representation=representation,
-        reducer=str(reducer),
-    )
-    materialized = materialize_source_grid_pages(
-        source,
-        source_origin_yx=source_origin_yx,
-        plans=plans,
-    )
-    # The oracle's default one-page shape preserves the historical row-major
-    # result contract. Explicit smaller pages are concatenated geometrically.
-    y_bins = _source_grid_axis_rects(valid_rect[0], valid_rect[1], factor_y)
-    x_bins = _source_grid_axis_rects(valid_rect[2], valid_rect[3], factor_x)
-    trailing_shape = () if str(reducer) not in (REDUCER_NATIVE, REDUCER_MEAN) else source.shape[2:]
-    values = np.empty((len(y_bins), len(x_bins), *trailing_shape), dtype=output_dtype)
-    by_rect: dict[tuple[int, int, int, int], object] = {
-        rect: value
-        for page in materialized
-        for rect, value in zip(
-            page.plan.sample_source_rects_yx,
-            page.values.reshape((-1, *trailing_shape)),
-            strict=True,
-        )
-    }
-    rects = tuple((y0, y1, x0, x1) for y0, y1 in y_bins for x0, x1 in x_bins)
-    for index, rect in enumerate(rects):
-        row, column = divmod(index, len(x_bins))
-        values[row, column] = by_rect[rect]
-    reduction_xy = reduction_yx_to_xy(reduction)
-    return SourceGridReduction(
-        values=np.ascontiguousarray(values),
-        source_rects=rects,
-        identities=tuple(
-            SourceGridBinIdentity(
-                source_rect_yx=rect,
-                reduction_vector_xy=reduction_xy,
-                reducer=str(reducer),
-            )
-            for rect in rects
-        ),
-        grid_origin_yx=(
-            (valid_rect[0] // factor_y) * factor_y,
-            (valid_rect[2] // factor_x) * factor_x,
-        ),
-        reduction_vector_xy=reduction_xy,
-        valid_source_rect_yx=valid_rect,
-    )
-
-
-def _reduce_sample(sample: np.ndarray, *, reducer: str):
-    reducer = str(reducer)
-    if reducer == REDUCER_NATIVE:
-        if tuple(sample.shape[:2]) != (1, 1):
-            raise ValueError("native route must map one source sample to one stored sample")
-        return sample[0, 0]
-    if reducer == REDUCER_MEAN:
-        dtype = np.complex64 if np.iscomplexobj(sample) else np.float32
-        return np.mean(sample, axis=(0, 1), dtype=dtype)
-    magnitude = np.abs(sample).astype(np.float32, copy=False)
-    if reducer == REDUCER_MEAN_ABS:
-        return np.mean(magnitude, axis=(0, 1), dtype=np.float32)
-    squared = np.square(magnitude, dtype=np.float32)
-    if reducer == REDUCER_POWER:
-        return np.mean(squared, axis=(0, 1), dtype=np.float32)
-    if reducer == REDUCER_RMS:
-        return np.float32(np.sqrt(np.mean(squared, axis=(0, 1), dtype=np.float32)))
-    if reducer == REDUCER_PHASE_VECTOR:
-        if not np.iscomplexobj(sample):
-            raise ValueError("phase_vector requires complex source values")
-        vectors = np.zeros(sample.shape, dtype=np.complex64)
-        nonzero = magnitude > 0.0
-        vectors[nonzero] = sample[nonzero].astype(np.complex64, copy=False) / magnitude[nonzero]
-        result = np.mean(vectors, axis=(0, 1), dtype=np.complex64)
-        return (
-            np.complex64(0.0)
-            if abs(result) <= _PHASE_VECTOR_MEAN_ZERO_ATOL
-            else np.complex64(result)
-        )
-    raise ValueError(f"unsupported source-grid reducer {reducer!r}")
-
-
 def _reducer_output_format(reducer: str, source) -> tuple[np.dtype, str]:
     """Return the canonical value format for one concrete source plane.
 
@@ -1147,13 +812,6 @@ def _reduction_vector_yx(value, *, name: str) -> tuple[int, int]:
     if reduction_y < 0 or reduction_x < 0:
         raise ValueError(f"{name} steps must be non-negative")
     return (reduction_y, reduction_x)
-
-
-def _reduction_vector_xy(value, *, name: str) -> tuple[int, int]:
-    reduction_x, reduction_y = (int(part) for part in value)
-    if reduction_x < 0 or reduction_y < 0:
-        raise ValueError(f"{name} steps must be non-negative")
-    return (reduction_x, reduction_y)
 
 
 def _rect_contains(outer, inner) -> bool:
@@ -1292,17 +950,6 @@ class LodPageCache:
         table, _pages_by_key = self._resolver_snapshot()
         return table.resolve(key)
 
-    def resolve_plans(self, plans):
-        """Resolve one complete target set through the canonical page table.
-
-        The returned rows preserve requested -> actual identity for every
-        target.  ``None`` means incomplete coverage; resolution remains a
-        passive query and performs no materialization, upload, or claim work.
-        """
-
-        resolved = self.resolved_page_set(plans)
-        return None if resolved is None else resolved.resolutions
-
     def resolved_page_set(self, plans) -> ResolvedLodPageSet | None:
         """Return complete requested -> actual rows and their checked values.
 
@@ -1411,17 +1058,6 @@ class LodPageCache:
             self._resolver_pages_by_key = pages_by_key
             self._resolver_revision = self._revision
             return table, pages_by_key
-
-    def begin_claim(self, key: DataChunkKey, owner: object) -> bool:
-        """Own the one producer claim for ``key`` if it is missing."""
-
-        if not isinstance(key, DataChunkKey):
-            raise TypeError("LOD page cache claims require DataChunkKey keys")
-        with self._lock:
-            if self._cache.peek(key) is not None or key in self._claims:
-                return False
-            self._claims[key] = owner
-            return True
 
     def claim_plans(self, plans, owner: object) -> tuple[LodPagePlan, ...]:
         """Attach to a complete requested set and claim only its missing pages.
@@ -1549,11 +1185,6 @@ class LodPageCache:
             self._owner_requested_keys.pop(owner, None)
             return released
 
-    def plan_set_ineligible(self, plans) -> bool:
-        keys = tuple(plan.key for plan in tuple(plans))
-        with self._lock:
-            return keys in self._ineligible_plan_sets
-
     def _plan_set_fits_budget(self, plans: tuple[LodPagePlan, ...]) -> bool:
         max_entries = self._cache.max_entries
         if max_entries is not None and len(plans) > int(max_entries):
@@ -1582,10 +1213,6 @@ class LodPageCache:
     def pending(self, key: DataChunkKey) -> bool:
         with self._lock:
             return key in self._claims
-
-    def claimed_by(self, key: DataChunkKey) -> object | None:
-        with self._lock:
-            return self._claims.get(key)
 
     @property
     def pending_count(self) -> int:
@@ -1654,17 +1281,11 @@ __all__ = [
     "ResolvedLodPageSet",
     "SourceGridBinIdentity",
     "SourceGridDrawBlock",
-    "SourceGridPage",
-    "SourceGridPageIdentity",
     "SourceGridReduction",
     "materialize_lod_page",
     "materialize_source_grid_pages",
-    "partition_source_grid_pages",
     "plan_source_grid_pages",
     "reduce_box_mean",
-    "reduce_source_grid",
-    "reduce_source_grid_mean",
-    "reduction_xy_to_yx",
     "reduction_yx_to_xy",
     "resolve_materialized_page_targets",
     "resolved_materialized_page_set",

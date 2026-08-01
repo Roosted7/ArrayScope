@@ -949,12 +949,6 @@ class FrameSession:
     _tile_states_cached_revision: int = -1
     _tile_states_cached_tuple: tuple[MontageTileState, ...] = ()
 
-    @property
-    def parked_dirty_payloads(self) -> frozenset[int]:
-        """Read-only view; the lifecycle machine owns parking (ADR 0051)."""
-
-        return self.lifecycle.parked_tiles
-
     def rearm_visible_parked_payloads(self) -> tuple[int, ...]:
         """Re-arm parked tiles that are visible and have something to present."""
 
@@ -1646,9 +1640,6 @@ class FrameSession:
     def lifecycle_snapshot(self):
         return self.lifecycle.snapshot()
 
-    def is_tile_loaded(self, tile) -> bool:
-        return int(tile.montage_index) in self.rendered_tiles
-
     def viewport_invariant_key(self, plan, view_range, viewport_shape):
         """A cheap key that is stable exactly while a retarget would be a no-op.
 
@@ -2265,20 +2256,6 @@ class FrameSession:
             ).settled
         )
 
-    def expand_viewport_coverage(
-        self,
-        *,
-        view_range,
-        viewport_shape: tuple[int, int],
-        margin_tiles: int = COVERAGE_MARGIN_TILES,
-    ) -> tuple[MontageTile, ...]:
-        additions, _changed = self.retarget_viewport(
-            view_range=view_range,
-            viewport_shape=viewport_shape,
-            coverage_margin_tiles=margin_tiles,
-        )
-        return additions
-
     def mark_materialized(self, rendered: RenderedTile) -> None:
         index = int(rendered.tile.montage_index)
         self.lifecycle.target_invalidated(index)
@@ -2416,27 +2393,6 @@ class FrameSession:
             self.level_generation.set_active_tiles(
                 (*self.level_generation.active_tiles, *level_scope_additions)
             )
-
-    def snapshot_display_tile_payloads(
-        self, source_ids: dict[int, object]
-    ) -> dict[int, DisplayTilePayload]:
-        """Return immutable-by-convention payload wrappers for loaded tiles.
-
-        Arrays are not copied.  Stable wrappers are retained across progressive
-        commits, avoiding repeated dataclass construction and dtype/shape
-        normalization for every tile already on screen.
-        """
-
-        loaded = {int(index) for index in self.rendered_tiles}
-        for stale in tuple(self.display_tile_payloads):
-            if int(stale) not in loaded:
-                self.display_tile_payloads.pop(int(stale), None)
-        lod_factor = self._selected_lod_factor()
-        for tile_number, rendered in self.rendered_tiles.items():
-            self._ensure_display_tile_payload(
-                int(tile_number), rendered, source_ids, lod_factor=lod_factor
-            )
-        return dict(self.display_tile_payloads)
 
     def _current_identity_tile(self, rendered: RenderedTile):
         """Return ``rendered.tile`` expressed in this session's target state."""
@@ -3241,9 +3197,6 @@ class FrameSession:
             refresh_demand=bool(refresh_demand),
         )
 
-    def _session_resident_levels(self, previous_factor: int) -> tuple[int, ...]:
-        return render_lod.session_resident_levels(self, previous_factor)
-
     def _payload_source_anchor(
         self,
         native_shape,
@@ -3503,10 +3456,6 @@ class FrameSession:
             )
         self.lifecycle.level_resident(int(tile_number), key)
         return True
-
-    def release_preview_claim(self, tile_number: int, key) -> None:
-        self.lifecycle.level_declined(int(tile_number), key)
-        self.lod_preview_metadata.pop(key, None)
 
     def _lod_preview_floor_first_fill_active(self, planned_numbers) -> bool:
         """Whether a preview-floor fill is IN PROGRESS (scheduling preference).
@@ -5510,25 +5459,6 @@ class FrameSession:
             self.lifecycle.tile_skipped(index)
             self.mark_tile_state(tile, MontageTileState.SKIPPED)
 
-    def rendered_tuple(self) -> tuple[RenderedTile, ...]:
-        return tuple(
-            sorted(self.rendered_tiles.values(), key=lambda rendered: rendered.tile.montage_index)
-        )
-
-    def loading_tile_tuple(self) -> tuple[MontageTile, ...]:
-        return tuple(
-            self.plan.tiles[index]
-            for index in sorted(self.loading_tiles)
-            if 0 <= index < len(self.plan.tiles)
-        )
-
-    def skipped_tile_tuple(self) -> tuple[MontageTile, ...]:
-        return tuple(
-            self.plan.tiles[index]
-            for index in sorted(self.skipped_tiles)
-            if 0 <= index < len(self.plan.tiles)
-        )
-
     def ensure_tile_states(self) -> tuple[MontageTileState, ...]:
         if int(self._tile_states_cached_revision) == int(self.tile_state_revision) and len(
             self._tile_states_cached_tuple
@@ -5596,17 +5526,6 @@ class FrameSession:
                 tiles.append(int(tile))
         return tuple(sorted(tiles))
 
-    def mark_preview_refinements_dirty(self, tile_numbers) -> None:
-        changed = False
-        for tile_number in tuple(tile_numbers or ()):
-            index = int(tile_number)
-            if index in self.rendered_tiles:
-                self.dirty_payloads[index] = None
-                changed = True
-        if changed:
-            self.flush_pending = True
-            self.final_commit_pending = True
-
     def visible_plan_complete(self) -> bool:
         if self.has_stale_level_presentations():
             return False
@@ -5660,9 +5579,6 @@ class FrameSession:
         self.tile_state_revision += 1
         self._tile_states_cached_revision = -1
         self._tile_states_cached_tuple = ()
-
-    def consume_dirty_rects(self) -> tuple[tuple[int, int, int, int], ...]:
-        return ()
 
     def consume_dirty_tiles(self) -> tuple[int, ...]:
         tiles = tuple(dict.fromkeys(int(tile) for tile in self.dirty_tiles))

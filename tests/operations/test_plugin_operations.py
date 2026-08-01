@@ -21,6 +21,7 @@ import pytest
 from arrayscope.operations import plugins, recipes, registry
 from arrayscope.operations.operation_definitions import export_operation_definition
 from arrayscope.operations.pipeline import ArrayDocument, OperationStep
+from tests import seams
 
 GROUP = plugins.PLUGIN_ENTRY_POINT_GROUP
 
@@ -34,6 +35,8 @@ PLUGIN_SOURCE = '''
 import numpy as np
 
 from arrayscope.operations.plugins import OperationParameter, PluginOperationSpec
+
+from tests import seams
 
 
 def make_reverse_rows():
@@ -130,17 +133,17 @@ def demo_plugin(tmp_path, monkeypatch):
         return list(entry_points) if group == GROUP else []
 
     monkeypatch.setattr(plugins, "entry_points", fake_entry_points)
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
     sys.modules.pop(PLUGIN_MODULE, None)
 
     yield tuple(sorted(ep.name for ep in entry_points))
 
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
     sys.modules.pop(PLUGIN_MODULE, None)
 
 
 def test_plugin_ids_are_discovered_without_importing_the_plugin(demo_plugin):
-    ids = plugins.plugin_operation_ids()
+    ids = tuple(sorted(plugins.discover_plugin_entry_points()))
     assert ids == demo_plugin
     # The op is visible in the registry (get_operation_entry resolves it) but
     # nothing was loaded merely by enumerating names.
@@ -297,10 +300,10 @@ def test_plugin_cannot_hijack_a_builtin_id(monkeypatch, caplog):
         return [hijack] if group == GROUP else []
 
     monkeypatch.setattr(plugins, "entry_points", fake_entry_points)
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
 
     with caplog.at_level("WARNING"):
-        assert plugins.plugin_operation_ids() == ()
+        assert plugins.discover_plugin_entry_points() == {}
     assert any("crop" in record.message for record in caplog.records)
     assert registry.get_operation_entry("crop").operation_type.__name__ == "Crop"
 
@@ -315,10 +318,10 @@ def test_namespaced_id_colliding_with_a_builtin_is_rejected_loudly(monkeypatch, 
         return [collide] if group == GROUP else []
 
     monkeypatch.setattr(plugins, "entry_points", fake_entry_points)
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
 
     with caplog.at_level("WARNING"):
-        assert plugins.plugin_operation_ids() == ()
+        assert plugins.discover_plugin_entry_points() == {}
     assert any("shadows a built-in" in record.message for record in caplog.records)
 
 
@@ -329,27 +332,27 @@ def test_un_namespaced_entry_point_is_rejected_loudly(monkeypatch, caplog):
         return [flat] if group == GROUP else []
 
     monkeypatch.setattr(plugins, "entry_points", fake_entry_points)
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
 
     with caplog.at_level("WARNING"):
-        assert plugins.plugin_operation_ids() == ()
+        assert plugins.discover_plugin_entry_points() == {}
     assert any("un-namespaced" in record.message for record in caplog.records)
 
 
 # --- slab-mapped operations ("apply per slab, broadcast over the rest") -------
 #
 # The specs are installed straight into the cache through the documented
-# ``_reset_plugin_cache`` seam: the subject here is execution and capability
+# ``seams.reset_plugin_cache`` seam: the subject here is execution and capability
 # declaration, not entry-point discovery, which the fixture above already owns.
 
 
 @pytest.fixture
 def spec_cache():
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
     yield None
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
 
 
 def _install(spec_cache, spec):

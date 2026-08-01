@@ -122,9 +122,6 @@ class GlyphAtlas:
             self._entries[key] = entry
         return entry
 
-    def line_height(self, font_key: str, pixel_size: int) -> float:
-        return float(self._font_metrics(font_key, pixel_size).lineSpacing())
-
     def layout_text(self, text: str, font_key: str, pixel_size: int) -> TextLayout:
         """Lay out multi-line text as glyph placements in block pixel space."""
 

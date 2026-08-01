@@ -103,12 +103,6 @@ def prewarm() -> None:
     _GROUP.prewarm()
 
 
-def is_ready() -> bool:
-    """Whether the accelerated path is compiled and available."""
-
-    return NUMBA_AVAILABLE and _GROUP.ready()
-
-
 def reduce_accumulated_if_ready(
     accumulated: np.ndarray,
     y_starts: np.ndarray,

@@ -285,12 +285,6 @@ class ViewState:
         axis_flipped[axis] = bool(flipped)
         return replace(self, axis_flipped=tuple(axis_flipped))
 
-    def with_axis_fftshifted(self, axis, fftshifted):
-        axis = self._validate_axis(axis)
-        axis_fftshifted = list(self.axis_fftshifted)
-        axis_fftshifted[axis] = bool(fftshifted)
-        return replace(self, axis_fftshifted=tuple(axis_fftshifted))
-
     def for_shape(self, shape, *, preserve_flags: bool = True):
         shape = tuple(int(size) for size in shape)
         ndim = len(shape)

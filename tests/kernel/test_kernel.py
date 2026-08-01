@@ -31,6 +31,21 @@ from arrayscope.kernel import (
 from arrayscope.operations.cancellation import EvaluationCancelled
 
 
+def supersede(kernel, family, value):
+    """Advance a supersession family without submitting a replacement.
+
+    Production always supersedes by submitting the successor; this drives the
+    same state transition from a test without a second task in flight.
+    """
+
+    from arrayscope.kernel.task import Supersession
+
+    with kernel._lock:
+        kernel._advance_supersession_locked(Supersession(family, value))
+        kernel._cond.notify_all()
+    kernel._flush_release_wake()
+
+
 class ManualBackend:
     """Pull-on-demand backend: nothing runs until the test says so."""
 
@@ -369,7 +384,7 @@ def test_supersession_cancels_running_non_reusable_work():
     )
     record = backend.take()
     assert record is not None
-    kernel.supersede("tile", "v2")
+    supersede(kernel, "tile", "v2")
     assert record.token.cancelled
 
 
@@ -389,7 +404,7 @@ def test_stale_completion_with_reuse_handler_is_reused():
         on_stale=lambda: stale.append(True),
     )
     record = backend.take()
-    kernel.supersede("stage", "v2")
+    supersede(kernel, "stage", "v2")
     assert not record.token.cancelled  # reusable work may finish
     kernel._execute(record)
     outcomes = dict(drain(kernel))
@@ -412,7 +427,7 @@ def test_completion_racing_supersession_is_stale_at_dispatch():
         on_stale=lambda: stale.append(True),
     )
     backend.run_all()  # completes; event now queued
-    kernel.supersede("t", "v2")  # target changes before the GUI drains
+    supersede(kernel, "t", "v2")  # target changes before the GUI drains
     outcomes = dict(drain(kernel))
     assert done == []
     assert stale == [True]
@@ -510,32 +525,6 @@ def test_cleared_scope_result_no_longer_satisfies_dependencies():
     backend.run_all()
     assert ran == ["a", "a2", "b"]
     drain(kernel)
-
-
-def test_forget_results_releases_completion_memory_without_staleness():
-    kernel, backend = make_manual()
-    ran = []
-    kernel.submit(TaskSpec(key="g1", fn=lambda: None, scope="eval:g1"))
-    kernel.submit(TaskSpec(key="g2", fn=lambda: None, scope="eval:g2"))
-    kernel.submit(TaskSpec(key="live", fn=lambda: ran.append("live"), scope="eval:g1"))
-    assert backend.run_next()  # g1 completes; live still queued
-    assert backend.run_next()  # g2 completes
-    assert kernel.forget_results("eval:g1") == 1
-    assert not kernel.has_completed_task("g1")
-    assert kernel.has_completed_task("g2")
-    backend.run_all()  # forgetting is not a clear: live work still runs
-    assert ran == ["live"]
-    drain(kernel)
-
-
-def test_forget_results_root_prefix_covers_inline_work():
-    from arrayscope.kernel import WorkItem
-
-    kernel, _backend = make_manual()
-    kernel.note_inline_work(WorkItem(key="inline", lane=Lane.BACKEND_COMMIT))
-    assert kernel.has_completed_task("inline")
-    assert kernel.forget_results("") == 1
-    assert not kernel.has_completed_task("inline")
 
 
 # ------------------------------------------------- quotas and deadlines
@@ -934,7 +923,7 @@ def test_shutdown_timeout_is_one_global_deadline_and_lists_running_scopes():
     elapsed = time.monotonic() - before
 
     assert elapsed < 0.2
-    diagnostics = kernel.last_shutdown_diagnostics
+    diagnostics = tuple(dict(row) for row in kernel._last_shutdown_diagnostics)
     assert len(diagnostics) == 4
     assert {row["scope"] for row in diagnostics} == {f"shutdown:test:{index}" for index in range(4)}
 

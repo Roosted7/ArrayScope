@@ -64,7 +64,6 @@ def test_backends_honor_declared_output_dtype(backend, input_dtype, expected):
 
 
 def test_numpy_backend_available_as_fallback():
-    assert "numpy" in fft_backend.available_fft_backends()
     assert fft_backend.resolve_fft_backend("numpy").name == "numpy"
 
 
@@ -82,7 +81,7 @@ def test_pyfftw_backend_available_in_maintained_environment():
     # green; it is not a licence for the maintained env to drop the extra, which
     # would silently turn this coverage into a skip.
     pytest.importorskip("pyfftw")
-    assert "pyfftw" in fft_backend.available_fft_backends()
+    assert fft_backend.resolve_fft_backend("pyfftw").name == "pyfftw"
     data = np.arange(4 * 4, dtype=np.float32).reshape(4, 4)
     backend = fft_backend.resolve_fft_backend("pyfftw")
 

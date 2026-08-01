@@ -48,6 +48,7 @@ from arrayscope.gpu.wgpu_executor import (
     WgpuPlaneExecutor,
     plane_chunk_key,
 )
+from arrayscope.tools import shader_reference
 
 PLANE = 1024
 GRID0 = PLANE // PAGE
@@ -61,6 +62,16 @@ _MODES = {"magnitude": 0, "phase": 1, "real": 2, "imag": 3}
 # workers that concurrency made wgpu-native abort inside
 # request_adapter_sync (full-suite worker crash, 2026-07-18).
 _DEVICE = None
+
+
+def _pool_row(executor, representation):
+    """One representation's row of the executor's pool diagnostics."""
+
+    return next(
+        row
+        for row in executor.pool_diagnostics_snapshot()
+        if row["representation"] == representation
+    )
 
 
 def _shared_device():
@@ -509,10 +520,10 @@ class Scene:
             # axis-aligned tile.
             fw_x = t.src_size[0] / tw
             fw_y = t.src_size[1] / th
-            taps = shader_mapping.wgpu_minification_tap_count(
+            taps = shader_reference.wgpu_minification_tap_count(
                 fw_x, fw_y, enabled=getattr(mapping, "minification_filter", False)
             )
-            tap_coords = shader_mapping.wgpu_minification_taps(
+            tap_coords = shader_reference.wgpu_minification_taps(
                 sxg,
                 syg,
                 fw_x,
@@ -556,16 +567,16 @@ class Scene:
             if nonfinite.any():
                 pos_x = (x0 + np.arange(tw) + 0.5)[np.newaxis, :]
                 pos_y = (y0 + np.arange(th) + 0.5)[:, np.newaxis]
-                hatch = shader_mapping.wgpu_nan_hatch_rgba(
+                hatch = shader_reference.wgpu_nan_hatch_rgba(
                     np.broadcast_to(pos_x, (th, tw)), np.broadcast_to(pos_y, (th, tw))
                 )
                 rgba[nonfinite] = hatch[nonfinite]
             # A4: clip markers (only when clip_indicator is enabled).
             if getattr(mapping, "clip_indicator", False) and not phase_path:
-                rgba[x < lo, :3] = shader_mapping.wgpu_clip_rgb("under")
-                rgba[x > hi, :3] = shader_mapping.wgpu_clip_rgb("over")
+                rgba[x < lo, :3] = shader_reference.wgpu_clip_rgb("under")
+                rgba[x > hi, :3] = shader_reference.wgpu_clip_rgb("over")
             # A1: zoom-gated pixel grid, applied once to the final colour.
-            rgba = shader_mapping.wgpu_pixel_grid_darken(
+            rgba = shader_reference.wgpu_pixel_grid_darken(
                 rgba,
                 sxg,
                 syg,
@@ -797,8 +808,8 @@ def test_clip_indicator_marks_out_of_window_values(scene):
     # The chosen window clips on both sides (else the mirror match proves
     # nothing); the exact marker colours live in the reference, and the shader
     # reproducing them is what ``assert_matches`` above verifies.
-    under = shader_mapping.wgpu_clip_rgb("under")
-    over = shader_mapping.wgpu_clip_rgb("over")
+    under = shader_reference.wgpu_clip_rgb("under")
+    over = shader_reference.wgpu_clip_rgb("over")
     assert np.any(np.all(ref[..., :3] == under, axis=-1)), "window has no under-clip"
     assert np.any(np.all(ref[..., :3] == over, axis=-1)), "window has no over-clip"
 
@@ -849,7 +860,7 @@ def test_minification_filter_averages_the_footprint(scene, tiles, case):
 
     on_map = DisplayMapping("magnitude", 0.0, 6.0, minification_filter=True)
     assert (
-        shader_mapping.wgpu_minification_tap_count(
+        shader_reference.wgpu_minification_tap_count(
             tiles[0].src_size[0] / round(tiles[0].dst_rect[2] * CANVAS[0]),
             tiles[0].src_size[1] / round(tiles[0].dst_rect[3] * CANVAS[1]),
         )
@@ -937,7 +948,7 @@ def test_minification_filter_keeps_a_nonfinite_footprint_nonfinite(scene):
     )
 
     ys, xs = np.mgrid[0:64, 0:64]
-    hatch = shader_mapping.wgpu_nan_hatch_rgba(xs + 0.5, ys + 0.5)
+    hatch = shader_reference.wgpu_nan_hatch_rgba(xs + 0.5, ys + 0.5)
 
     def marked(img):  # only inside the tile; the cleared target is black too
         return np.all(img[:64, :64, :3] == hatch[..., :3], axis=-1)
@@ -993,7 +1004,7 @@ def test_nonfinite_source_renders_nan_hatch_not_lut_entry():
     got = _single_page_scalar_executor("nan-doc", data)
 
     rows, cols = np.mgrid[40:60, 40:60]
-    hatch = shader_mapping.wgpu_nan_hatch_rgba(cols + 0.5, rows + 0.5)
+    hatch = shader_reference.wgpu_nan_hatch_rgba(cols + 0.5, rows + 0.5)
     _assert_matches(got[40:60, 40:60], hatch)
     # The hatch carries both extremes (opaque black AND white) — proof it is
     # not a flat LUT colour standing in for the non-finite values.
@@ -1011,12 +1022,12 @@ def test_missing_page_renders_distinct_hatch_not_black():
     got = _single_page_scalar_executor("miss-doc", None)
 
     ys, xs = np.mgrid[0:PAGE, 0:PAGE]
-    hatch = shader_mapping.wgpu_missing_hatch_rgba(xs + 0.5, ys + 0.5)
+    hatch = shader_reference.wgpu_missing_hatch_rgba(xs + 0.5, ys + 0.5)
     _assert_matches(got, hatch)
     # Not solid black (which is how a genuine zero value would read)...
     assert float(got[..., :3].mean()) > 5.0
     # ...and a different pattern from the high-contrast NaN hatch.
-    assert not np.array_equal(got, shader_mapping.wgpu_nan_hatch_rgba(xs + 0.5, ys + 0.5))
+    assert not np.array_equal(got, shader_reference.wgpu_nan_hatch_rgba(xs + 0.5, ys + 0.5))
 
 
 # ---- row 3(a) growth oracles: multi-plane binding + honest pools ------------
@@ -1475,7 +1486,7 @@ def test_growing_plane_prefix_appends_without_rebuilding_bound_buffers():
     )
 
     assert report.uploads == SP_W // PAGE
-    assert executor.bound_planes == (plane_a, plane_b)
+    assert executor._bound_planes == (plane_a, plane_b)
     assert executor._bind_epoch == bind_epoch
     assert executor._lod_info_buf is lod_buffer
     assert executor._planes_buf is plane_buffer
@@ -1605,11 +1616,11 @@ def test_per_pool_eviction_respects_budget_and_pins():
     assert scalar_keys[2] in resident
     assert scalar_keys[1] not in resident
     assert complex_key in resident
-    assert executor.pool_free_layers(SCALAR_R32F) == 0
-    assert executor.pool_free_layers(COMPLEX_RG32F) == 0
+    assert _pool_row(executor, SCALAR_R32F)["raw_free_layers"] == 0
+    assert _pool_row(executor, COMPLEX_RG32F)["raw_free_layers"] == 0
 
     # Pin everything in the scalar pool: overflow must fail loudly.
-    executor.page_table.pin(scalar_keys[2])
+    executor.page_table.replace_pin_set("test-owner", {scalar_keys[2]})
     with pytest.raises(RuntimeError, match="pinned"):
         executor.submit(
             FrameSubmission(
@@ -1653,7 +1664,7 @@ def test_zero_budget_pool_keeps_every_allocated_layer_usable():
         device=_shared_device(),
     )
     assert executor.pool_budget(COMPLEX_RG32F) == 0
-    assert executor.pool_free_layers(COMPLEX_RG32F) == 1
+    assert _pool_row(executor, COMPLEX_RG32F)["raw_free_layers"] == 1
 
     budget = 6
     executor.ensure_pool_budgets({COMPLEX_RG32F: budget})
@@ -1670,7 +1681,7 @@ def test_zero_budget_pool_keeps_every_allocated_layer_usable():
     # Every layer the raised ceiling promised is reachable: all `budget`
     # pages are resident even though each one is pinned against eviction.
     assert set(executor.page_table.resident_keys()) >= set(keys)
-    assert executor.pool_free_layers(COMPLEX_RG32F) == 0
+    assert _pool_row(executor, COMPLEX_RG32F)["raw_free_layers"] == 0
 
 
 def test_histogram_frontier_survives_same_submission_eviction_pressure():

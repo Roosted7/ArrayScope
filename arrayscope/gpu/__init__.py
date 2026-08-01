@@ -12,7 +12,6 @@ may import Qt, pyqtgraph, or ``arrayscope.display`` — the dependency
 points the other way.
 """
 
-from arrayscope.gpu.chunk_grid import ChunkGrid, WindowDelta
 from arrayscope.gpu.chunk_summary import (
     HISTOGRAM_NORMALIZED_L1_TOLERANCE,
     ChunkHistogramAggregate,
@@ -28,7 +27,6 @@ from arrayscope.gpu.page_table import PageResolution, PageSlot, PageTable, Resid
 
 __all__ = [
     "HISTOGRAM_NORMALIZED_L1_TOLERANCE",
-    "ChunkGrid",
     "ChunkHistogramAggregate",
     "ChunkHistogramSummary",
     "ChunkLod",
@@ -38,7 +36,6 @@ __all__ = [
     "PageTable",
     "ResidencyEntry",
     "ViewTileKey",
-    "WindowDelta",
     "aggregate_chunk_summaries",
     "chunk_key_frontier",
     "chunk_summary_frontier",

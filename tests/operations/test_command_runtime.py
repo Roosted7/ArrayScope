@@ -16,6 +16,7 @@ from arrayscope.operations.command_runtime import (
     run_command_template,
     write_cfl,
 )
+from tests import seams
 
 
 def _fake_npy_command(tmp_path: Path) -> Path:
@@ -294,7 +295,7 @@ def test_pipeline_evaluation_stops_a_command_op_on_a_pre_cancelled_token(tmp_pat
     from arrayscope.operations.pipeline import evaluate
 
     executable = _fake_npy_command(tmp_path)
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
     try:
         spec = _sleeping_command_spec("demo:sleepy-pipeline", executable)
         plugins._SPEC_CACHE[spec.id] = spec
@@ -306,7 +307,7 @@ def test_pipeline_evaluation_stops_a_command_op_on_a_pre_cancelled_token(tmp_pat
             evaluate(np.ones((2, 2), dtype=np.float32), (operation,), evaluation_context=context)
         elapsed = time.monotonic() - started
     finally:
-        plugins._reset_plugin_cache()
+        seams.reset_plugin_cache()
 
     # The token used to be dropped on the floor: apply() took no context and
     # apply_to_region deleted the one it was handed, so this waited out the

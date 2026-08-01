@@ -52,18 +52,6 @@ class LodInfo:
         object.__setattr__(self, "gutter", max(0, int(self.gutter)))
         object.__setattr__(self, "source_origin", _origin2(self.source_origin))
 
-    def reduced_extents(self) -> tuple[int, int]:
-        """Reduced sample count per axis for this payload's native extent.
-
-        The one place the phase rule lives, so a producer and a validating
-        consumer cannot disagree about it.
-        """
-
-        return tuple(
-            reduced_extent(origin, extent, self.factor)
-            for origin, extent in zip(self.source_origin, self.source_shape, strict=True)
-        )
-
 
 def reduced_extent(origin: int, extent: int, factor: int) -> int:
     """Bins a native span covers on a reduction grid aligned to ``origin``.
@@ -380,21 +368,6 @@ def resident_lod_policy(
     )
 
 
-def inner_uv_for_gutter(
-    texture_shape: tuple[int, int], gutter: int = 1
-) -> tuple[float, float, float, float]:
-    height, width = _shape2(texture_shape)
-    gutter = max(0, int(gutter))
-    if gutter <= 0:
-        return (0.0, 0.0, 1.0, 1.0)
-    return (
-        gutter / max(1, width),
-        gutter / max(1, height),
-        (width - gutter) / max(1, width),
-        (height - gutter) / max(1, height),
-    )
-
-
 def _desired_factor_for_texels(
     texels_per_pixel: float, *, target_min: float, target_max: float
 ) -> int:
@@ -493,7 +466,6 @@ __all__ = [
     "LodPolicyDecision",
     "choose_resident_level",
     "factor_xy_for_level",
-    "inner_uv_for_gutter",
     "native_lod_policy",
     "resident_lod_policy",
     "select_lod_demand",

@@ -10,11 +10,8 @@ class CacheStatus(str, Enum):
     COLD = "Cold"
     CACHED = "Cached"
     COMPUTING = "Computing"
-    PREFETCHING = "Prefetching"
     READY = "Ready"
     STALE = "Stale"
-    EVICTED = "Evicted"
-    STALE_IGNORED = "Stale ignored"
     ERROR = "Error"
 
 
@@ -42,10 +39,7 @@ class CacheDiagnosticsSnapshot:
     prefetch_skipped: int = 0
     prefetch_stored: int = 0
     prefetch_stale: int = 0
-    degraded_evaluations: int = 0
-    refused_evaluations: int = 0
     chunked_evaluations: int = 0
-    cancelled_evaluations: int = 0
     scheduler_pending: int = 0
     scheduler_running: int = 0
     scheduler_cancelled: int = 0
@@ -83,11 +77,3 @@ def cache_status_computing(message: str = "Evaluating") -> CacheStatusSnapshot:
 
 def cache_status_error(error) -> CacheStatusSnapshot:
     return CacheStatusSnapshot(CacheStatus.ERROR, f"Evaluation error: {error}")
-
-
-def cache_status_prefetching(message: str = "Prefetching") -> CacheStatusSnapshot:
-    return CacheStatusSnapshot(CacheStatus.PREFETCHING, message)
-
-
-def cache_status_stale_ignored(message: str = "Ignored stale result") -> CacheStatusSnapshot:
-    return CacheStatusSnapshot(CacheStatus.STALE_IGNORED, message)

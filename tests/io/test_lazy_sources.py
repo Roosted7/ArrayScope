@@ -9,7 +9,6 @@ from arrayscope.io.lazy_sources import (
     open_scaled_nifti_source,
     should_load_lazily,
     supports_lazy_source,
-    supports_memmap_source,
 )
 
 
@@ -28,13 +27,6 @@ def _write_cfl(tmp_path, data, name="data"):
     hdr_path.write_text("# Dimensions\n" + " ".join(str(d) for d in dims) + "\n")
     np.asfortranarray(data.astype(np.complex64)).T.tofile(cfl_path)
     return cfl_path
-
-
-def test_supports_memmap_source_suffixes():
-    assert supports_memmap_source(".npy")
-    assert supports_memmap_source(".CFL")
-    assert not supports_memmap_source(".nii.gz")
-    assert not supports_memmap_source(".txt")
 
 
 def test_supports_lazy_source_includes_uncompressed_nifti():

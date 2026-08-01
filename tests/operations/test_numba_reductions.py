@@ -121,4 +121,4 @@ def test_rss_operation_apply_uses_helper():
 def test_prewarm_is_idempotent_and_reports_ready():
     _numba_reductions.prewarm()
     _numba_reductions.prewarm()
-    assert _numba_reductions.is_ready()
+    assert _numba_reductions._GROUP.ready()

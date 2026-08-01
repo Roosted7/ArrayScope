@@ -7,7 +7,6 @@ from arrayscope.window.render_contract import (
     generation_is_current,
     montage_work_token,
     montage_work_token_is_current,
-    session_is_current,
     session_token_is_current,
 )
 
@@ -36,13 +35,10 @@ def test_missing_generation_guard_admits_everything():
 
 def test_session_predicates_agree_on_identity():
     current = _session()
-    assert session_is_current(current, current)
     assert session_token_is_current(current, 1, ("doc", "view"))
     assert not session_token_is_current(current, 2, ("doc", "view"))
     assert not session_token_is_current(current, 1, ("doc", "other"))
-    assert not session_is_current(current, _session(session_id=2))
-    assert not session_is_current(None, current)
-    assert not session_is_current(current, None)
+    assert not session_token_is_current(None, 1, ("doc", "view"))
 
 
 def test_work_token_carries_session_identity_and_generation():

@@ -6,13 +6,13 @@ from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 from arrayscope.display.frame_planner import ANCHORED_CHUNK_SHAPE, FramePlanner, _axis_origins
-from arrayscope.display.region_source import EagerDisplayRegionSource
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.source_anchoring import (
     contiguous_range_start,
     source_anchoring_for_view,
 )
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, Conjugate, Mean
+from tests.display.region_source_double import EagerDisplayRegionSource
 
 TARGET = FrameTarget(
     semantic_key="test", viewport_key=None, presentation_key=None, quality="exact-visible"
@@ -109,7 +109,7 @@ class TestAnchoringDecision:
         state = windowed_state((512, 512), x_range=(100, 200))
         anchoring = source_anchoring_for_view(document, state)
         assert anchoring is not None
-        assert anchoring.any_anchored
+        assert any(start is not None for start in anchoring.anchored_starts)
 
     def test_reduction_on_a_non_display_axis_does_not_raise(self):
         # Regression (ring: default offscreen; pins the render-path crash where

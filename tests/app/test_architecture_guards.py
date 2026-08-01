@@ -764,7 +764,6 @@ def test_window_render_does_not_own_presentation_policy():
     render_text = (ROOT / "arrayscope" / "window" / "render.py").read_text()
     presenter_text = (ROOT / "arrayscope" / "window" / "display_presenter.py").read_text()
     forbidden = (
-        "choose_window_levels",
         "choose_montage_presentation",
         "choose_normal_image_presentation",
         "display_data_bounds",
@@ -1702,7 +1701,6 @@ def test_render_staleness_vocabulary_is_defined_once():
     contract = (ROOT / "arrayscope" / "window" / "render_contract.py").read_text()
     for predicate in (
         "def generation_is_current",
-        "def session_is_current",
         "def session_token_is_current",
         "def montage_work_token",
         "def montage_work_token_is_current",
@@ -1845,3 +1843,41 @@ def test_camera_tile_sets_come_from_one_derivation():
         "these derive a camera tile set from the raw rect instead of "
         f"viewport_tiles: {sorted(found - _RAW_RECT_TILE_SET_EXEMPTIONS)}"
     )
+
+
+def test_shipped_code_never_imports_the_test_suite():
+    """The import street is one-way: tests may reach into the product, never back.
+
+    ``tests/`` imports ``arrayscope/`` freely -- that is what a test is for. The
+    reverse makes the suite a runtime dependency of the product: an installed
+    wheel carries no ``tests`` package, so the import is an ImportError on a
+    path nobody runs until a user does, and it lets test-only scaffolding
+    masquerade as reachable production code (the dead-code gate credits an
+    ``arrayscope/`` caller, so a seam imported from ``tests/`` would read live).
+
+    Scoped to what ships. ``tools/`` and ``experiments/`` run from a checkout,
+    and the harness CLIs there deliberately import the policy modules that live
+    in ``tests/`` (``tools/dead_code.py`` imports ``tests.dead_code``): that is
+    the suite driving itself, not the product depending on it.
+    """
+
+    shipped = [ROOT / "arrayscope"]
+    shipped += [ROOT / name for name in ("wrappers", "packaging") if (ROOT / name).is_dir()]
+
+    offenders = []
+    for directory in shipped:
+        for path in sorted(directory.rglob("*.py")):
+            rel = path.relative_to(ROOT).as_posix()
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    if module == "tests" or module.startswith("tests."):
+                        offenders.append(f"{rel}:{node.lineno} from {module} import ...")
+                elif isinstance(node, ast.Import):
+                    offenders += [
+                        f"{rel}:{node.lineno} import {alias.name}"
+                        for alias in node.names
+                        if alias.name == "tests" or alias.name.startswith("tests.")
+                    ]
+
+    assert not offenders, "shipped code imports the test suite:\n  " + "\n  ".join(offenders)

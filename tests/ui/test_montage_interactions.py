@@ -7,6 +7,7 @@ from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.operations.evaluator import EvaluationResult
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from tests import seams
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
@@ -137,9 +138,7 @@ def _reset_warm_tile_state(win):
     """
 
     win.operation_evaluator.clear_cache()
-    win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change(
-        "test-cold-start"
-    )
+    seams.clear_retained_store(win.renderer._retained_tiled_payload_store(), "test-cold-start")
     # The slice render's session would re-acknowledge its payloads on the next
     # presentation commit; drop it so no warm tile state can be resurrected.
     win.renderer._frame_session = None
@@ -907,7 +906,7 @@ def test_montage_interactive_render_commits_tiled_frame(qtbot):
 
         frame = win._committed_display_frame
         assert frame.is_tiled
-        assert frame.scene.resident_region_ids
+        assert frame.scene._resident_region_ids
     finally:
         win.close()
 
@@ -1216,7 +1215,7 @@ def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatc
         session = win.renderer._frame_session
         effects = FramePipelineEffects(win.renderer, session)
         for index, tile in enumerate(session.plan.tiles):
-            effects.admit_tile_result(tile, _tile_result(tile, 100 * (index + 1)))
+            effects._admit_evaluation_result(tile, _tile_result(tile, 100 * (index + 1)))
         win.renderer.apply_montage_presentation(session)
         _process_events(qtbot)
 

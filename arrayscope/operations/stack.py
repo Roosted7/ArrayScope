@@ -7,22 +7,6 @@ from dataclasses import replace
 from arrayscope.operations.pipeline import OperationStep, evaluate_shape
 
 
-def delete_operation(operations, index, base_shape):
-    operations = tuple(operations)
-    index = _validate_index(index, operations)
-    return validate_operation_stack(operations[:index] + operations[index + 1 :], base_shape)
-
-
-def move_operation(operations, index, direction, base_shape):
-    operations = list(operations)
-    index = _validate_index(index, operations)
-    new_index = index + int(direction)
-    if new_index < 0 or new_index >= len(operations):
-        return tuple(operations)
-    operations[index], operations[new_index] = operations[new_index], operations[index]
-    return validate_operation_stack(tuple(operations), base_shape)
-
-
 def reorder_operations(operations, order, base_shape):
     operations = tuple(operations)
     order = tuple(int(index) for index in order)

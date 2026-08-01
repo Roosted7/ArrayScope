@@ -28,6 +28,15 @@ from tests.ui.helpers import (
     use_wgpu_backend,
 )
 
+
+def _cached_display_tile(evaluator, view_state, colormap_lut=None):
+    """The display cache entry for one view state, or ``None``."""
+
+    return evaluator._display_cache.get(
+        evaluator.display_tile_key(view_state, colormap_lut=colormap_lut)
+    )
+
+
 HEIGHT = 96
 WIDTH = 128
 
@@ -59,7 +68,7 @@ def _assert_scrub_step_never_blanks(qtbot, win, data):
 
     # Display-cache MISS for plane 1 (prefetch is off by default).
     state_1 = win.view_state.with_slice(0, 1)
-    assert win.operation_evaluator.cached_display_tile(state_1) is None
+    assert _cached_display_tile(win.operation_evaluator, state_1) is None
 
     apply_plane(win, 1, reason="test-retention-scrub")
 
@@ -148,7 +157,7 @@ def _assert_stage_backed_scrub_replaces_retained_plane_while_interactive(qtbot, 
     assert win.operation_evaluator.stage_cache.diagnostics().entries >= 1
 
     state_1 = win.view_state.with_slice(0, 1)
-    assert win.operation_evaluator.cached_display_tile(state_1) is None
+    assert _cached_display_tile(win.operation_evaluator, state_1) is None
 
     # Hold the viewport interaction edge open deterministically.  No fixed
     # sleep is involved, and the real governor applies the production quotas.

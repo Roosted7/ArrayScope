@@ -328,42 +328,6 @@ def test_fft_off_the_display_axes_commutes_and_on_them_does_not():
     )
 
 
-def test_fft_pipeline_declares_complete_native_magnitude_envelopes():
-    from arrayscope.operations.capabilities import (
-        pipeline_complete_native_magnitude_envelope,
-        pipeline_has_complete_native_magnitude_envelope,
-    )
-    from arrayscope.operations.pipeline import evaluate as evaluate_pipeline
-
-    rng = np.random.default_rng(20260727)
-    values = rng.standard_normal((7, 9, 8)).astype(np.float32)
-    fft = (CenteredFFT(axis=2),)
-    phase_modulation = (
-        CenteredFFT(axis=2),
-        FFTShift(axis=2),
-        CenteredIFFT(axis=2),
-    )
-
-    for operations in (fft, phase_modulation):
-        assert pipeline_has_complete_native_magnitude_envelope(operations, axis=2)
-        bound = pipeline_complete_native_magnitude_envelope(
-            operations,
-            values,
-            axis=2,
-        )
-        exact = evaluate_pipeline(values, operations)
-        assert bound >= float(np.max(np.abs(exact)))
-
-    assert not pipeline_has_complete_native_magnitude_envelope(
-        (CenteredFFT(axis=1),),
-        axis=2,
-    )
-    assert not pipeline_has_complete_native_magnitude_envelope(
-        (CenteredFFT(axis=2), Conjugate()),
-        axis=2,
-    )
-
-
 def test_montage_axis_fft_on_reduced_display_input_is_numerically_exact():
     """The reason gate 1 exists: reduce-then-FFT == FFT-then-reduce, exactly.
 
@@ -473,43 +437,3 @@ def test_pipeline_windowable_display_axes_is_conservative():
     assert (
         pipeline_windowable_display_axes((object(),), shape, np.float32, display_axes=(1, 2)) == ()
     )
-
-
-def test_operation_execution_class_covers_the_endpoint_table():
-    from arrayscope.operations.capabilities import OperationClass, operation_execution_class
-
-    shape = (4, 8, 16)
-    # Coordinate metadata: moving/relabelling samples, never copying values.
-    assert (
-        operation_execution_class(Crop(axis=1, start=1, stop=4), shape, np.float32)
-        is OperationClass.COORDINATE_METADATA
-    )
-    assert (
-        operation_execution_class(ReverseAxis(axis=0), shape, np.float32)
-        is OperationClass.COORDINATE_METADATA
-    )
-    assert (
-        operation_execution_class(FFTShift(axis=2), shape, np.float32)
-        is OperationClass.COORDINATE_METADATA
-    )
-    assert (
-        operation_execution_class(SplitComplexAxis(axis=0), (1, 8, 16), np.complex64)
-        is OperationClass.COORDINATE_METADATA
-    )
-    # Cheap pointwise value maps sample-time work.
-    assert (
-        operation_execution_class(Conjugate(), shape, np.complex64) is OperationClass.SHADER_ON_READ
-    )
-    # Reductions return small results.
-    assert operation_execution_class(Mean(axis=0), shape, np.float32) is OperationClass.REDUCTION
-    assert (
-        operation_execution_class(RootSumSquares(axis=0), shape, np.float32)
-        is OperationClass.REDUCTION
-    )
-    # Whole-axis transforms are cost-model territory.
-    assert (
-        operation_execution_class(CenteredFFT(axis=1), shape, np.complex64)
-        is OperationClass.GLOBAL_TRANSFORM
-    )
-    # Anything undeclared stays opaque CPU materialization.
-    assert operation_execution_class(object(), shape, np.float32) is OperationClass.OPAQUE

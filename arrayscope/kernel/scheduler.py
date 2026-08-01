@@ -293,14 +293,6 @@ class Kernel:
             on_stale=on_stale,
         )
 
-    def supersede(self, family: object, value: object) -> None:
-        """Advance a supersession family without submitting a replacement."""
-
-        with self._lock:
-            self._advance_supersession_locked(Supersession(family, value))
-            self._cond.notify_all()
-        self._flush_release_wake()
-
     def clear_scope(self, scope: str) -> None:
         """Make every task in ``scope`` (and child scopes) stale.
 
@@ -321,22 +313,6 @@ class Kernel:
                     record.token.cancel()
             self._cond.notify_all()
         self._flush_release_wake()
-
-    def forget_results(self, prefix: str) -> int:
-        """Forget completion memory for ``prefix`` and its child scopes.
-
-        Releases dependency-satisfaction records for long sessions without
-        making anything stale: live tasks keep running, and epochs are
-        untouched. A later submission depending on a forgotten key parks
-        until that key is produced again. Returns the number of keys
-        forgotten. Inline work (``note_inline_work``) completes under the
-        root scope ``""`` and is forgotten by ``forget_results("")``.
-        """
-
-        with self._lock:
-            forgotten = self._purge_completed_locked(str(prefix))
-        emit_trace("kernel_forget_results", prefix=str(prefix), forgotten=int(forgotten))
-        return forgotten
 
     def rerank_unstarted_tile_tasks(
         self,
@@ -615,11 +591,6 @@ class Kernel:
     def visible_backlog(self) -> int:
         with self._lock:
             return int(self._queued_visible + self._running_visible)
-
-    @property
-    def last_shutdown_diagnostics(self) -> tuple[dict[str, object], ...]:
-        with self._lock:
-            return tuple(dict(row) for row in self._last_shutdown_diagnostics)
 
     def has_live_task(self, key: object) -> bool:
         with self._lock:

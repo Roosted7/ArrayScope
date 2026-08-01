@@ -2,20 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 
 DEFAULT_VISIBLE_RENDER_BUDGET_BYTES = 512 * 1024 * 1024
-DEFAULT_PREFETCH_BUDGET_BYTES = 256 * 1024 * 1024
-DEFAULT_MONTAGE_RESIDENCY_BUDGET_BYTES = DEFAULT_VISIBLE_RENDER_BUDGET_BYTES
-
-
-@dataclass(frozen=True)
-class MemoryEstimate:
-    bytes: int
-    label: str
-    over_budget: bool
 
 
 def estimate_array_bytes(shape, dtype, *, channels=1) -> int:
@@ -31,27 +20,6 @@ def estimate_display_image_bytes(shape, dtype, *, rgb=False, histogram=False) ->
     if histogram:
         total += estimate_array_bytes(base_shape, np.float32)
     return int(total)
-
-
-def estimate_montage_tile_grid_bytes(
-    tile_shape, tile_count, dtype, *, rgb=False, histogram=True, gap=1, columns=None
-) -> int:
-    tile_count = max(0, int(tile_count))
-    if tile_count == 0:
-        return 0
-    tile_height, tile_width = (int(tile_shape[0]), int(tile_shape[1]))
-    columns = int(columns or np.ceil(np.sqrt(tile_count)))
-    columns = max(1, min(columns, tile_count))
-    rows = int(np.ceil(tile_count / columns))
-    gap = max(0, int(gap))
-    height = rows * tile_height + gap * max(0, rows - 1)
-    width = columns * tile_width + gap * max(0, columns - 1)
-    return estimate_display_image_bytes((height, width), dtype, rgb=rgb, histogram=histogram)
-
-
-def estimate(label, nbytes, budget_bytes) -> MemoryEstimate:
-    nbytes = int(nbytes)
-    return MemoryEstimate(bytes=nbytes, label=str(label), over_budget=nbytes > int(budget_bytes))
 
 
 def format_bytes(nbytes: int) -> str:

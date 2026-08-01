@@ -20,6 +20,16 @@ from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.display.test_imageview2d import _present_tiled, _view_class
 
 
+def _pool_row(executor, representation):
+    """One representation's row of the executor's pool diagnostics."""
+
+    return next(
+        row
+        for row in executor.pool_diagnostics_snapshot()
+        if row["representation"] == representation
+    )
+
+
 def _wgpu_adapter_available() -> bool:
     try:
         import wgpu
@@ -616,7 +626,7 @@ def test_progressive_upsert_appends_only_new_wgpu_plane(qt_app):
         assert second.binding_incremental_commits == 1
         assert second.binding_full_republications == 0
         assert second.committed_upserts == frozenset({0, 1})
-        assert len(executor.bound_planes) == 2
+        assert len(executor._bound_planes) == 2
         assert executor._planes_buf is plane_buffer
     finally:
         view.close()
@@ -709,7 +719,7 @@ def test_layout_identity_covers_shift_and_transpose():
     assert _display_axes_transposed(transposed) is True
 
 
-def test_page_eviction_readmission_and_remap_force_full_republication(qt_app):
+def test_page_eviction_and_readmission_force_full_republication(qt_app):
     geometry = _montage_geometry((32, 32), 1, 1, loaded=1)
     payload = _typed_scalar_payload(0, np.full((32, 32), 0.2, dtype=np.float32))
     view = _shown_view(qt_app, texture_codec="off")
@@ -730,21 +740,6 @@ def test_page_eviction_readmission_and_remap_force_full_republication(qt_app):
         table.bind(key, slot, nbytes=entry.nbytes, pinned=entry.pinned)
         assert table.generation == generation + 2
 
-        report = _present_tiled(
-            view,
-            np.zeros(geometry.display_shape, dtype=np.float32),
-            geometry=geometry,
-            levels=(0.0, 1.0),
-            histogramRange=(0.0, 1.0),
-            montage_dirty_tiles=(),
-            montage_tile_payloads={0: payload},
-        )
-        assert report.binding_fast_path_commits == 0
-        assert report.binding_full_republications == 1
-
-        generation = table.generation
-        table.remap_slots(lambda current: current)
-        assert table.generation == generation + 1
         report = _present_tiled(
             view,
             np.zeros(geometry.display_shape, dtype=np.float32),
@@ -1271,57 +1266,6 @@ def test_phase1_prepared_stats_skip_redundant_resident_histogram(qt_app):
         view.close()
 
 
-def test_tiled_commit_publishes_histogram_to_shared_widget(qt_app):
-    view = _shown_view(qt_app)
-    try:
-        image = np.linspace(0.0, 8.0, 20 * 30, dtype=np.float32).reshape(20, 30)
-        histogram = image[::2, ::2]
-        geometry = _montage_geometry((20, 30), 1, 1, loaded=1)
-        payloads = {0: _payload(0, image, source_id=("histogram-widget", 0))}
-
-        _present_tiled(
-            view,
-            np.zeros(geometry.display_shape, dtype=np.float32),
-            geometry=geometry,
-            levels=(0.0, 8.0),
-            histogramRange=(0.0, 8.0),
-            histogramPlotData=histogram,
-            montage_tile_payloads=payloads,
-        )
-
-        assert view._histogram_adapter.bound_item is view.histogramImageItem
-        assert np.array_equal(view.histogramImageItem.image, histogram)
-        assert view.histogram.getLevels() == pytest.approx((0.0, 8.0))
-
-        _present_tiled(
-            view,
-            np.zeros(geometry.display_shape, dtype=np.float32),
-            geometry=geometry,
-            levels=(0.0, 8.0),
-            histogramRange=(0.0, 8.0),
-            histogramPlotData=histogram,
-            montage_tile_payloads=payloads,
-        )
-        assert view.lastImageUploadTiming().histogram_bytes == 0
-
-        # ``None`` means this presentation carries no histogram update. A
-        # later tile/level acknowledgement must not erase the most recently
-        # published semantic histogram while its source remains current.
-        _present_tiled(
-            view,
-            np.zeros(geometry.display_shape, dtype=np.float32),
-            geometry=geometry,
-            levels=(0.0, 8.0),
-            histogramRange=(0.0, 8.0),
-            histogramPlotData=None,
-            montage_tile_payloads=payloads,
-        )
-        assert view.histogramPlotSource is histogram
-        assert np.array_equal(view.histogramImageItem.image, histogram)
-    finally:
-        view.close()
-
-
 def test_histogram_frontier_evicted_in_same_submission_never_aborts_commit(qt_app, monkeypatch):
     """Dogfood crash 2026-07-19: pool pressure inside one submission evicted a
     snapshotted histogram frontier page; the executor's loud KeyError then
@@ -1457,64 +1401,6 @@ def test_phase1_windowable_rgb_uses_resident_alpha_histogram_signal(qt_app):
         counts, bounds = evidence.readback.resolve()
         assert bounds == pytest.approx((2.0, 8.0))
         assert int(counts.sum()) == histogram.size
-    finally:
-        view.close()
-
-
-def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app):
-    view = _shown_view(qt_app)
-    try:
-        source_shape = (512, 512)
-        geometry = _montage_geometry(source_shape, 1, 1, loaded=1)
-        coarse = _lod_payload(
-            0,
-            np.full((32, 32), 0.25, np.float32),
-            base_source_id="lod-plane",
-            # Rung labels describe quality role, not pyramid exponent.  The
-            # physical factor is the executor's LOD owner (ADR 0050).
-            level=3,
-            factor=16,
-            source_shape=source_shape,
-            payload_source_shape=(32, 32),
-        )
-        fine = _lod_payload(
-            0,
-            np.full(source_shape, 0.8, np.float32),
-            base_source_id="lod-plane",
-            level=0,
-            source_shape=source_shape,
-        )
-
-        report = _commit(view, geometry, {0: coarse}, levels=(0.0, 1.0))
-        assert report.texture_uploads == 1
-        assert report.presented_identities == {0: coarse.tile_identity}
-        assert view._wgpu_executor._bound_planes[0].max_lod == 4
-        assert view._wgpu_tile_instances()[0].lod_level == 0
-        assert view._wgpu_tile_instances()[0].src_size == (512.0, 512.0)
-        view.getView().setRange(xRange=(0, 512), yRange=(0, 512), padding=0)
-        _rerender_internal(view)
-        assert np.allclose(_center_pixel(view)[:3], 64, atol=2)
-
-        coarse_keys = set(view._wgpu_executor.page_table.resident_keys())
-        report = _commit(view, geometry, {0: fine}, levels=(0.0, 1.0))
-        assert report.texture_uploads == 4
-        assert report.presented_identities == {0: fine.tile_identity}
-        assert view._wgpu_executor._bound_planes[0].max_lod == 4
-        resident_keys = set(view._wgpu_executor.page_table.resident_keys())
-        assert coarse_keys <= resident_keys
-        # The predecessor stays pinned through the synchronous fine upload,
-        # then ownership moves to the committed fine cover. Keeping the
-        # superseded ancestor pinned after that edge would make historical
-        # LODs unevictable even though no visible tile depends on them.
-        assert not any(view._wgpu_executor.page_table.is_pinned(key) for key in coarse_keys)
-        assert all(
-            view._wgpu_executor.page_table.is_pinned(key) for key in resident_keys - coarse_keys
-        )
-        assert {
-            key.document_generation for key in view._wgpu_executor.page_table.resident_keys()
-        } == {view._wgpu_executor._bound_planes[0].document_generation}
-        _rerender_internal(view)
-        assert np.allclose(_center_pixel(view)[:3], 204, atol=2)
     finally:
         view.close()
 
@@ -2097,9 +1983,9 @@ def test_complex_montage_acknowledges_only_resident_content_planes(qt_app):
         report = _commit(view, geometry, payloads, levels=(0.0, 10.0))
         assert set(report.presented_tiles) == {1}
         assert report.presented_identities == {1: ("complex-partial", 1)}
-        assert len(view._wgpu_executor.bound_planes) == 2
+        assert len(view._wgpu_executor._bound_planes) == 2
         assert all(
-            plane.representation == "complex_rg32f" for plane in view._wgpu_executor.bound_planes
+            plane.representation == "complex_rg32f" for plane in view._wgpu_executor._bound_planes
         )
     finally:
         view.close()
@@ -2139,7 +2025,7 @@ def test_complex_montage_mode_switch_is_zero_upload_per_tile(qt_app):
             1: ("complex-montage", 1),
         }
         assert report.texture_uploads == 2
-        assert len(view._wgpu_executor.bound_planes) == 2
+        assert len(view._wgpu_executor._bound_planes) == 2
         view.getView().setRange(xRange=(0, 48), yRange=(0, 16), padding=0)
         _rerender_internal(view)
         target = view._wgpu_executor.read_target()
@@ -3638,7 +3524,7 @@ def test_executor_pool_growth_preserves_atlas_upload_currency(qt_app):
         grown = view._ensure_wgpu_executor({"scalar_r32f": 8})
         assert grown is original
         assert grown.pool_budget("scalar_r32f") >= 8
-        assert grown.pool_allocated_layers("scalar_r32f") >= 8
+        assert _pool_row(grown, "scalar_r32f")["raw_allocated_layers"] >= 8
         assert grown.pool_grows_total == 1
         assert {name: getattr(view, name) for name in trackers} == dict.fromkeys(trackers, 7)
     finally:
@@ -3935,5 +3821,114 @@ def test_incremental_presented_set_drops_a_tile_evicted_between_deltas(qt_app):
         fourth = upsert(5)
         assert fourth.binding_incremental_commits == 1
         assert frozenset(fourth.presented_tiles) == frozenset(range(9))
+    finally:
+        view.close()
+
+
+def test_tiled_commit_publishes_histogram_to_shared_widget(qt_app):
+    view = _shown_view(qt_app)
+    try:
+        image = np.linspace(0.0, 8.0, 20 * 30, dtype=np.float32).reshape(20, 30)
+        histogram = image[::2, ::2]
+        geometry = _montage_geometry((20, 30), 1, 1, loaded=1)
+        payloads = {0: _payload(0, image, source_id=("histogram-widget", 0))}
+
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 8.0),
+            histogramRange=(0.0, 8.0),
+            histogramPlotData=histogram,
+            montage_tile_payloads=payloads,
+        )
+
+        assert view._histogram_adapter._bound_item is view.histogramImageItem
+        assert np.array_equal(view.histogramImageItem.image, histogram)
+        assert view.histogram.getLevels() == pytest.approx((0.0, 8.0))
+
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 8.0),
+            histogramRange=(0.0, 8.0),
+            histogramPlotData=histogram,
+            montage_tile_payloads=payloads,
+        )
+        assert view.lastImageUploadTiming().histogram_bytes == 0
+
+        # ``None`` means this presentation carries no histogram update. A
+        # later tile/level acknowledgement must not erase the most recently
+        # published semantic histogram while its source remains current.
+        _present_tiled(
+            view,
+            np.zeros(geometry.display_shape, dtype=np.float32),
+            geometry=geometry,
+            levels=(0.0, 8.0),
+            histogramRange=(0.0, 8.0),
+            histogramPlotData=None,
+            montage_tile_payloads=payloads,
+        )
+        assert view.histogramPlotSource is histogram
+        assert np.array_equal(view.histogramImageItem.image, histogram)
+    finally:
+        view.close()
+
+
+def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app):
+    view = _shown_view(qt_app)
+    try:
+        source_shape = (512, 512)
+        geometry = _montage_geometry(source_shape, 1, 1, loaded=1)
+        coarse = _lod_payload(
+            0,
+            np.full((32, 32), 0.25, np.float32),
+            base_source_id="lod-plane",
+            # Rung labels describe quality role, not pyramid exponent.  The
+            # physical factor is the executor's LOD owner (ADR 0050).
+            level=3,
+            factor=16,
+            source_shape=source_shape,
+            payload_source_shape=(32, 32),
+        )
+        fine = _lod_payload(
+            0,
+            np.full(source_shape, 0.8, np.float32),
+            base_source_id="lod-plane",
+            level=0,
+            source_shape=source_shape,
+        )
+
+        report = _commit(view, geometry, {0: coarse}, levels=(0.0, 1.0))
+        assert report.texture_uploads == 1
+        assert report.presented_identities == {0: coarse.tile_identity}
+        assert view._wgpu_executor._bound_planes[0].max_lod == 4
+        assert view._wgpu_tile_instances()[0].lod_level == 0
+        assert view._wgpu_tile_instances()[0].src_size == (512.0, 512.0)
+        view.getView().setRange(xRange=(0, 512), yRange=(0, 512), padding=0)
+        _rerender_internal(view)
+        assert np.allclose(_center_pixel(view)[:3], 64, atol=2)
+
+        coarse_keys = set(view._wgpu_executor.page_table.resident_keys())
+        report = _commit(view, geometry, {0: fine}, levels=(0.0, 1.0))
+        assert report.texture_uploads == 4
+        assert report.presented_identities == {0: fine.tile_identity}
+        assert view._wgpu_executor._bound_planes[0].max_lod == 4
+        resident_keys = set(view._wgpu_executor.page_table.resident_keys())
+        assert coarse_keys <= resident_keys
+        # The predecessor stays pinned through the synchronous fine upload,
+        # then ownership moves to the committed fine cover. Keeping the
+        # superseded ancestor pinned after that edge would make historical
+        # LODs unevictable even though no visible tile depends on them.
+        assert not any(view._wgpu_executor.page_table.is_pinned(key) for key in coarse_keys)
+        assert all(
+            view._wgpu_executor.page_table.is_pinned(key) for key in resident_keys - coarse_keys
+        )
+        assert {
+            key.document_generation for key in view._wgpu_executor.page_table.resident_keys()
+        } == {view._wgpu_executor._bound_planes[0].document_generation}
+        _rerender_internal(view)
+        assert np.allclose(_center_pixel(view)[:3], 204, atol=2)
     finally:
         view.close()

@@ -166,9 +166,6 @@ class QtGestureNavigationDriver:
             event.accept()
         return handled
 
-    def is_middle_drag_active(self) -> bool:
-        return self._middle_drag is not None
-
     def cancel_middle_drag(self) -> None:
         if self._middle_drag is not None:
             self._finish_middle_drag(commit_provisional=False)

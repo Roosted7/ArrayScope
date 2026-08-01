@@ -16,8 +16,7 @@ from arrayscope.core.roi import (
     roi_mask,
 )
 from arrayscope.core.roi_store import RoiStore
-from arrayscope.operations import plugins, recipes, registry
-from arrayscope.operations.capabilities import OperationClass
+from arrayscope.operations import plugin_conformance, plugins, recipes, registry
 from arrayscope.operations.evaluator import OperationEvaluator
 from arrayscope.operations.input_slots import (
     SLOT_DIMENSION_SET,
@@ -34,23 +33,22 @@ from arrayscope.operations.input_slots import (
 )
 from arrayscope.operations.pipeline import ArrayDocument, OperationStep
 from arrayscope.operations.plugin_conformance import (
-    characterization_stats,
     characterize_operation,
-    reset_characterization_cache,
 )
 from arrayscope.operations.plugins import PluginOperationSpec
 from arrayscope.window.operation_slots import OperationSlotSourcesMixin
+from tests import seams
 
 
 @pytest.fixture(autouse=True)
 def _clean_plugin_state():
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
-    reset_characterization_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
+    seams.reset_plugin_cache()
     yield
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
-    reset_characterization_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
+    seams.reset_plugin_cache()
 
 
 def _slot_spec(operation_id="test-slots:add"):
@@ -124,7 +122,7 @@ def test_every_slot_identity_component_partitions_characterization_cache(changed
     characterize_operation(spec, (3, 4), "float32", slots={"reference": changed})
 
     assert calls == 2
-    assert characterization_stats()["cache_hits"] == 1
+    assert plugin_conformance._CHARACTERIZATION_STATS["cache_hits"] == 1
 
 
 def test_multi_input_is_opaque_even_when_definition_claims_regions():
@@ -137,7 +135,7 @@ def test_multi_input_is_opaque_even_when_definition_claims_regions():
         resolved_slots={"reference": source},
     )
 
-    assert operation.execution_class is OperationClass.OPAQUE
+    assert operation._region_honored() is False
     assert operation.capabilities((3, 4), np.dtype("float32")).blocking_axes == (0, 1)
     np.testing.assert_array_equal(
         operation.apply(np.zeros((3, 4), dtype=np.float32)),
@@ -415,8 +413,7 @@ def test_roi_geometry_invalidates_only_the_dependent_operation_evaluation():
     )
     window._set_document(ArrayDocument(window.base_data, steps=(OperationStep(operation),)))
 
-    initial = window.operation_evaluator.current_data().copy()
-    assert window.operation_evaluator.derived_evaluations == 1
+    initial = window.operation_evaluator.document.materialize().copy()
 
     # An unrelated ROI geometry update is not even rebuilt, so the cached
     # derived array remains the exact same evaluation.
@@ -428,8 +425,6 @@ def test_roi_geometry_invalidates_only_the_dependent_operation_evaluation():
         )
     )
     assert window._refresh_operation_slot_bindings(roi_id="roi-b", render=False) is False
-    window.operation_evaluator.current_data()
-    assert window.operation_evaluator.derived_evaluations == 1
 
     # Label/color are presentation metadata: rebuilding the referenced source
     # compares equal and must also preserve the cached evaluation.
@@ -437,8 +432,6 @@ def test_roi_geometry_invalidates_only_the_dependent_operation_evaluation():
         RoiSelection("roi-a", "Renamed", first_geometry, color=(1, 2, 3))
     )
     assert window._refresh_operation_slot_bindings(roi_id="roi-a", render=False) is False
-    window.operation_evaluator.current_data()
-    assert window.operation_evaluator.derived_evaluations == 1
 
     window.roi_store = window.roi_store.upsert(
         RoiSelection(
@@ -448,8 +441,7 @@ def test_roi_geometry_invalidates_only_the_dependent_operation_evaluation():
         )
     )
     assert window._refresh_operation_slot_bindings(roi_id="roi-a", render=False) is True
-    moved = window.operation_evaluator.current_data()
-    assert window.operation_evaluator.derived_evaluations == 2
+    moved = window.operation_evaluator.document.materialize()
     assert moved.sum() > initial.sum()
 
     window.roi_store = window.roi_store.remove("roi-a")

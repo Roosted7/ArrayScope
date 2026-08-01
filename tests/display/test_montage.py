@@ -84,32 +84,19 @@ def test_montage_plan_tile_at_returns_source_tile_and_ignores_gap():
     assert plan.tile_at(3, 0) is None
 
 
-def test_montage_tile_status_at_global_point_distinguishes_tile_and_gap():
+def test_montage_tile_at_global_point_distinguishes_tile_and_gap():
     from arrayscope.core.view_state import ViewState
 
     state = ViewState.from_shape((2, 2, 3)).with_montage_axis(2, indices=(0, 1, 2), text=":")
     plan = montage.make_montage_plan(
         state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=3, gap=1
     )
-    states = (
-        montage.MontageTileState.LOADED,
-        montage.MontageTileState.LOADING,
-        montage.MontageTileState.SKIPPED,
-    )
 
-    assert (
-        montage.tile_status_at_global_point(plan, states, 1, 1).state
-        == montage.MontageTileState.LOADED
-    )
-    assert (
-        montage.tile_status_at_global_point(plan, states, 4, 1).state
-        == montage.MontageTileState.LOADING
-    )
-    assert (
-        montage.tile_status_at_global_point(plan, states, 7, 1).state
-        == montage.MontageTileState.SKIPPED
-    )
-    assert montage.tile_status_at_global_point(plan, states, 2, 1) is None
+    assert plan.tile_at(1, 1).montage_index == 0
+    assert plan.tile_at(4, 1).montage_index == 1
+    assert plan.tile_at(7, 1).montage_index == 2
+    # The one-pixel gap between tiles belongs to no tile.
+    assert plan.tile_at(2, 1) is None
 
 
 def _field_montage_plan():

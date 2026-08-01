@@ -354,9 +354,6 @@ class WindowLayoutManager:
             dock, bool(visible), reason="progressive", preserve_canvas=preserve_canvas
         )
 
-    def set_dock_visible_preserving_canvas(self, dock, visible):
-        return self.set_managed_dock_visible(dock, visible, reason="preserve-canvas")
-
     def set_managed_dock_visible(
         self, dock, visible, *, reason, preserve_canvas=True, raise_dock=True
     ):
@@ -665,43 +662,6 @@ class WindowLayoutManager:
             extra.append((dock, int(target), spec[2]))
         return tuple(dock_extents) + tuple(extra)
 
-    def _window_size_excluding_docked_panels(self):
-        win = self.window
-        size = Qt.QtCore.QSize(win.size())
-        if win.isMaximized() or win.isFullScreen():
-            return size
-        width_delta = 0
-        height_delta = 0
-        separator = self._dock_separator_extent()
-        for dock in self._managed_docks():
-            if dock is None or not dock.isVisible():
-                continue
-            panel_manager = getattr(win, "panel_manager", None)
-            panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
-            if panel is not None and panel.location != PanelLocation.DOCKED:
-                continue
-            area = self._dock_area_for_transition(dock)
-            if self._is_horizontal_dock_area(area):
-                extent = int(dock.width())
-                if extent > 0:
-                    width_delta += extent + separator
-            else:
-                extent = int(dock.height())
-                if extent > 0:
-                    height_delta += extent + separator
-        minimum = self._dockless_minimum_window_size()
-        return Qt.QtCore.QSize(
-            max(int(minimum.width()), int(size.width()) - int(width_delta)),
-            max(int(minimum.height()), int(size.height()) - int(height_delta)),
-        )
-
-    def _restore_saved_viewport_session(self):
-        viewport = self._saved_viewport_session()
-        if viewport is None:
-            return
-        self._begin_settings_viewport_continuity(viewport)
-        self._restore_viewport_continuity_shape()
-
     def _saved_viewport_session(self) -> ViewportSession | None:
         value = self.window._settings.value("viewport_session")
         if value is None:
@@ -740,36 +700,6 @@ class WindowLayoutManager:
         if callable(restore_viewport_shape):
             restore_viewport_shape()
 
-    def _viewport_shape_matches(self, viewport_shape) -> bool:
-        try:
-            target_height = max(1, int(viewport_shape[0]))
-            target_width = max(1, int(viewport_shape[1]))
-            size = self.window.img_view.graphicsView.viewport().size()
-            return (
-                abs(int(size.height()) - target_height) <= 1
-                and abs(int(size.width()) - target_width) <= 1
-            )
-        except Exception:
-            return True
-
-    def _visible_docked_panel_deltas(self) -> tuple[int, int]:
-        width_delta = 0
-        height_delta = 0
-        separator = self._dock_separator_extent()
-        for dock in self._managed_docks():
-            if dock is None or not dock.isVisible():
-                continue
-            panel_manager = getattr(self.window, "panel_manager", None)
-            panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
-            if panel is not None and panel.location != PanelLocation.DOCKED:
-                continue
-            area = self._dock_area_for_transition(dock)
-            if self._is_horizontal_dock_area(area):
-                width_delta += max(0, int(dock.width())) + separator
-            else:
-                height_delta += max(0, int(dock.height())) + separator
-        return width_delta, height_delta
-
     def resize_to_dockless_viewport_shape(self, viewport_shape) -> bool:
         win = self.window
         if win.isMaximized() or win.isFullScreen():
@@ -800,31 +730,6 @@ class WindowLayoutManager:
         self.refresh_view_geometry()
         return True
 
-    def dockless_window_size_for_viewport_shape(self, viewport_shape):
-        try:
-            target_height = max(1, int(viewport_shape[0]))
-            target_width = max(1, int(viewport_shape[1]))
-            viewport = self.window.img_view.graphicsView.viewport()
-            current = viewport.size()
-        except Exception:
-            return None
-        base = self._window_size_excluding_docked_panels()
-        if base is None or not base.isValid() or base.isEmpty():
-            base = Qt.QtCore.QSize(self.window.size())
-        return Qt.QtCore.QSize(
-            max(1, int(base.width()) + target_width - max(1, int(current.width()))),
-            max(1, int(base.height()) + target_height - max(1, int(current.height()))),
-        )
-
-    def _dockless_minimum_window_size(self):
-        minimum = Qt.QtCore.QSize(320, 240)
-        central = self.window.centralWidget()
-        if central is not None:
-            minimum = minimum.expandedTo(central.minimumSizeHint()).expandedTo(
-                central.minimumSize()
-            )
-        return minimum
-
     def _current_viewport_session(self) -> ViewportSession | None:
         current = getattr(self.window, "_current_viewport_session", None)
         if not callable(current):
@@ -850,23 +755,6 @@ class WindowLayoutManager:
             except Exception as exc:
                 handle_ui_exception("restore managed dock extents", exc)
 
-    def _dock_extent_for_area(self, dock, area=None):
-        if area is None:
-            area = self._dock_area_for_transition(dock)
-        state = self._state_for(dock)
-        if dock.isVisible():
-            current = dock.width() if self._is_horizontal_dock_area(area) else dock.height()
-            if current > 0:
-                state.reserved_extent = max(int(state.reserved_extent or 0), int(current))
-        fallback_extent = self._default_dock_extent(dock, area)
-        panel_extent = max(int(state.reserved_extent or 0), fallback_extent)
-        state.reserved_extent = panel_extent
-        extent = panel_extent + self._dock_separator_extent()
-        state.last_area = area
-        width_delta = extent if self._is_horizontal_dock_area(area) else 0
-        height_delta = 0 if self._is_horizontal_dock_area(area) else extent
-        return width_delta, height_delta
-
     def _dock_area_for_transition(self, dock):
         panel_manager = getattr(self.window, "panel_manager", None)
         panel = None if panel_manager is None else panel_manager.panel_for_dock(dock)
@@ -876,19 +764,6 @@ class WindowLayoutManager:
         if state.last_area is not None:
             return state.last_area
         return self.window.dockWidgetArea(dock)
-
-    def _default_dock_extent(self, dock, area):
-        hint = dock.sizeHint().expandedTo(dock.minimumSizeHint()).expandedTo(dock.minimumSize())
-        body = Qt.QtWidgets.QDockWidget.widget(dock)
-        if body is not None:
-            hint = (
-                hint.expandedTo(body.sizeHint())
-                .expandedTo(body.minimumSizeHint())
-                .expandedTo(body.minimumSize())
-            )
-        if self._is_horizontal_dock_area(area):
-            return max(220, int(hint.width()))
-        return max(140, int(hint.height()))
 
     def available_client_size(self):
         """Largest client-area size that still fits the screen's work area.
@@ -956,16 +831,6 @@ class WindowLayoutManager:
             clamped_width = max(clamped_width, int(minimum.width()))
             clamped_height = max(clamped_height, int(minimum.height()))
         return clamped_width, clamped_height
-
-    def _dock_separator_extent(self):
-        try:
-            return int(
-                self.window.style().pixelMetric(
-                    Qt.QtWidgets.QStyle.PixelMetric.PM_DockWidgetSeparatorExtent
-                )
-            )
-        except Exception:
-            return 6
 
     def _is_horizontal_dock_area(self, area):
         return area in (

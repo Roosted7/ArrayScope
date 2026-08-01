@@ -18,7 +18,7 @@ from arrayscope.display.pyramid import (
     materialize_lod_page,
     plan_source_grid_pages,
 )
-from arrayscope.display.shader_mapping import ShaderComponent, ShaderMapping, TexturePlaneKind
+from arrayscope.display.shader_mapping import TexturePlaneKind
 from arrayscope.display.source_anchoring import SourceAnchoring
 from arrayscope.kernel.task import Lane, Priority
 from arrayscope.operations.evaluator import OperationEvaluator
@@ -29,9 +29,6 @@ from arrayscope.operations.pipeline import (
     Conjugate,
     FFTShift,
     Mean,
-)
-from arrayscope.operations.pipeline import (
-    evaluate as evaluate_pipeline,
 )
 from arrayscope.operations.regions import region_shape
 from arrayscope.operations.stage_fanin import StageFanInState
@@ -489,197 +486,6 @@ def test_reusable_preview_keeps_captured_route_and_source_anchor():
     assert key.plans[0].valid_source_rect_yx == (10, 14, 20, 26)
 
 
-def test_evaluate_shared_preview_fans_out_display_only_payloads():
-    session = _session()
-    demand = _demand(0)
-    tiles = session.plan.tiles[:2]
-
-    previews = effects.evaluate_shared_preview(
-        session,
-        tiles[0],
-        tiles,
-        demand=demand,
-        level=1,
-        cancellation_token=None,
-        shader_display=False,
-        evaluation_context=None,
-    )
-
-    assert [row[0] for row in previews] == [0, 1]
-    for row in previews:
-        (
-            tile_number,
-            key,
-            pages,
-            histogram,
-            shader_mapping,
-            texture_kind,
-            level_data,
-            level_stats,
-        ) = row
-        assert key.source_id == ("semantic", int(tile_number))
-        assert key.level_xy == (1, 1)
-        assert _stored_preview_values(pages).shape == (2, 3)
-        assert histogram is None
-        assert shader_mapping is not None
-        assert texture_kind is not None
-        assert level_data is not None
-        assert level_stats is not None
-        assert int(level_stats.source_index) == int(tile_number)
-        assert level_stats.bounds == (
-            float(np.min(np.asarray(session.document.base_data)[..., int(tile_number)])),
-            float(np.max(np.asarray(session.document.base_data)[..., int(tile_number)])),
-        )
-        np.testing.assert_allclose(
-            _stored_preview_values(pages),
-            effects.reduce_display_payload_axes(
-                np.asarray(session.document.base_data)[..., int(tile_number)],
-                (2, 2),
-            ),
-        )
-
-
-def test_shared_preview_uses_the_same_source_alignment_owner_as_per_tile(monkeypatch):
-    session = _session()
-    tiles = session.plan.tiles[:2]
-    original = effects.read_reduced_preview_base_and_state
-    observed = []
-
-    def capture(*args, source_aligned=False, **kwargs):
-        observed.append(bool(source_aligned))
-        return original(*args, source_aligned=source_aligned, **kwargs)
-
-    monkeypatch.setattr(effects, "read_reduced_preview_base_and_state", capture)
-    session.source_anchoring = object()
-    assert effects.evaluate_shared_preview(
-        session,
-        tiles[0],
-        tiles,
-        demand=_demand(0),
-        level=1,
-        cancellation_token=None,
-        shader_display=False,
-        evaluation_context=None,
-    )
-    session.source_anchoring = None
-    assert effects.evaluate_shared_preview(
-        session,
-        tiles[0],
-        tiles,
-        demand=_demand(0),
-        level=1,
-        cancellation_token=None,
-        shader_display=False,
-        evaluation_context=None,
-    )
-
-    assert observed == [True, False]
-
-
-def test_shared_preview_uses_round_owned_floor_unchanged():
-    session = _session()
-    session.lod_preview_level = 3
-    demand = _demand(1)
-    tiles = session.plan.tiles[:2]
-
-    previews = effects.evaluate_shared_preview(
-        session,
-        tiles[0],
-        tiles,
-        demand=demand,
-        cancellation_token=None,
-        shader_display=False,
-        evaluation_context=None,
-    )
-
-    assert len(previews) == 2
-    assert {row[1].level_xy for row in previews} == {(3, 3)}
-
-
-def test_full_montage_preview_uses_screen_scale_floor_chosen_for_round():
-    height = width = 336
-    y, x = np.indices((height, width), dtype=np.float32)
-    data = np.stack(tuple(y * 1000.0 + x + offset for offset in (0.0, 1.0, 2.0)), axis=2)
-    session = _session(data)
-    demand = LodDemand(
-        desired_level=2,
-        desired_factor=4,
-        desired_factor_xy=(4, 4),
-        acceptable_levels=(1, 2, 3),
-        source_texels_per_pixel_xy=(7.58, 7.58),
-        reason="captured 272-tile montage scale",
-    )
-    session.lod_preview_level = 5
-
-    previews = effects.evaluate_shared_preview(
-        session,
-        session.plan.tiles[0],
-        session.plan.tiles,
-        demand=demand,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-
-    assert {row[1].level_xy for row in previews} == {(5, 5)}
-    for row in previews:
-        values = _stored_preview_values(row[2])
-        assert values.shape == (11, 11)
-        assert float(np.ptp(values)) > 0.0
-
-
-def test_shared_preview_slices_the_reduced_volume_without_per_tile_slab_plans(monkeypatch):
-    session = _session()
-    tiles = session.plan.tiles[:2]
-
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("shared preview must not plan one document slab per tile")
-
-    monkeypatch.setattr(effects, "evaluate_image_snapshot", forbidden)
-
-    previews = effects.evaluate_shared_preview(
-        session,
-        tiles[0],
-        tiles,
-        demand=_demand(0),
-        level=2,
-        cancellation_token=None,
-        shader_display=False,
-        evaluation_context=None,
-    )
-
-    assert len(previews) == 2
-
-
-def test_shared_preview_plans_only_its_selected_page_identity(monkeypatch):
-    session = _session()
-    tiles = session.plan.tiles[:2]
-    original = effects.plan_source_grid_pages
-    planned_content_keys = []
-
-    def capture(*args, **kwargs):
-        planned_content_keys.append(kwargs["content_key"])
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(effects, "plan_source_grid_pages", capture)
-    monkeypatch.setattr(render_lod, "plan_source_grid_pages", capture)
-
-    previews = effects.evaluate_shared_preview(
-        session,
-        tiles[0],
-        tiles,
-        demand=_demand(0),
-        level=2,
-        cancellation_token=None,
-        shader_display=False,
-        evaluation_context=None,
-    )
-
-    assert len(previews) == 2
-    assert len(planned_content_keys) == len(tiles)
-    assert all(key[-1][-1] == effects.SHARED_PREVIEW_ROUTE for key in planned_content_keys)
-
-
 def test_reduced_preview_base_samples_display_axes_before_operation_input():
     session = _session()
     demand = _demand(1)
@@ -710,317 +516,6 @@ def test_montage_axis_fft_is_admitted_only_through_cacheable_shared_stage():
     # cacheable and the tile requests prove they share one real-document
     # reduced region. This is stricter than merely asking whether it commutes.
     assert effects.preview_pipeline_is_tile_local(session, tile) is True
-
-
-def test_pyqtgraph_shared_fft_preview_retains_reduced_complex_source_format():
-    data = np.arange(8 * 10 * 8, dtype=np.float32).reshape(8, 10, 8)
-    session = _session(data)
-    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
-    session.rgb = True
-    session.shader_display = False
-    session.lod_preview_level = 2
-
-    rows = effects.evaluate_shared_preview(
-        session,
-        session.plan.tiles[0],
-        session.plan.tiles,
-        demand=_demand(1),
-        level=2,
-        cancellation_token=None,
-        shader_display=False,
-        evaluation_context=None,
-    )
-
-    assert rows
-    for _tile_number, _key, pages, histogram, mapping, texture_kind, *_rest in rows:
-        assert texture_kind == TexturePlaneKind.COMPLEX_RG32F
-        assert np.iscomplexobj(_stored_preview_values(pages))
-        assert histogram is not None
-        assert mapping is not None
-
-
-def test_shared_fft_prepares_native_evidence_without_a_second_full_transform(monkeypatch):
-    data = np.arange(128 * 128 * 8, dtype=np.float32).reshape(128, 128, 8)
-    session = _session(data)
-    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
-    session.shader_display = True
-    session.lod_preview_level = 2
-    original = effects._evaluate_reduced_preview_volume
-    input_shapes = []
-
-    def counted(*args, **kwargs):
-        input_shapes.append(tuple(int(size) for size in np.shape(args[1])))
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(effects, "_evaluate_reduced_preview_volume", counted)
-    rows = effects.evaluate_shared_preview(
-        session,
-        session.plan.tiles[0],
-        session.plan.tiles,
-        demand=_demand(1),
-        level=2,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-
-    assert len(rows) == len(session.plan.tiles)
-    assert input_shapes == [(32, 32, 8)]
-    assert all(row[-1].bounds is not None for row in rows)
-
-
-def test_shared_fft_native_floor_reuses_one_input_read_for_pixels_and_bounds(monkeypatch):
-    data = np.arange(16 * 16 * 8, dtype=np.float32).reshape(16, 16, 8)
-    session = _session(data)
-    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
-    session.shader_display = True
-    session.lod_preview_level = 0
-    original = effects.read_reduced_preview_base_and_state
-    factors = []
-
-    def counted(*args, **kwargs):
-        factors.append(tuple(kwargs["factor_xy"]))
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(effects, "read_reduced_preview_base_and_state", counted)
-    rows = effects.evaluate_shared_preview(
-        session,
-        session.plan.tiles[0],
-        session.plan.tiles,
-        demand=_demand(0),
-        level=0,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-
-    assert rows
-    assert factors == [(1, 1)]
-
-
-@pytest.mark.parametrize("extreme_yx", [(8, 8), (9, 9)])
-@pytest.mark.parametrize("extreme_value", [-1000.0, 1000.0])
-def test_preview_cohort_level_evidence_contains_the_native_extremes(
-    extreme_yx,
-    extreme_value,
-):
-    """Round levels from the preview cohort must still contain what is drawn.
-
-    The displayed page is a real box mean, while the cohort bounds come from
-    the transformed native plane the same preview worker held before reducing
-    those pixels. A lone extreme must therefore affect the mean by the same
-    amount and remain verbatim in the evidence regardless of stride alignment.
-    FFT is the realistic case: k-space is one sharp DC peak on an otherwise dim
-    field, so losing that one source value would mis-scale the whole montage.
-    """
-
-    data = np.zeros((16, 16, 3), dtype=np.float32)
-    data[extreme_yx[0], extreme_yx[1], :] = extreme_value
-    session = _session(data)
-    session.lod_preview_level = 2
-
-    rows = effects.evaluate_shared_preview(
-        session,
-        session.plan.tiles[0],
-        session.plan.tiles,
-        demand=_demand(0),
-        level=2,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-
-    assert rows
-    _tile, key, pages, _histogram, _mapping, _kind, _level_data, stats = rows[0]
-    assert stats is not None, "preview cohort must carry level evidence"
-    assert key.reducer == "mean"
-    stored = _stored_preview_values(pages)
-    assert float(
-        stored[np.unravel_index(np.argmax(np.abs(stored)), stored.shape)]
-    ) == pytest.approx(extreme_value / 16.0)
-    assert stats.bounds[0] <= float(np.min(data))
-    assert stats.bounds[1] >= float(np.max(data))
-
-
-@pytest.mark.parametrize("extreme_value", [-1000.0, 1000.0])
-def test_preview_cohort_bounds_survive_above_the_evidence_sample_limit(extreme_value):
-    """The same guarantee, at a scale that defeats a bounded sample.
-
-    The sibling test above uses a 16x16x3 source: 768 display positions, well
-    under ``REFINED_TILE_SAMPLE_LIMIT`` (8192), so every position is visited
-    and any subsampling strategy passes it trivially. That made it unable to
-    fail for the one defect it exists to catch.
-
-    A field source is 336x336 per slice, so a cohort is millions of positions
-    against that same 8192 cap -- three orders of magnitude of subsampling. A
-    lone sharp peak is exactly what falls through, and k-space is precisely a
-    lone sharp peak on an otherwise dim field, so this is the shape of the real
-    data rather than an adversarial one.
-
-    Measured: a bounded-sample implementation reports ``(-0.5, 0.5)`` here for
-    a native maximum of 1000.0 -- a degenerate window padded around an all-zero
-    sample, mis-scaling the montage by three orders of magnitude, while the
-    sibling test stays green.
-    """
-
-    data = np.zeros((336, 336, 8), dtype=np.float32)
-    data[169, 169, :] = extreme_value  # off every coarse grid, one position only
-    session = _session(data)
-    session.lod_preview_level = 2
-
-    rows = effects.evaluate_shared_preview(
-        session,
-        session.plan.tiles[0],
-        session.plan.tiles,
-        demand=_demand(0),
-        level=2,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-
-    assert rows
-    stats = rows[0][-1]
-    assert stats is not None, "preview cohort must carry level evidence"
-    assert stats.bounds[0] <= float(np.min(data)), (
-        f"cohort lower bound {stats.bounds[0]} excludes native minimum {np.min(data)}"
-    )
-    assert stats.bounds[1] >= float(np.max(data)), (
-        f"cohort upper bound {stats.bounds[1]} excludes native maximum {np.max(data)}"
-    )
-
-
-@pytest.mark.parametrize("extreme_value", [-1000.0, 1000.0])
-def test_shared_fft_analytic_bounds_cover_a_field_scale_native_peak(extreme_value):
-    data = np.zeros((336, 336, 8), dtype=np.float32)
-    data[169, 169, :] = extreme_value
-    session = _session(data)
-    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
-    session.shader_display = True
-    session.lod_preview_level = 2
-
-    rows = effects.evaluate_shared_preview(
-        session,
-        session.plan.tiles[0],
-        session.plan.tiles,
-        demand=_demand(0),
-        level=2,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-
-    exact = evaluate_pipeline(data, session.document.enabled_operations)
-    exact_low = float(np.min(np.real(exact)))
-    exact_high = float(np.max(np.real(exact)))
-    for row in rows:
-        stats = row[-1]
-        assert stats is not None
-        assert stats.bounds[0] <= exact_low
-        assert stats.bounds[1] >= exact_high
-
-
-@pytest.mark.parametrize(
-    ("distribution", "max_looseness"),
-    [("non-negative", 1.01), ("zero-mean", 1.30)],
-)
-def test_shared_fft_analytic_bounds_stay_tight_enough_to_be_worth_using(
-    distribution,
-    max_looseness,
-):
-    """Containment alone is not enough: a huge window is legal and useless.
-
-    The analytic envelope replaces an exact scan, so it is conservative by
-    construction and every containment test would still pass if it widened to
-    ``(-1e30, 1e30)``. That would satisfy R3 and destroy the image, so the
-    envelope needs an upper bound on its looseness as well as a guarantee of
-    coverage.
-
-    ``max_k|X_k| <= sum_m|x_m| / sqrt(N)`` is exactly attained whenever the DC
-    bin dominates, which is the case for the non-negative magnitude data a
-    montage-axis FFT is usually taken over -- so the realistic case costs no
-    contrast at all. Zero-mean data is the unfavourable direction, where
-    cancellation in the DC bin leaves the bound above the true peak.
-    """
-
-    rng = np.random.default_rng(7)
-    raw = rng.normal(size=(64, 64, 8))
-    data = (np.abs(raw) if distribution == "non-negative" else raw).astype(np.float32)
-    session = _session(data)
-    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
-    session.shader_display = True
-    session.lod_preview_level = 2
-
-    rows = effects.evaluate_shared_preview(
-        session,
-        session.plan.tiles[0],
-        session.plan.tiles,
-        demand=_demand(0),
-        level=2,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-
-    exact = evaluate_pipeline(data, session.document.enabled_operations)
-    exact_peak = float(np.max(np.abs(exact)))
-    envelope = float(rows[0][-1].bounds[1])
-
-    assert envelope >= exact_peak, "envelope must still contain the true peak"
-    looseness = envelope / exact_peak
-    assert looseness <= max_looseness, (
-        f"{distribution} envelope is {looseness:.3f}x the true peak "
-        f"({envelope:.3f} vs {exact_peak:.3f}); the window is too wide to be useful"
-    )
-
-
-def test_pyqtgraph_per_tile_fft_preview_also_retains_the_complex_source_format():
-    """The per-tile reduced route carries the same storm-safety invariant.
-
-    ``can_evaluate_reduced_preview`` used to decline CPU-composited complex
-    outright, because a ``(h, w, 3)`` display plane is neither scalar nor
-    complex and ``render.lod._reducer_format_for_rendered`` raises on it: the
-    rung failed, the pipeline replanned, and it failed again -- a real session
-    logged 18314 admissions against 773 completions. That blanket decline is
-    gone, so the safety now rests on every preview route emitting a complex
-    plane instead. ``evaluate_shared_preview`` is covered above; this is the
-    other route, reached through ``evaluate_preview_tile`` when the shared
-    batch is not used, and it was previously untested.
-    """
-
-    data = np.arange(8 * 10 * 8, dtype=np.float32).reshape(8, 10, 8)
-    session = _session(data)
-    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
-    session.rgb = True
-    session.shader_display = False
-    session.lod_preview_level = 2
-    tile = session.plan.tiles[0]
-
-    assert effects.can_evaluate_reduced_preview(session, tile) is True
-
-    result = effects.evaluate_preview_tile(
-        session,
-        tile,
-        demand=_demand(1),
-        semantic_source_id=("session", 0),
-        level=2,
-        cancellation_token=None,
-        shader_display=False,
-    )
-
-    assert result is not None
-    _key, pages, _display, mapping, texture_kind, *_rest = result
-    values = _stored_preview_values(pages)
-    assert texture_kind == TexturePlaneKind.COMPLEX_RG32F
-    assert np.iscomplexobj(values), "a composited (h, w, 3) plane would re-open the replan storm"
-    assert values.ndim == 2
-
-    # The step the storm actually died on: this must route, not raise.
-    reducer, dtype, representation = render_lod._reducer_format_for_rendered(
-        SimpleNamespace(shader_mapping=mapping), values
-    )
-    assert (dtype, representation) == ("complex64", "complex_rg32f")
-    assert reducer
 
 
 @pytest.mark.parametrize("shader_display", [True, False])
@@ -1070,30 +565,6 @@ def test_montage_axis_reindex_keeps_its_preview_pass(operations, admitted, shade
     seed = session.plan.tiles[0]
 
     assert effects.preview_pipeline_is_tile_local(session, seed) is admitted
-
-
-def test_display_axis_fft_is_not_admitted_to_the_coarse_ladder():
-    session = _session()
-    session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=0),))
-    tile = session.plan.tiles[0]
-
-    assert effects.preview_pipeline_commutes_for_display_lod(session, tile) is False
-    assert effects.preview_pipeline_is_tile_local(session, tile) is False
-
-    with pytest.raises(
-        ValueError,
-        match="commuting tile-local admission",
-    ):
-        effects.evaluate_shared_preview(
-            session,
-            tile,
-            session.plan.tiles,
-            demand=_demand(1),
-            level=2,
-            cancellation_token=None,
-            shader_display=True,
-            evaluation_context=None,
-        )
 
 
 @pytest.mark.parametrize("shader_display", [True, False], ids=["wgpu", "pyqtgraph"])
@@ -1172,105 +643,6 @@ def test_raw_and_pointwise_pipelines_stay_coarse_ladder_admissible():
     assert effects.preview_pipeline_is_tile_local(session, tile) is False
 
 
-def test_noncommuting_shared_preview_cannot_alias_direct_exact_pages():
-    data = np.arange(8 * 10 * 3, dtype=np.float32).reshape(8, 10, 3)
-    session = _session(data)
-    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
-    session.shader_display = True
-    session.lod_preview_level = 2
-    demand = _demand(1)
-    tile = session.plan.tiles[0]
-
-    rows = effects.evaluate_shared_preview(
-        session,
-        tile,
-        (tile,),
-        demand=demand,
-        level=2,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-    preview_key = rows[0][1]
-    preview_pages = rows[0][2]
-    exact_volume = evaluate_pipeline(data, session.document.enabled_operations)
-    exact_plane = np.ascontiguousarray(
-        exact_volume[..., int(tile.source_index)], dtype=np.complex64
-    )
-    exact_rendered = RenderedTile(
-        tile=tile,
-        image=exact_plane,
-        histogram_data=np.abs(exact_plane).astype(np.float32),
-        eval_ms=0.0,
-        slab_shape=exact_plane.shape,
-        slab_nbytes=exact_plane.nbytes,
-        semantic_data=exact_plane,
-        lod_source_data=exact_plane,
-    )
-    exact_key = render_lod.page_set_key_for_rendered(
-        exact_rendered,
-        demand=demand,
-        level=2,
-        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
-        shader_display=True,
-    )
-
-    assert preview_key.source_id == exact_key.source_id
-    assert preview_key.page_keys != exact_key.page_keys
-    assert preview_key.plans[0].key.operation_key != exact_key.plans[0].key.operation_key
-    cache = LodPageCache(max_bytes=1 << 20)
-    owner = ("noncommuting-preview", 0)
-    assert cache.claim_plans(preview_key.plans, owner) == preview_key.plans
-    try:
-        for page in preview_pages:
-            cache.admit_as(page.key, page, owner=owner)
-    finally:
-        cache.release_owner_claims(owner)
-    assert cache.exact_pages(preview_key.plans) is not None
-    assert cache.exact_pages(exact_key.plans) is None
-
-
-def test_shared_fft_shift_ifft_preview_box_means_exact_complex_output():
-    data = np.arange(8 * 10 * 8, dtype=np.float32).reshape(8, 10, 8)
-    session = _session(data)
-    operations = (
-        CenteredFFT(axis=2),
-        FFTShift(axis=2),
-        CenteredIFFT(axis=2),
-    )
-    session.document = ArrayDocument(data, operations=operations)
-    session.shader_display = True
-    session.lod_preview_level = 2
-
-    rows = effects.evaluate_shared_preview(
-        session,
-        session.plan.tiles[0],
-        session.plan.tiles,
-        demand=_demand(1),
-        level=2,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-    exact = evaluate_pipeline(data, operations)
-
-    assert len(rows) == 3
-    for tile_number, _key, pages, *_rest in rows:
-        np.testing.assert_allclose(
-            _stored_preview_values(pages),
-            effects.reduce_display_payload_axes(
-                np.asarray(exact)[..., int(tile_number)],
-                (4, 4),
-            ),
-            rtol=1e-5,
-            atol=1e-5,
-        )
-        stats = _rest[-1]
-        exact_plane = np.real(np.asarray(exact)[..., int(tile_number)])
-        assert stats.bounds[0] <= float(np.min(exact_plane))
-        assert stats.bounds[1] >= float(np.max(exact_plane))
-
-
 def test_fft_coarse_rung_materializes_one_reduced_stage_for_272_tiles():
     """Gate 2: sharing is a counter assertion, never a timing inference."""
 
@@ -1333,86 +705,6 @@ def test_fft_coarse_rung_materializes_one_reduced_stage_for_272_tiles():
     assert len(rows) == 272
     assert all(row[0].level_xy == (4, 4) for row in rows)
     assert all(row[-1] is None for row in rows), "coarse pages carry no native warm plane"
-
-
-def test_shared_fft_preview_maps_shifted_flipped_window_by_source_index():
-    data = np.arange(8 * 10 * 12, dtype=np.float32).reshape(8, 10, 12)
-    session = _session(data)
-    operations = (
-        CenteredFFT(axis=2),
-        FFTShift(axis=2),
-        CenteredIFFT(axis=2),
-    )
-    session.document = ArrayDocument(data, operations=operations)
-    session.view_state = (
-        ViewState.from_shape(data.shape)
-        .with_image_axes(0, 1)
-        .with_axis_flipped(2, True)
-        .with_montage_axis(2, columns=3, indices=(5, 6, 7), text="5:8")
-    )
-    session.plan = make_montage_plan(
-        session.view_state,
-        axis=2,
-        indices=(5, 6, 7),
-        tile_shape=(8, 10),
-        columns=3,
-        viewport_shape=(100, 100),
-    )
-    session.shader_display = True
-    session.lod_preview_level = 2
-
-    rows = effects.evaluate_shared_preview(
-        session,
-        session.plan.tiles[0],
-        session.plan.tiles,
-        demand=_demand(1),
-        level=2,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-    exact = evaluate_pipeline(data, operations)
-
-    assert [int(row[0]) for row in rows] == [0, 1, 2]
-    for row, source_index in zip(rows, (5, 6, 7), strict=True):
-        np.testing.assert_allclose(
-            _stored_preview_values(row[2]),
-            effects.reduce_display_payload_axes(
-                np.asarray(exact)[..., int(source_index)],
-                (4, 4),
-            ),
-            rtol=1e-5,
-            atol=1e-5,
-        )
-
-
-def test_shared_complex_preview_rows_include_display_histogram():
-    data = (
-        np.arange(4 * 6 * 3, dtype=np.float32).reshape(4, 6, 3)
-        + 1j * np.ones((4, 6, 3), dtype=np.float32)
-    ).astype(np.complex64)
-    session = _session(data)
-    session.shader_display = True
-    demand = _demand(1)
-    tiles = session.plan.tiles[:2]
-
-    rows = effects.evaluate_shared_preview(
-        session,
-        tiles[0],
-        tiles,
-        demand=demand,
-        cancellation_token=None,
-        shader_display=True,
-        evaluation_context=None,
-    )
-
-    assert len(rows) == 2
-    for row in rows:
-        _tile_number, _key, pages, histogram, *_rest = row
-        plane = _stored_preview_values(pages)
-        assert np.iscomplexobj(plane)
-        assert histogram is not None
-        assert np.shape(histogram) == np.shape(plane)
 
 
 def test_reduce_nd_axis_mean_handles_integer_edges():
@@ -1552,63 +844,6 @@ def test_tile_lod_states_does_not_treat_resident_level_as_committable_behind_pre
     assert state.presented_quality == "preview"
     assert state.resident_levels == ()
     assert state.target_quality_available is False
-
-
-def test_tile_lod_states_reads_page_cache_and_preview_floor_residency():
-    session = _session()
-    demand = _demand(1)
-    tile = session.plan.tiles[2]
-    session.lod_page_cache = LodPageCache(max_entries=8)
-    rendered = effects.rendered_tile_from_evaluation_result(
-        tile,
-        effects.evaluate_target_tile(
-            session,
-            tile,
-            level=0,
-            demand=_demand(0),
-            semantic_source_id=session.tile_semantic_source_id(tile.source_index),
-            stage_cache=None,
-            stage_materializer=None,
-            shader_display=False,
-            evaluation_context=None,
-        ),
-    )
-    session.rendered_tiles[int(tile.montage_index)] = rendered
-    session.lod_preview_level = 3
-    preview_level = effects.preview_evaluation_level(session, demand)
-    assert preview_level == 3
-    level_key = effects.render_lod.page_set_key_for(
-        session,
-        rendered,
-        demand=demand,
-        level=preview_level,
-    )
-    _admit_page_set(session.lod_page_cache, level_key, rendered.image)
-    session.lifecycle.level_claimed(int(tile.montage_index), level_key, ClaimOwner.PREVIEW)
-    session.lifecycle.level_resident(int(tile.montage_index), level_key)
-    preview_key = effects.preview_claim_key(
-        session,
-        tile,
-        demand=demand,
-        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
-        shader_display=False,
-    )
-    assert preview_key == level_key
-    session._best_floor_key = lambda *_args, **_kwargs: (
-        level_key,
-        level_key.level,
-        session.lod_page_cache,
-    )
-
-    state = {
-        state.tile_number: state
-        for state in effects.tile_lod_states(session, demand, tile_numbers=(tile.montage_index,))
-    }[int(tile.montage_index)]
-
-    # Lifecycle acknowledgement plus complete exact page residency is the
-    # ladder's resident truth; the rendered native tile is only its source.
-    assert state.resident_levels == (3,)
-    assert state.floor_available is True
 
 
 def test_unpresented_native_residency_is_not_presented_target_quality():
@@ -1975,73 +1210,6 @@ def test_presentation_commit_holds_camera_replay_while_coverage_is_open():
     assert scheduled == [1]
 
 
-def test_chunk_summary_levels_share_complex_shader_mapping():
-    values = np.asarray(
-        [[1.0 + 10.0j, 2.0 + 20.0j], [3.0 + 30.0j, 4.0 + 40.0j]],
-        dtype=np.complex64,
-    )
-    plans = plan_source_grid_pages(
-        content_key="complex-summary",
-        valid_source_rect_yx=(0, 2, 0, 2),
-        reduction_yx=(0, 0),
-        stored_page_shape=(2, 2),
-        dtype="complex64",
-        representation="complex_rg32f",
-        reducer="native",
-    )
-    pages = tuple(
-        materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan) for plan in plans
-    )
-
-    real = effects.chunk_level_stats_for_pages(
-        pages,
-        source_index=7,
-        mapping=ShaderMapping(component=ShaderComponent.REAL),
-    )
-    magnitude = effects.chunk_level_stats_for_pages(
-        pages,
-        source_index=7,
-        mapping=ShaderMapping(component=ShaderComponent.ABS),
-    )
-
-    assert real.bounds == (1.0, 4.0)
-    assert np.allclose(
-        magnitude.bounds,
-        (float(np.abs(values).min()), float(np.abs(values).max())),
-    )
-    assert real.sample.size <= 512
-    assert magnitude.sample.size <= 512
-
-
-def test_chunk_summary_levels_reuse_identity_mapped_scalar_summary(monkeypatch):
-    values = np.arange(4, dtype=np.float32).reshape(2, 2)
-    plans = plan_source_grid_pages(
-        content_key="scalar-summary",
-        valid_source_rect_yx=(0, 2, 0, 2),
-        reduction_yx=(0, 0),
-        stored_page_shape=(2, 2),
-        dtype="float32",
-        representation="scalar_r32f",
-        reducer="native",
-    )
-    pages = tuple(
-        materialize_lod_page(values, source_origin_yx=(0, 0), plan=plan) for plan in plans
-    )
-    monkeypatch.setattr(
-        effects,
-        "summarize_chunk",
-        lambda *_args, **_kwargs: pytest.fail("identity mapping must reuse the resident summary"),
-    )
-
-    stats = effects.chunk_level_stats_for_pages(
-        pages,
-        source_index=3,
-        mapping=ShaderMapping(component=ShaderComponent.REAL),
-    )
-
-    assert stats.bounds == (0.0, 3.0)
-
-
 def test_present_tile_delta_declines_when_the_presenter_reported_a_failure():
     """A backend commit that raised is caught and reported by the presenter,
     which returns False.  Declining here is what keeps the caller from
@@ -2154,3 +1322,108 @@ def test_cpu_composited_rgb_display_retains_complex_reduced_coarse_rung():
     # Scalar data on the same CPU-mapping backend is unaffected.
     session.rgb = False
     assert effects.can_evaluate_reduced_preview(session, tile) is True
+
+
+def test_pyqtgraph_per_tile_fft_preview_also_retains_the_complex_source_format():
+    """The per-tile reduced route carries the same storm-safety invariant.
+
+    ``can_evaluate_reduced_preview`` used to decline CPU-composited complex
+    outright, because a ``(h, w, 3)`` display plane is neither scalar nor
+    complex and ``render.lod._reducer_format_for_rendered`` raises on it: the
+    rung failed, the pipeline replanned, and it failed again -- a real session
+    logged 18314 admissions against 773 completions. That blanket decline is
+    gone, so the safety now rests on the preview route emitting a complex
+    plane instead.
+    """
+
+    data = np.arange(8 * 10 * 8, dtype=np.float32).reshape(8, 10, 8)
+    session = _session(data)
+    session.document = ArrayDocument(data, operations=(CenteredFFT(axis=2),))
+    session.rgb = True
+    session.shader_display = False
+    session.lod_preview_level = 2
+    tile = session.plan.tiles[0]
+
+    assert effects.can_evaluate_reduced_preview(session, tile) is True
+
+    result = effects.evaluate_preview_tile(
+        session,
+        tile,
+        demand=_demand(1),
+        semantic_source_id=("session", 0),
+        level=2,
+        cancellation_token=None,
+        shader_display=False,
+    )
+
+    assert result is not None
+    _key, pages, _display, mapping, texture_kind, *_rest = result
+    values = _stored_preview_values(pages)
+    assert texture_kind == TexturePlaneKind.COMPLEX_RG32F
+    assert np.iscomplexobj(values), "a composited (h, w, 3) plane would re-open the replan storm"
+    assert values.ndim == 2
+
+    # The step the storm actually died on: this must route, not raise.
+    reducer, dtype, representation = render_lod._reducer_format_for_rendered(
+        SimpleNamespace(shader_mapping=mapping), values
+    )
+    assert (dtype, representation) == ("complex64", "complex_rg32f")
+    assert reducer
+
+
+def test_display_axis_fft_is_not_admitted_to_the_coarse_ladder():
+    session = _session()
+    session.document = ArrayDocument(session.document.base_data, operations=(CenteredFFT(axis=0),))
+    tile = session.plan.tiles[0]
+
+    assert effects.preview_pipeline_commutes_for_display_lod(session, tile) is False
+    assert effects.preview_pipeline_is_tile_local(session, tile) is False
+
+
+def test_tile_lod_states_reads_page_cache_and_preview_floor_residency():
+    session = _session()
+    demand = _demand(1)
+    tile = session.plan.tiles[2]
+    session.lod_page_cache = LodPageCache(max_entries=8)
+    rendered = effects.rendered_tile_from_evaluation_result(
+        tile,
+        effects.evaluate_target_tile(
+            session,
+            tile,
+            level=0,
+            demand=_demand(0),
+            semantic_source_id=session.tile_semantic_source_id(tile.source_index),
+            stage_cache=None,
+            stage_materializer=None,
+            shader_display=False,
+            evaluation_context=None,
+        ),
+    )
+    session.rendered_tiles[int(tile.montage_index)] = rendered
+    session.lod_preview_level = 3
+    preview_level = effects.preview_evaluation_level(session, demand)
+    assert preview_level == 3
+    level_key = effects.render_lod.page_set_key_for(
+        session,
+        rendered,
+        demand=demand,
+        level=preview_level,
+    )
+    _admit_page_set(session.lod_page_cache, level_key, rendered.image)
+    session.lifecycle.level_claimed(int(tile.montage_index), level_key, ClaimOwner.PREVIEW)
+    session.lifecycle.level_resident(int(tile.montage_index), level_key)
+    session._best_floor_key = lambda *_args, **_kwargs: (
+        level_key,
+        level_key.level,
+        session.lod_page_cache,
+    )
+
+    state = {
+        state.tile_number: state
+        for state in effects.tile_lod_states(session, demand, tile_numbers=(tile.montage_index,))
+    }[int(tile.montage_index)]
+
+    # Lifecycle acknowledgement plus complete exact page residency is the
+    # ladder's resident truth; the rendered native tile is only its source.
+    assert state.resident_levels == (3,)
+    assert state.floor_available is True

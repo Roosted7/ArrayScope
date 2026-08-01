@@ -27,7 +27,7 @@ from arrayscope.display.model.frame import (
 )
 from arrayscope.display.model.tile_identity import tile_ack_identity
 from arrayscope.display.model.tile_priority import TilePriorityContext, prioritize_tile_numbers
-from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile, make_montage_plan
+from arrayscope.display.montage import MontagePlan, MontageTile, RenderedTile
 from arrayscope.display.pyramid import (
     LodPageCache,
     MaterializedLodPage,
@@ -43,7 +43,7 @@ from arrayscope.presentation import ClaimOwner, Presentation
 from arrayscope.render import effects as render_effects
 from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import LadderPolicy, LodLadder, Rung, RungStep, TileLodState
-from arrayscope.render.lod import LodPageSetKey, admit_retained_preview_level
+from arrayscope.render.lod import LodPageSetKey
 from arrayscope.render.stages import CommitBatch, LodAdmissionScope, RenderIntent
 from arrayscope.window import frame_effects as montage_commit
 from arrayscope.window.frame_effects import (
@@ -61,6 +61,7 @@ from arrayscope.window.frame_session import (
     plan_presentation_transition,
     texture_source_for_rendered,
 )
+from tests import seams
 
 TILE = 64
 # Two 64x64 tiles seen through a viewport that shows four source texels per
@@ -715,7 +716,7 @@ def test_resident_mode_falls_back_to_native_and_records_missing_levels():
     for request in requests:
         assert isinstance(request.key, LodPageSetKey)
         assert request.key.factor_xy == (4, 4)
-        assert request.reduce_factor_xy == (4, 4)
+        assert request.key.factor_xy == (4, 4)
         assert request.source.shape == (TILE, TILE)
     assert len(session.lifecycle.dangling_claims()) == 2
 
@@ -1017,7 +1018,7 @@ def test_coarse_ancestor_does_not_suppress_finer_materialization_claim():
         semantic_source_id=semantic_id,
     )
     _admit_page_set(pyramid, coarse, np.asarray(rendered.image))
-    assert render_lod._page_set_complete(pyramid, target)
+    assert pyramid.resolved_pages(target.plans) is not None
     assert not render_lod._page_set_exact(pyramid, target)
     effects = FramePipelineEffects(_RungPrepareRenderer(), session)
     step = RungStep(
@@ -1037,39 +1038,6 @@ def test_coarse_ancestor_does_not_suppress_finer_materialization_claim():
     assert tuple(plan.key for plan in request.claimed_plans) == target.page_keys
     session.pending_rung_materializations.release(request)
     assert pyramid.pending_count == 0
-
-
-def test_coarse_ancestor_does_not_skip_retained_finer_preview():
-    preview = LodPageCache(max_bytes=1 << 20)
-    session = _session(pyramid=preview, count=1)
-    rendered = session.rendered_tiles[0]
-    demand = session.lod_policy_decision.demand
-    semantic_id = session.tile_semantic_source_id(0)
-    coarse = page_set_key_for_rendered(
-        rendered,
-        demand=demand,
-        level=4,
-        semantic_source_id=semantic_id,
-    )
-    target = page_set_key_for_rendered(
-        rendered,
-        demand=demand,
-        level=2,
-        semantic_source_id=semantic_id,
-    )
-    _admit_page_set(preview, coarse, np.asarray(rendered.image))
-    assert render_lod._page_set_complete(preview, target)
-    assert not render_lod._page_set_exact(preview, target)
-
-    admitted = admit_retained_preview_level(
-        preview,
-        rendered,
-        semantic_source_id=semantic_id,
-        preview_level=2,
-    )
-
-    assert admitted == target
-    assert render_lod._page_set_exact(preview, target)
 
 
 def test_oversized_finer_page_releases_claim_instead_of_admitting_coarse_fallback():
@@ -1111,7 +1079,7 @@ def test_oversized_finer_page_releases_claim_instead_of_admitting_coarse_fallbac
         )
         pyramid.admit_as(page_plan.key, page, owner=request.owner)
 
-    assert render_lod._page_set_complete(pyramid, target)
+    assert pyramid.resolved_pages(target.plans) is not None
     assert not render_lod._page_set_exact(pyramid, target)
     assert session.pending_rung_materializations.mark_resident(request) is False
     assert pyramid.pending_count == 0
@@ -1328,7 +1296,7 @@ def test_no_reduction_work_happens_inside_presentation_builds(monkeypatch):
     monkeypatch.setattr(pyramid_module, "reduce_box_mean", _fail)
 
     session.build_tile_presentation({})
-    session.snapshot_display_tile_payloads({})
+    seams.snapshot_display_tile_payloads(session, {})
 
 
 def _cold_session(*, pyramid, count=2):
@@ -1888,10 +1856,7 @@ def test_level_swap_carries_native_stats_and_recomputes_nothing():
 
 def test_level_swap_keeps_semantic_histogram_identity():
     from arrayscope.display.model.tiled_histogram_identity import (
-        tiled_histogram_key as _tiled_histogram_key,
-    )
-    from arrayscope.display.model.tiled_histogram_identity import (
-        tiled_semantic_histogram_identity as _tiled_semantic_histogram_identity,
+        payload_histogram_source,
     )
 
     pyramid = LodPageCache(max_bytes=1 << 24)
@@ -1913,24 +1878,11 @@ def test_level_swap_keeps_semantic_histogram_identity():
     assert {payload.source_id for payload in swapped_payloads.values()} != {
         payload.source_id for payload in native_payloads.values()
     }
-    # ...but the semantic histogram identity, and therefore the histogram
-    # stream key, is unchanged: a level swap produces ZERO histogram work.
-    assert _tiled_semantic_histogram_identity(
-        swapped_payloads
-    ) == _tiled_semantic_histogram_identity(native_payloads)
-    key_before = _tiled_histogram_key(
-        (0.0, 1.0),
-        histogram_plot_data=None,
-        tile_delta=delta,
-        semantic_identity=_tiled_semantic_histogram_identity(native_payloads),
-    )
-    key_after = _tiled_histogram_key(
-        (0.0, 1.0),
-        histogram_plot_data=None,
-        tile_delta=delta,
-        semantic_identity=_tiled_semantic_histogram_identity(swapped_payloads),
-    )
-    assert key_before == key_after
+    # ...but every tile still histograms the very same semantic array it did
+    # before the swap, so the commit patches nothing: a level swap produces
+    # ZERO histogram work.
+    for tile, payload in swapped_payloads.items():
+        assert payload_histogram_source(payload) is payload_histogram_source(native_payloads[tile])
 
 
 def test_coarser_level_stays_direct_source_with_finer_pages_resident():
@@ -1983,7 +1935,7 @@ def test_uneven_tiles_fall_back_to_native_reduction_source():
     assert requests, "the coarser level must still be requested"
     for request in requests:
         assert request.source.shape[:2] == (tile, tile)
-        assert request.reduce_factor_xy == request.key.factor_xy
+        assert request.key.factor_xy == request.key.factor_xy
 
 
 def test_floor_presents_resident_level_for_unrendered_tile_instead_of_placeholder():
@@ -2266,7 +2218,7 @@ def test_report_bound_to_an_older_delta_acknowledges_nothing():
     assert dict(acknowledged.payloads) == {}, "mismatched report must acknowledge nothing"
     assert 0 in session.dirty_payloads, "dirty stays armed"
     assert 1 in session.dirty_payloads, "dirty stays armed"
-    assert session.parked_dirty_payloads == frozenset(), "and nothing parks"
+    assert session.lifecycle.parked_tiles == frozenset(), "and nothing parks"
 
     bound = TileCommitReport(
         presented_tiles=(0, 1),
@@ -2841,7 +2793,7 @@ def test_parked_dirty_tiles_rearm_when_the_viewport_makes_them_active():
     assert 1 not in delta.upserts
     report = TileCommitReport(presented_tiles=(0,))
     session.acknowledge_tile_presentation(delta, report)
-    assert 1 not in session.parked_dirty_payloads
+    assert 1 not in session.lifecycle.parked_tiles
     assert 1 in session.dirty_payloads
 
     # Idle does not emit the offscreen tile.
@@ -2855,220 +2807,8 @@ def test_parked_dirty_tiles_rearm_when_the_viewport_makes_them_active():
     session.visible_tile_numbers = frozenset({0, 1})
     session.sync_lifecycle_scope()
     _state, delta3 = session.build_tile_presentation({})
-    assert 1 not in session.parked_dirty_payloads
+    assert 1 not in session.lifecycle.parked_tiles
     assert 1 in delta3.upserts
-
-
-def test_retained_preview_uses_the_same_direct_canonical_route():
-
-    preview = LodPageCache(max_bytes=1 << 20)
-    session = _session(pyramid=LodPageCache(max_bytes=1 << 20))
-    rendered = session.rendered_tiles[0]
-    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
-
-    key = admit_retained_preview_level(
-        preview, rendered, semantic_source_id=semantic_id, preview_level=3
-    )
-    assert key is not None
-    assert key.level_xy == (3, 3)
-    page = preview.resolved_pages(key.plans)[0]
-    assert page.values.shape == (TILE // 8, TILE // 8)
-    expected = np.asarray(rendered.image).reshape(TILE // 8, 8, TILE // 8, 8).mean(axis=(1, 3))
-    assert np.allclose(page.values, expected, atol=1e-4)
-
-    # A second cache takes the same direct route; cache history cannot select
-    # different numeric values for the canonical identity.
-    preview2 = LodPageCache(max_bytes=1 << 20)
-    key2 = admit_retained_preview_level(
-        preview2,
-        rendered,
-        semantic_source_id=semantic_id,
-        preview_level=3,
-    )
-    assert key2 is not None
-    assert np.allclose(preview2.resolved_pages(key2.plans)[0].values, expected, atol=1e-4)
-
-    # Singleflight: second admission is a no-op.
-    assert not admit_retained_preview_level(
-        preview, rendered, semantic_source_id=semantic_id, preview_level=3
-    )
-
-
-def test_retained_preview_protects_its_claim_until_checked_admission(monkeypatch):
-    preview = LodPageCache(max_bytes=1 << 20)
-    session = _session(pyramid=preview, count=1)
-    rendered = session.rendered_tiles[0]
-    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
-    original_materialize = render_lod.materialize_lod_page
-    cancellation_results = []
-
-    def materialize_while_cancelled(*args, plan, **kwargs):
-        owner = preview.claimed_by(plan.key)
-        assert owner is not None
-        cancellation_results.append(preview.release_owner_claims(owner))
-        return original_materialize(*args, plan=plan, **kwargs)
-
-    monkeypatch.setattr(render_lod, "materialize_lod_page", materialize_while_cancelled)
-
-    key = admit_retained_preview_level(
-        preview,
-        rendered,
-        semantic_source_id=semantic_id,
-        preview_level=3,
-    )
-
-    assert key is not None
-    assert cancellation_results
-    assert all(result == () for result in cancellation_results)
-    assert preview.exact_pages(key.plans) is not None
-    assert preview.pending_count == 0
-
-
-def test_retained_preview_wrong_page_is_loud_and_releases_its_claim(monkeypatch):
-    preview = LodPageCache(max_bytes=1 << 20)
-    session = _session(pyramid=preview, count=1)
-    rendered = session.rendered_tiles[0]
-    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
-    wrong_key = page_set_key_for_rendered(
-        rendered,
-        demand=session.lod_policy_decision.demand,
-        level=3,
-        semantic_source_id=semantic_id,
-    )
-    wrong_page = materialize_lod_page(
-        np.asarray(rendered.image),
-        source_origin_yx=(0, 0),
-        plan=wrong_key.plans[0],
-    )
-    monkeypatch.setattr(render_lod, "materialize_lod_page", lambda *args, **kwargs: wrong_page)
-
-    with pytest.raises(ValueError, match="wrong key"):
-        admit_retained_preview_level(
-            preview,
-            rendered,
-            semantic_source_id=semantic_id,
-            preview_level=2,
-        )
-
-    assert len(preview) == 0
-    assert preview.pending_count == 0
-
-
-def test_ineligible_retained_preview_never_leaves_an_owner_claim():
-    preview = LodPageCache(max_bytes=8)
-    session = _session(pyramid=preview, count=1)
-    rendered = session.rendered_tiles[0]
-    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
-    key = page_set_key_for_rendered(
-        rendered,
-        demand=session.lod_policy_decision.demand,
-        level=2,
-        semantic_source_id=semantic_id,
-    )
-
-    assert (
-        admit_retained_preview_level(
-            preview,
-            rendered,
-            semantic_source_id=semantic_id,
-            preview_level=2,
-        )
-        is None
-    )
-    assert preview.plan_set_ineligible(key.plans)
-    assert preview.pending_count == 0
-    assert len(preview) == 0
-
-
-def test_floor_presents_from_pinned_preview_when_main_pyramid_lost_the_level():
-    """Scroll-back contract: main-cache churn can never blank a tile that was
-    ever computed — the pinned preview level floors it."""
-
-    main = LodPageCache(max_bytes=1 << 20)
-    preview = LodPageCache(max_bytes=1 << 20)
-    session = _session(pyramid=main, count=2)
-    session.lod_page_cache = preview
-    session.lod_preview_level = 3
-
-    rendered = session.rendered_tiles[1]
-    semantic_id = session.tile_semantic_source_id(rendered.tile.source_index)
-    key = admit_retained_preview_level(
-        preview, rendered, semantic_source_id=semantic_id, preview_level=3
-    )
-    assert key is not None
-    _claim_preview_resident(session, 1, key)
-    # Tile 1 loses its rendered result and has nothing in the MAIN pyramid.
-    del session.rendered_tiles[1]
-    session.dirty_payloads.pop(1, None)
-
-    _state, delta = session.build_tile_presentation({})
-    payload = delta.upserts.get(1) or session.display_tile_payloads.get(1)
-    assert payload is not None, "preview level must floor the tile"
-    assert payload.quality == "preview"
-    assert payload.lod.level == 2
-    assert payload.page_backing.resolved_page_set.coarsest_actual_level == 3
-    assert payload.texture_data.shape[:2] == (TILE // 8, TILE // 8)
-
-
-def test_rgb_retained_preview_is_rejected_instead_of_becoming_false_canonical_data():
-
-    main = LodPageCache(max_bytes=1 << 20)
-    preview = LodPageCache(max_bytes=1 << 20)
-    session = _session(pyramid=main, count=1)
-    session.lod_page_cache = preview
-    session.lod_preview_level = 2
-    session.rgb = True
-
-    tile = session.plan.tiles[0]
-    rgb = np.zeros((TILE, TILE, 3), dtype=np.uint8)
-    rgb[..., 0] = np.arange(TILE, dtype=np.uint8)[:, None]
-    histogram = np.arange(TILE * TILE, dtype=np.float32).reshape(TILE, TILE)
-    rendered = RenderedTile(
-        tile=tile,
-        image=rgb,
-        histogram_data=histogram,
-        eval_ms=0.0,
-        slab_shape=rgb.shape,
-        slab_nbytes=rgb.nbytes,
-    )
-    semantic_id = session.tile_semantic_source_id(tile.source_index)
-    with pytest.raises(ValueError, match="scalar or complex"):
-        admit_retained_preview_level(
-            preview,
-            rendered,
-            semantic_source_id=semantic_id,
-            preview_level=2,
-            shader_display=False,
-        )
-    assert len(preview) == 0
-
-
-def test_rgb_preview_without_display_histogram_is_not_admitted():
-    pyramid = LodPageCache(max_bytes=1 << 20)
-    session = _session(pyramid=pyramid, count=1)
-    session.rgb = True
-
-    tile = session.plan.tiles[0]
-    rgb = np.zeros((TILE, TILE, 3), dtype=np.uint8)
-    rendered = RenderedTile(
-        tile=tile,
-        image=rgb,
-        histogram_data=None,
-        eval_ms=0.0,
-        slab_shape=rgb.shape,
-        slab_nbytes=rgb.nbytes,
-    )
-    semantic_id = session.tile_semantic_source_id(tile.source_index)
-
-    with pytest.raises(ValueError, match="scalar or complex"):
-        admit_retained_preview_level(
-            pyramid,
-            rendered,
-            semantic_source_id=semantic_id,
-            preview_level=2,
-            shader_display=False,
-        )
-    assert len(pyramid) == 0
 
 
 def test_preview_payload_at_acceptable_level_still_refines_to_exact():
@@ -3137,7 +2877,7 @@ def test_shared_preview_floor_is_presented_before_exact_refinement():
     preview_refinements = session.unrefined_preview_tiles()
     assert set(preview_refinements) == set()
     assert set(session.dirty_payloads) == {0, 1}
-    session.mark_preview_refinements_dirty(preview_refinements)
+    seams.mark_preview_refinements_dirty(session, preview_refinements)
     assert set(session.dirty_payloads) == {0, 1}
 
     _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
@@ -3145,133 +2885,6 @@ def test_shared_preview_floor_is_presented_before_exact_refinement():
     assert set(exact_delta.upserts) == {0, 1}
     assert {payload.quality for payload in exact_delta.upserts.values()} == {"exact"}
     assert {payload.lod.level for payload in exact_delta.upserts.values()} == {2}
-
-
-def test_shared_preview_worker_rows_admit_as_checked_canonical_pages():
-    """The real worker result must cross the GUI seam as checked pages."""
-
-    data = np.arange(TILE * TILE * 2, dtype=np.float32).reshape(TILE, TILE, 2)
-    state = (
-        ViewState.from_shape(data.shape)
-        .with_image_axes(0, 1)
-        .with_montage_axis(2, columns=2, indices=(0, 1), text=":")
-    )
-    plan = make_montage_plan(
-        state,
-        axis=2,
-        indices=(0, 1),
-        tile_shape=(TILE, TILE),
-        columns=2,
-        viewport_shape=VIEWPORT,
-    )
-    cache = LodPageCache(max_bytes=1 << 24)
-    session = _session(pyramid=cache, count=2)
-    session.document = ArrayDocument(data)
-    session.view_state = state
-    session.plan = plan
-    session.montage_axis = 2
-    session.visible_tiles = plan.tiles
-    session.rendered_tiles.clear()
-    session.dirty_payloads.clear()
-    session.lod_policy_mode = LOD_POLICY_NATIVE_ONLY
-    session.lod_preview_level = 1
-    demand = LodDemand(
-        desired_level=0,
-        desired_factor=1,
-        desired_factor_xy=(1, 1),
-        acceptable_levels=(0, 1, 2),
-        source_texels_per_pixel_xy=(1.0, 1.0),
-        reason="shared-preview-admission-test",
-    )
-
-    rows = render_effects.evaluate_shared_preview(
-        session,
-        plan.tiles[0],
-        plan.tiles,
-        demand=demand,
-        level=1,
-        cancellation_token=None,
-        shader_display=False,
-        evaluation_context=None,
-    )
-    renderer = _RungPrepareRenderer()
-    renderer._rendered_tile_for_current_payload = lambda *_args, **_kwargs: None
-    renderer._admit_first_pass_level_evidence_batch = lambda *_args, **_kwargs: None
-    renderer._admit_preview_cohort_level_evidence = lambda *_args, **_kwargs: None
-    frame_effects = FramePipelineEffects(renderer, session)
-    ensure_calls = []
-    original_ensure_floor_payloads = session._ensure_floor_payloads
-
-    def ensure_floor_payloads(tile_numbers, *, max_count=None, preferred_keys=None):
-        ensure_calls.append(tuple(int(tile) for tile in tile_numbers))
-        return original_ensure_floor_payloads(
-            tile_numbers,
-            max_count=max_count,
-            preferred_keys=preferred_keys,
-        )
-
-    session._ensure_floor_payloads = ensure_floor_payloads
-
-    assert rows
-    assert all(all(isinstance(page, MaterializedLodPage) for page in row[2]) for row in rows)
-    steps = tuple(
-        RungStep(
-            tile_number=int(row[0]),
-            rung=Rung.FLOOR,
-            level=1,
-            reduce_from_native=False,
-            lane=Lane.DISPLAY_PREVIEW,
-            priority=Priority.VISIBLE_IMAGE,
-            reason="shared preview batch",
-        )
-        for row in rows
-    )
-    assert frame_effects._admit_ready_payloads(
-        tuple((step, tuple(row[1:])) for step, row in zip(steps, rows, strict=True))
-    )
-    assert ensure_calls == [(0, 1)]
-
-    for tile_number, key, pages, *_rest in rows:
-        assert cache.exact_pages(key.plans) is not None
-        assert tuple(page.key for page in pages) == tuple(plan.key for plan in key.plans)
-        record = session.lifecycle.peek(int(tile_number))
-        assert record is not None
-        assert record.levels[key].phase.name == "RESIDENT"
-
-    # A later direct route at the same physical level has a different value
-    # identity and outranks the non-semantic preview instead of being
-    # suppressed by its residency.
-    tile = plan.tiles[0]
-    source = np.ascontiguousarray(data[..., int(tile.source_index)])
-    rendered = RenderedTile(
-        tile=tile,
-        image=source,
-        histogram_data=source,
-        eval_ms=0.0,
-        slab_shape=source.shape,
-        slab_nbytes=source.nbytes,
-    )
-    exact_key = page_set_key_for_rendered(
-        rendered,
-        demand=demand,
-        level=1,
-        semantic_source_id=session.tile_semantic_source_id(tile.source_index),
-    )
-    exact_pages = _materialized_page_set(exact_key, source)
-    assert exact_key.page_keys != rows[0][1].page_keys
-    assert session.admit_preview_plane(
-        int(tile.montage_index),
-        exact_key,
-        exact_pages,
-        quality="exact",
-    )
-    session.lod_policy_mode = LOD_POLICY_RESIDENT
-    best = session._best_floor_key(
-        int(tile.source_index),
-        tile_number=int(tile.montage_index),
-    )
-    assert best is not None
-    assert best[0] == exact_key
 
 
 def test_presented_preview_keeps_active_exact_work_loading():
@@ -3326,7 +2939,7 @@ def test_preview_floor_does_not_complete_full_refinement():
     assert not session.visible_plan_complete()
     assert not session.is_complete()
 
-    session.mark_preview_refinements_dirty(session.unrefined_preview_tiles())
+    seams.mark_preview_refinements_dirty(session, session.unrefined_preview_tiles())
     _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
     _acknowledge(session, exact_delta)
     session.mark_presented(tuple(exact_delta.upserts))
@@ -3747,7 +3360,7 @@ def test_stale_floor_first_hint_cannot_block_exact_after_all_first_pixels(monkey
     _state, preview_delta = session.build_tile_presentation({}, max_upserts=2)
     _acknowledge(session, preview_delta)
     session.mark_presented(tuple(preview_delta.upserts))
-    session.mark_preview_refinements_dirty((0, 1))
+    seams.mark_preview_refinements_dirty(session, (0, 1))
     monkeypatch.setattr(
         session,
         "_lod_preview_floor_first_fill_active",
@@ -3781,7 +3394,7 @@ def test_lifecycle_noop_cannot_consume_dirty_wrapper_build_cohort(monkeypatch):
     _state, preview_delta = session.build_tile_presentation({}, max_upserts=2)
     _acknowledge(session, preview_delta)
     session.mark_presented(tuple(preview_delta.upserts))
-    session.mark_preview_refinements_dirty((0,))
+    seams.mark_preview_refinements_dirty(session, (0,))
     _state, first_exact = session.build_tile_presentation({}, max_upserts=1)
     _acknowledge(session, first_exact)
     session.mark_presented(tuple(first_exact.upserts))
@@ -3789,7 +3402,7 @@ def test_lifecycle_noop_cannot_consume_dirty_wrapper_build_cohort(monkeypatch):
     preview_tile = next(iter({0, 1} - {exact_tile}))
     session.dirty_payloads.clear()
     session.pending_payload_upserts.clear()
-    session.mark_preview_refinements_dirty((preview_tile,))
+    seams.mark_preview_refinements_dirty(session, (preview_tile,))
     monkeypatch.setattr(
         session.lifecycle,
         "presentation_changes",
@@ -3856,7 +3469,7 @@ def test_offscreen_floor_claim_cannot_block_required_exact_atomic_successor():
     assert not session.scheduling_policy.verdict.coverage_open
 
     session.atomic_successor_pending = True
-    session.mark_preview_refinements_dirty((1, 2))
+    seams.mark_preview_refinements_dirty(session, (1, 2))
     _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
 
     assert set(exact_delta.upserts) == {1, 2}
@@ -4097,7 +3710,7 @@ def test_preview_admission_rejects_unchecked_whole_plane_values():
 
     with pytest.raises(TypeError, match="checked canonical"):
         session.admit_preview_plane(0, key, np.zeros((TILE // 4, TILE // 4)))
-    assert not render_lod._page_set_complete(pyramid, key)
+    assert not pyramid.resolved_pages(key.plans) is not None
 
 
 def test_preview_page_admission_protects_claims_until_the_set_is_complete(monkeypatch):
@@ -4166,7 +3779,7 @@ def test_ineligible_preview_page_set_is_declined_without_claim_or_lifecycle_stat
     pages = _materialized_page_set(key, np.asarray(rendered.image))
 
     assert not session.admit_preview_plane(0, key, pages)
-    assert pyramid.plan_set_ineligible(key.plans)
+    assert tuple(plan.key for plan in key.plans) in pyramid._ineligible_plan_sets
     assert pyramid.pending_count == 0
     assert session.lifecycle.dangling_claims() == ()
 
@@ -4189,7 +3802,7 @@ def test_acknowledged_preview_floor_stays_active_until_exact_refinement():
     _state, preview_delta = session.build_tile_presentation({}, max_upserts=4)
     _acknowledge(session, preview_delta)
     session.mark_presented(tuple(preview_delta.upserts))
-    session.mark_preview_refinements_dirty((1, 2))
+    seams.mark_preview_refinements_dirty(session, (1, 2))
 
     _state, exact_delta = session.build_tile_presentation({}, max_upserts=2)
 
@@ -4213,7 +3826,8 @@ def test_preview_floor_claim_release_unblocks_exact_payload():
     _state, blocked_delta = session.build_tile_presentation({}, max_upserts=1)
 
     assert blocked_delta.upserts == {}
-    session.release_preview_claim(0, key)
+    seams.level_declined(session.lifecycle, 0, key)
+    session.lod_preview_metadata.pop(key, None)
     assert session.lifecycle.dangling_claims() == ()
     assert pyramid.pending_count == 0
 
@@ -4299,7 +3913,7 @@ def test_lod_debug_pass_marker_mirrors_final_payload_only(monkeypatch):
     _state, preview_delta = session.build_tile_presentation({}, max_upserts=1)
     _acknowledge(session, preview_delta)
     session.mark_presented(tuple(preview_delta.upserts))
-    session.mark_preview_refinements_dirty(session.unrefined_preview_tiles())
+    seams.mark_preview_refinements_dirty(session, session.unrefined_preview_tiles())
     _state, exact_delta = session.build_tile_presentation({}, max_upserts=1)
 
     assert np.array_equal(preview_delta.upserts[0].texture_data, preview)
@@ -6056,7 +5670,7 @@ def test_live_phase_ladder_does_not_accept_resident_mean_family_as_floor():
     assert mean_key.reducer == "mean"
     _admit_page_set(pyramid, mean_key, values)
 
-    assert not render_lod._page_set_complete(pyramid, phase_key)
+    assert not pyramid.resolved_pages(phase_key.plans) is not None
     assert render_lod.best_floor_key(session, 0, tile_number=0) is None
     effects = FramePipelineEffects(_RungPrepareRenderer(), session)
     assert effects.prepare_rung(

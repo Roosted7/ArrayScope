@@ -17,10 +17,6 @@ MODULE_PATHS = {
         "arrayscope.core.cache_status",
         ROOT / "arrayscope" / "core" / "cache_status.py",
     ),
-    "dimension_roles": (
-        "arrayscope.core.dimension_roles",
-        ROOT / "arrayscope" / "core" / "dimension_roles.py",
-    ),
     "view_state": ("arrayscope.core.view_state", ROOT / "arrayscope" / "core" / "view_state.py"),
     "window_levels": (
         "arrayscope.core.window_levels",
@@ -92,23 +88,22 @@ OperationEvaluator = operation_evaluator.OperationEvaluator
 ProfileCoordinator = profile_coordinator.ProfileCoordinator
 
 
-def test_profile_coordinator_clamps_and_renders_line_result():
+def test_profile_coordinator_states_a_line_through_the_marker():
+    """The one seam production takes: a marker becomes a profile view state.
+
+    The window clamps the marker to the image before it gets here (the
+    coordinator's own clamp had no caller and is gone), so this states the part
+    that ships: which slice the profile reads, and that evaluating it yields
+    the line under the marker.
+    """
+
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
     state = ViewState.from_shape(data.shape).with_line_axis(2)
     coordinator = ProfileCoordinator()
     evaluator = OperationEvaluator(ArrayDocument(data))
 
-    result = coordinator.render_from_marker(
-        evaluator,
-        state,
-        10,
-        -2,
-        line_axis=2,
-        y_range_mode="match_image",
-        image_levels=(1, 9),
-    )
+    profile_state = coordinator.state_from_marker(state, 2, 0, line_axis=2)
 
-    assert result.marker_position == (2, 0)
-    assert result.view_state.slice_indices == (0, 2, 2)
-    assert result.y_range == (1.0, 9.0)
-    np.testing.assert_array_equal(result.line_result.data, data[0, 2, :])
+    assert profile_state is not None
+    assert profile_state.slice_indices == (0, 2, 2)
+    np.testing.assert_array_equal(evaluator.line(profile_state).data, data[0, 2, :])

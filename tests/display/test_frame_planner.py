@@ -217,8 +217,9 @@ def test_sub_tile_nudge_reuses_the_whole_region_tuple():
     assert first.near_region_ids == nudged.near_region_ids
     assert first.regions is nudged.regions
     assert first.scene_region_signature is nudged.scene_region_signature
-    assert planner.montage_region_set_hits == 1
-    assert planner.montage_region_set_misses == 1
+    skeletons = planner._montage_skeletons.values()
+    assert sum(skeleton.set_hits for skeleton in skeletons) == 1
+    assert sum(skeleton.set_misses for skeleton in skeletons) == 1
 
 
 def test_a_camera_edge_on_a_tile_boundary_answers_the_same_as_half_a_pixel_past_it():

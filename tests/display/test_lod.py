@@ -5,7 +5,6 @@ from arrayscope.display.lod import (
     LOD_REASON_NATIVE_POLICY,
     LOD_REASON_NATIVE_SCALE,
     factor_xy_for_level,
-    inner_uv_for_gutter,
     native_lod_policy,
     select_lod_demand,
 )
@@ -169,7 +168,3 @@ def test_native_policy_deferred_reason_ignored_at_native_scale():
 
     assert decision.demand.desired_factor == 1
     assert decision.reason == LOD_REASON_NATIVE_SCALE
-
-
-def test_inner_uv_for_gutter_excludes_border_pixels():
-    assert inner_uv_for_gutter((4, 6), gutter=1) == (1 / 6, 1 / 4, 5 / 6, 3 / 4)

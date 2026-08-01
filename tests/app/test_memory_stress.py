@@ -2,19 +2,19 @@ import numpy as np
 import pytest
 
 from arrayscope.core.memory_budget import (
-    DEFAULT_MONTAGE_RESIDENCY_BUDGET_BYTES,
-    estimate_montage_tile_grid_bytes,
+    DEFAULT_VISIBLE_RENDER_BUDGET_BYTES,
+    estimate_display_image_bytes,
 )
 from arrayscope.display.levels import finite_bounds
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 
 
-def test_memory_estimate_blocks_large_montage_without_allocation():
-    nbytes = estimate_montage_tile_grid_bytes(
-        (8192, 8192), 128, np.float32, histogram=True, columns=16
-    )
+def test_memory_estimate_blocks_large_montage_tile_without_allocation():
+    # The montage guard in ``window/frame_controller`` is per tile: a tile whose
+    # estimate exceeds the single-tile budget is skipped rather than computed.
+    nbytes = estimate_display_image_bytes((8192, 16384), np.float32, histogram=True)
 
-    assert nbytes > DEFAULT_MONTAGE_RESIDENCY_BUDGET_BYTES
+    assert nbytes > DEFAULT_VISIBLE_RENDER_BUDGET_BYTES
 
 
 def test_large_level_bounds_uses_sampling():

@@ -313,10 +313,6 @@ class CompressedBackingTier:
             self._cache.resize(max_bytes=max_bytes, max_entries=max_entries)
             self._reconcile_resident()
 
-    def stored_bytes(self, key: object) -> int:
-        entry = self._cache.peek(key)
-        return len(entry.data) if isinstance(entry, _CompressedEntry) else 0
-
     def _reconcile_resident(self) -> None:
         # Recompute the resident uncompressed footprint from the surviving
         # entries.  Cheap (entry count is small: it is bounded by the tier's

@@ -1,4 +1,4 @@
-from arrayscope.operations.benchmarks import benchmark_fft_slice, run_foundation_benchmarks
+from arrayscope.tools.operation_benchmarks import benchmark_fft_slice, run_foundation_benchmarks
 
 
 def test_run_foundation_benchmarks_returns_expected_scenarios():
@@ -33,7 +33,7 @@ def test_fft_benchmark_honors_workers_argument():
 
 
 def test_chunked_warmup_benchmark_reports_multiple_chunks():
-    from arrayscope.operations.benchmarks import benchmark_fft_stage_warmup_chunked
+    from arrayscope.tools.operation_benchmarks import benchmark_fft_stage_warmup_chunked
 
     result = benchmark_fft_stage_warmup_chunked()
 
@@ -42,7 +42,7 @@ def test_chunked_warmup_benchmark_reports_multiple_chunks():
 
 
 def test_montage_priority_queue_benchmark_reports_scheduler_counters():
-    from arrayscope.operations.benchmarks import benchmark_montage_priority_queue_retarget
+    from arrayscope.tools.operation_benchmarks import benchmark_montage_priority_queue_retarget
 
     result = benchmark_montage_priority_queue_retarget()
 

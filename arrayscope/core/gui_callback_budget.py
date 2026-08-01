@@ -143,16 +143,6 @@ class GuiCallbackBudget:
         )
 
 
-def should_yield_after_item(
-    budget: GuiCallbackBudget,
-    *,
-    byte_count: int = 0,
-    item_count: int = 1,
-) -> bool:
-    budget.record_item(byte_count=byte_count, item_count=item_count)
-    return budget.should_yield()
-
-
 def default_gui_callback_budget_decision(
     channel: str, *, interactive: bool = False
 ) -> GuiCallbackBudgetDecision:

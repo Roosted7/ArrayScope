@@ -138,10 +138,6 @@ class DisplayInteractionController:
             **_idle_updates(hover=None, cancel_reason="tool-change"),
         )
 
-    def set_pointer(self, point: tuple[float, float] | None) -> DisplayInteractionState:
-        normalized = None if point is None else (float(point[0]), float(point[1]))
-        return self._replace(pointer=normalized)
-
     def set_hover(
         self, target: InteractionTarget | None, *, point: tuple[float, float] | None = None
     ) -> DisplayInteractionState:
@@ -288,19 +284,6 @@ class DisplayInteractionController:
             drag_geometry=geometry,
             drag_profile_position=profile,
         )
-        return self.drag_result()
-
-    def observe_capture_geometry(self, geometry: RoiGeometry) -> DragResult | None:
-        if self._state.phase is not PointerPhase.DRAGGING or self._state.capture is None:
-            return None
-        self._replace(drag_geometry=geometry)
-        return self.drag_result()
-
-    def observe_profile_position(self, position: tuple[float, float]) -> DragResult | None:
-        if self._state.phase is not PointerPhase.DRAGGING or self._state.capture is None:
-            return None
-        normalized = (float(position[0]), float(position[1]))
-        self._replace(drag_profile_position=normalized)
         return self.drag_result()
 
     def drag_result(self) -> DragResult | None:

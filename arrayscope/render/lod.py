@@ -52,7 +52,6 @@ from arrayscope.display.pyramid import (
     LodPagePlan,
     MaterializedLodPage,
     ResolvedLodPageSet,
-    materialize_lod_page,
     plan_source_grid_pages,
 )
 from arrayscope.display.shader_mapping import ShaderComponent, ShaderDisplayMode, TexturePlaneKind
@@ -162,38 +161,6 @@ def canonical_source_tile_shape(session) -> tuple[int, ...]:
         if len(axes) == 2 and axes[0] > axes[1]:
             return (tile_shape[1], tile_shape[0], *tile_shape[2:])
     return tile_shape
-
-
-def plan_lod_page_targets(
-    *,
-    content_key: object,
-    source_rect: tuple[int, int, int, int],
-    reduction: tuple[int, int],
-    stored_page_shape: tuple[int, int],
-    dtype: str,
-    representation: str,
-    reducer: str,
-) -> tuple[DataChunkKey, ...]:
-    """Decompose one desired LOD window into canonical source-grid pages.
-
-    Geometry is native-source ``(y, x)`` space. ``reduction`` follows that
-    same axis order, while ``stored_page_shape`` is the uniform physical
-    sample extent of a page. Boundary pages carry their clipped footprint;
-    aligned interiors therefore share identity across shifted windows.
-    """
-
-    return tuple(
-        plan.key
-        for plan in plan_source_grid_pages(
-            content_key=content_key,
-            valid_source_rect_yx=source_rect,
-            reduction_yx=reduction,
-            stored_page_shape=stored_page_shape,
-            dtype=dtype,
-            representation=representation,
-            reducer=reducer,
-        )
-    )
 
 
 def texture_requires_display_histogram(texture, texture_kind) -> bool:
@@ -763,10 +730,6 @@ def _demand_key_sig(demand) -> tuple:
     )
 
 
-def _page_set_complete(cache: LodPageCache | None, key: LodPageSetKey) -> bool:
-    return bool(isinstance(cache, LodPageCache) and cache.resolve_plans(key.plans) is not None)
-
-
 def _page_set_exact(cache: LodPageCache | None, key: LodPageSetKey) -> bool:
     return bool(isinstance(cache, LodPageCache) and cache.exact_pages(key.plans) is not None)
 
@@ -1038,10 +1001,6 @@ class LodPageMaterializationRequest:
         # cache state carried by ``claimed_plans`` and ``owner``.
         return ((self.key, (1, 1)),)
 
-    @property
-    def reduce_factor_xy(self) -> tuple[int, int]:
-        return self.key.factor_xy
-
 
 def plan_materialization(
     session,
@@ -1210,66 +1169,6 @@ def preserve_finer_presented_payload(session, payload) -> bool:
 # --------------------------------------------------------------------------
 # Worker-side admissions
 # --------------------------------------------------------------------------
-
-
-def admit_retained_preview_level(
-    preview_pyramid,
-    rendered: RenderedTile,
-    *,
-    semantic_source_id,
-    preview_level: int,
-    shader_display: bool = True,
-) -> LodPageSetKey | None:
-    """Admit the retained preview level for a freshly computed tile.
-
-    Worker-side and opportunistic (ADR 0050 retained preview level): prefetch
-    can pin a coarse copy in the shared pyramid cache, so any index ever
-    computed re-presents instantly through the floor. When a finer resident
-    history never selects its values: it always executes the canonical direct
-    source route for any newly claimed page.
-    """
-
-    if not isinstance(preview_pyramid, LodPageCache) or int(preview_level) <= 0:
-        return None
-    shader_display = bool(shader_display)
-    level = int(preview_level)
-    source = canonical_value_source_for_rendered(rendered, shader_display=shader_display)
-    reducer, dtype, representation = _reducer_format_for_rendered(rendered, source)
-    height, width = (int(value) for value in np.shape(source)[:2])
-    plans = plan_source_grid_pages(
-        content_key=("src-anchored", semantic_source_id, ("display-plane",)),
-        valid_source_rect_yx=(0, height, 0, width),
-        reduction_yx=(level, level),
-        stored_page_shape=(256, 256),
-        dtype=dtype,
-        representation=representation,
-        reducer=reducer,
-    )
-    key = LodPageSetKey(
-        source_id=semantic_source_id,
-        tile_id=int(rendered.tile.source_index),
-        level_xy=(level, level),
-        reducer=reducer,
-        plans=plans,
-    )
-    if _page_set_exact(preview_pyramid, key):
-        return None
-    owner = ("retained-preview-pages", semantic_source_id, key)
-    claimed = preview_pyramid.claim_plans(plans, owner)
-    if not claimed:
-        return None
-    if not preview_pyramid.begin_owner_work(owner):
-        preview_pyramid.release_owner_claims(owner)
-        raise RuntimeError("retained preview page claims disappeared before admission")
-    try:
-        for plan in claimed:
-            page = materialize_lod_page(source, source_origin_yx=(0, 0), plan=plan)
-            preview_pyramid.admit_as(plan.key, page, owner=owner)
-    finally:
-        preview_pyramid.finish_owner_work(owner)
-    if not _page_set_exact(preview_pyramid, key):
-        return None
-    return key
 
 
 # --------------------------------------------------------------------------

@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from arrayscope.gpu import device_topology as topo
+from tests import seams
 
 
 def test_detect_returns_valid_label():
@@ -12,7 +13,6 @@ def test_detect_returns_valid_label():
     assert result.kind in ("integrated", "discrete", "unknown")
     assert isinstance(result.unified_memory, bool)
     # Unknown (or integrated) is treated as RAM-only; discrete sets the seam.
-    assert result.is_integrated or result.is_discrete
     assert result.discrete_transfer_candidate == (result.kind == "discrete")
 
 
@@ -32,7 +32,7 @@ def test_safe_fallback_when_no_adapter(monkeypatch):
     result = topo.detect_topology(force=True)
     assert result.kind == "unknown"
     assert result.unified_memory is True
-    assert result.is_integrated is True  # unknown treated as RAM-only
+    # Unknown is treated as RAM-only, so the Phase-B transfer seam stays off.
     assert result.discrete_transfer_candidate is False
 
 
@@ -58,12 +58,12 @@ def test_cached_after_first_detect(monkeypatch):
 
     monkeypatch.setattr(topo, "_adapter_info_from_shared_device", lambda: None)
     monkeypatch.setattr(topo, "_adapter_info_from_probe", _probe)
-    topo.reset_topology_cache()
+    seams.reset_topology_cache()
     first = topo.detect_topology()
     second = topo.detect_topology()
     assert first is second
     assert calls["n"] == 1  # probed once, then cached
-    topo.reset_topology_cache()
+    seams.reset_topology_cache()
 
 
 def test_import_does_not_require_gpu():

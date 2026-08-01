@@ -63,14 +63,6 @@ def session_token_is_current(current_session, session_id, key) -> bool:
     return int(current_session.session_id) == int(session_id) and current_session.key == key
 
 
-def session_is_current(current_session, session) -> bool:
-    """Is a captured session object still the current session?"""
-
-    if session is None:
-        return False
-    return session_token_is_current(current_session, session.session_id, session.key)
-
-
 def montage_work_token(session, reason: str) -> tuple[object, ...]:
     """Derive the supersession token for one kind of deferred montage work.
 
@@ -111,6 +103,5 @@ __all__ = [
     "generation_is_current",
     "montage_work_token",
     "montage_work_token_is_current",
-    "session_is_current",
     "session_token_is_current",
 ]

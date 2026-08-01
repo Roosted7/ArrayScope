@@ -17,7 +17,7 @@ def test_register_is_idempotent_by_name():
     g1 = numba_runtime.register("test-idem", builder)
     g2 = numba_runtime.register("test-idem", lambda: {"k": 0})  # ignored builder
     assert g1 is g2
-    assert numba_runtime.get_group("test-idem") is g1
+    assert g1.name == "test-idem"
 
 
 def test_prewarm_runs_builder_once_and_marks_ready():

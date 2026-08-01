@@ -157,14 +157,6 @@ class LevelEvidenceBatchResult:
         return len(self.sources)
 
     @property
-    def requested_pixels(self) -> int:
-        return sum(int(source.sampled_pixels) for source in self.sources)
-
-    @property
-    def max_source_pixels(self) -> int:
-        return max((int(source.sampled_pixels) for source in self.sources), default=0)
-
-    @property
     def slab_nbytes(self) -> int:
         return sum(int(source.slab_nbytes) for source in self.sources)
 
@@ -190,11 +182,8 @@ class OperationEvaluator:
     # a legacy display-order entry (a flag flip degrades to a cache miss, never
     # a wrong-orientation reuse).
     canonical_orientation: bool = False
-    _derived_key: tuple | None = None
-    _derived_data: object | None = None
     _line_key: tuple | None = None
     _line_result: object | None = None
-    derived_evaluations: int = 0
     image_evaluations: int = 0
     line_evaluations: int = 0
     scalar_evaluations: int = 0
@@ -204,10 +193,7 @@ class OperationEvaluator:
     prefetch_skipped: int = 0
     prefetch_stored: int = 0
     prefetch_stale: int = 0
-    degraded_evaluations: int = 0
-    refused_evaluations: int = 0
     chunked_evaluations: int = 0
-    cancelled_evaluations: int = 0
     display_generation: int = 0
     last_status: CacheStatusSnapshot = _NO_EVALUATION_STATUS
     last_diagnostics: object | None = None
@@ -278,8 +264,6 @@ class OperationEvaluator:
             self.document = document
 
     def clear_cache(self):
-        self._derived_key = None
-        self._derived_data = None
         self._line_key = None
         self._line_result = None
         if hasattr(self, "_display_cache"):
@@ -294,23 +278,6 @@ class OperationEvaluator:
             self._stage_materializer.clear()
         self.display_generation += 1
         self.last_status = CacheStatusSnapshot(CacheStatus.STALE, "Cache cleared")
-
-    def current_data(self):
-        key = _document_key(self.document)
-        if self._derived_key == key:
-            self.last_status = cache_status_for_hit(True)
-            return self._derived_data
-
-        self.last_status = cache_status_computing("Evaluating derived array")
-        try:
-            self._derived_data = self.document.materialize()
-            self._derived_key = key
-            self.derived_evaluations += 1
-            self.last_status = cache_status_ready("Derived array cached")
-            return self._derived_data
-        except Exception as exc:
-            self.last_status = cache_status_error(exc)
-            raise
 
     def image(self, view_state, colormap_lut=None):
         request_for_image(view_state)
@@ -566,24 +533,6 @@ class OperationEvaluator:
             return fast
 
         return key_for
-
-    def cached_display_tile(
-        self, view_state, colormap_lut=None, *, document=None, shader_display: bool = False
-    ):
-        cached = self._display_cache.get(
-            self.display_tile_key(
-                view_state,
-                colormap_lut=colormap_lut,
-                document=document,
-                shader_display=shader_display,
-            )
-        )
-        if cached is not None:
-            self.last_status = cache_status_for_hit(True)
-            self.last_diagnostics = self._display_cache.diagnostics(
-                CacheStatus.CACHED, "Using cached display tile"
-            )
-        return cached
 
     def cached_montage_tile_by_key(self, tile_key):
         """Display-cache lookup for a key produced by ``montage_tile_key_batch``."""
@@ -942,23 +891,8 @@ class OperationEvaluator:
     def note_prefetch_skipped(self):
         self.prefetch_skipped += 1
 
-    def note_render_refused(self, reason: str = ""):
-        self.refused_evaluations += 1
-        self.last_status = CacheStatusSnapshot(CacheStatus.STALE, str(reason or "Render refused"))
-
-    def note_render_degraded(self):
-        self.degraded_evaluations += 1
-
-    def note_render_cancelled(self):
-        self.cancelled_evaluations += 1
-
     def note_chunked_evaluation(self):
         self.chunked_evaluations += 1
-
-    def cache_diagnostics(self):
-        if self.last_diagnostics is not None:
-            return self.last_diagnostics
-        return self._display_cache.diagnostics(self.last_status.status, self.last_status.message)
 
     def apply_memory_policy(self, policy) -> None:
         self._display_cache.resize(max_bytes=int(policy.display_cache_budget_bytes))
@@ -1008,10 +942,7 @@ class OperationEvaluator:
             "prefetch_skipped": int(self.prefetch_skipped),
             "prefetch_stored": int(self.prefetch_stored),
             "prefetch_stale": int(self.prefetch_stale),
-            "degraded_evaluations": int(self.degraded_evaluations),
-            "refused_evaluations": int(self.refused_evaluations),
             "chunked_evaluations": int(self.chunked_evaluations),
-            "cancelled_evaluations": int(self.cancelled_evaluations),
         }
 
 

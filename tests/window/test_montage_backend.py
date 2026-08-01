@@ -29,6 +29,7 @@ from arrayscope.window.montage_viewport import (
     MontageViewportPlan,
     frame_session_key,
 )
+from tests import seams
 
 
 def _window_ns(**kwargs):
@@ -6813,10 +6814,10 @@ def test_tiled_payload_source_id_follows_semantic_materialization_identity():
         skipped_tiles=set(),
     )
 
-    first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    first = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
     session.rendered_tiles[0] = rendered(2.0)
-    second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
-    third = session.snapshot_display_tile_payloads({0: ("tile", 0, "revision", 2)})[0]
+    second = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
+    third = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0, "revision", 2)})[0]
 
     assert _base_tile_source_id(first.source_id) == ("tile", 0)
     assert _base_tile_source_id(second.source_id) == ("tile", 0)

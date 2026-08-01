@@ -218,48 +218,9 @@ def patched_histogram_plot_source(previous, previous_layout, payloads, *, upsert
     return patched, (previous_population, slices)
 
 
-def tiled_semantic_histogram_identity(tile_payloads):
-    """Identity of the semantic histogram inputs of a tiled commit."""
-
-    if not tile_payloads:
-        return None
-    result = []
-    for tile, payload in sorted(dict(tile_payloads).items()):
-        semantic = getattr(payload, "semantic_data", None)
-        if semantic is None:
-            semantic = getattr(payload, "image", None)
-        result.append((int(tile), id(semantic), id(payload_histogram_source(payload))))
-    return tuple(result)
-
-
-def tiled_histogram_key(histogram_range, *, histogram_plot_data, tile_delta, semantic_identity):
-    """Identity of the histogram stream for one tiled presentation commit.
-
-    Texture/source identity is deliberately absent: presentation identity
-    churn (display-LOD level swaps, atlas retargets) must never repaint or
-    recompute the histogram (ADR 0050).
-    """
-
-    if tile_delta is None:
-        raise ValueError("tiled histogram identity requires a TilePresentationDelta")
-    source = None if histogram_plot_data is None else np.asarray(histogram_plot_data)
-    return (
-        "revision",
-        int(tile_delta.histogram_revision),
-        id(histogram_plot_data),
-        semantic_identity,
-        None if source is None else tuple(int(value) for value in source.shape),
-        None if source is None else str(source.dtype),
-        None if source is None else tuple(int(value) for value in source.strides),
-        (float(histogram_range[0]), float(histogram_range[1])),
-    )
-
-
 __all__ = [
     "histogram_plot_source_and_layout",
     "patched_histogram_plot_source",
     "payload_histogram_display_source",
     "payload_histogram_source",
-    "tiled_histogram_key",
-    "tiled_semantic_histogram_identity",
 ]

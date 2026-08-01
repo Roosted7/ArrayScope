@@ -6,7 +6,6 @@ from arrayscope.core.array_source import (
     LazySourceArray,
     NdArraySource,
     SourceReadRefused,
-    is_lazy_source_array,
     read_index_spec,
 )
 
@@ -96,8 +95,7 @@ def test_lazy_source_array_mirrors_source_metadata():
     data = np.arange(24, dtype=np.float64).reshape(2, 3, 4)
     lazy = LazySourceArray(NdArraySource(data, label="lazy"))
 
-    assert is_lazy_source_array(lazy)
-    assert not is_lazy_source_array(data)
+    assert isinstance(lazy, LazySourceArray)
     assert lazy.shape == (2, 3, 4)
     assert np.shape(lazy) == (2, 3, 4)
     assert lazy.dtype == np.float64

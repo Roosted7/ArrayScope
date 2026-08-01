@@ -5,10 +5,8 @@ import pytest
 from arrayscope.display.viewport import (
     MIN_VIEWPORT_CONTENT_FRACTION,
     ViewportController,
-    ViewportIntent,
     ViewportMode,
     ViewportPolicy,
-    coerce_viewport_policy,
     constrain_view_range,
     square_pixel_fit_view_range,
     view_ranges_near,
@@ -367,17 +365,6 @@ def test_square_pixel_fit_view_range_preserves_content_aspect_inside_wide_viewpo
     assert view_range[0] == pytest.approx((-5.0, 15.0))
     assert view_range[1] == pytest.approx((0.0, 10.0))
     assert view_ranges_near(view_range, ((-5.01, 15.01), (0.0, 10.0)), tolerance_fraction=0.02)
-
-
-def test_qt_auto_range_is_coerced_identically_for_every_backend():
-    assert coerce_viewport_policy(ViewportPolicy.PRESERVE, True) is ViewportPolicy.FIT_ONCE
-    assert coerce_viewport_policy(ViewportPolicy.FIT_ONCE, False) is ViewportPolicy.PRESERVE
-
-
-def test_semantic_viewport_intent_survives_canonical_coercion():
-    assert coerce_viewport_policy(ViewportIntent.FIT) is ViewportIntent.FIT
-    assert coerce_viewport_policy("reset_for_new_shape") is ViewportPolicy.RESET_FOR_NEW_SHAPE
-    assert coerce_viewport_policy("one_to_one") is ViewportIntent.ONE_TO_ONE
 
 
 def test_constrain_view_range_caps_zoom_out_to_minimum_content_fraction():

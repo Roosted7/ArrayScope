@@ -90,13 +90,6 @@ class ChunkLod:
     def is_native(self) -> bool:
         return not any(self.reduction) and self.factor == 1 and self.level == 0
 
-    def axis_scale(self, axis: int) -> int:
-        """Source samples per stored sample along ``axis`` (1 = native)."""
-
-        if axis < len(self.reduction):
-            return 1 << self.reduction[axis]
-        return 1
-
 
 @dataclass(frozen=True)
 class DataChunkKey:

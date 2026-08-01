@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
-
 
 @dataclass(frozen=True)
 class ArrayLayer:
@@ -29,7 +27,3 @@ class CompareDocument:
         index = len(self.layers) + 1
         layer = ArrayLayer(f"layer-{index}", str(label or f"Layer {index}"), data)
         return CompareDocument((*self.layers, layer), self.active_layer_id)
-
-
-def compatible_roi_shape(layer_data, reference_shape):
-    return tuple(np.shape(layer_data)[:2]) == tuple(int(value) for value in reference_shape[:2])

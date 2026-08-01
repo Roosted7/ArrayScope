@@ -754,21 +754,6 @@ def page_assembly_nbytes(assembly: _PageAssembly) -> int:
     return int(getattr(image, "nbytes", 0) or 0)
 
 
-def _assemble_page_backed_payload(
-    payload: DisplayTilePayload,
-    *,
-    levels: tuple[float, float] | None = None,
-) -> DisplayTilePayload:
-    """Assemble exact native geometry for PyQtGraph's one-item CPU path.
-
-    Reduced samples are repeated over their exact planned source rectangles,
-    not uniformly stretched. This is nearest-neighbour presentation with the
-    same clipped-bin geometry as the GPU path.
-    """
-
-    return _resolve_page_backed_payload(payload, levels=levels).payload
-
-
 def _payload_direct_dims(region, tile_data, payload):
     """World footprint + image crop for a possibly LOD-reduced payload.
 
@@ -986,33 +971,6 @@ class MontageTileLayer:
         state.item.setVisible(bool(visible))
         self._sync_presented(state.tile_number)
 
-    def _presented_index_scan(self) -> set[int]:
-        """The full scan the index replaces. Kept for the equivalence oracle."""
-
-        return {
-            int(state.tile_number)
-            for tile, state in self._states.items()
-            if int(tile) == int(state.tile_number) and _state_is_physically_visible(state)
-        }
-
-    def assert_presented_index_matches_scan(self) -> None:
-        """Raise unless the maintained index equals a fresh full scan.
-
-        Test-only, and the gate on removing the scan from production: a
-        visibility mutation site that forgets to sync shows up here as a
-        concrete difference rather than as a tile that silently stops being
-        acknowledged.
-        """
-
-        scanned = self._presented_index_scan()
-        maintained = self.presented_tiles
-        if maintained != scanned:
-            raise AssertionError(
-                "presented index drifted from the full scan: "
-                f"index-only={sorted(maintained - scanned)} "
-                f"scan-only={sorted(scanned - maintained)}"
-            )
-
     def _resolve_payload(
         self, payload: DisplayTilePayload, *, levels, defer_if_unprepared: bool = False
     ):
@@ -1122,15 +1080,6 @@ class MontageTileLayer:
         if item is None or not item.isVisible():
             return frozenset()
         return item.active_tiles
-
-    @property
-    def preview_atlas_page_count(self) -> int:
-        item = self._preview_atlas_item
-        return 0 if item is None else int(item.page_count)
-
-    @property
-    def preview_atlas_decline_reason(self) -> str:
-        return str(self._preview_atlas_decline_reason)
 
     def tile_truth_physical_rows(self) -> dict[int, dict[str, object]]:
         """Describe the arrays and mapping the visible ImageItems draw now."""
@@ -2237,59 +2186,6 @@ class MontageTileLayer:
         remove_item = getattr(self.layer_owner, "remove_montage_preview_item", None)
         if callable(remove_item):
             remove_item(item)
-
-    def update_levels(
-        self,
-        levels,
-        *,
-        image=None,
-        histogram_data=None,
-    ) -> TileLayerUpdateStats:
-        levels = (float(levels[0]), float(levels[1]))
-        atlas = self._preview_atlas_item
-        if atlas is not None:
-            atlas.set_mapping(replace(atlas.mapping, levels=levels))
-        image_array = None if image is None else np.asarray(image)
-        hist_array = None if histogram_data is None else np.asarray(histogram_data)
-        items_updated = 0
-        items_skipped = 0
-        rgb_window_tiles = 0
-        update_start = perf_counter()
-        processed = 0
-        for state in tuple(self._states.values()):
-            if not state.visible:
-                continue
-            updated, windowed = self._update_tile_levels(
-                state, levels, image=image_array, histogram_data=hist_array
-            )
-            processed += 1
-            items_updated += int(updated)
-            rgb_window_tiles += int(windowed)
-            if not updated:
-                items_skipped += 1
-        self._prune_rgb_source_cache()
-        resident_items = self._resident_count()
-        physically_presented = self._physically_presented_tiles()
-        return TileLayerUpdateStats(
-            visible_items=len(physically_presented),
-            presented_tiles=physically_presented,
-            presented_identities=self._presented_identities(),
-            items_updated=items_updated,
-            items_skipped=items_skipped,
-            rgb_window_tiles=rgb_window_tiles,
-            level_updates=processed,
-            resident_items=int(resident_items) + len(self.preview_atlas_active_tiles),
-            storage_capacity=int(resident_items) + len(self.preview_atlas_active_tiles),
-            cpu_shadow_bytes=int(self._resident_bytes) + self._preview_atlas_nbytes(),
-            warm_resident_items=max(
-                0,
-                int(resident_items)
-                + len(self.preview_atlas_active_tiles)
-                - len(physically_presented),
-            ),
-            level_update_processed_items=processed,
-            upload_ms=(perf_counter() - update_start) * 1000.0,
-        )
 
     def warm_payloads(
         self,

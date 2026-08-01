@@ -20,7 +20,6 @@ from arrayscope.operations.pipeline import (
 )
 from arrayscope.operations.planner import (
     build_operation_stages,
-    candidate_stage_cache_points,
     expanded_axes_for_transition,
     final_region_for_request,
     plan_region_request,
@@ -43,6 +42,7 @@ from arrayscope.operations.slabs import (
     request_for_line,
     request_for_scalar,
 )
+from tests import seams
 
 
 def test_region_spec_roundtrips_to_index_spec():
@@ -83,11 +83,16 @@ def test_build_operation_stages_includes_base_and_operation_metadata():
     assert stages[1].capabilities.cache_stage is True
 
 
+def _cache_candidates(*operations):
+    """The candidates the production planner derives for a sliced-axis image."""
+
+    document = ArrayDocument(np.zeros((4, 5, 6), dtype=np.float32), operations=operations)
+    state = ViewState.from_shape((4, 5, 6)).with_image_axes(0, 1).with_slice(2, 2)
+    return plan_region_request(document, request_for_image(state)).cache_candidates
+
+
 def test_fft_over_sliced_axis_produces_expanded_cache_candidate():
-    final_region = region_from_index_spec((4, 5, 6), (slice(None), slice(None), 2))
-    candidates = candidate_stage_cache_points(
-        (4, 5, 6), np.float32, (CenteredFFT(axis=2),), final_region
-    )
+    candidates = _cache_candidates(CenteredFFT(axis=2))
 
     assert len(candidates) == 1
     assert candidates[0].stage_index == 1
@@ -96,11 +101,10 @@ def test_fft_over_sliced_axis_produces_expanded_cache_candidate():
     assert candidates[0].retain is True
 
 
-def test_fft_then_ifft_produces_two_ordered_candidates():
-    final_region = region_from_index_spec((4, 5, 6), (slice(None), slice(None), 2))
-    candidates = candidate_stage_cache_points(
-        (4, 5, 6), np.float32, (CenteredFFT(axis=2), CenteredIFFT(axis=2)), final_region
-    )
+def test_two_cacheable_stages_produce_two_ordered_candidates():
+    # Two transforms on different axes: the optimizer elides an FFT/IFFT pair
+    # outright, so that pipeline reaches the planner with nothing to cache.
+    candidates = _cache_candidates(CenteredFFT(axis=2), CenteredFFT(axis=1))
 
     assert [candidate.stage_index for candidate in candidates] == [1, 2]
     assert candidates[0].retain is False
@@ -391,7 +395,7 @@ def test_scrubbing_a_broadcast_axis_of_an_axis_set_transform_reads_one_slab():
 
 
 def _plugin_operation(operation_id, fn):
-    """Install a spec directly (the documented ``_reset_plugin_cache`` seam)."""
+    """Install a spec directly (the documented ``seams.reset_plugin_cache`` seam)."""
 
     spec = PluginOperationSpec(id=operation_id, label=operation_id, fn=fn, changes_shape=True)
     plugins._SPEC_CACHE[spec.id] = spec
@@ -400,9 +404,9 @@ def _plugin_operation(operation_id, fn):
 
 @pytest.fixture
 def plugin_spec_cache():
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
     yield
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
 
 
 def test_rank_reducing_plugin_op_plans_and_evaluates(plugin_spec_cache):

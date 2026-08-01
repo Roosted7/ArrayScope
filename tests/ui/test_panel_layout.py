@@ -430,10 +430,10 @@ def test_opening_dock_uses_current_dock_extent_for_window_growth(qtbot):
         win.setGeometry(420, 20, 320, 500)
         _process_events(qtbot, count=20)
         win.inspection_dock.resize(420, 300)
-        width_delta, height_delta = win.layout_manager._dock_extent_for_area(win.inspection_dock)
+        # The dock's own size is what a reopen must honour, not the default share.
+        win.layout_manager._state_for(win.inspection_dock).reserved_extent = 420
 
-        assert width_delta >= 420
-        assert height_delta == 0
+        assert win.layout_manager.default_dock_extent(win.inspection_dock) >= 420
 
         win._set_inspection_dock_visible_from_user(True)
         _process_events(qtbot, count=40)

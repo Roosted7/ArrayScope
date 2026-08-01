@@ -116,15 +116,6 @@ _runtime_backend_choice = FFTBackendChoice.AUTO
 _runtime_workers_choice = FFTWorkersChoice.AUTO
 
 
-def available_fft_backends() -> tuple[str, ...]:
-    names = ["numpy"]
-    if _module_available("scipy"):
-        names.insert(0, "scipy")
-    if _module_available("pyfftw"):
-        names.append("pyfftw")
-    return tuple(names)
-
-
 def resolve_fft_backend(choice: FFTBackendChoice | str) -> FFTBackend:
     choice = _normalize_backend_choice(choice)
     if choice == FFTBackendChoice.NUMPY:

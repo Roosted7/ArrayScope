@@ -321,8 +321,8 @@ def test_restored_file_session_uses_viewport_shape_authority(qtbot, monkeypatch)
     )
     monkeypatch.setattr(
         WindowLayoutManager,
-        "_restore_saved_viewport_session",
-        lambda self: calls.append("settings"),
+        "_saved_viewport_session",
+        lambda self: calls.append("settings") or None,
     )
     monkeypatch.setattr(
         WindowLayoutManager,
@@ -369,8 +369,8 @@ def test_restored_file_session_uses_viewport_shape_without_general_settings(qtbo
     )
     monkeypatch.setattr(
         WindowLayoutManager,
-        "_restore_saved_viewport_session",
-        lambda self: calls.append("settings"),
+        "_saved_viewport_session",
+        lambda self: calls.append("settings") or None,
     )
     monkeypatch.setattr(
         WindowLayoutManager,

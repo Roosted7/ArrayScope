@@ -25,6 +25,7 @@ from arrayscope.display.shader_mapping import (
     TexturePlaneKind,
 )
 from arrayscope.window.frame_session import FrameSession
+from tests import seams
 
 
 def _session():
@@ -290,14 +291,14 @@ def test_montage_priority_retarget_preserves_payload_identity():
     image = np.ones((2, 2), dtype=np.float32)
     rendered = RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes)
     session.mark_materialized(rendered)
-    first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    first = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
 
     session.retarget_tile_priority(
         focus=(8.0, 1.0),
         active_tiles=(0, 1, 2, 3),
         near_tiles=(),
     )
-    second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    second = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
 
     assert second is first
     assert second.source_id == first.source_id
@@ -314,7 +315,7 @@ def test_montage_render_session_materialized_tile_stays_loading_until_presented(
 
     session.mark_materialized(rendered)
 
-    assert session.is_tile_loaded(tile)
+    assert int(tile.montage_index) in session.rendered_tiles
     assert int(tile.montage_index) in session.loading_tiles
 
     session.mark_presented((tile.montage_index,))
@@ -498,7 +499,7 @@ def test_backend_confirmed_current_payload_rehydrates_active_state():
     tile = session.plan.tiles[0]
     image = np.full((2, 2), 7.0, dtype=np.float32)
     session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
-    payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    payload = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
     session.tile_presentation_state = TilePresentationState()
     session.lifecycle.backend_presented_snapshot({0: tile_ack_identity(payload)})
     session.lifecycle.presentation_discarded(0)
@@ -537,7 +538,7 @@ def test_backend_confirmed_current_payloads_do_not_trickle_through_upsert_cap():
         image = np.full((2, 2), tile.source_index, dtype=np.float32)
         session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
         source_ids[index] = ("tile", index)
-    payloads = session.snapshot_display_tile_payloads(source_ids)
+    payloads = seams.snapshot_display_tile_payloads(session, source_ids)
     session.display_tile_payloads.update(payloads)
     session.tile_presentation_state = TilePresentationState()
     session.lifecycle.backend_presented_snapshot(
@@ -596,8 +597,8 @@ def test_montage_render_session_reuses_typed_payload_wrappers_until_tile_changes
     first_rendered = RenderedTile(tile, image, histogram, 0.0, image.shape, image.nbytes)
     session.mark_materialized(first_rendered)
 
-    first = session.snapshot_display_tile_payloads({0: ("tile", 0)})
-    second = session.snapshot_display_tile_payloads({0: ("tile", 0)})
+    first = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})
+    second = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})
     state, delta = session.build_tile_presentation({0: ("tile", 0)})
     session.acknowledge_tile_presentation(delta, TileCommitReport(presented_tiles=(0,)))
     clean_state, clean_delta = session.build_tile_presentation({0: ("tile", 0)})
@@ -1049,7 +1050,7 @@ def test_lod_payload_does_not_reduce_display_ready_rgb_phase_tiles():
     )
     session.mark_materialized(rendered)
 
-    payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    payload = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
 
     assert payload.lod.factor == 1
     assert payload.image.shape[:2] == (8, 8)
@@ -1103,7 +1104,7 @@ def test_zoomed_out_scalar_payload_keeps_exact_texture_on_ui_commit_path():
     )
     session.mark_materialized(rendered)
 
-    payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    payload = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
     decision = session.lod_policy_decision
 
     assert decision.demand.desired_factor > 1
@@ -1136,8 +1137,8 @@ def test_zoomed_out_payload_reuses_clean_wrapper_without_cpu_lod_work():
     )
     session.mark_materialized(rendered)
 
-    first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
-    second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    first = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
+    second = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
 
     assert second is first
 
@@ -1157,12 +1158,12 @@ def test_exact_payload_seeds_from_previous_session_without_materialization():
     )
     first_session.mark_materialized(rendered)
     source_ids = {0: ("tile", 0)}
-    first = first_session.snapshot_display_tile_payloads(source_ids)[0]
+    first = seams.snapshot_display_tile_payloads(first_session, source_ids)[0]
 
     second_session = _zoomed_out_session()
     second_session.mark_materialized(rendered)
     second_session.seed_display_tile_payloads({0: first}, source_ids)
-    second = second_session.snapshot_display_tile_payloads(source_ids)[0]
+    second = seams.snapshot_display_tile_payloads(second_session, source_ids)[0]
 
     assert second is first
 
@@ -1180,7 +1181,7 @@ def test_retargeted_seed_rebuilds_typed_identity_for_current_source():
             image.nbytes,
         )
     )
-    stale_wrapper = original.snapshot_display_tile_payloads({0: ("tile-source", 3)})[0]
+    stale_wrapper = seams.snapshot_display_tile_payloads(original, {0: ("tile-source", 3)})[0]
     assert stale_wrapper.tile_identity.source_index == 0
 
     state = ViewState.from_shape((2, 2, 4)).with_montage_axis(
@@ -1259,7 +1260,7 @@ def test_same_source_seed_rebuilds_typed_identity_for_current_axes():
         )
     )
     source_ids = {0: ("tile-source", 0)}
-    predecessor = original.snapshot_display_tile_payloads(source_ids)[0]
+    predecessor = seams.snapshot_display_tile_payloads(original, source_ids)[0]
 
     current = _session()
     current.view_state = current.view_state.with_axis_flipped(0, True)
@@ -1314,7 +1315,7 @@ def test_zoomed_out_complex_payload_keeps_exact_semantics_and_texture():
     )
     session.mark_materialized(rendered)
 
-    payload = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    payload = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
     decision = session.lod_policy_decision
 
     assert decision.demand.desired_factor > 1
@@ -1354,7 +1355,7 @@ def test_shader_mapping_change_reuses_texture_content_identity():
         shader_mapping=first_mapping,
     )
     session.mark_materialized(first_rendered)
-    first = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    first = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
 
     second_rendered = RenderedTile(
         session.plan.tiles[0],
@@ -1368,7 +1369,7 @@ def test_shader_mapping_change_reuses_texture_content_identity():
         shader_mapping=second_mapping,
     )
     session.mark_materialized(second_rendered)
-    second = session.snapshot_display_tile_payloads({0: ("tile", 0)})[0]
+    second = seams.snapshot_display_tile_payloads(session, {0: ("tile", 0)})[0]
 
     assert second is not first
     assert second.source_id == first.source_id

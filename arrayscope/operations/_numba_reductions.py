@@ -115,12 +115,6 @@ def prewarm_async() -> None:
     _GROUP.prewarm_async()
 
 
-def is_ready() -> bool:
-    """Return True when the numba kernels are compiled and usable."""
-
-    return NUMBA_AVAILABLE and _GROUP.ready()
-
-
 def rss_if_ready(data, axis: int):
     """Return the fused numba RSS result, or ``None`` for the numpy fallback.
 

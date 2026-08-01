@@ -19,10 +19,11 @@ import numpy as np
 import pytest
 
 from arrayscope.kernel.task import CancellationToken
-from arrayscope.operations import environments, library, plugins, registry
+from arrayscope.operations import environments, library, registry
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.packs import bart_pack
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
+from tests import seams
 
 PROBE_SHAPE = (4, 5, 6)
 _CHATTY_BYTES = 200_000
@@ -33,11 +34,11 @@ def _clean_pack_state(monkeypatch):
     # A real BART build may need a private loader path. The bash/Python fake
     # executables in this module must remain independent of that installation.
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
     yield
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
 
 
 @pytest.mark.parametrize("dtype", ["complex64", "float32", "float64", "int16"])

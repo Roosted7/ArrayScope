@@ -18,6 +18,7 @@ from arrayscope.presentation import (
     TilePayloadRef,
     TileTarget,
 )
+from tests import seams
 
 
 @pytest.fixture
@@ -80,7 +81,7 @@ def test_preview_claim_identity_changes_with_semantic_window(lc):
     assert lc.preview_claimed(0, 1, 4, ("window", 2))
     assert not lc.preview_released(0, 1, 4, ("window", 1))
     assert lc.preview_claim_matches(0, 1, 4, ("window", 2))
-    assert lc.preview_claim_active(0, ("window", 2))
+    assert any(key == ("window", 2) for _level, key in lc.record(0).preview_claims.values())
 
 
 # -- rule 1: acknowledged presentation only ----------------------------------
@@ -115,47 +116,6 @@ def test_fresh_evaluation_invalidates_stale_emit_identity(lc):
     assert rec.presentation is Presentation.PRESENTED
     assert rec.presented_source_id == "old"
     assert rec.emitted_source_id is None
-
-
-def test_best_presentable_prefers_exact_current_source(lc):
-    Payload = namedtuple("Payload", "source_id quality lod source_index")
-    Lod = namedtuple("Lod", "level")
-    semantic = ("montage-tile", "doc", 3)
-    preview = Payload((*semantic, "floor", "scalar", (4, 4)), "preview", Lod(4), 3)
-    exact = Payload((*semantic, "texture_kind", "scalar", "lod", 0, 0), "exact", Lod(0), 3)
-    other = Payload(("montage-tile", "other", 3, "texture_kind", "scalar"), "exact", Lod(0), 3)
-    lc.retarget({3: TileTarget(3, 3, semantic, 0)})
-
-    lc.remember_presentable(3, preview)
-    lc.remember_presentable(3, other)
-    lc.remember_presentable(3, exact)
-
-    assert lc.best_presentable(3, semantic, 0) is exact
-    assert lc.best_presentable(3, ("missing",), 0) is None
-    assert not lc.may_remove_visible(3)
-    lc.acknowledge_presented(3, exact.source_id, exact.quality, exact.lod.level)
-    assert not lc.may_remove_visible(3)
-
-
-def test_feedback_signature_tracks_lifecycle_owned_work_class(lc):
-    LevelKey = namedtuple("LevelKey", "component level_xy")
-    preview_key = LevelKey("scalar", (4, 4))
-
-    lc.plan_applied([0])
-    initial = lc.feedback_signature([0])
-    lc.level_claimed(0, preview_key, ClaimOwner.PREVIEW, request=("preview", preview_key))
-    lc.level_resident(0, preview_key)
-    preview = lc.feedback_signature([0])
-    lc.evaluation_started(0)
-    lc.evaluation_completed(0)
-    lc.upsert_emitted(0, source_id=("exact", 0))
-    lc.commit_acknowledged(emitted_tiles=[0], accepted_tiles=[0], active_scope=[0])
-    exact_presented = lc.feedback_signature([0])
-
-    assert initial != preview
-    assert preview != exact_presented
-    assert "preview" in repr(preview)
-    assert "presented" in repr(exact_presented)
 
 
 # -- rule 3: emit-once, park, re-arm ------------------------------------------
@@ -351,7 +311,7 @@ def test_declined_level_releases_claim(lc):
     admission."""
 
     lc.level_claimed(3, ("lvl", 1), ClaimOwner.CHAIN)
-    effects = lc.level_declined(3, ("lvl", 1))
+    effects = seams.level_declined(lc, 3, ("lvl", 1))
     assert effects == (ReleaseClaim(3, ("lvl", 1), ClaimOwner.CHAIN),)
     assert lc.dangling_claims() == ()
 
@@ -359,7 +319,7 @@ def test_declined_level_releases_claim(lc):
 def test_resident_level_never_released_by_decline(lc):
     lc.level_claimed(3, ("lvl", 1), ClaimOwner.WALK)
     lc.level_resident(3, ("lvl", 1))
-    assert lc.level_declined(3, ("lvl", 1)) == ()
+    assert seams.level_declined(lc, 3, ("lvl", 1)) == ()
     assert lc.record(3).levels[("lvl", 1)].phase is LevelPhase.RESIDENT
 
 
@@ -614,14 +574,14 @@ def test_request_views_follow_semantic_events(lc):
 
 def test_stage_bindings_replace_waiters(lc):
     lc.stage_bindings_replaced({"stage-a": (1, 2), "stage-b": (3,)})
-    assert lc.stage_blocked_tiles == frozenset({1, 2, 3})
+    assert frozenset(i for w in lc._stage_blocked.values() for i in w) == frozenset({1, 2, 3})
     assert lc.record(2).stage_key == "stage-a"
     # Activation batch consumed tile 2; fail dropped stage-b entirely.
     lc.stage_bindings_replaced({"stage-a": (1,)})
-    assert lc.stage_blocked_tiles == frozenset({1})
+    assert frozenset(i for w in lc._stage_blocked.values() for i in w) == frozenset({1})
     assert lc.record(2).stage_key is None
     assert lc.record(3).stage_key is None
     # A completed evaluation unbinds mechanically.
     lc.evaluation_started(1)
     lc.evaluation_completed(1)
-    assert lc.stage_blocked_tiles == frozenset()
+    assert frozenset(i for w in lc._stage_blocked.values() for i in w) == frozenset()

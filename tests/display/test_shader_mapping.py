@@ -14,13 +14,10 @@ from arrayscope.display.shader_mapping import (
     mapped_scalar,
     normalize_lut_rgb,
     pack_texture_data,
-    phase_lut_indices,
-    shader_component_uniform,
     shader_mapping_with_lut,
-    wgpu_minification_tap_count,
-    wgpu_minification_taps,
     window_intensity,
 )
+from arrayscope.tools import shader_reference
 
 
 def test_component_extraction_matches_numpy_for_complex_values():
@@ -30,14 +27,6 @@ def test_component_extraction_matches_numpy_for_complex_values():
     np.testing.assert_allclose(extract_component(data, ShaderComponent.IMAG), np.imag(data))
     np.testing.assert_allclose(extract_component(data, ShaderComponent.ABS), np.abs(data))
     np.testing.assert_allclose(extract_component(data, ShaderComponent.ANGLE), np.angle(data))
-
-
-def test_shader_component_uniform_matches_component_order():
-    assert shader_component_uniform(ShaderComponent.REAL) == 0.0
-    assert shader_component_uniform("imag") == 1.0
-    assert shader_component_uniform(ShaderComponent.ABS) == 2.0
-    assert shader_component_uniform(ShaderComponent.ANGLE) == 3.0
-    assert shader_component_uniform(ShaderComponent.COMPLEX_PHASE) == 3.0
 
 
 def test_scale_oracle_handles_linear_log_symlog_and_nonfinite_values():
@@ -68,12 +57,6 @@ def test_window_intensity_clips_and_maps_nonfinite_values():
         window_intensity(values, (0.0, 1.0)),
         np.array([0.0, 0.0, 0.5, 1.0, 1.0, 0.0, 1.0, 0.0], dtype=np.float32),
     )
-
-
-def test_phase_lut_indices_are_deterministic_at_key_angles():
-    data = np.array([1 + 0j, 1j, -1 + 0j], dtype=np.complex64)
-
-    np.testing.assert_array_equal(phase_lut_indices(data, 5), np.array([2, 3, 4]))
 
 
 def test_phase_lut_sampling_interpolates_colormap_like_gpu_shader():
@@ -207,15 +190,15 @@ def test_minification_tap_count_gates_on_the_minification_factor():
     while magnifying or at 1:1, more only once a screen pixel really covers
     more than one source texel, capped so the cost stays constant."""
 
-    assert wgpu_minification_tap_count(0.5, 0.5) == 1
-    assert wgpu_minification_tap_count(1.0, 1.0) == 1
-    assert wgpu_minification_tap_count(1.3, 1.3) == 2
-    assert wgpu_minification_tap_count(2.0, 0.1) == 2  # the wider axis decides
-    assert wgpu_minification_tap_count(40.0, 40.0) == MINIFY_FILTER_MAX_TAPS
-    assert wgpu_minification_tap_count(8.0, 8.0, enabled=False) == 1
+    assert shader_reference.wgpu_minification_tap_count(0.5, 0.5) == 1
+    assert shader_reference.wgpu_minification_tap_count(1.0, 1.0) == 1
+    assert shader_reference.wgpu_minification_tap_count(1.3, 1.3) == 2
+    assert shader_reference.wgpu_minification_tap_count(2.0, 0.1) == 2  # the wider axis decides
+    assert shader_reference.wgpu_minification_tap_count(40.0, 40.0) == MINIFY_FILTER_MAX_TAPS
+    assert shader_reference.wgpu_minification_tap_count(8.0, 8.0, enabled=False) == 1
     # A non-finite derivative must fall to the nearest-sample path, never into
     # ceil() of a NaN.
-    assert wgpu_minification_tap_count(float("nan"), 1.0) == 1
+    assert shader_reference.wgpu_minification_tap_count(float("nan"), 1.0) == 1
 
 
 def test_minification_taps_box_quadrature_covers_the_footprint_symmetrically():
@@ -224,7 +207,7 @@ def test_minification_taps_box_quadrature_covers_the_footprint_symmetrically():
     takes really is a box filter over the footprint."""
 
     src = np.array([10.0])
-    taps = wgpu_minification_taps(src, src, 3.0, 3.0, 3)
+    taps = shader_reference.wgpu_minification_taps(src, src, 3.0, 3.0, 3)
 
     assert len(taps) == 9
     xs = sorted({float(tx[0]) for tx, _ in taps})
@@ -232,7 +215,7 @@ def test_minification_taps_box_quadrature_covers_the_footprint_symmetrically():
     # Symmetric about the fragment centre, and inside the footprint.
     assert min(xs) >= 10.0 - 3.0 / 2
     assert max(xs) <= 10.0 + 3.0 / 2
-    assert wgpu_minification_taps(src, src, 3.0, 3.0, 1) == [(src, src)]
+    assert shader_reference.wgpu_minification_taps(src, src, 3.0, 3.0, 1) == [(src, src)]
 
 
 def test_minification_taps_never_leave_the_tile_source_rect():
@@ -249,7 +232,9 @@ def test_minification_taps_never_leave_the_tile_source_rect():
     # A deliberately over-wide footprint at the rect's two corners.
     corners_x = np.array([100.0, 107.9])
     corners_y = np.array([200.0, 207.9])
-    for tx, ty in wgpu_minification_taps(corners_x, corners_y, 20.0, 20.0, 3, src_rect=rect):
+    for tx, ty in shader_reference.wgpu_minification_taps(
+        corners_x, corners_y, 20.0, 20.0, 3, src_rect=rect
+    ):
         assert np.all(tx >= 100.0)
         assert np.all(tx < 108.0)
         assert np.all(ty >= 200.0)

@@ -48,7 +48,6 @@ __all__ = [
     "bc4_decode",
     "bc4_encode",
     "bc4_encode_with_quality",
-    "bc4_plan",
     "bc5_decode",
     "bc5_encode",
     "complex_display_quality",
@@ -369,59 +368,4 @@ def complex_display_quality(
         phase_rmse_rad=float(np.sqrt(np.mean(dphase**2))) if dphase.size else 0.0,
         phase_weighted_rmse_rad=weighted_rmse,
         phase_max_abs_significant_rad=sig_max,
-    )
-
-
-@dataclass(frozen=True)
-class Bc4Plan:
-    """The BC4 decision for one scalar tile: engage (with its measured quality) or
-    decline to raw when the loss exceeds the threshold."""
-
-    engage: bool
-    quality: BcQuality
-    norm: TileNorm
-    height: int
-    width: int
-    raw_bytes: int
-    bc_bytes: int
-    reason: str
-
-    @property
-    def vram_ratio(self) -> float:
-        return self.raw_bytes / self.bc_bytes if self.bc_bytes else float("inf")
-
-
-def bc4_plan(
-    tile: np.ndarray,
-    *,
-    min_psnr_db: float = 40.0,
-    max_abs: float = 0.05,
-    raw_bytes_per_texel: int = 4,
-) -> Bc4Plan:
-    """Encode ``tile`` as BC4, measure the loss, and decide engage vs decline.
-
-    ``min_psnr_db`` / ``max_abs`` gate engagement: a tile whose BC4 round-trip is
-    worse than either threshold is declined (kept raw) so quality is never
-    silently sacrificed.  ``raw_bytes_per_texel`` is the raw resident cost the BC
-    texture is compared against (4 for r32float, 2 for r16)."""
-
-    unit, norm = normalize_tile(tile)
-    data, h, w = bc4_encode(unit)
-    decoded = bc4_decode(data, h, w)
-    q = quality_of(unit, decoded)
-    n = int(tile.shape[-2] * tile.shape[-1]) if tile.ndim >= 2 else int(tile.size)
-    raw_bytes = n * int(raw_bytes_per_texel)
-    engage = q.acceptable(min_psnr_db=min_psnr_db, max_abs=max_abs)
-    reason = f"BC4 PSNR {q.psnr_db:.1f}dB, max|err| {q.max_abs_diff:.4f}: " + (
-        "engage (within thresholds)" if engage else "decline -> raw (loss too high)"
-    )
-    return Bc4Plan(
-        engage=engage,
-        quality=q,
-        norm=norm,
-        height=h,
-        width=w,
-        raw_bytes=raw_bytes,
-        bc_bytes=len(data),
-        reason=reason,
     )

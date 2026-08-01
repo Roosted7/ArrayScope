@@ -64,11 +64,6 @@ def apply_fftshift(data, axis):
     return np.fft.fftshift(data, axes=axis)
 
 
-def undo_fftshift(data, axis):
-    axis = _validate_axis(data, axis)
-    return np.fft.ifftshift(data, axes=axis)
-
-
 def combine_real_imag_axis(data, axis):
     """Combine a size-2 real/imag axis into a singleton complex axis."""
     axis = _validate_axis(data, axis)

@@ -16,13 +16,20 @@ from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, Crop
 from arrayscope.operations.regions import apply_region, region_from_index_spec
 from arrayscope.operations.slabs import (
-    evaluate_slab,
+    evaluate_slab_from_plan,
+    plan_slab,
     request_for_image,
     request_for_line,
     request_for_scalar,
 )
 from arrayscope.operations.source_read import read_base_region, source_read_budget_bytes
 from arrayscope.operations.stage_cache import StageCache
+
+
+def evaluate_slab(document, request, **kwargs):
+    """Plan then evaluate -- the two steps every production caller takes."""
+
+    return evaluate_slab_from_plan(document, request, plan_slab(document, request), **kwargs)
 
 
 class _Token:

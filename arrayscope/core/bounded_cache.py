@@ -72,10 +72,6 @@ class BoundedCache:
         with self.lock:
             return {key: self._items[key][0] for key in requested if key in self._items}
 
-    def note_hit(self) -> None:
-        with self.lock:
-            self.hits += 1
-
     def note_miss(self) -> None:
         with self.lock:
             self.misses += 1

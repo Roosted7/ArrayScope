@@ -83,7 +83,7 @@ def test_counters_and_clear():
     cache.put("a", 1)
     assert cache.get("a") == 1
     assert cache.get("missing") is None
-    cache.note_hit()
+    cache.hits += 1
     cache.note_miss()
     assert (cache.hits, cache.misses) == (2, 2)
     cache.clear_counters()

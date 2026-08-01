@@ -4,6 +4,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from arrayscope.operations import registry
+
+
+def _append(coordinator, operation_id, axis=None, parameters=None, *, axes=None):
+    """Create then append -- the two steps the Add-operation flow takes."""
+
+    coordinator.append_created_operation(
+        registry.create_operation(operation_id, axis=axis, parameters=parameters or {}, axes=axes)
+    )
+
+
 ROOT = Path(__file__).parents[2]
 
 
@@ -12,10 +23,6 @@ MODULE_PATHS = {
     "cache_status": (
         "arrayscope.core.cache_status",
         ROOT / "arrayscope" / "core" / "cache_status.py",
-    ),
-    "dimension_roles": (
-        "arrayscope.core.dimension_roles",
-        ROOT / "arrayscope" / "core" / "dimension_roles.py",
     ),
     "view_state": ("arrayscope.core.view_state", ROOT / "arrayscope" / "core" / "view_state.py"),
     "window_levels": (
@@ -89,13 +96,13 @@ def test_operation_coordinator_appends_reorders_and_materializes():
     data = np.arange(3 * 4).reshape(3, 4)
     coordinator = OperationCoordinator(data)
 
-    coordinator.append_operation("crop", axis=1, parameters={"start": 1, "stop": 4})
-    coordinator.append_operation("reverse", axis=0)
+    _append(coordinator, "crop", axis=1, parameters={"start": 1, "stop": 4})
+    _append(coordinator, "reverse", axis=0)
 
     assert coordinator.shape == (3, 3)
     assert coordinator.operation_shapes() == ((3, 3), (3, 3))
 
-    result = coordinator.evaluator.current_data()
+    result = coordinator.evaluator.document.materialize()
     np.testing.assert_array_equal(result, np.flip(data[:, 1:4], axis=0))
 
     coordinator.materialize()
@@ -106,8 +113,8 @@ def test_operation_coordinator_appends_reorders_and_materializes():
 def test_operation_coordinator_delete_and_move_validate_against_base_shape():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
     coordinator = OperationCoordinator(data)
-    coordinator.append_operation("crop", axis=2, parameters={"start": 1, "stop": 4})
-    coordinator.append_operation("mean", axis=0)
+    _append(coordinator, "crop", axis=2, parameters={"start": 1, "stop": 4})
+    _append(coordinator, "mean", axis=0)
 
     with pytest.raises(ValueError, match="out of bounds"):
         coordinator.move(1, -1)
@@ -118,43 +125,11 @@ def test_operation_coordinator_delete_and_move_validate_against_base_shape():
     assert coordinator.shape == (3, 4)
 
 
-def test_operation_coordinator_pipeline_cost_estimate_uses_enabled_steps_only():
-    data = np.zeros((8, 16), dtype=np.float32)
-    coordinator = OperationCoordinator(data)
-    coordinator.load_steps(
-        (
-            OperationStep(CenteredFFT(axis=0), enabled=False),
-            OperationStep(ReverseAxis(axis=1), enabled=True),
-        )
-    )
-
-    cost = coordinator.pipeline_cost_estimate()
-
-    assert len(cost.operation_costs) == 1
-    assert cost.operation_costs[0].kind == "view"
-
-
 def test_operation_dtype_estimates_delegate_to_cost_model():
     coordinator = OperationCoordinator(np.zeros((8, 16), dtype=np.float32))
-    coordinator.append_operation("centered_fft", axis=0)
+    _append(coordinator, "centered_fft", axis=0)
 
     assert coordinator.operation_dtype_estimates() == (np.dtype(np.complex64),)
-
-
-def test_disabled_expensive_fft_not_in_pipeline_peak():
-    data = np.zeros((8, 16), dtype=np.float32)
-    coordinator = OperationCoordinator(data)
-    coordinator.load_steps(
-        (
-            OperationStep(CenteredFFT(axis=0), enabled=False),
-            OperationStep(ReverseAxis(axis=1), enabled=True),
-        )
-    )
-
-    costs = coordinator.operation_cost_estimates()
-
-    assert len(costs) == 1
-    assert costs[0].kind == "view"
 
 
 def test_the_coordinator_takes_an_axis_set_from_either_channel():
@@ -168,18 +143,20 @@ def test_the_coordinator_takes_an_axis_set_from_either_channel():
     data = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
 
     from_form = OperationCoordinator(data)
-    from_form.append_operation("mean_axes", axis=None, parameters={"axes": (0, 2)})
+    _append(from_form, "mean_axes", axis=None, parameters={"axes": (0, 2)})
 
     explicit = OperationCoordinator(data)
-    explicit.append_operation("mean_axes", axes=(2, 0))
+    _append(explicit, "mean_axes", axes=(2, 0))
 
     assert from_form.shape == (3,)
     assert from_form.document.operations == explicit.document.operations
-    np.testing.assert_array_equal(from_form.evaluator.current_data(), data.mean(axis=(0, 2)))
+    np.testing.assert_array_equal(
+        from_form.evaluator.document.materialize(), data.mean(axis=(0, 2))
+    )
 
 
 def test_the_coordinator_names_an_out_of_range_axis_set_before_evaluating():
     coordinator = OperationCoordinator(np.zeros((2, 3), dtype=np.float32))
 
     with pytest.raises(ValueError, match="out of bounds"):
-        coordinator.append_operation("centered_fftn", axes=(0, 2))
+        _append(coordinator, "centered_fftn", axes=(0, 2))

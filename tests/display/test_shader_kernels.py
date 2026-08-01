@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from arrayscope.core import numba_runtime
 from arrayscope.display import shader_kernels
 from arrayscope.display import shader_mapping as sm
 from arrayscope.display.image_upload import rgb_display_for_levels
@@ -22,7 +23,8 @@ from arrayscope.display.shader_mapping import (
     default_gray_lut,
 )
 
-_NUMBA_WARM = shader_kernels.prewarm_blocking()
+numba_runtime.prewarm("display")  # blocking compile, so the fast path is exercised
+_NUMBA_WARM = numba_runtime.ready("display")
 requires_numba = pytest.mark.skipif(not _NUMBA_WARM, reason="numba accelerator unavailable")
 
 
@@ -176,7 +178,9 @@ def test_ensure_prewarming_never_blocks_and_registers_group():
     # ensure_prewarming must return immediately (it only spawns a daemon thread).
     from arrayscope.core import numba_runtime
 
-    assert "display" in numba_runtime.registered_names()
+    # ``register`` is idempotent by name, so it returns the group the display
+    # kernels already registered rather than building a second one.
+    assert numba_runtime.register("display", lambda: None) is shader_kernels._GROUP
     shader_kernels.ensure_prewarming()  # returns immediately even if already warm
 
 
@@ -200,13 +204,10 @@ def test_display_prewarm_is_gated_to_the_cpu_backend():
     assert cpu_display_backend_likely(_Settings(ImageRenderingBackendChoice.PYQTGRAPH)) is True
 
     # The registered display group defers to that predicate for bulk prewarm.
-    from arrayscope.core import numba_runtime
-
-    group = numba_runtime.get_group("display")
-    assert group is not None
     monkeypatched = {"value": False}
     import arrayscope.display.shader_kernels as sk
 
+    group = sk._GROUP
     original = sk._cpu_display_backend_active
     try:
         sk._GROUP._should_prewarm = lambda: monkeypatched["value"]

@@ -96,10 +96,6 @@ class PresentationGenerationTracker:
             else:
                 self.stale_active_tiles.add(tile)
 
-    def forget_tiles(self, tile_ids) -> None:
-        for tile in tuple(tile_ids or ()):
-            self.forget_tile(int(tile))
-
     def forget_tile(self, tile: int) -> None:
         tile = int(tile)
         self.tile_revisions.pop(tile, None)

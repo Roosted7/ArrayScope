@@ -1,5 +1,6 @@
 import ast
 import importlib.util
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -13,10 +14,6 @@ MODULE_PATHS = {
     "cache_status": (
         "arrayscope.core.cache_status",
         ROOT / "arrayscope" / "core" / "cache_status.py",
-    ),
-    "dimension_roles": (
-        "arrayscope.core.dimension_roles",
-        ROOT / "arrayscope" / "core" / "dimension_roles.py",
     ),
     "view_state": ("arrayscope.core.view_state", ROOT / "arrayscope" / "core" / "view_state.py"),
     "window_levels": (
@@ -286,12 +283,17 @@ def test_operation_steps_can_be_disabled_and_reenabled():
         .with_operation(Mean(axis=0))
     )
 
-    disabled = document.with_step_enabled(1, False)
+    disabled = ArrayDocument(
+        data,
+        steps=tuple(replace(step, enabled=index != 1) for index, step in enumerate(document.steps)),
+    )
     assert disabled.current_shape == (2, 3, 3)
     np.testing.assert_array_equal(disabled.materialize(), data[:, :, 1:4])
     assert disabled.operations == (Crop(axis=2, start=1, stop=4),)
 
-    reenabled = disabled.with_step_enabled(1, True)
+    reenabled = ArrayDocument(
+        data, steps=tuple(replace(step, enabled=True) for step in disabled.steps)
+    )
     assert reenabled.current_shape == (3, 3)
     np.testing.assert_array_equal(reenabled.materialize(), np.mean(data[:, :, 1:4], axis=0))
 
@@ -299,7 +301,10 @@ def test_operation_steps_can_be_disabled_and_reenabled():
 def test_operation_step_edit_replaces_operation_and_updates_values():
     data = np.arange(3 * 5).reshape(3, 5)
     document = ArrayDocument(data).with_operation(Crop(axis=1, start=1, stop=4))
-    edited = document.with_replaced_operation(0, Crop(axis=1, start=2, stop=5))
+    edited = ArrayDocument(
+        data,
+        steps=(replace(document.steps[0], operation=Crop(axis=1, start=2, stop=5)),),
+    )
 
     assert edited.current_shape == (3, 3)
     np.testing.assert_array_equal(edited.materialize(), data[:, 2:5])

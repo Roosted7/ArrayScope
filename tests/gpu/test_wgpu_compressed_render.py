@@ -38,6 +38,16 @@ from arrayscope.gpu.keys import COMPLEX_RG32F, SCALAR_R32F
 from arrayscope.gpu.wgpu_executor import PAGE, WgpuPlaneExecutor, plane_chunk_key
 
 
+def _pool_row(executor, representation):
+    """One representation's row of the executor's pool diagnostics."""
+
+    return next(
+        row
+        for row in executor.pool_diagnostics_snapshot()
+        if row["representation"] == representation
+    )
+
+
 def _bc_device():
     try:
         import wgpu  # noqa: F401
@@ -411,15 +421,15 @@ def test_raw_and_codec_arrays_grow_on_demand_without_losing_resident_pages():
     executor.submit(FrameSubmission(0, (BindContentPlanes((plane,)),)))
 
     assert executor.pool_budget(SCALAR_R32F) == 32
-    assert executor.pool_allocated_layers(SCALAR_R32F) == 8
-    assert executor.codec_pool_allocated_layers(SCALAR_R32F) == 8
+    assert _pool_row(executor, SCALAR_R32F)["raw_allocated_layers"] == 8
+    assert _pool_row(executor, SCALAR_R32F)["codec_allocated_layers"] == 8
 
     compressed_payloads = [_scalar_tile(seed) for seed in range(9)]
     for index, payload in enumerate(compressed_payloads):
         executor.submit(FrameSubmission(index + 1, (EnsureChunkResident(keys[index], payload),)))
 
-    assert executor.codec_pool_allocated_layers(SCALAR_R32F) == 16
-    assert executor.pool_allocated_layers(SCALAR_R32F) == 8
+    assert _pool_row(executor, SCALAR_R32F)["codec_allocated_layers"] == 16
+    assert _pool_row(executor, SCALAR_R32F)["raw_allocated_layers"] == 8
     assert all(executor.page_is_compressed(key) for key in keys[:9])
     # The first layer survived the immutable-array replacement at the same slot.
     assert np.max(np.abs(executor.read_resident_page(keys[0]) - compressed_payloads[0])) < 0.08
@@ -436,8 +446,8 @@ def test_raw_and_codec_arrays_grow_on_demand_without_losing_resident_pages():
             )
         )
 
-    assert executor.pool_allocated_layers(SCALAR_R32F) == 16
-    assert executor.codec_pool_allocated_layers(SCALAR_R32F) == 16
+    assert _pool_row(executor, SCALAR_R32F)["raw_allocated_layers"] == 16
+    assert _pool_row(executor, SCALAR_R32F)["codec_allocated_layers"] == 16
     assert executor.pool_grows_total == 2
     expected_copy_bytes = 8 * PAGE * PAGE * 4 + 8 * (PAGE * PAGE // 2)
     assert executor.pool_growth_copy_bytes_total == expected_copy_bytes

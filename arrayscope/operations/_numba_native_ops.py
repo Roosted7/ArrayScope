@@ -65,10 +65,6 @@ def prewarm() -> None:
     _GROUP.prewarm()
 
 
-def is_ready() -> bool:
-    return NUMBA_AVAILABLE and _GROUP.ready()
-
-
 def _kernels_for(data):
     if not NUMBA_AVAILABLE:
         return None

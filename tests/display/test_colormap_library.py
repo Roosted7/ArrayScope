@@ -23,14 +23,21 @@ def _isolated_user_dir(tmp_path, monkeypatch):
     library.refresh_user_colormaps()
 
 
+def _names_for_family(family):
+    """The filter ``ui/colormap_manager`` applies: kind must suit the family."""
+
+    kinds = library.kinds_for_family(family)
+    return {info.name for info in library.list_colormaps() if info.kind in kinds}
+
+
 def test_builtin_library_covers_all_kinds():
     kinds = {info.kind for info in library.builtin_colormaps()}
     assert kinds == {library.SEQUENTIAL, library.DIVERGING, library.CYCLIC}
 
 
 def test_family_filtering_is_phase_safe():
-    phase_names = {info.name for info in library.colormaps_for_family("phase")}
-    scalar_names = {info.name for info in library.colormaps_for_family("scalar")}
+    phase_names = _names_for_family("phase")
+    scalar_names = _names_for_family("scalar")
     assert "viridis" not in phase_names
     assert "PAL-relaxed" in phase_names
     assert "CET-C2" in phase_names
@@ -84,7 +91,7 @@ def test_import_csv_and_npy(tmp_path):
     np.save(npy_path, np.column_stack([np.linspace(0, 1, 9)] * 3))
     info = library.import_colormap_file(str(npy_path), name="npy-gray", kind=library.CYCLIC)
     assert info.kind == library.CYCLIC
-    assert "npy-gray" in {i.name for i in library.colormaps_for_family("phase")}
+    assert "npy-gray" in _names_for_family("phase")
 
 
 def test_export_round_trip(tmp_path):

@@ -12,7 +12,7 @@ import os
 
 import pytest
 
-from arrayscope.operations import plugins, registry
+from arrayscope.operations import registry
 from arrayscope.operations.parameter_forms import (
     DerivedValue,
     ParameterField,
@@ -23,15 +23,16 @@ from arrayscope.operations.registry import (
     OperationParameter,
     get_operation_entry,
 )
+from tests import seams
 
 
 @pytest.fixture(autouse=True)
 def _clean_pack_state():
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
     yield
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
 
 
 # --- default form ------------------------------------------------------------

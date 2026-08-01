@@ -194,15 +194,6 @@ def register(
         return group
 
 
-def get_group(name: str) -> KernelGroup | None:
-    return _REGISTRY.get(name)
-
-
-def registered_names() -> tuple[str, ...]:
-    with _REGISTRY_LOCK:
-        return tuple(_REGISTRY)
-
-
 def _select(names: tuple[str, ...]) -> list[KernelGroup]:
     with _REGISTRY_LOCK:
         if not names:

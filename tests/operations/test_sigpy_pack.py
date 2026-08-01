@@ -7,22 +7,21 @@ import sys
 
 import pytest
 
-from arrayscope.operations import plugins, registry
+from arrayscope.operations import registry
 from arrayscope.operations.packs import sigpy_pack
+from tests import seams
 
 
 @pytest.fixture(autouse=True)
 def _clean_pack_state():
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
     yield
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
 
 
-def test_sigpy_pack_has_no_specs_or_registered_operations(monkeypatch):
-    monkeypatch.setattr(sigpy_pack, "sigpy_available", lambda: True)
-
+def test_sigpy_pack_has_no_specs_or_registered_operations():
     assert sigpy_pack.pack_specs() == ()
     assert sigpy_pack.register() is False
     assert not any(entry.id.startswith("sigpy:") for entry in registry.all_operations())
@@ -39,5 +38,5 @@ def test_sigpy_availability_probe_never_imports_sigpy(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
 
-    assert isinstance(sigpy_pack.sigpy_available(), bool)
+    assert sigpy_pack.register() is False
     assert "sigpy" not in sys.modules

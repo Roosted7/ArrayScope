@@ -52,10 +52,6 @@ class SourceAnchoring:
         object.__setattr__(self, "anchored_starts", display_starts)
         object.__setattr__(self, "source_starts_yx", source_starts)
 
-    @property
-    def any_anchored(self) -> bool:
-        return any(start is not None for start in self.anchored_starts)
-
 
 def contiguous_range_start(indices) -> int | None:
     """Start of a contiguous ascending index range, else ``None``.

@@ -42,8 +42,8 @@ def test_raw_level_evidence_is_source_and_pixel_bounded_without_display_images(m
     assert result.source_indices == (0, 5, 19)
     assert result.source_count == 3
     assert result.pixel_limit == 257
-    assert result.max_source_pixels <= 257
-    assert result.requested_pixels <= 3 * 257
+    assert max(int(source.sampled_pixels) for source in result.sources) <= 257
+    assert sum(int(source.sampled_pixels) for source in result.sources) <= 3 * 257
     assert all(source.stats is not None for source in result.sources)
     assert all(source.stats.refined for source in result.sources)
     assert all(source.sampled_pixels <= 257 for source in result.sources)

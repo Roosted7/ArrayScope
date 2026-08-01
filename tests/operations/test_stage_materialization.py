@@ -55,13 +55,12 @@ def test_stage_materialization_refusal_records_consequence():
     assert "recompute" in diagnostics.consequence
 
 
-def test_stage_materialization_invalidate_document_clears_inflight():
+def test_stage_materialization_cancel_clears_inflight():
     _document, candidate = _candidate()
     cache = StageCache(max_bytes=1024 * 1024, max_entries=8)
     manager = StageMaterializationManager(cache)
-    key = ("doc",)
-    manager.request_stage(key, candidate)
+    result = manager.request_stage(("doc",), candidate)
 
-    manager.invalidate_document(key)
+    manager.cancel(result.key)
 
     assert manager.diagnostics().in_flight == 0

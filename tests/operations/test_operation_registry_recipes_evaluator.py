@@ -5,6 +5,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+
+def _operations_from_recipe(module, recipe, base_shape, **kwargs):
+    """The enabled operations of a recipe, the way a loader reads them."""
+
+    return tuple(
+        step.operation
+        for step in module.steps_from_recipe(recipe, base_shape, **kwargs)
+        if step.enabled
+    )
+
+
 ROOT = Path(__file__).parents[2]
 
 
@@ -13,10 +24,6 @@ MODULE_PATHS = {
     "cache_status": (
         "arrayscope.core.cache_status",
         ROOT / "arrayscope" / "core" / "cache_status.py",
-    ),
-    "dimension_roles": (
-        "arrayscope.core.dimension_roles",
-        ROOT / "arrayscope" / "core" / "dimension_roles.py",
     ),
     "view_state": ("arrayscope.core.view_state", ROOT / "arrayscope" / "core" / "view_state.py"),
     "window_levels": (
@@ -184,7 +191,7 @@ def test_an_axis_set_recipe_is_read_back_as_a_set_whatever_order_it_names():
         "operations": [{"id": "centered_fftn", "axes": [2, 0]}],
     }
 
-    loaded = operation_recipes.operations_from_recipe(recipe, base_shape=(3, 4, 2))
+    loaded = _operations_from_recipe(operation_recipes, recipe, base_shape=(3, 4, 2))
 
     # Written backwards, loaded as the same operation -- otherwise two identical
     # pipelines would miss each other's stage-cache entries.
@@ -203,7 +210,7 @@ def test_a_recipe_written_before_axis_sets_existed_still_loads_unchanged():
         ],
     }
 
-    assert operation_recipes.operations_from_recipe(legacy, base_shape=(3, 4, 2)) == (
+    assert _operations_from_recipe(operation_recipes, legacy, base_shape=(3, 4, 2)) == (
         Crop(axis=1, start=1, stop=3),
         Conjugate(),
         Mean(axis=0),
@@ -221,7 +228,7 @@ def test_an_axis_set_recipe_names_a_bad_selection_instead_of_a_shape_error():
             "operations": [{"id": "centered_fftn", "axes": axes}],
         }
         with pytest.raises(ValueError, match=message):
-            operation_recipes.operations_from_recipe(recipe, base_shape=(3, 4, 2))
+            _operations_from_recipe(operation_recipes, recipe, base_shape=(3, 4, 2))
 
     # ...and the rank it is checked against is the shape entering THAT step, not
     # the base shape: axis 2 is legal at the start and gone after the reduction.
@@ -230,15 +237,15 @@ def test_an_axis_set_recipe_names_a_bad_selection_instead_of_a_shape_error():
         "operations": [{"id": "mean", "axis": 0}, {"id": "centered_fftn", "axes": [0, 2]}],
     }
     with pytest.raises(ValueError, match=r"operation 1 \(centered_fftn\) is incompatible"):
-        operation_recipes.operations_from_recipe(after_reduction, base_shape=(3, 4, 2))
+        _operations_from_recipe(operation_recipes, after_reduction, base_shape=(3, 4, 2))
 
 
 def test_axis_set_entries_declare_one_selection_kind_and_reject_the_other():
     entries = {entry.id: entry for entry in operation_registry.operation_entries()}
 
-    assert entries["centered_fftn"].axis_selection == "set"
-    assert entries["centered_fft"].axis_selection == "one"
-    assert entries["conjugate"].axis_selection == "none"
+    assert entries["centered_fftn"].requires_axes is True
+    assert entries["centered_fft"].requires_axis is True
+    assert (entries["conjugate"].requires_axis or entries["conjugate"].requires_axes) is False
 
     with pytest.raises(ValueError, match="requires an axis set"):
         operation_registry.create_operation("centered_fftn")
@@ -265,8 +272,8 @@ def test_describing_an_axis_set_operation_names_every_axis():
 
 def test_invalid_recipe_validation_reports_clear_error():
     with pytest.raises(ValueError, match="unsupported recipe version"):
-        operation_recipes.operations_from_recipe(
-            {"version": 999, "operations": []}, base_shape=(2, 3)
+        _operations_from_recipe(
+            operation_recipes, {"version": 999, "operations": []}, base_shape=(2, 3)
         )
 
     invalid_crop = {
@@ -274,14 +281,14 @@ def test_invalid_recipe_validation_reports_clear_error():
         "operations": [{"id": "crop", "axis": 1, "parameters": {"start": 2, "stop": 5}}],
     }
     with pytest.raises(ValueError, match=r"operation 0 \(crop\) is incompatible"):
-        operation_recipes.operations_from_recipe(invalid_crop, base_shape=(2, 3))
+        _operations_from_recipe(operation_recipes, invalid_crop, base_shape=(2, 3))
 
     invalid_axis_after_reduction = {
         "version": operation_recipes.RECIPE_VERSION,
         "operations": [{"id": "mean", "axis": 0}, {"id": "reverse", "axis": 1}],
     }
     with pytest.raises(ValueError, match=r"operation 1 \(reverse\) is incompatible"):
-        operation_recipes.operations_from_recipe(invalid_axis_after_reduction, base_shape=(2, 3))
+        _operations_from_recipe(operation_recipes, invalid_axis_after_reduction, base_shape=(2, 3))
 
 
 def test_document_undo_clear_and_all_operation_shape_changes():
@@ -323,17 +330,14 @@ def test_display_cache_invalidates_for_operations_and_view_state():
     first = evaluator.image(state)
     second = evaluator.image(state)
     assert first is second
-    assert evaluator.derived_evaluations == 0
     assert evaluator.image_evaluations == 1
 
     shifted_state = state.with_slice(2, 0)
     evaluator.image(shifted_state)
-    assert evaluator.derived_evaluations == 0
     assert evaluator.image_evaluations == 2
 
     evaluator.set_document(evaluator.document.with_operation(ReverseAxis(axis=0)))
     evaluator.image(state)
-    assert evaluator.derived_evaluations == 0
     assert evaluator.image_evaluations == 3
 
 
@@ -344,10 +348,11 @@ def test_display_cache_invalidates_for_step_enabled_flag():
     evaluator = OperationEvaluator(document)
 
     evaluator.image(state)
-    evaluator.set_document(document.with_step_enabled(0, False))
+    evaluator.set_document(
+        ArrayDocument(data, steps=(OperationStep(ReverseAxis(axis=0), enabled=False),))
+    )
     evaluator.image(state)
 
-    assert evaluator.derived_evaluations == 0
     assert evaluator.image_evaluations == 2
 
 
@@ -355,9 +360,6 @@ def test_display_cache_status_tracks_display_hit_and_miss():
     data = np.arange(3 * 4).reshape(3, 4).astype(float)
     state = ViewState.from_shape(data.shape)
     evaluator = OperationEvaluator(ArrayDocument(data))
-
-    evaluator.current_data()
-    assert evaluator.last_status.status == CacheStatus.READY
 
     evaluator.image(state)
     assert evaluator.last_status.status == CacheStatus.READY

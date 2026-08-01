@@ -38,12 +38,6 @@ class LevelSourceRank(IntEnum):
 
 
 @dataclass(frozen=True)
-class WindowLevelDecision:
-    auto_levels: bool
-    levels: Levels | None
-
-
-@dataclass(frozen=True)
 class LevelSource:
     levels: Levels
     histogram_range: Levels
@@ -132,29 +126,6 @@ def relative_levels(previous_levels, previous_bounds, current_bounds) -> Levels 
         current_low + low_fraction * current_span,
         current_low + high_fraction * current_span,
     )
-
-
-def choose_window_levels(
-    mode: str,
-    previous_levels=None,
-    previous_bounds=None,
-    current_bounds=None,
-    default_levels=None,
-    force_auto: bool = False,
-) -> WindowLevelDecision:
-    """Backward-compatible helper for simple non-montage image decisions."""
-    if force_auto:
-        return WindowLevelDecision(auto_levels=True, levels=normalize_bounds(default_levels))
-
-    if mode == "absolute" and previous_levels is not None:
-        return WindowLevelDecision(auto_levels=False, levels=normalize_bounds(previous_levels))
-
-    if mode == "relative":
-        levels = relative_levels(previous_levels, previous_bounds, current_bounds)
-        if levels is not None:
-            return WindowLevelDecision(auto_levels=False, levels=levels)
-
-    return WindowLevelDecision(auto_levels=True, levels=normalize_bounds(default_levels))
 
 
 def state_from_source(

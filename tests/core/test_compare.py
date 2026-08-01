@@ -9,5 +9,5 @@ def test_compare_document_adds_compatible_layers():
 
     assert document.layers[0].label == "base"
     assert document.layers[1].label == "other"
-    assert compare.compatible_roi_shape(document.layers[1].data, (4, 5))
-    assert not compare.compatible_roi_shape(document.layers[1].data, (5, 4))
+    assert document.active_layer_id == "layer-1"
+    assert np.shape(document.layers[1].data) == (4, 5)

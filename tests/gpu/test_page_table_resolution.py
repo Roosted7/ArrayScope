@@ -185,26 +185,20 @@ def test_unbinding_fine_page_immediately_falls_back_to_coarse():
     )
 
 
-def test_remap_and_slot_reuse_mint_new_binding_generations():
+def test_slot_reuse_mints_a_new_binding_generation():
     table = PageTable()
     target = chunk(origin=(256, 256))
     first = chunk(origin=(0, 0), shape=(1024, 1024), reduction=(3, 3))
     first_slot = bind(table, first, 0)
     initial = table.resolve(target)
 
-    remapped_slot = PageSlot("lod", 1, 3)
-    table.remap_slots(lambda slot: remapped_slot if slot == first_slot else slot)
-    remapped = table.resolve(target)
-    assert remapped.slot == remapped_slot
-    assert remapped.binding_generation > initial.binding_generation
-
     table.unbind(first)
     replacement = chunk(origin=(0, 0), shape=(512, 512), reduction=(1, 1))
-    table.bind(replacement, remapped_slot, nbytes=256 * 256 * 4)
+    table.bind(replacement, first_slot, nbytes=256 * 256 * 4)
     reused = table.resolve(target)
     assert reused.actual_key == replacement
-    assert reused.slot == remapped_slot
-    assert reused.binding_generation > remapped.binding_generation
+    assert reused.binding_generation > initial.binding_generation
+    assert reused.slot == first_slot
 
 
 def test_owner_pin_replacement_keeps_shared_coverage_until_last_owner_releases():

@@ -72,10 +72,9 @@ def test_fftshift_round_trip_preserves_shape_and_values():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
 
     shifted = dim_ops.apply_fftshift(data, axis=2)
-    restored = dim_ops.undo_fftshift(shifted, axis=2)
 
     np.testing.assert_array_equal(shifted, np.fft.fftshift(data, axes=2))
-    np.testing.assert_array_equal(restored, data)
+    np.testing.assert_array_equal(np.fft.ifftshift(shifted, axes=2), data)
     assert shifted.shape == data.shape
 
 

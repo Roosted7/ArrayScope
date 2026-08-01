@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
@@ -128,14 +127,6 @@ class MontageTileState(_ValueEnum):
 
 
 @dataclass(frozen=True)
-class MontageTileStatus:
-    tile_number: int
-    montage_index: int
-    source_index: int
-    state: MontageTileState
-
-
-@dataclass(frozen=True)
 class MontagePlan:
     axis: int | None
     tile_shape: tuple[int, int]
@@ -186,18 +177,6 @@ class MontagePlan:
         if tile_number >= len(self.tiles):
             return None
         return self.tiles[tile_number]
-
-    def display_rect_for_tiles(
-        self, tiles: Sequence[MontageTile]
-    ) -> tuple[int, int, int, int] | None:
-        tiles = tuple(tiles)
-        if not tiles:
-            return None
-        x0 = min(int(tile.x0) for tile in tiles)
-        y0 = min(int(tile.y0) for tile in tiles)
-        x1 = max(int(tile.x0 + tile.width) for tile in tiles)
-        y1 = max(int(tile.y0 + tile.height) for tile in tiles)
-        return x0, y0, x1, y1
 
     def _axis_span(self, lo: float, hi: float, *, axis: int) -> tuple[int, int]:
         """Inclusive row/column range covering ``[lo, hi]`` on one axis.
@@ -607,26 +586,6 @@ def _expand_rect_to_tile_bounds(plan: MontagePlan, rect) -> tuple[int, int, int,
     if x0 is None:
         return rect
     return _intersect_rect((x0, y0, x1, y1), (0, 0, full_width, full_height)) or rect
-
-
-def tile_status_at_global_point(
-    plan: MontagePlan,
-    tile_states: Sequence[MontageTileState],
-    x: int,
-    y: int,
-) -> MontageTileStatus | None:
-    tile = plan.tile_at(int(x), int(y))
-    if tile is None:
-        return None
-    state = MontageTileState.UNLOADED
-    if int(tile.montage_index) < len(tile_states):
-        state = MontageTileState(tile_states[int(tile.montage_index)])
-    return MontageTileStatus(
-        tile_number=int(tile.montage_index),
-        montage_index=int(tile.montage_index),
-        source_index=int(tile.source_index),
-        state=state,
-    )
 
 
 def _rect_for_view_range(

@@ -19,6 +19,7 @@ from arrayscope.operations.pipeline import (
     RootSumSquares,
     SplitComplexAxis,
 )
+from tests import seams
 
 
 def test_default_axes_have_stable_ids_labels_and_sizes():
@@ -278,7 +279,7 @@ def test_rank_increasing_plugin_operation_labels_every_axis_uniquely():
     from arrayscope.operations import plugins
     from arrayscope.operations.plugins import PluginOperation, PluginOperationSpec
 
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
     try:
         spec = PluginOperationSpec(
             id="demo:stack-3",
@@ -292,7 +293,7 @@ def test_rank_increasing_plugin_operation_labels_every_axis_uniquely():
             operations=(PluginOperation(plugin_id=spec.id),),
         )
     finally:
-        plugins._reset_plugin_cache()
+        seams.reset_plugin_cache()
 
     # The created axis 0 and the surviving input axis 0 both claimed the
     # positional default, producing ['Dim 0', 'Dim 0', 'Dim 1'].
@@ -306,7 +307,7 @@ def test_a_custom_label_survives_a_rank_change_unrenumbered():
     from arrayscope.operations import plugins
     from arrayscope.operations.plugins import PluginOperation, PluginOperationSpec
 
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
     try:
         spec = PluginOperationSpec(
             id="demo:stack-2",
@@ -321,7 +322,7 @@ def test_a_custom_label_survives_a_rank_change_unrenumbered():
             axes=(AxisInfo("slice", "Slice", 4), AxisInfo("axis-1", "Dim 1", 5)),
         )
     finally:
-        plugins._reset_plugin_cache()
+        seams.reset_plugin_cache()
 
     labels = tuple(axis.label for axis in document.current_axes)
     assert labels == ("Dim 0", "Slice", "Dim 2")

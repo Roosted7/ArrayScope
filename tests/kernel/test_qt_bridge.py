@@ -20,6 +20,21 @@ from arrayscope.tools.interaction_budget import (
 )
 
 
+def supersede(kernel, family, value):
+    """Advance a supersession family without submitting a replacement.
+
+    Production always supersedes by submitting the successor; this drives the
+    same state transition from a test without a second task in flight.
+    """
+
+    from arrayscope.kernel.task import Supersession
+
+    with kernel._lock:
+        kernel._advance_supersession_locked(Supersession(family, value))
+        kernel._cond.notify_all()
+    kernel._flush_release_wake()
+
+
 def _process_until(
     qt_app,
     predicate,
@@ -83,7 +98,7 @@ def test_dispatch_time_staleness_across_thread_boundary(qt_app):
         assert finished.wait(timeout=5.0)
         kernel.wait_idle(timeout=5.0)
         # The completion is queued but not yet drained; the target moves on.
-        kernel.supersede("t", "v2")
+        supersede(kernel, "t", "v2")
         assert _process_until(qt_app, lambda: bool(stale))
         assert done == []
     finally:

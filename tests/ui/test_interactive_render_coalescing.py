@@ -193,24 +193,19 @@ def test_deferred_side_panels_refresh_once_after_interaction_quiet(qtbot, monkey
 def test_montage_side_panels_defer_while_viewport_interaction_active():
     from types import SimpleNamespace
 
-    from arrayscope.window.frame_controller import _should_defer_montage_side_panels
+    from arrayscope.window.frame_runtime import _viewport_interaction_active
 
-    def _renderer(active):
-        renderer = SimpleNamespace(win=SimpleNamespace(_viewport_interaction_active=active))
-        return renderer
+    def _defer(*, interacting, session_defers):
+        renderer = SimpleNamespace(win=SimpleNamespace(_viewport_interaction_active=interacting))
+        session = SimpleNamespace(defer_side_panels=session_defers)
+        # The rule the montage drain applies before refreshing the docks.
+        return bool(
+            getattr(session, "defer_side_panels", False) or _viewport_interaction_active(renderer)
+        )
 
-    assert _should_defer_montage_side_panels(
-        _renderer(True),
-        SimpleNamespace(defer_side_panels=False),
-    )
-    assert _should_defer_montage_side_panels(
-        _renderer(False),
-        SimpleNamespace(defer_side_panels=True),
-    )
-    assert not _should_defer_montage_side_panels(
-        _renderer(False),
-        SimpleNamespace(defer_side_panels=False),
-    )
+    assert _defer(interacting=True, session_defers=False)
+    assert _defer(interacting=False, session_defers=True)
+    assert not _defer(interacting=False, session_defers=False)
 
 
 def test_operation_dock_identical_refresh_does_not_rebuild_rows(qtbot, monkeypatch):

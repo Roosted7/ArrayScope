@@ -1,35 +1,38 @@
-from arrayscope.core.gui_callback_budget import (
-    WARNING_THRESHOLD_MS,
-    GuiCallbackBudget,
-    should_yield_after_item,
-)
+from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS, GuiCallbackBudget
+
+
+def _yield_after_item(budget, **kwargs):
+    """Record one item, then ask the budget -- the drain-loop order."""
+
+    budget.record_item(**kwargs)
+    return budget.should_yield()
 
 
 def test_gui_callback_budget_yields_on_item_cap():
     budget = GuiCallbackBudget("tiles", item_cap=2, target_ms=1000.0, byte_cap=0)
 
-    assert not should_yield_after_item(budget)
-    assert should_yield_after_item(budget)
+    assert not _yield_after_item(budget)
+    assert _yield_after_item(budget)
 
 
 def test_gui_callback_budget_yields_on_byte_cap_after_progress():
     budget = GuiCallbackBudget("tiles", item_cap=99, target_ms=1000.0, byte_cap=8)
 
-    assert should_yield_after_item(budget, byte_count=16)
+    assert _yield_after_item(budget, byte_count=16)
 
 
 def test_gui_callback_budget_always_allows_first_item():
     budget = GuiCallbackBudget("tiles", item_cap=1, target_ms=0.0, byte_cap=1)
 
     assert not budget.should_yield()
-    assert should_yield_after_item(budget, byte_count=999)
+    assert _yield_after_item(budget, byte_count=999)
 
 
 def test_gui_callback_budget_yields_on_elapsed_cap_after_progress():
     budget = GuiCallbackBudget("tiles", item_cap=99, target_ms=1.0, byte_cap=0)
     budget._started -= 1.0
 
-    assert should_yield_after_item(budget)
+    assert _yield_after_item(budget)
 
 
 def test_gui_callback_observation_classifies_over_warning():

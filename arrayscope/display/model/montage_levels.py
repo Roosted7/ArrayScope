@@ -104,14 +104,6 @@ class MontageLevelStats:
         object.__setattr__(self, "evidence_quality", quality)
         object.__setattr__(self, "refined", bool(quality >= LevelEvidenceQuality.REFINED))
 
-    @property
-    def coverage_rank(self) -> int:
-        if self.rank == LevelSourceRank.NONE:
-            return 0
-        if self.rank in {LevelSourceRank.MONTAGE_COMPLETE, LevelSourceRank.MONTAGE_SAMPLED_FULL}:
-            return 2
-        return 1
-
 
 class MontageLevelTracker:
     def __init__(self):
@@ -137,32 +129,6 @@ class MontageLevelTracker:
             self._invalidate(key)
         self._tiles.setdefault(key, {})
         return expected
-
-    def update_from_tile(
-        self,
-        key: object,
-        source_index: int,
-        histogram_data: np.ndarray | None,
-        image: np.ndarray,
-        *,
-        refined: bool = False,
-        aggregate: bool = True,
-    ) -> MontageLevelStats | None:
-        expected = self._expected.get(key, frozenset())
-        source = histogram_data if histogram_data is not None else image
-        tile_stats = _sample_tile_stats(source, int(source_index), refined=bool(refined))
-        if tile_stats is None:
-            return self.stats_for(key) if aggregate else None
-        by_source = self._tiles.setdefault(key, {})
-        previous = by_source.get(int(source_index))
-        if _tile_stats_is_improvement(tile_stats, previous):
-            by_source[int(source_index)] = tile_stats
-            self._invalidate(key)
-            if aggregate and previous is None and int(source_index) in expected:
-                self._append_tile_sample(key, expected, tile_stats)
-            else:
-                self._sample_accumulators.pop(key, None)
-        return self.stats_for(key) if aggregate else None
 
     def update_from_stats(
         self,
@@ -303,12 +269,6 @@ class MontageLevelTracker:
             return False
         return _coerce_evidence_quality(stats.evidence_quality) >= _coerce_evidence_quality(quality)
 
-    def best_source(self, key: object, *, explicit_auto: bool = False) -> LevelSource | None:
-        stats = self.stats_for(key)
-        if stats is None:
-            return None
-        return self.source_for_stats(key, stats)
-
     def source_for_stats(self, key: object, stats: MontageLevelStats) -> LevelSource | None:
         if stats.bounds is None:
             return None
@@ -321,11 +281,6 @@ class MontageLevelTracker:
             semantic_key=key,
             evidence_quality=int(stats.evidence_quality),
         )
-
-    def histogram_data_for_stats(self, stats: MontageLevelStats | None) -> np.ndarray | None:
-        if stats is None or stats.sample is None or np.asarray(stats.sample).size == 0:
-            return None
-        return np.asarray(stats.sample, dtype=np.float32)
 
     def histogram_aggregate_snapshot(
         self,
@@ -618,22 +573,6 @@ def tile_level_stats_with_quality(
         refined=bool(quality >= LevelEvidenceQuality.REFINED),
         evidence_quality=quality,
     )
-
-
-def _finite_sample(values, *, limit: int) -> np.ndarray:
-    finite = _finite_values(values)
-    if finite is None:
-        return np.asarray((), dtype=np.float32)
-    if finite.size > int(limit):
-        finite = _sparse_even_random_sample(finite, limit=int(limit))
-    return np.asarray(finite, dtype=np.float32)
-
-
-def _finite_bounds(values) -> tuple[float, float] | None:
-    finite = _finite_values(values)
-    if finite is None:
-        return None
-    return normalize_bounds((float(np.min(finite)), float(np.max(finite))))
 
 
 def _finite_values(values) -> np.ndarray | None:

@@ -15,6 +15,14 @@ from arrayscope.operations.evaluator import (
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT, CenteredIFFT, ReverseAxis
 
 
+def _cached_display_tile(evaluator, view_state, colormap_lut=None):
+    """The display cache entry for one view state, or ``None``."""
+
+    return evaluator._display_cache.get(
+        evaluator.display_tile_key(view_state, colormap_lut=colormap_lut)
+    )
+
+
 def test_fft_over_sliced_axis_stores_and_reuses_expanded_stage(monkeypatch):
     calls = {"fft": 0}
     original = dim_ops.centered_fft
@@ -86,7 +94,7 @@ def test_stage_cache_invalidates_on_operation_and_revision_changes():
 
     evaluator.image(ViewState.from_shape(evaluator.document.current_shape).with_slice(2, 0))
     assert evaluator.stage_cache_diagnostics().entries >= 1
-    evaluator.set_document(evaluator.document.with_data_changed())
+    evaluator.set_document(evaluator.document.mark_base_data_changed())
     assert evaluator.stage_cache_diagnostics().entries == 0
 
 
@@ -169,7 +177,7 @@ def test_display_lod_change_never_reruns_the_pipeline_when_the_stage_is_cached(m
 
     # A display-LOD level change re-requests the same semantic tile; the
     # display cache key carries no level, so it must hit without evaluation.
-    cached = evaluator.cached_display_tile(state)
+    cached = _cached_display_tile(evaluator, state)
     assert cached is not None
     assert calls["fft"] == 1
 

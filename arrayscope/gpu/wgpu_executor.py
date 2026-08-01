@@ -186,8 +186,7 @@ def _adapter_is_integrated(info: dict) -> bool:
 
 
 def _decide_codec_family(mode: str, device_features: set[str], integrated: bool) -> str:
-    """Pick the display-pool codec family for a device.  Mirrors the topology
-    policy in :func:`arrayscope.gpu.cache_policy.decide_texture_codec`:
+    """Pick the display-pool codec family for a device:
 
     * ``off`` -> ``"none"`` (render path byte-identical);
     * integrated + ASTC feature + ``astc_encoder`` available -> ``"astc"``
@@ -3993,10 +3992,6 @@ class WgpuPlaneExecutor:
         return self._widget_atlas_uploads_total
 
     @property
-    def bound_planes(self) -> tuple:
-        return self._bound_planes
-
-    @property
     def codec_engaged(self) -> bool:
         """Whether native compressed pools (BC or ASTC) are live and taking
         eligible tiles this session."""
@@ -4135,16 +4130,6 @@ class WgpuPlaneExecutor:
 
         return self._histogram_codec_mode
 
-    def set_histogram_codec_mode(self, mode: str) -> None:
-        """Switch the compressed-page histogram/bounds path (see the property)."""
-
-        mode = str(mode).lower()
-        if mode not in ("gpu_compressed", "skip"):
-            raise ValueError(
-                f"histogram_codec_mode must be 'gpu_compressed' or 'skip', got {mode!r}"
-            )
-        self._histogram_codec_mode = mode
-
     def pool_budget(self, representation: str) -> int:
         return int(self._pool_budgets[representation])
 
@@ -4281,20 +4266,6 @@ class WgpuPlaneExecutor:
     @property
     def last_pool_exhaustion(self) -> str:
         return str(self._last_pool_exhaustion)
-
-    def pool_free_layers(self, representation: str) -> int:
-        return len(self._pools[representation].free_layers)
-
-    def pool_allocated_layers(self, representation: str) -> int:
-        return int(self._pools[representation].allocated_layers)
-
-    def codec_pool_free_layers(self, representation: str) -> int:
-        pool = self._codec_pools.get(representation)
-        return 0 if pool is None else len(pool.free_layers)
-
-    def codec_pool_allocated_layers(self, representation: str) -> int:
-        pool = self._codec_pools.get(representation)
-        return 0 if pool is None else int(pool.allocated_layers)
 
     def read_target(self) -> np.ndarray:
         """Physical-truth oracle: the offscreen target as (h, w, 4) uint8."""

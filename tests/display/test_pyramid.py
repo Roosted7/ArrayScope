@@ -18,9 +18,22 @@ from arrayscope.display.lod import (
     select_lod_demand,
 )
 from arrayscope.display.pyramid import (
+    REDUCER_MEAN,
     reduce_box_mean,
-    reduce_source_grid_mean,
 )
+from arrayscope.tools import pyramid_reference
+
+
+def _reduce_mean(array, *, source_origin_yx, valid_source_rect_yx, reduction_vector_xy):
+    """The mean reducer, addressed the way every reducer family is."""
+
+    return pyramid_reference.reduce_source_grid(
+        array,
+        source_origin_yx=source_origin_yx,
+        valid_source_rect_yx=valid_source_rect_yx,
+        reduction_yx=(int(reduction_vector_xy[1]), int(reduction_vector_xy[0])),
+        reducer=REDUCER_MEAN,
+    )
 
 
 class TestReduceBoxMean:
@@ -178,13 +191,13 @@ class TestSourceGridMeanReduction:
         first_rect = (100, 104, 101, 113)
         second_rect = (100, 104, 102, 114)
 
-        first = reduce_source_grid_mean(
+        first = _reduce_mean(
             _global_plane(first_rect),
             source_origin_yx=first_rect[:1] + first_rect[2:3],
             valid_source_rect_yx=first_rect,
             reduction_vector_xy=(2, 2),
         )
-        second = reduce_source_grid_mean(
+        second = _reduce_mean(
             _global_plane(second_rect),
             source_origin_yx=second_rect[:1] + second_rect[2:3],
             valid_source_rect_yx=second_rect,
@@ -206,7 +219,7 @@ class TestSourceGridMeanReduction:
         valid_rect = (101, 109, 102, 115)
         source = _global_plane(array_rect)
 
-        result = reduce_source_grid_mean(
+        result = _reduce_mean(
             source,
             source_origin_yx=(array_rect[0], array_rect[2]),
             valid_source_rect_yx=valid_rect,
@@ -222,54 +235,10 @@ class TestSourceGridMeanReduction:
             expected.append(float(np.mean(local, dtype=np.float32)))
         np.testing.assert_allclose(np.asarray(result.values).reshape(-1), expected)
 
-    def test_recursive_route_matches_direct_only_for_aligned_input_grid(self):
-        rect = (96, 112, 96, 112)
-        source = _global_plane(rect)
-        level_one = reduce_source_grid_mean(
-            source,
-            source_origin_yx=(96, 96),
-            valid_source_rect_yx=rect,
-            reduction_vector_xy=(1, 1),
-        )
-
-        recursive = reduce_source_grid_mean(
-            level_one.values,
-            source_origin_yx=level_one.grid_origin_yx,
-            valid_source_rect_yx=rect,
-            input_reduction_vector_xy=(1, 1),
-            reduction_vector_xy=(2, 2),
-        )
-        direct = reduce_source_grid_mean(
-            source,
-            source_origin_yx=(96, 96),
-            valid_source_rect_yx=rect,
-            reduction_vector_xy=(2, 2),
-        )
-
-        assert tuple(recursive.source_rects) == tuple(direct.source_rects)
-        assert tuple(recursive.identities) == tuple(direct.identities)
-        np.testing.assert_allclose(recursive.values, direct.values, rtol=1e-6, atol=1e-6)
-
-        clipped_rect = (101, 113, 101, 113)
-        clipped_level_one = reduce_source_grid_mean(
-            _global_plane(clipped_rect),
-            source_origin_yx=(101, 101),
-            valid_source_rect_yx=clipped_rect,
-            reduction_vector_xy=(1, 1),
-        )
-        with pytest.raises(ValueError, match="align"):
-            reduce_source_grid_mean(
-                clipped_level_one.values,
-                source_origin_yx=clipped_level_one.grid_origin_yx,
-                valid_source_rect_yx=clipped_rect,
-                input_reduction_vector_xy=(1, 1),
-                reduction_vector_xy=(2, 2),
-            )
-
     def test_anisotropic_vector_places_bins_on_each_source_axis_grid(self):
         rect = (5, 12, 9, 20)
 
-        result = reduce_source_grid_mean(
+        result = _reduce_mean(
             _global_plane(rect),
             source_origin_yx=(5, 9),
             valid_source_rect_yx=rect,
@@ -286,7 +255,7 @@ class TestSourceGridMeanReduction:
         array_rect = (1, 17, 2, 21)
         valid_rect = (3, 14, 5, 18)
 
-        result = reduce_source_grid_mean(
+        result = _reduce_mean(
             _global_plane(array_rect),
             source_origin_yx=(array_rect[0], array_rect[2]),
             valid_source_rect_yx=valid_rect,

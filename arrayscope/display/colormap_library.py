@@ -355,11 +355,6 @@ def kinds_for_family(family: str) -> tuple[str, ...]:
     return (CYCLIC,) if str(family) == "phase" else (SEQUENTIAL, DIVERGING)
 
 
-def colormaps_for_family(family: str) -> tuple[ColormapInfo, ...]:
-    kinds = kinds_for_family(family)
-    return tuple(info for info in list_colormaps() if info.kind in kinds)
-
-
 def find_colormap(name: str) -> ColormapInfo | None:
     for info in list_colormaps(include_hidden=True, include_unavailable=True):
         if info.name == str(name):

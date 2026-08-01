@@ -11,18 +11,19 @@ def _version_tuple(version: str) -> tuple[int, ...]:
 
 
 def test_installed_pyqtgraph_histogram_lut_api_shape(qt_app):
-    from arrayscope.display.backends.pyqtgraph.histogram_adapter import (
-        installed_histogram_lut_api_facts,
-    )
+    """The adapter reaches for these by name; a pyqtgraph bump must keep them."""
 
-    facts = installed_histogram_lut_api_facts()
+    import pyqtgraph as pg
 
-    assert _version_tuple(facts.pyqtgraph_version) >= (0, 14, 0)
-    assert facts.widget_has_set_image_item is True
-    assert facts.item_has_image_item is True
-    assert facts.item_has_lookup_table_refresh is True
-    assert facts.item_has_region_changed is True
-    assert facts.item_has_image_changed is True
+    widget = pg.HistogramLUTWidget()
+    item = widget.item
+
+    assert _version_tuple(str(getattr(pg, "__version__", ""))) >= (0, 14, 0)
+    assert hasattr(widget, "setImageItem")
+    assert hasattr(item, "imageItem")
+    assert hasattr(item, "_setImageLookupTable")
+    assert hasattr(item, "regionChanged")
+    assert hasattr(item, "imageChanged")
 
 
 def test_histogram_adapter_new_binding_connects_once_and_disconnects_auto_recompute(

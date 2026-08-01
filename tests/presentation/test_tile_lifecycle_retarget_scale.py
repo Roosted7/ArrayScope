@@ -283,7 +283,9 @@ def _drive(lc: TileLifecycle) -> list[dict[str, object]]:
     assert lc.record(parked_tile).presentation is Presentation.PARKED
 
     # 4. Claims taken on tiles that are already out of scope, then a pan.
-    lc.task_requested(30, stage_key=("stage", 30), stage_producer_key=("prod", 30))
+    _record = lc.record(30)
+    _record.stage_key = ("stage", 30)
+    _record.stage_producer_key = ("prod", 30)
     lc.task_admitted(31, ("task", 31), stage_key=("stage", 31), stage_producer_key=("prod", 31))
     lc.retarget(_window(81))
     step()

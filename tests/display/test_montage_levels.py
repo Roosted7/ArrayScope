@@ -14,6 +14,7 @@ from arrayscope.display.model.montage_levels import (
     _aggregate_samples,
 )
 from arrayscope.display.planning import LevelSourceRank
+from tests import seams
 
 
 def test_montage_level_tracker_reuses_overlap_and_excludes_removed_indices():
@@ -21,7 +22,8 @@ def test_montage_level_tracker_reuses_overlap_and_excludes_removed_indices():
     key = "scope"
     tracker.ensure(key, (0, 1, 2))
     for index, value in enumerate((10.0, 20.0, 30.0)):
-        tracker.update_from_tile(
+        seams.update_from_tile(
+            tracker,
             key,
             index,
             np.full((4, 4), value, dtype=np.float32),
@@ -37,8 +39,12 @@ def test_montage_level_tracker_reuses_overlap_and_excludes_removed_indices():
     assert shifted.bounds == (19.5, 30.5)
     assert shifted.rank == LevelSourceRank.MONTAGE_VISIBLE_SUBSET
 
-    tracker.update_from_tile(
-        key, 3, np.full((4, 4), 40.0, dtype=np.float32), np.full((4, 4), 40.0, dtype=np.float32)
+    seams.update_from_tile(
+        tracker,
+        key,
+        3,
+        np.full((4, 4), 40.0, dtype=np.float32),
+        np.full((4, 4), 40.0, dtype=np.float32),
     )
     complete = tracker.stats_for(key)
     assert complete.source_indices == frozenset({1, 2, 3})
@@ -51,7 +57,8 @@ def test_montage_level_tracker_does_not_downgrade_when_expected_set_shrinks():
     key = "scope"
     tracker.ensure(key, (0, 1, 2))
     for index in (0, 1, 2):
-        tracker.update_from_tile(
+        seams.update_from_tile(
+            tracker,
             key,
             index,
             np.full((4, 4), index, dtype=np.float32),
@@ -72,10 +79,10 @@ def test_montage_level_tracker_samples_deterministically_and_caps_aggregate():
     tracker.ensure(key, tuple(range(3)))
     large = np.arange(PROVISIONAL_TILE_SAMPLE_LIMIT * 4, dtype=np.float32)
     for index in range(3):
-        tracker.update_from_tile(key, index, large + index, large + index)
+        seams.update_from_tile(tracker, key, index, large + index, large + index)
 
     stats = tracker.stats_for(key)
-    sample = tracker.histogram_data_for_stats(stats)
+    sample = np.asarray(stats.sample, dtype=np.float32)
 
     assert sample is not None
     assert sample.size <= AGGREGATE_SAMPLE_LIMIT
@@ -138,14 +145,14 @@ def test_montage_level_tracker_records_provisional_then_refined_samples():
     large = np.arange(EXACT_TILE_SAMPLE_LIMIT * 2, dtype=np.float32)
 
     tracker.ensure(key, (0,))
-    tracker.update_from_tile(key, 0, large, large, refined=False)
+    seams.update_from_tile(tracker, key, 0, large, large, refined=False)
     provisional = tracker.stats_for(key)
 
     assert provisional.refined is False
     assert provisional.sample is not None
     assert provisional.sample.size <= PROVISIONAL_TILE_SAMPLE_LIMIT
 
-    tracker.update_from_tile(key, 0, large, large, refined=True)
+    seams.update_from_tile(tracker, key, 0, large, large, refined=True)
     refined = tracker.stats_for(key)
 
     assert refined.refined is True
@@ -287,7 +294,9 @@ def test_montage_level_tracker_reports_reusable_source_stats():
     tracker.ensure(key, (0,))
 
     assert tracker.has_source(key, 0) is False
-    tracker.update_from_tile(key, 0, np.arange(8, dtype=np.float32), np.arange(8, dtype=np.float32))
+    seams.update_from_tile(
+        tracker, key, 0, np.arange(8, dtype=np.float32), np.arange(8, dtype=np.float32)
+    )
 
     assert tracker.has_source(key, 0) is True
     assert tracker.has_source(key, 0, refined=True) is True
@@ -301,7 +310,7 @@ def test_montage_level_tracker_treats_accidental_complex_input_as_magnitude_with
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        tracker.update_from_tile(key, 0, None, values)
+        seams.update_from_tile(tracker, key, 0, None, values)
 
     assert not caught
     stats = tracker.stats_for(key)
@@ -315,11 +324,14 @@ def test_montage_level_tracker_treats_accidental_complex_input_as_magnitude_with
 def test_tile_stats_do_not_rescan_values_for_bounds_and_sample(monkeypatch):
     import arrayscope.display.model.montage_levels as montage_levels
 
-    def fail_rescan(*_args, **_kwargs):
-        raise AssertionError("tile stats should share one finite-value pass")
+    passes = []
+    original = montage_levels._finite_values
 
-    monkeypatch.setattr(montage_levels, "_finite_bounds", fail_rescan)
-    monkeypatch.setattr(montage_levels, "_finite_sample", fail_rescan)
+    def counted(values):
+        passes.append(1)
+        return original(values)
+
+    monkeypatch.setattr(montage_levels, "_finite_values", counted)
 
     stats = montage_levels._sample_tile_stats(
         np.asarray([0.0, np.nan, 2.0], dtype=np.float32),
@@ -329,6 +341,7 @@ def test_tile_stats_do_not_rescan_values_for_bounds_and_sample(monkeypatch):
 
     assert stats is not None
     assert stats.bounds == (0.0, 2.0)
+    assert len(passes) == 1
 
 
 def test_montage_level_tracker_can_defer_aggregate_rebuild():
@@ -337,7 +350,8 @@ def test_montage_level_tracker_can_defer_aggregate_rebuild():
     tracker.ensure(key, (0, 1))
 
     assert (
-        tracker.update_from_tile(
+        seams.update_from_tile(
+            tracker,
             key,
             0,
             np.ones((4, 4), dtype=np.float32),

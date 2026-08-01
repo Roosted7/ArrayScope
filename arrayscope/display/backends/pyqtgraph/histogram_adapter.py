@@ -12,8 +12,6 @@ import weakref
 from dataclasses import dataclass
 from time import perf_counter
 
-import pyqtgraph as pg
-
 
 @dataclass(frozen=True)
 class HistogramBindingFacts:
@@ -26,16 +24,6 @@ class HistogramBindingFacts:
     sig_image_changed_disconnects: int = 0
 
 
-@dataclass(frozen=True)
-class HistogramLUTApiFacts:
-    pyqtgraph_version: str
-    widget_has_set_image_item: bool
-    item_has_image_item: bool
-    item_has_lookup_table_refresh: bool
-    item_has_region_changed: bool
-    item_has_image_changed: bool
-
-
 class PyQtGraphHistogramAdapter:
     """Bind ImageItems to a HistogramLUTWidget without duplicate recomputes."""
 
@@ -43,10 +31,6 @@ class PyQtGraphHistogramAdapter:
         self.histogram_widget = histogram_widget
         self._bound_item = None
         self._known_item_ids: set[int] = set()
-
-    @property
-    def bound_item(self):
-        return self._bound_item
 
     def is_bound_item(self, item) -> bool:
         return item is not None and self._bound_item is item
@@ -109,16 +93,3 @@ class PyQtGraphHistogramAdapter:
             else:
                 disconnects += 1
         return disconnects
-
-
-def installed_histogram_lut_api_facts(histogram_widget=None) -> HistogramLUTApiFacts:
-    widget = histogram_widget if histogram_widget is not None else pg.HistogramLUTWidget()
-    item = widget.item
-    return HistogramLUTApiFacts(
-        pyqtgraph_version=str(getattr(pg, "__version__", "")),
-        widget_has_set_image_item=hasattr(widget, "setImageItem"),
-        item_has_image_item=hasattr(item, "imageItem"),
-        item_has_lookup_table_refresh=hasattr(item, "_setImageLookupTable"),
-        item_has_region_changed=hasattr(item, "regionChanged"),
-        item_has_image_changed=hasattr(item, "imageChanged"),
-    )

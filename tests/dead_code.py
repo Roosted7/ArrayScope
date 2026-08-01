@@ -1,12 +1,27 @@
-"""Production definitions that no production caller reaches.
+"""Definitions that no caller on the owning side reaches.
 
-Two classes, both failures:
+Three classes, all failures:
 
 * **Unreachable** — nothing names it. Not ``arrayscope/``, not ``tests/``, not
   the repo-root product trees.
 * **Test-only** — the only files naming it live under ``tests/``. This is the
   class that rots silently: the function still *executes*, so a coverage
   number reports it healthy, while no shipped code path reaches it.
+* **Dead test helper** — the same question asked of the suite's own support
+  modules (anything under ``tests/`` that is not a ``test_*.py`` or a
+  ``conftest.py``). Without it, "delete the method, keep a shim" would be a way
+  to launder dead code: neither production scan looks at ``tests/``, so a seam
+  moved there to live beside its assertions could lose its last caller and
+  nothing would say so.
+
+There is no allowlist and no backlog, and there is deliberately nowhere to put
+one. A definition the product cannot reach is either the product's, the
+suite's, or nobody's; the answers are to give it a real caller, to move it to
+the side that actually owns it, or to delete it with its assertions. The
+harness package ``arrayscope/tools/`` is where an oracle or a benchmark ring
+belongs — being called only from tests is *that* package's design, so it is
+exempt from the test-only class alone (a definition nothing there reaches at
+all still fails as unreachable).
 
 This is a lint, not a test, and it is wired the way ruff is: the gate is
 ``.githooks/pre-commit`` via ``tools/dead_code.py``. Running the tree scan
@@ -61,6 +76,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import Counter
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -80,351 +96,6 @@ _STRUCTURAL_BASES = {"Protocol", "ABC"}
 _WORD = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
 _PACKAGE = "arrayscope"
-
-
-# Real entry points with no in-tree caller by construction. Everything else is
-# either deleted or listed below with its reason -- the rule is never widened
-# silently, because a guard that is wrong once gets deleted.
-#
-# Format: (path, name, reason).
-_ALLOWLIST = (
-    # --- Test/benchmark seams a production caller must never have -----------
-    (
-        "arrayscope/display/shader_kernels.py",
-        "prewarm_blocking",
-        "synchronous compile for tests/benchmarks; production prewarms off-thread",
-    ),
-    (
-        "arrayscope/gpu/device_topology.py",
-        "reset_topology_cache",
-        "cache-drop seam for adapter/device lifecycle churn; production caches for the process",
-    ),
-    (
-        "arrayscope/operations/plugins.py",
-        "_reset_plugin_cache",
-        "re-discovery seam; production discovers entry points once",
-    ),
-    (
-        "arrayscope/operations/registry.py",
-        "_reset_operation_packs",
-        "pack re-load seam; production loads packs once per process",
-    ),
-    # --- Oracles: the CPU mirror IS the reference, the shader is the caller --
-    (
-        "arrayscope/display/shader_mapping.py",
-        "wgpu_nan_hatch_rgba",
-        "RGBA8 mirror of the WGSL nan_marker (A2); WGSL is the caller-side twin",
-    ),
-    (
-        "arrayscope/display/shader_mapping.py",
-        "wgpu_missing_hatch_rgba",
-        "RGBA8 mirror of the WGSL missing_marker (A3)",
-    ),
-    (
-        "arrayscope/display/shader_mapping.py",
-        "wgpu_clip_rgb",
-        "RGB8 mirror of the WGSL clip marker (A4)",
-    ),
-    (
-        "arrayscope/display/shader_mapping.py",
-        "wgpu_pixel_grid_darken",
-        "mirror of the WGSL pixel_grid darkening (A1)",
-    ),
-    (
-        "arrayscope/display/shader_mapping.py",
-        "wgpu_minification_tap_count",
-        "mirror of the C1 minification box filter's tap count",
-    ),
-    (
-        "arrayscope/display/shader_mapping.py",
-        "wgpu_minification_taps",
-        "mirror of the C1 box-filter tap coordinates",
-    ),
-    (
-        "arrayscope/display/pyramid.py",
-        "reduce_source_grid",
-        "direct source-grid oracle every reducer family is checked against",
-    ),
-    # --- Benchmark entry points, driven by their own ring or by a CLI -------
-    (
-        "arrayscope/operations/benchmarks.py",
-        "run_foundation_benchmarks",
-        "benchmark ring entry point; no product path may run a benchmark suite",
-    ),
-)
-
-# Test-only definitions this sweep FOUND but did not adjudicate (2026-07-30).
-#
-# Every one is real: no shipped code path names it. They are not exempt and not
-# excused -- they are named debt, because "delete it" and "restore a caller" are
-# different answers here and the difference is a product decision:
-#
-# * **Superseded twins.** A public entry replaced by an internal one that now
-#   carries production: ``evaluate_slab`` over ``evaluate_slab_from_plan``,
-#   ``cache_policy.decide_texture_codec`` over the executor's own
-#   ``_decide_codec_family``, ``plugin_operation_ids`` over
-#   ``discover_plugin_entry_points``. Deleting the twin means migrating its
-#   tests onto the survivor, which changes what they exercise.
-# * **A producer whose consumer is still live.** ``evaluate_shared_preview`` is
-#   the only thing that builds shared-preview cohort rows, and nothing calls it
-#   -- while ``window/frame_effects.py`` still consumes those rows through
-#   ``_looks_like_shared_preview_rows``, ``_admit_preview_cohort_level_evidence``
-#   and the ``preview-cohort-pending`` round-level source. Deleting it would
-#   erase the evidence for what may be a render regression, not clean up rot.
-#
-# The count below is a ceiling, so this list can only shrink.
-_PENDING_ADJUDICATION = (
-    ("arrayscope/core/array_source.py", "is_lazy_source_array"),
-    ("arrayscope/core/cache_status.py", "cache_status_prefetching"),
-    ("arrayscope/core/cache_status.py", "cache_status_stale_ignored"),
-    ("arrayscope/core/compare.py", "compatible_roi_shape"),
-    ("arrayscope/core/dimension_roles.py", "DimensionRoles"),
-    ("arrayscope/core/gui_callback_budget.py", "should_yield_after_item"),
-    ("arrayscope/core/memory_budget.py", "estimate_montage_tile_grid_bytes"),
-    ("arrayscope/core/numba_runtime.py", "get_group"),
-    ("arrayscope/core/numba_runtime.py", "registered_names"),
-    ("arrayscope/core/window_levels.py", "choose_window_levels"),
-    ("arrayscope/display/_numba_pyramid.py", "is_ready"),
-    (
-        "arrayscope/display/backends/pyqtgraph/histogram_adapter.py",
-        "installed_histogram_lut_api_facts",
-    ),
-    ("arrayscope/display/backends/pyqtgraph/tiles.py", "_assemble_page_backed_payload"),
-    ("arrayscope/display/colormap_library.py", "colormaps_for_family"),
-    ("arrayscope/display/histogram_controller.py", "adaptive_histogram_for_view"),
-    ("arrayscope/display/lod.py", "inner_uv_for_gutter"),
-    ("arrayscope/display/model/montage_levels.py", "_finite_bounds"),
-    ("arrayscope/display/model/montage_levels.py", "_finite_sample"),
-    ("arrayscope/display/model/tiled_histogram_identity.py", "tiled_histogram_key"),
-    ("arrayscope/display/model/tiled_histogram_identity.py", "tiled_semantic_histogram_identity"),
-    ("arrayscope/display/montage.py", "tile_status_at_global_point"),
-    ("arrayscope/display/pyramid.py", "_reduce_sample"),
-    ("arrayscope/display/pyramid.py", "partition_source_grid_pages"),
-    ("arrayscope/display/pyramid.py", "reduce_source_grid_mean"),
-    ("arrayscope/display/pyramid.py", "reduction_xy_to_yx"),
-    ("arrayscope/display/region_source.py", "EagerDisplayRegionSource"),
-    ("arrayscope/display/shader_mapping.py", "phase_lut_indices"),
-    ("arrayscope/display/shader_mapping.py", "shader_component_uniform"),
-    ("arrayscope/display/viewport.py", "coerce_viewport_policy"),
-    ("arrayscope/gpu/bc_codec.py", "bc4_plan"),
-    ("arrayscope/gpu/cache_policy.py", "decide_texture_codec"),
-    ("arrayscope/gpu/chunk_codec.py", "CompressedChunkCache"),
-    ("arrayscope/gpu/chunk_codec.py", "gpu_decodable_codec_names"),
-    ("arrayscope/gpu/chunk_texture_codec.py", "encode_complex_tile"),
-    ("arrayscope/gpu/chunk_texture_codec.py", "encode_scalar_tile"),
-    ("arrayscope/io/lazy_sources.py", "supports_memmap_source"),
-    ("arrayscope/io/numpy_save.py", "estimate_nbytes"),
-    ("arrayscope/operations/_numba_native_ops.py", "is_ready"),
-    ("arrayscope/operations/_numba_reductions.py", "is_ready"),
-    ("arrayscope/operations/capabilities.py", "operation_execution_class"),
-    ("arrayscope/operations/chunked.py", "evaluate_image_snapshot_chunked"),
-    ("arrayscope/operations/dim_ops.py", "undo_fftshift"),
-    ("arrayscope/operations/fft_backend.py", "available_fft_backends"),
-    ("arrayscope/operations/packs/sigpy_pack.py", "sigpy_available"),
-    ("arrayscope/operations/planner.py", "candidate_stage_cache_points"),
-    ("arrayscope/operations/plugin_conformance.py", "verify_region_conformance"),
-    ("arrayscope/operations/plugins.py", "is_region_honored"),
-    ("arrayscope/operations/plugins.py", "plugin_operation_ids"),
-    ("arrayscope/operations/plugins.py", "region_conformance_stats"),
-    ("arrayscope/operations/recipes.py", "operations_from_recipe"),
-    ("arrayscope/operations/regions.py", "region_axis_kinds"),
-    ("arrayscope/operations/slabs.py", "evaluate_slab"),
-    ("arrayscope/operations/stack.py", "delete_operation"),
-    ("arrayscope/operations/stack.py", "move_operation"),
-    ("arrayscope/render/effects.py", "chunk_level_stats_for_pages"),
-    ("arrayscope/render/effects.py", "evaluate_shared_preview"),
-    ("arrayscope/render/effects.py", "preview_claim_key"),
-    ("arrayscope/render/effects.py", "reduce_display_payload_axes"),
-    ("arrayscope/render/lod.py", "_page_set_complete"),
-    ("arrayscope/render/lod.py", "admit_retained_preview_level"),
-    ("arrayscope/render/lod.py", "plan_lod_page_targets"),
-    ("arrayscope/window/frame_controller.py", "_should_defer_montage_side_panels"),
-    ("arrayscope/window/montage_viewport.py", "remap_montage_roi_geometry"),
-    ("arrayscope/window/render_contract.py", "session_is_current"),
-)
-
-#: Ceiling, never a target. Lower it as entries are resolved; raising it needs a
-#: reason in the same commit.
-_PENDING_CEILING = 64
-
-
-# Methods of name-reachable classes with no production caller, grandfathered
-# when the method rule was added. This list is the honest cost of the rule: it
-# is what the blind spot had already accumulated, and nothing on it is a new
-# failure. The gate refuses anything NOT listed here, so the class of mistake
-# that produced it -- replace a caller, leave the method -- fails at the hook
-# from now on.
-#
-# Several clusters are visible and worth naming rather than hiding:
-#   * ``WgpuPlaneExecutor``'s ``*_total`` properties are instruments that only
-#     probes and tests read. The dossier culture wants those to exist; they
-#     need a decision on whether an instrument counts as production surface.
-#   * ``PageTable`` alone has ``pin``, ``remap_slots`` and ``chunk_in_slot``,
-#     all of which lost their production callers to newer seams -- the same
-#     rot that produced ``eviction_candidates``.
-#   * ``FrameSession``'s tuple accessors and ``WindowLayoutManager``'s geometry
-#     helpers are the two largest, both from superseded call paths.
-#
-# The count below is a ceiling, so this list can only shrink.
-_PENDING_METHODS = (
-    ("arrayscope/core/bounded_cache.py", "BoundedCache.note_hit"),
-    ("arrayscope/core/dimension_roles.py", "DimensionRoles.with_single_profile_axis"),
-    ("arrayscope/core/dimension_roles.py", "DimensionRoles.with_toggled_profile_axis"),
-    ("arrayscope/core/view_state.py", "ViewState.with_axis_fftshifted"),
-    (
-        "arrayscope/display/backends/pyqtgraph/histogram_adapter.py",
-        "PyQtGraphHistogramAdapter.bound_item",
-    ),
-    (
-        "arrayscope/display/backends/pyqtgraph/tiles.py",
-        "MontageTileLayer.assert_presented_index_matches_scan",
-    ),
-    (
-        "arrayscope/display/backends/pyqtgraph/tiles.py",
-        "MontageTileLayer.preview_atlas_decline_reason",
-    ),
-    (
-        "arrayscope/display/backends/pyqtgraph/tiles.py",
-        "MontageTileLayer.preview_atlas_page_count",
-    ),
-    ("arrayscope/display/backends/pyqtgraph/tiles.py", "MontageTileLayer.update_levels"),
-    ("arrayscope/display/frame_planner.py", "FramePlanner.montage_region_set_hits"),
-    ("arrayscope/display/frame_planner.py", "FramePlanner.montage_region_set_misses"),
-    ("arrayscope/display/geometry.py", "DisplayGeometry.view_point_to_display_point"),
-    ("arrayscope/display/glyph_atlas.py", "GlyphAtlas.line_height"),
-    ("arrayscope/display/interaction.py", "DisplayInteractionController.observe_capture_geometry"),
-    ("arrayscope/display/interaction.py", "DisplayInteractionController.observe_profile_position"),
-    ("arrayscope/display/interaction.py", "DisplayInteractionController.set_pointer"),
-    ("arrayscope/display/lod.py", "LodInfo.reduced_extents"),
-    (
-        "arrayscope/display/model/frame.py",
-        "PageBackedPresentation.sample_presented_value_at_native",
-    ),
-    ("arrayscope/display/model/frame.py", "TilePresentationState.near_payloads"),
-    ("arrayscope/display/model/montage_levels.py", "MontageLevelStats.coverage_rank"),
-    ("arrayscope/display/model/montage_levels.py", "MontageLevelTracker.best_source"),
-    ("arrayscope/display/model/montage_levels.py", "MontageLevelTracker.histogram_data_for_stats"),
-    ("arrayscope/display/model/montage_levels.py", "MontageLevelTracker.update_from_tile"),
-    (
-        "arrayscope/display/model/presentation_generation.py",
-        "PresentationGenerationTracker.forget_tiles",
-    ),
-    ("arrayscope/display/montage.py", "MontagePlan.display_rect_for_tiles"),
-    ("arrayscope/display/pyramid.py", "LodPageCache.begin_claim"),
-    ("arrayscope/display/pyramid.py", "LodPageCache.claimed_by"),
-    ("arrayscope/display/pyramid.py", "LodPageCache.plan_set_ineligible"),
-    ("arrayscope/display/pyramid.py", "ResolvedLodPageSet.target_actual_levels"),
-    ("arrayscope/display/pyramid.py", "ResolvedLodPageSet.uniform_actual_level"),
-    ("arrayscope/display/scene.py", "DisplayScene.resident_region_ids"),
-    ("arrayscope/display/source_anchoring.py", "SourceAnchoring.any_anchored"),
-    (
-        "arrayscope/display/view_navigation_driver.py",
-        "QtGestureNavigationDriver.is_middle_drag_active",
-    ),
-    ("arrayscope/display/viewport.py", "ViewportController._current_view_is_near_auto"),
-    ("arrayscope/display/viewport.py", "ViewportController.promote_near_auto"),
-    ("arrayscope/gpu/cache_policy.py", "CompressedTierDecision.pressure_ratio"),
-    ("arrayscope/gpu/chunk_codec.py", "BitpackCodec.is_packed"),
-    ("arrayscope/gpu/chunk_codec.py", "BitpackCodec.payload_words"),
-    ("arrayscope/gpu/chunk_codec.py", "BitpackCodec.read_header"),
-    ("arrayscope/gpu/chunk_codec.py", "CompressedChunkCache.stored_bytes"),
-    ("arrayscope/gpu/chunk_grid.py", "ChunkGrid.origin_for_index"),
-    ("arrayscope/gpu/chunk_grid.py", "ChunkGrid.shape_at"),
-    ("arrayscope/gpu/chunk_grid.py", "ChunkGrid.window_delta"),
-    ("arrayscope/gpu/keys.py", "ChunkLod.axis_scale"),
-    ("arrayscope/gpu/page_table.py", "PageTable.chunk_in_slot"),
-    ("arrayscope/gpu/page_table.py", "PageTable.pin"),
-    ("arrayscope/gpu/page_table.py", "PageTable.remap_slots"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.bound_planes"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.codec_pool_allocated_layers"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.codec_pool_free_layers"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.glyph_atlas_uploads_total"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.histogram_batch_readbacks_total"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.histogram_dispatches_total"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.histogram_readback_resolves_total"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.overlay_buffer_writes_total"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.pool_allocated_layers"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.pool_free_layers"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.set_histogram_codec_mode"),
-    ("arrayscope/gpu/wgpu_executor.py", "WgpuPlaneExecutor.widget_atlas_uploads_total"),
-    ("arrayscope/kernel/completions.py", "_DrainState.exhausted"),
-    ("arrayscope/kernel/scheduler.py", "Kernel.forget_results"),
-    ("arrayscope/kernel/scheduler.py", "Kernel.last_shutdown_diagnostics"),
-    ("arrayscope/kernel/scheduler.py", "Kernel.supersede"),
-    ("arrayscope/operations/compressed_tier.py", "CompressedBackingTier.stored_bytes"),
-    ("arrayscope/operations/coordinator.py", "OperationCoordinator.append_operation"),
-    ("arrayscope/operations/coordinator.py", "OperationCoordinator.operation_cost_estimates"),
-    ("arrayscope/operations/coordinator.py", "OperationCoordinator.pipeline_cost_estimate"),
-    ("arrayscope/operations/evaluator.py", "LevelEvidenceBatchResult.max_source_pixels"),
-    ("arrayscope/operations/evaluator.py", "LevelEvidenceBatchResult.requested_pixels"),
-    ("arrayscope/operations/evaluator.py", "OperationEvaluator.cache_diagnostics"),
-    ("arrayscope/operations/evaluator.py", "OperationEvaluator.cached_display_tile"),
-    ("arrayscope/operations/evaluator.py", "OperationEvaluator.current_data"),
-    ("arrayscope/operations/evaluator.py", "OperationEvaluator.note_render_cancelled"),
-    ("arrayscope/operations/evaluator.py", "OperationEvaluator.note_render_degraded"),
-    ("arrayscope/operations/evaluator.py", "OperationEvaluator.note_render_refused"),
-    ("arrayscope/operations/pipeline.py", "ArrayDocument.with_data_changed"),
-    ("arrayscope/operations/pipeline.py", "ArrayDocument.with_replaced_operation"),
-    ("arrayscope/operations/pipeline.py", "ArrayDocument.with_step_enabled"),
-    ("arrayscope/operations/plugin_conformance.py", "OperationCharacterization.predict_shape"),
-    ("arrayscope/operations/plugins.py", "PluginOperation.execution_class"),
-    ("arrayscope/operations/registry.py", "OperationEntry.axis_selection"),
-    (
-        "arrayscope/operations/stage_materialization.py",
-        "StageMaterializationManager.invalidate_document",
-    ),
-    (
-        "arrayscope/operations/stage_materialization.py",
-        "StageMaterializationResult.should_schedule",
-    ),
-    ("arrayscope/presentation/prepared_uploads.py", "PreparedUploadMailbox.note_submitted"),
-    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.best_presentable"),
-    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.evaluation_requests_cleared"),
-    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.feedback_signature"),
-    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.preview_claim_active"),
-    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.stage_blocked_tiles"),
-    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.stage_detached"),
-    ("arrayscope/presentation/tile_lifecycle.py", "TileLifecycle.task_requested"),
-    ("arrayscope/presentation/tile_lifecycle.py", "TilePayloadRef.is_target_quality"),
-    ("arrayscope/profiles/coordinator.py", "ProfileCoordinator.render_from_marker"),
-    ("arrayscope/render/lod.py", "LodPageMaterializationRequest.reduce_factor_xy"),
-    ("arrayscope/window/frame_effects.py", "FramePipelineEffects.admit_tile_result"),
-    ("arrayscope/window/frame_session.py", "FrameSession._session_resident_levels"),
-    ("arrayscope/window/frame_session.py", "FrameSession.consume_dirty_rects"),
-    ("arrayscope/window/frame_session.py", "FrameSession.expand_viewport_coverage"),
-    ("arrayscope/window/frame_session.py", "FrameSession.is_tile_loaded"),
-    ("arrayscope/window/frame_session.py", "FrameSession.loading_tile_tuple"),
-    ("arrayscope/window/frame_session.py", "FrameSession.mark_preview_refinements_dirty"),
-    ("arrayscope/window/frame_session.py", "FrameSession.parked_dirty_payloads"),
-    ("arrayscope/window/frame_session.py", "FrameSession.release_preview_claim"),
-    ("arrayscope/window/frame_session.py", "FrameSession.rendered_tuple"),
-    ("arrayscope/window/frame_session.py", "FrameSession.skipped_tile_tuple"),
-    ("arrayscope/window/frame_session.py", "FrameSession.snapshot_display_tile_payloads"),
-    ("arrayscope/window/layout_controller.py", "WindowLayoutManager._dock_extent_for_area"),
-    (
-        "arrayscope/window/layout_controller.py",
-        "WindowLayoutManager._restore_saved_viewport_session",
-    ),
-    ("arrayscope/window/layout_controller.py", "WindowLayoutManager._viewport_shape_matches"),
-    ("arrayscope/window/layout_controller.py", "WindowLayoutManager._visible_docked_panel_deltas"),
-    (
-        "arrayscope/window/layout_controller.py",
-        "WindowLayoutManager.dockless_window_size_for_viewport_shape",
-    ),
-    (
-        "arrayscope/window/layout_controller.py",
-        "WindowLayoutManager.set_dock_visible_preserving_canvas",
-    ),
-    (
-        "arrayscope/window/montage_payload_cache.py",
-        "RetainedTiledPayloadStore.clear_for_document_or_context_change",
-    ),
-    ("arrayscope/window/panels.py", "PanelManager.reset_panel_layout"),
-    ("arrayscope/window/panels.py", "PanelManager.toggle_panel"),
-)
-
-#: Ceiling for the method backlog, on the same terms as ``_PENDING_CEILING``.
-_PENDING_METHOD_CEILING = 115
 
 
 #: ``arrayscope/tools/`` is the tracing/benchmark/oracle harness (docs/areas.md
@@ -578,6 +249,78 @@ def _words_under(directory: Path) -> frozenset[str]:
             continue
         words.update(_WORD.findall(path.read_text(encoding="utf-8")))
     return words
+
+
+@cache
+def _words_per_test_file(root: Path) -> tuple[tuple[str, frozenset[str]], ...]:
+    """``(relative path, words)`` for every file under ``tests/``.
+
+    Per file rather than per tree, because a helper module naming its own
+    definition must not count as that definition's caller -- the same rule the
+    package scan applies, asked of the suite's own support code.
+    """
+
+    directory = root / "tests"
+    if not directory.is_dir():
+        return ()
+    return tuple(
+        (
+            path.relative_to(root).as_posix(),
+            frozenset(_WORD.findall(path.read_text(encoding="utf-8"))),
+        )
+        for path in _python_files(directory)
+    )
+
+
+def _is_test_module(relative: str) -> bool:
+    """Whether pytest collects this file, rather than it being support code."""
+
+    name = Path(relative).name
+    return name.startswith("test_") or name == "conftest.py"
+
+
+@cache
+def unreferenced_test_helpers(root: Path) -> tuple[Definition, ...]:
+    """Definitions in ``tests/`` support modules that no other file names.
+
+    The suite's own helpers are the blind spot the package scan cannot see: a
+    seam moved out of ``arrayscope/`` to live beside its assertions is still
+    dead the moment its last caller goes, and nothing here is production, so
+    neither the unreachable nor the test-only rule ever looks at it. This is
+    the same question asked of ``tests/`` itself -- and it is what stops
+    "delete the method, keep a shim" from being a way to launder dead code.
+
+    Only *support* modules are in scope. A ``test_*.py`` file's own top-level
+    definitions are its fixtures and helpers, and pytest reaches its tests by
+    collection rather than by name.
+    """
+
+    files = _words_per_test_file(root)
+    this_module = Path(__file__).resolve()
+    found: list[Definition] = []
+    for relative, _words in files:
+        if _is_test_module(relative) or (root / relative).resolve() == this_module:
+            continue
+        text = (root / relative).read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        # A sibling helper in the same module is a real caller, so count the
+        # module's own words too -- but a name that appears exactly once there
+        # is only its own ``def`` line.
+        own = Counter(_WORD.findall(text))
+        elsewhere: set[str] = set()
+        for other, words in files:
+            if other != relative:
+                elsewhere |= words
+        elsewhere |= _product_root_names(root)
+        for node in tree.body:
+            if not isinstance(node, _DEFINITION):
+                continue
+            if _structurally_exempt(node, relative) or node.name.startswith("_"):
+                continue
+            if node.name in elsewhere or own[node.name] > 1:
+                continue
+            found.append(Definition(relative, node.name, node.lineno))
+    return tuple(found)
 
 
 @cache
@@ -750,16 +493,6 @@ def unreferenced_methods(root: Path) -> tuple[tuple[Definition, ...], tuple[Defi
     return tuple(unreachable), tuple(test_only)
 
 
-def _allowed(definition: Definition) -> bool:
-    return any(
-        definition.relative == path and definition.name == name for path, name, _ in _ALLOWLIST
-    )
-
-
-def _pending(definition: Definition) -> bool:
-    return (definition.relative, definition.name) in _PENDING_ADJUDICATION
-
-
 @dataclass(frozen=True)
 class Dangling:
     relative: str
@@ -876,58 +609,24 @@ def problems(root: Path = ROOT) -> list[str]:
         dangling.append("  -> a rebase can do this with no textual conflict: the caller and")
         dangling.append("     the deleted definition live in different files.")
 
-    found = [
-        f"unreachable (nothing names it):   {definition}"
-        for definition in unreachable
-        if not _allowed(definition) and not _pending(definition)
+    found = [f"unreachable (nothing names it):   {definition}" for definition in unreachable]
+    found += [f"test-only (only tests/ names it): {definition}" for definition in test_only]
+    if found:
+        found.append("  -> delete it with its assertions, or restore a real caller.")
+        found.append("     There is no allowlist: a definition the product cannot reach")
+        found.append("     is either the product's, or the suite's, or nobody's.")
+
+    helpers = [
+        f"dead test helper (no test names it): {definition}"
+        for definition in unreferenced_test_helpers(root)
     ]
-    found += [
-        f"test-only (only tests/ names it): {definition}"
-        for definition in test_only
-        if not _allowed(definition) and not _pending(definition)
-    ]
-    methods = [
-        f"dead method (no production caller): {definition}"
-        for definition in dead_methods
-        if (definition.relative, definition.name) not in _PENDING_METHODS
-    ]
+    if helpers:
+        helpers.append("  -> a seam that moved out of arrayscope/ to live beside its")
+        helpers.append("     assertions is dead the moment its last caller goes too.")
+
+    methods = [f"dead method (no production caller): {definition}" for definition in dead_methods]
     if methods:
         methods.append("  -> the caller you replaced was the last one; delete the method with")
         methods.append("     its assertions, or point the new seam's tests at the survivor.")
-    found += methods
-    if found:
-        found.append("  -> delete it with its assertions, or restore a real caller;")
-        found.append(f"     a genuine entry point goes in _ALLOWLIST in {Path(__file__).name}.")
 
-    flagged = {(definition.relative, definition.name) for definition in unreachable + test_only}
-    flagged_methods = {(definition.relative, definition.name) for definition in dead_methods}
-    # A stale entry is how the rule gets silently widened, so it is a failure
-    # in its own right rather than a line nobody ever deletes.
-    stale = [
-        f"stale allowlist entry (no longer flagged): {path}::{name}"
-        for path, name, _ in _ALLOWLIST
-        if (path, name) not in flagged
-    ]
-    stale += [
-        f"resolved pending entry (no longer flagged): {path}::{name}"
-        for path, name in _PENDING_ADJUDICATION
-        if (path, name) not in flagged
-    ]
-    stale += [
-        f"resolved pending method (no longer flagged): {path}::{name}"
-        for path, name in _PENDING_METHODS
-        if (path, name) not in flagged_methods
-    ]
-
-    ceiling = []
-    if len(_PENDING_ADJUDICATION) > _PENDING_CEILING:
-        ceiling.append(
-            f"{len(_PENDING_ADJUDICATION)} pending entries against a ceiling of "
-            f"{_PENDING_CEILING}: adjudicate one instead of raising the ceiling."
-        )
-    if len(_PENDING_METHODS) > _PENDING_METHOD_CEILING:
-        ceiling.append(
-            f"{len(_PENDING_METHODS)} pending methods against a ceiling of "
-            f"{_PENDING_METHOD_CEILING}: adjudicate one instead of raising the ceiling."
-        )
-    return dangling + found + stale + ceiling
+    return dangling + found + helpers + methods

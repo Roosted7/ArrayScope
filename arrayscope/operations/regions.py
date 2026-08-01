@@ -106,10 +106,6 @@ def index_spec_from_region(region: RegionSpec) -> tuple:
     return tuple(spec)
 
 
-def region_axis_kinds(region: RegionSpec) -> tuple[str, ...]:
-    return tuple(axis_region_kind(axis.kind).value for axis in region.axes)
-
-
 def region_text(region: RegionSpec) -> str:
     parts = []
     for axis in region.axes:

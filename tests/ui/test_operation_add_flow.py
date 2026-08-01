@@ -19,8 +19,18 @@ import pytest
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from arrayscope.operations import registry
 from arrayscope.operations.registry import operation_id_for
+from tests import seams
 from tests.ui.helpers import clear_arrayscope_settings, process_events
+
+
+def _append(coordinator, operation_id, axis=None, parameters=None, *, axes=None):
+    """Create then append -- the two steps the Add-operation flow takes."""
+
+    coordinator.append_created_operation(
+        registry.create_operation(operation_id, axis=axis, parameters=parameters or {}, axes=axes)
+    )
 
 
 def _window(qtbot, shape=(4, 8, 6)):
@@ -90,7 +100,7 @@ def test_add_popup_parameterized_op_chains_to_params_popup(qtbot):
 def test_edit_operation_seeds_and_replaces_generic_op(qtbot):
     win = _window(qtbot)
     # Land a crop, then re-edit it through the generic pencil flow.
-    win.operation_coordinator.append_operation("crop", axis=1, parameters={"start": 1, "stop": 5})
+    _append(win.operation_coordinator, "crop", axis=1, parameters={"start": 1, "stop": 5})
     win._set_document(win.operation_coordinator.document)
     win.edit_operation(0)
     popup = win._operation_params_popup
@@ -115,7 +125,7 @@ def test_edit_operation_reopens_a_parameterless_axis_set_op(qtbot):
     """
 
     win = _window(qtbot)
-    win.operation_coordinator.append_operation("centered_fftn", axes=(1, 2))
+    _append(win.operation_coordinator, "centered_fftn", axes=(1, 2))
     win._set_document(win.operation_coordinator.document)
     win.edit_operation(0)
     popup = win._operation_params_popup
@@ -148,7 +158,6 @@ def test_native_soft_threshold_parameter_flow(qtbot):
 
 
 def test_bart_pics_lands_from_ui_with_a_bound_second_array(qtbot, tmp_path, monkeypatch):
-    from arrayscope.operations import plugins, registry
     from arrayscope.operations.input_slots import SLOT_DIMENSION_SET
     from arrayscope.operations.packs import bart_pack
 
@@ -164,8 +173,8 @@ def test_bart_pics_lands_from_ui_with_a_bound_second_array(qtbot, tmp_path, monk
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setattr(bart_pack, "bart_available", lambda env=None: True)
     monkeypatch.setattr(bart_pack, "bart_executable", lambda env=None: str(executable))
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
 
     win = _window(qtbot, shape=(3, 4, 5))
     win.request_operation("bart:pics")
@@ -180,6 +189,6 @@ def test_bart_pics_lands_from_ui_with_a_bound_second_array(qtbot, tmp_path, monk
     assert step.operation.plugin_id == "bart:pics"
     assert dict(step.operation.slot_bindings)["sensitivities"].kind == SLOT_DIMENSION_SET
     np.testing.assert_allclose(
-        win.operation_evaluator.current_data(),
+        win.operation_evaluator.document.materialize(),
         np.asarray(win.base_data, dtype=np.complex64),
     )

@@ -13,10 +13,10 @@ from arrayscope.core.frame_targets import FrameTarget
 from arrayscope.core.view_state import ViewState
 from arrayscope.display.backend_contract import WGPU_CAPABILITIES
 from arrayscope.display.frame_planner import ANCHORED_CHUNK_SHAPE, FramePlanner
-from arrayscope.display.region_source import EagerDisplayRegionSource
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.display.source_anchoring import source_anchoring_for_view
 from arrayscope.operations.pipeline import ArrayDocument, CenteredFFT
+from tests.display.region_source_double import EagerDisplayRegionSource
 
 TARGET = FrameTarget(
     semantic_key="gate", viewport_key=None, presentation_key=None, quality="exact-visible"
@@ -181,7 +181,7 @@ def test_non_windowable_chain_still_gets_scroll_back_identity():
     anchoring = source_anchoring_for_view(document, scrolled_state(data.shape, 0))
     assert anchoring is not None
     assert anchoring.anchored_starts == (None, None)
-    assert anchoring.any_anchored is False
+    assert any(start is not None for start in anchoring.anchored_starts) is False
 
     _anchor_a, plane_a = payloads_for_plane(
         document, data.real.astype(np.float32), 0, extent=extent

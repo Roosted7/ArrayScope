@@ -173,7 +173,7 @@ def test_shutdown_during_level_evidence_batch_stops_at_tile_boundary(sweep_envir
     assert shutdown_warnings == [], (
         f"leaked-thread diagnostics on shutdown: {[str(w.message) for w in shutdown_warnings]}"
     )
-    assert kernel.last_shutdown_diagnostics == ()
+    assert tuple(kernel._last_shutdown_diagnostics) == ()
     # Cooperative stop, not a mid-item interrupt: the sweep quit at a tile
     # edge after at most a couple of samples, never the whole batch.
     assert 1 <= len(sampled) <= 3

@@ -9,6 +9,7 @@ import numpy as np
 
 from arrayscope.display.geometry import DisplayGeometry, MontageGeometry
 from arrayscope.display.model.frame import DisplayTilePayload
+from tests import seams
 
 
 class _Owner:
@@ -378,7 +379,7 @@ def test_reentering_retained_tile_is_shown_in_the_commit_that_admits_it(qt_app):
     assert layer._states[0] is retained
     assert retained.item.isVisible() is True
     assert retained.visible is True
-    layer.assert_presented_index_matches_scan()
+    seams.assert_presented_index_matches_scan(layer)
 
     # The warm-residency claim is dropped the moment the tile is presented:
     # leaving it pooled lets a later tile in the same transaction pop and move
@@ -438,7 +439,7 @@ def test_reentering_tile_with_stale_retained_identity_stays_hidden(qt_app):
     # A payload the target has outrun is not a rejected upsert: the presenter
     # is not looping on it.
     assert back.identity_rejected_tiles == ()
-    layer.assert_presented_index_matches_scan()
+    seams.assert_presented_index_matches_scan(layer)
 
 
 def test_resolve_budget_defers_unprepared_page_backed_upserts(qt_app, monkeypatch):
@@ -554,7 +555,7 @@ def test_resolve_budget_defers_unprepared_page_backed_upserts(qt_app, monkeypatc
 
     final = commit((3,), deadline=None)
     assert set(final.presented_tiles) == {0, 1, 2, 3}
-    layer.assert_presented_index_matches_scan()
+    seams.assert_presented_index_matches_scan(layer)
 
 
 def _scroll_page_backed_payload(tile_number: int, source_index: int, *, pages_by_index: dict):
@@ -686,7 +687,7 @@ def test_an_index_scroll_step_reassembles_and_reuploads_only_the_entering_tile(q
                 _resolve_page_backed_payload(payloads[tile], levels=(0.0, 1.0)).payload.image
             )
             assert np.array_equal(drawn, expected), f"step {offset} slot {tile} draws wrong pixels"
-    layer.assert_presented_index_matches_scan()
+    seams.assert_presented_index_matches_scan(layer)
 
 
 def test_a_residency_reset_drops_retained_assemblies(qt_app):

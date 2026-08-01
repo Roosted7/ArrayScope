@@ -268,31 +268,6 @@ class PageTable:
     def slot_items(self) -> tuple[tuple[DataChunkKey, PageSlot], ...]:
         return tuple((key, entry.slot) for key, entry in self._entries.items())
 
-    def remap_slots(self, transform) -> None:
-        """Rewrite every binding's slot via ``transform(slot) -> PageSlot``.
-
-        Used when pages are dropped/compacted and surviving page indices
-        shift. LRU state and pins survive; the generation bumps once.
-        """
-
-        new_slots: dict[PageSlot, DataChunkKey] = {}
-        for key, entry in self._entries.items():
-            slot = transform(entry.slot)
-            if slot in new_slots:
-                raise ValueError(f"remap collides on slot {slot}")
-            entry.slot = slot
-            new_slots[slot] = key
-        self._generation += 1
-        for entry in self._entries.values():
-            entry.generation = self._generation
-        self._slots = new_slots
-
-    def pin(self, key: DataChunkKey, pinned: bool = True) -> None:
-        entry = self._entries.get(key)
-        if entry is None:
-            raise KeyError(f"cannot pin non-resident chunk {key}")
-        self._replace_owner_key(_LEGACY_PIN_OWNER, key, bool(pinned))
-
     def replace_pin_set(self, owner: object, keys) -> None:
         """Atomically replace one owner's resident coverage pins."""
 
@@ -337,9 +312,6 @@ class PageTable:
 
     def _owners_for(self, key: DataChunkKey) -> tuple[object, ...]:
         return tuple(owner for owner, keys in self._pin_sets.items() if key in keys)
-
-    def chunk_in_slot(self, slot: PageSlot) -> DataChunkKey | None:
-        return self._slots.get(slot)
 
     def resident_keys(self) -> tuple[DataChunkKey, ...]:
         return tuple(self._entries)

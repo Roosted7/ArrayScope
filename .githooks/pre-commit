@@ -99,8 +99,9 @@ if ! ruff format --check .; then
 fi
 
 if ! python "$root/tools/dead_code.py"; then
-	echo "pre-commit: dead-code guard failed — production code nothing reaches." >&2
-	echo "  Delete it with its assertions, or restore a real caller." >&2
+	echo "pre-commit: dead-code guard failed — code nothing on its own side reaches." >&2
+	echo "  Delete it with its assertions, move it to the side that owns it," >&2
+	echo "  or give it a real caller. There is no allowlist to add it to." >&2
 	status=1
 fi
 

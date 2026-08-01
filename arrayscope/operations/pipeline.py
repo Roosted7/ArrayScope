@@ -1201,7 +1201,6 @@ class Minimum:
 @dataclass(frozen=True)
 class CenteredFFT:
     axis: int
-    native_magnitude_envelope_role = "orthonormal_fft"
 
     def apply(self, data):
         return dim_ops.centered_fft(data, self.axis)
@@ -1254,7 +1253,6 @@ class CenteredFFT:
 @dataclass(frozen=True)
 class CenteredIFFT:
     axis: int
-    native_magnitude_envelope_role = "orthonormal_ifft"
 
     def apply(self, data):
         return dim_ops.centered_ifft(data, self.axis)
@@ -1491,7 +1489,6 @@ class MeanOverAxes:
 @dataclass(frozen=True)
 class FFTShift:
     axis: int
-    native_magnitude_envelope_role = "fft_shift"
 
     def apply(self, data):
         return dim_ops.apply_fftshift(data, self.axis)
@@ -1809,22 +1806,6 @@ class ArrayDocument:
             self.base_data, steps=self.steps[:-1], revision=self.revision, axes=self.base_axes
         )
 
-    def with_step_enabled(self, index, enabled) -> ArrayDocument:
-        index = _validate_step_index(index, self.steps)
-        steps = list(self.steps)
-        steps[index] = replace(steps[index], enabled=bool(enabled))
-        return ArrayDocument(
-            self.base_data, steps=tuple(steps), revision=self.revision, axes=self.base_axes
-        )
-
-    def with_replaced_operation(self, index, operation: ArrayOperation) -> ArrayDocument:
-        index = _validate_step_index(index, self.steps)
-        steps = list(self.steps)
-        steps[index] = replace(steps[index], operation=operation)
-        return ArrayDocument(
-            self.base_data, steps=tuple(steps), revision=self.revision, axes=self.base_axes
-        )
-
     def mark_base_data_changed(self) -> ArrayDocument:
         return ArrayDocument(
             self.base_data, steps=self.steps, revision=self.revision + 1, axes=self.base_axes
@@ -1837,11 +1818,6 @@ class ArrayDocument:
 
     def replace_base_and_clear_steps(self, data) -> ArrayDocument:
         return ArrayDocument(data, steps=(), revision=self.revision + 1)
-
-    def with_data_changed(self, base_data=None) -> ArrayDocument:
-        if base_data is None or base_data is self.base_data:
-            return self.mark_base_data_changed()
-        return self.replace_base_and_clear_steps(base_data)
 
     def materialize(self, *, evaluation_context=None):
         return evaluate(
@@ -1912,13 +1888,6 @@ def _coerce_step(step) -> OperationStep:
             step_id=str(getattr(step, "step_id", uuid4().hex)),
         )
     return OperationStep(step)
-
-
-def _validate_step_index(index, steps):
-    index = int(index)
-    if index < 0 or index >= len(steps):
-        raise IndexError("operation step index is out of range")
-    return index
 
 
 def _validate_axis(shape, axis) -> int:

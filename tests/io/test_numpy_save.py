@@ -7,7 +7,6 @@ import numpy as np
 
 from arrayscope.io.numpy_save import (
     default_numpy_filename,
-    estimate_nbytes,
     save_derived_array,
     selected_numpy_data,
 )
@@ -60,10 +59,6 @@ def test_derived_array_export_writes_npz_payload(tmp_path):
         np.testing.assert_array_equal(archive["array"], data)
         assert str(archive["recipe_json"]) == "recipe"
         assert str(archive["view_recipe_json"]) == "view"
-
-
-def test_estimate_nbytes_uses_shape_and_dtype():
-    assert estimate_nbytes((2, 3), np.float32) == 24
 
 
 def test_numpy_save_helpers_have_no_qt_or_pyqtgraph_imports():

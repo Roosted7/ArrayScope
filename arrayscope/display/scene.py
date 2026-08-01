@@ -88,10 +88,6 @@ class DisplayScene:
     def near_region_ids(self) -> tuple[int, ...]:
         return self._near_region_ids
 
-    @property
-    def resident_region_ids(self) -> tuple[int, ...]:
-        return self._resident_region_ids
-
     def region(self, region_id: int) -> DisplayRegion | None:
         return self._region_by_id.get(int(region_id))
 

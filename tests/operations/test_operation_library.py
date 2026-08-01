@@ -17,6 +17,16 @@ from arrayscope.operations import library, recipes, registry
 from arrayscope.operations.operation_definitions import export_operation_definition
 
 
+def _operations_from_recipe(module, recipe, base_shape, **kwargs):
+    """The enabled operations of a recipe, the way a loader reads them."""
+
+    return tuple(
+        step.operation
+        for step in module.steps_from_recipe(recipe, base_shape, **kwargs)
+        if step.enabled
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolated_ops_dir(tmp_path, monkeypatch):
     ops_dir = tmp_path / "operations"
@@ -332,6 +342,16 @@ _MODES_SRC = '''
 from typing import Literal
 
 
+def _operations_from_recipe(module, recipe, base_shape, **kwargs):
+    """The enabled operations of a recipe, the way a loader reads them."""
+
+    return tuple(
+        step.operation
+        for step in module.steps_from_recipe(recipe, base_shape, **kwargs)
+        if step.enabled
+    )
+
+
 def blur(data, mode: Literal["reflect", "edge", "zero"] = "reflect", verbose=False, note="x"):
     """Blur with an explicit boundary mode."""
     return data
@@ -404,7 +424,7 @@ def test_user_op_recipe_round_trip(tmp_path):
 
     recipe = recipes.recipe_from_operations([operation])
     data = np.zeros((2, 3, 4), dtype=np.float32)
-    restored = recipes.operations_from_recipe(recipe, data.shape)
+    restored = _operations_from_recipe(recipes, recipe, data.shape)
     assert len(restored) == 1
     probe = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
     assert np.allclose(restored[0].apply(probe), operation.apply(probe))
@@ -959,7 +979,7 @@ def test_a_user_operation_can_declare_itself_slab_mapped(tmp_path):
     library.update_user_operation(operation_id, maps_over_slabs=True)
 
     entry = registry.get_operation_entry(operation_id)
-    assert entry.axis_selection == "set"
+    assert entry.requires_axes is True
     assert entry.requires_axis is False
 
     operation = registry.create_operation(operation_id, axes=(1, 2), ndim=3)
@@ -1002,7 +1022,7 @@ def test_a_user_operation_may_ask_for_the_axis_set_itself(tmp_path):
     # ``axes`` is inferred as the axis SET, not as one more parameter to type a
     # number into.
     entry = registry.get_operation_entry(operation_id)
-    assert entry.axis_selection == "set"
+    assert entry.requires_axes is True
     assert entry.parameters == ()
 
     operation = registry.create_operation(operation_id, axes=(0, 2), ndim=3)
@@ -1023,7 +1043,7 @@ def test_duplicating_an_axis_set_builtin_produces_a_working_axis_set_copy():
     duplicate_id = library.duplicate_operation("mean_axes")
 
     entry = registry.get_operation_entry(duplicate_id)
-    assert entry.axis_selection == "set"
+    assert entry.requires_axes is True
 
     data = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
     copy = registry.create_operation(duplicate_id, axes=(0, 2), ndim=3)

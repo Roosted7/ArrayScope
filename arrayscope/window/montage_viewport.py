@@ -578,21 +578,6 @@ def remap_montage_view_range(
     )
 
 
-def remap_montage_roi_geometry(
-    previous_plan, next_plan, geometry: RoiGeometry
-) -> RoiGeometry | None:
-    """Move ROI geometry through a same-source montage layout reflow.
-
-    Returns ``None`` when the source population changed.  Rectangle ROIs keep
-    their shape and move by a source-local anchor, while point-based ROIs move
-    each point by the source tile underneath that point.
-    """
-
-    previous_layout = _source_layout(previous_plan)
-    next_layout = _source_layout(next_plan)
-    return _remap_montage_roi_geometry_with_layout(previous_layout, next_layout, geometry)
-
-
 def remap_montage_roi_selections(previous_plan, next_plan, selections) -> tuple[RoiSelection, ...]:
     """Return ROI selections remapped through a same-source montage layout reflow.
 

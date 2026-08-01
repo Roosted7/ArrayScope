@@ -266,16 +266,6 @@ class FramePlanner:
         self.montage_region_cache_hits = 0
         self.montage_region_cache_misses = 0
 
-    @property
-    def montage_region_set_hits(self) -> int:
-        """Retargets that reused a previous pan's regions tuple whole."""
-
-        return sum(skeleton.set_hits for skeleton in self._montage_skeletons.values())
-
-    @property
-    def montage_region_set_misses(self) -> int:
-        return sum(skeleton.set_misses for skeleton in self._montage_skeletons.values())
-
     def plan(
         self,
         *,

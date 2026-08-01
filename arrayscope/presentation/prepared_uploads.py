@@ -328,12 +328,6 @@ class PreparedUploadMailbox:
             self._generation += 1
             return self._generation
 
-    def note_submitted(self, count: int = 1) -> None:
-        """One planned preparation reached the scheduler."""
-
-        with self._lock:
-            self._submitted += max(0, int(count))
-
     def note_deduped(self, count: int = 1) -> None:
         """A planned preparation was already waiting, so it was not resubmitted."""
 

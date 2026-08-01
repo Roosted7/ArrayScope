@@ -12,7 +12,6 @@ from arrayscope.core.view_state import ViewState
 from arrayscope.display import pyramid as pyramid_core
 from arrayscope.display.backends.pyqtgraph.tiles import (
     MontageTileLayer,
-    _assemble_page_backed_payload,
     _payload_rgb_already_windowed,
     _resolve_page_backed_payload,
 )
@@ -22,6 +21,7 @@ from arrayscope.display.model.frame import (
     DisplayTilePayload,
     PageBackedPresentation,
     TiledValueSource,
+    array_value_at,
     display_tile_payload_has_semantics,
 )
 from arrayscope.display.montage import MontageTile, RenderedTile
@@ -31,8 +31,6 @@ from arrayscope.display.pyramid import (
     materialize_lod_page,
     materialize_source_grid_pages,
     plan_source_grid_pages,
-    reduce_source_grid,
-    reduction_xy_to_yx,
     reduction_yx_to_xy,
 )
 from arrayscope.display.shader_mapping import (
@@ -46,7 +44,25 @@ from arrayscope.gpu import PageSlot, PageTable
 from arrayscope.gpu.keys import COMPLEX_RG32F, RGB8, SCALAR_R32F
 from arrayscope.presentation.tile_lifecycle import TileTarget, payload_ref_from_display_payload
 from arrayscope.render import lod as render_lod
+from arrayscope.tools import pyramid_reference
 from arrayscope.tools.framebuffer_reference import payload_display_kind
+from tests import seams
+
+
+def _presented_value_at(presentation, y_i, x_i):
+    """One presented sample through the exact clipped-bin geometry."""
+
+    y0, y1, x0, x1 = presentation.source_coverage_yx
+    if not (y0 <= int(y_i) < y1 and x0 <= int(x_i) < x1):
+        return None
+    if presentation.resolved_page_set is None:
+        return None
+    values = presentation.sample_presented_values_at_native_coordinates(
+        np.asarray((int(y_i),), dtype=np.int64),
+        np.asarray((int(x_i),), dtype=np.int64),
+    )
+    return array_value_at(values, 0, 0)
+
 
 CONTENT = ("src-anchored", ("doc", 4), ("op", "fft"))
 
@@ -135,21 +151,26 @@ def test_page_materialization_uses_vectorized_axis_reduction(monkeypatch):
     page_plans = plan(rect=rect, reduction=(3, 2), page_shape=(256, 256))
     values = source(rect)
 
-    def reject_scalar_reduction(*_args, **_kwargs):
-        raise AssertionError("materialization must not reduce one stored sample at a time")
+    calls = []
+    original = pyramid_core._reduce_planned_bins
 
-    monkeypatch.setattr(pyramid_core, "_reduce_sample", reject_scalar_reduction)
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pyramid_core, "_reduce_planned_bins", counted)
     pages = materialize_source_grid_pages(
         values,
         source_origin_yx=(rect[0], rect[2]),
         plans=page_plans,
     )
     assert sum(page.values.size for page in pages) == 8_385
+    # One bulk reduction per page -- never one per stored sample.
+    assert len(calls) == len(page_plans)
 
 
 def test_named_axis_conversion_keeps_asymmetric_routes_distinct():
     assert reduction_yx_to_xy((1, 2)) == (2, 1)
-    assert reduction_xy_to_yx((1, 2)) == (2, 1)
 
     y1_x2 = plan(reduction=(1, 2), page_shape=(8, 8))
     y2_x1 = plan(reduction=(2, 1), page_shape=(8, 8))
@@ -215,7 +236,7 @@ def test_named_axis_conversion_keeps_asymmetric_routes_distinct():
 )
 def test_reducer_families_match_direct_bin_oracles(reducer, expected, dtype, representation):
     values = np.asarray([[1 + 1j, 3 - 1j], [-1 + 2j, 5 + 0j]], dtype=np.complex64)
-    result = reduce_source_grid(
+    result = pyramid_reference.reduce_source_grid(
         values,
         source_origin_yx=(0, 0),
         valid_source_rect_yx=(0, 2, 0, 2),
@@ -240,7 +261,7 @@ def test_reducer_families_match_direct_bin_oracles(reducer, expected, dtype, rep
 
 def test_native_route_keeps_samples_unchanged():
     values = np.arange(12, dtype=np.float32).reshape(3, 4)
-    result = reduce_source_grid(
+    result = pyramid_reference.reduce_source_grid(
         values,
         source_origin_yx=(5, 7),
         valid_source_rect_yx=(5, 8, 7, 11),
@@ -257,7 +278,7 @@ def test_native_uint8_route_keeps_two_dimensional_values_scalar():
     assert output_dtype == np.dtype(np.uint8)
     assert representation == SCALAR_R32F
 
-    result = reduce_source_grid(
+    result = pyramid_reference.reduce_source_grid(
         values,
         source_origin_yx=(5, 7),
         valid_source_rect_yx=(5, 8, 7, 11),
@@ -365,7 +386,7 @@ def test_live_three_dimensional_rgb_route_remains_noncanonical():
 
 def test_phase_vector_counts_zero_as_zero_and_cancels_opposed_phase():
     values = np.asarray([[1 + 0j, -1 + 0j], [0 + 0j, 0 + 0j]], dtype=np.complex64)
-    result = reduce_source_grid(
+    result = pyramid_reference.reduce_source_grid(
         values,
         source_origin_yx=(0, 0),
         valid_source_rect_yx=(0, 2, 0, 2),
@@ -375,7 +396,7 @@ def test_phase_vector_counts_zero_as_zero_and_cancels_opposed_phase():
     assert result.values.dtype == np.complex64
     assert result.values[0, 0] == 0j
 
-    quarter = reduce_source_grid(
+    quarter = pyramid_reference.reduce_source_grid(
         np.asarray([[1 + 0j, 0 + 0j], [0 + 0j, 0 + 0j]], dtype=np.complex64),
         source_origin_yx=(0, 0),
         valid_source_rect_yx=(0, 2, 0, 2),
@@ -396,31 +417,27 @@ def test_phase_vector_large_almost_cancelled_bin_keeps_one_unmatched_vector():
     flat[4095] = np.complex64(0.0j)
     expected = np.complex64(1.0 / 4096.0)
 
-    planned = reduce_source_grid(
+    planned = pyramid_reference.reduce_source_grid(
         values,
         source_origin_yx=(0, 0),
         valid_source_rect_yx=(0, 64, 0, 64),
         reduction_yx=(6, 6),
         reducer="phase_vector",
     )
-    sampled = pyramid_core._reduce_sample(values, reducer="phase_vector")
-
     assert planned.values[0, 0] != 0.0j
-    assert sampled != 0.0j
     assert planned.values[0, 0] == expected
-    assert sampled == expected
 
 
 def test_mean_abs_is_not_abs_of_complex_mean():
     values = np.asarray([[1 + 0j, -1 + 0j]], dtype=np.complex64)
-    mean = reduce_source_grid(
+    mean = pyramid_reference.reduce_source_grid(
         values,
         source_origin_yx=(0, 0),
         valid_source_rect_yx=(0, 1, 0, 2),
         reduction_yx=(0, 1),
         reducer="mean",
     )
-    mean_abs = reduce_source_grid(
+    mean_abs = pyramid_reference.reduce_source_grid(
         values,
         source_origin_yx=(0, 0),
         valid_source_rect_yx=(0, 1, 0, 2),
@@ -479,8 +496,8 @@ def test_logical_page_cache_singleflight_and_terminal_cleanup_are_owner_scoped()
     )
     cache = LodPageCache(max_bytes=1 << 20)
 
-    assert cache.begin_claim(page.key, "request-a")
-    assert not cache.begin_claim(page.key, "request-b")
+    assert seams.begin_claim(cache, page.key, "request-a")
+    assert not seams.begin_claim(cache, page.key, "request-b")
     with pytest.raises(ValueError, match="owner mismatch"):
         cache.admit(page, owner="request-b")
     assert cache.pending(page.key)
@@ -489,7 +506,7 @@ def test_logical_page_cache_singleflight_and_terminal_cleanup_are_owner_scoped()
     assert not cache.pending(page.key)
 
     second = plan(rect=(0, 4, 4, 8), reduction=(1, 1), page_shape=(4, 4))[0]
-    assert cache.begin_claim(second.key, "request-c")
+    assert seams.begin_claim(cache, second.key, "request-c")
     assert cache.release_owner_claims("request-c") == (second.key,)
     assert cache.pending_count == 0
 
@@ -502,7 +519,7 @@ def test_logical_page_cache_reuses_resolver_snapshot_until_residency_changes(mon
         plan=page_plan,
     )
     cache = LodPageCache(max_bytes=1 << 20)
-    assert cache.begin_claim(page.key, "worker")
+    assert seams.begin_claim(cache, page.key, "worker")
     cache.admit(page, owner="worker")
     bind_calls = 0
     original_bind = pyramid_core.PageTable.bind
@@ -525,7 +542,7 @@ def _admit_square(cache, page_plan, owner, *, origin):
         source_origin_yx=origin,
         plan=page_plan,
     )
-    assert cache.begin_claim(page.key, owner)
+    assert seams.begin_claim(cache, page.key, owner)
     cache.admit(page, owner=owner)
     return page
 
@@ -614,7 +631,7 @@ def test_page_set_resolution_is_memoized_per_residency_revision(monkeypatch):
         plan=resident_plan,
     )
     cache = LodPageCache(max_bytes=1 << 20)
-    assert cache.begin_claim(page.key, "worker")
+    assert seams.begin_claim(cache, page.key, "worker")
     cache.admit(page, owner="worker")
 
     resolve_calls = 0
@@ -643,7 +660,7 @@ def test_page_set_resolution_is_memoized_per_residency_revision(monkeypatch):
         source_origin_yx=(4, 0),
         plan=missing_plan,
     )
-    assert cache.begin_claim(missing_page.key, "worker-b")
+    assert seams.begin_claim(cache, missing_page.key, "worker-b")
     cache.admit(missing_page, owner="worker-b")
     filled = cache.resolved_page_set((missing_plan,))
     assert filled is not None
@@ -671,7 +688,7 @@ def test_page_set_resolution_memo_rejects_stale_result_after_concurrent_admit(mo
         plan=missing_plan,
     )
     cache = LodPageCache(max_bytes=1 << 20)
-    assert cache.begin_claim(resident_page.key, "worker-a")
+    assert seams.begin_claim(cache, resident_page.key, "worker-a")
     cache.admit(resident_page, owner="worker-a")
 
     original_resolve = pyramid_core.PageTable.resolve
@@ -681,7 +698,7 @@ def test_page_set_resolution_memo_rejects_stale_result_after_concurrent_admit(mo
         if hook_state["armed"] and key == missing_plan.key:
             hook_state["armed"] = False
             # Interleaved worker: the page lands mid-compute...
-            assert cache.begin_claim(late_page.key, "worker-b")
+            assert seams.begin_claim(cache, late_page.key, "worker-b")
             cache.admit(late_page, owner="worker-b")
             # ...and a newer query refreshes the memo epoch.
             assert cache.resolved_page_set((resident_plan,)) is not None
@@ -715,7 +732,7 @@ def test_exact_page_query_does_not_treat_coarse_ancestor_as_materialized_target(
     )
     cache = LodPageCache(max_bytes=1 << 20)
     owner = ("coarse-page",)
-    assert cache.begin_claim(coarse_page.key, owner)
+    assert seams.begin_claim(cache, coarse_page.key, owner)
     cache.admit(coarse_page, owner=owner)
 
     resolution = cache.resolve(target_plan.key)
@@ -735,11 +752,11 @@ def test_running_page_owner_defers_cancellation_release_until_worker_terminal():
     )
     cache = LodPageCache(max_bytes=1 << 20)
     owner = "running-worker"
-    assert cache.begin_claim(page.key, owner)
+    assert seams.begin_claim(cache, page.key, owner)
     assert cache.begin_owner_work(owner)
 
     assert cache.release_owner_claims(owner) == ()
-    assert cache.claimed_by(page.key) == owner
+    assert cache._claims.get(page.key) == owner
     cache.admit(page, owner=owner)
     assert cache.finish_owner_work(owner) == ()
     assert cache.pending_count == 0
@@ -806,14 +823,14 @@ def test_budget_impossible_exact_set_is_ineligible_until_cache_resize():
     cache = LodPageCache(max_bytes=page_bytes)
 
     assert cache.claim_plans(plans, "impossible") == ()
-    assert cache.plan_set_ineligible(plans)
+    assert tuple(plan.key for plan in plans) in cache._ineligible_plan_sets
     assert cache.pending_count == 0
     assert cache.claim_plans(plans, "same-budget-replan") == ()
     assert cache.pending_count == 0
 
     cache.resize(max_bytes=2 * page_bytes)
 
-    assert not cache.plan_set_ineligible(plans)
+    assert tuple(plan.key for plan in plans) not in cache._ineligible_plan_sets
     assert cache.claim_plans(plans, "resized") == plans
     assert cache.release_owner_claims("resized") == tuple(plan.key for plan in plans)
 
@@ -827,7 +844,7 @@ def test_wrong_key_admission_is_loud_and_releases_the_request_claim():
         plan=first_plan,
     )
     cache = LodPageCache(max_bytes=1 << 20)
-    assert cache.begin_claim(second_plan.key, "worker")
+    assert seams.begin_claim(cache, second_plan.key, "worker")
     with pytest.raises(ValueError, match="wrong key"):
         cache.admit_as(second_plan.key, page, owner="worker")
     assert not cache.pending(second_plan.key)
@@ -934,8 +951,8 @@ def test_page_backed_presentation_probe_uses_exact_clipped_bin_geometry_without_
     # x=101 is the one-sample clipped leading bin; x=102 begins the next
     # full factor-two bin. Equal-width arithmetic would map one of these
     # coordinates incorrectly.
-    first = backing.sample_presented_value_at_native(100, 101)
-    second = backing.sample_presented_value_at_native(100, 102)
+    first = _presented_value_at(backing, 100, 101)
+    second = _presented_value_at(backing, 100, 102)
     assert first == pytest.approx((10101 + 10201) / 2)
     assert second == pytest.approx((10102 + 10103 + 10202 + 10203) / 4)
     assert semantic_values.value_at(SimpleNamespace(tile_number=0, local_y=0, local_x=0)) is None
@@ -1134,7 +1151,7 @@ def test_pyqtgraph_page_assembly_matches_exact_source_grid_nearest_oracle():
         lod=lod,
         page_backing=PageBackedPresentation(plans, pages, rect, lod),
     )
-    assembled = _assemble_page_backed_payload(payload)
+    assembled = _resolve_page_backed_payload(payload).payload
     expected = np.empty((4, 12), dtype=np.float32)
     for page in pages:
         for index, (y0, y1, x0, x1) in enumerate(page.plan.sample_source_rects_yx):
@@ -1297,7 +1314,7 @@ def test_clipped_page_backing_matches_direct_oracle_and_canonical_resolution():
     rect = (100, 105, 101, 114)
     values = source(rect)
     reduction = (1, 1)
-    oracle = reduce_source_grid(
+    oracle = pyramid_reference.reduce_source_grid(
         values,
         content_key=CONTENT,
         source_origin_yx=(rect[0], rect[2]),
@@ -1355,7 +1372,7 @@ def test_mean_abs_page_values_match_canonical_route_and_never_alias_complex_mean
         ],
         dtype=np.complex64,
     )
-    mean_abs_oracle = reduce_source_grid(
+    mean_abs_oracle = pyramid_reference.reduce_source_grid(
         values,
         content_key=CONTENT,
         source_origin_yx=(0, 0),
@@ -1363,7 +1380,7 @@ def test_mean_abs_page_values_match_canonical_route_and_never_alias_complex_mean
         reduction_yx=(1, 1),
         reducer="mean_abs",
     )
-    mean_oracle = reduce_source_grid(
+    mean_oracle = pyramid_reference.reduce_source_grid(
         values,
         content_key=CONTENT,
         source_origin_yx=(0, 0),
@@ -1737,7 +1754,7 @@ def test_two_fine_targets_assemble_from_one_coarse_actual_page():
     np.testing.assert_array_equal(assembly.payload.image, expected)
     for y in range(8):
         for x in range(8):
-            assert backing.sample_presented_value_at_native(y, x) == expected[y, x]
+            assert _presented_value_at(backing, y, x) == expected[y, x]
     assert (
         TiledValueSource({0: payload}).tile_region(
             SimpleNamespace(tile_number=0),
@@ -1765,11 +1782,13 @@ def test_heterogeneous_actual_pages_remain_target_aligned_physical_truth(qt_app)
     resolved = backing.resolved_page_set
     assert resolved is not None
     assert resolved.actual_levels == (3, 4)
-    assert resolved.target_actual_levels == (
+    assert tuple(
+        zip((r.target_key for r in resolved.resolutions), resolved.actual_levels, strict=True)
+    ) == (
         (targets[0].key, 3),
         (targets[1].key, 4),
     )
-    assert resolved.uniform_actual_level is None
+    assert (resolved.actual_levels[0] if len(set(resolved.actual_levels)) == 1 else None) is None
     assert resolved.coarsest_actual_level == 4
 
     payload = DisplayTilePayload(
@@ -1794,8 +1813,8 @@ def test_heterogeneous_actual_pages_remain_target_aligned_physical_truth(qt_app)
     assembly = _resolve_page_backed_payload(payload)
     assert tuple(max(item.actual_key.lod.reduction) for item in assembly.resolutions) == (3, 4)
     assert assembly.payload.image.shape == values.shape
-    assert backing.sample_presented_value_at_native(0, 0) == pages[0].values[0, 0]
-    assert backing.sample_presented_value_at_native(0, 31) == pages[1].values[0, 1]
+    assert _presented_value_at(backing, 0, 0) == pages[0].values[0, 0]
+    assert _presented_value_at(backing, 0, 31) == pages[1].values[0, 1]
 
     table = PageTable()
     for index, page in enumerate(pages):
@@ -2247,7 +2266,7 @@ def test_page_backed_complex_preview_preserves_pyqtgraph_rewindowing_semantics()
         page_backing=PageBackedPresentation(key.plans, pages, (0, 8, 0, 8), lod),
     )
 
-    assembled = _assemble_page_backed_payload(payload, levels=(0.0, 16.0))
+    assembled = _resolve_page_backed_payload(payload, levels=(0.0, 16.0)).payload
 
     assert assembled.texture_kind == "rgb8"
     assert assembled.histogram_data is not None
@@ -2279,14 +2298,14 @@ def test_oversized_page_admission_releases_active_owner_claim():
     cache = LodPageCache(max_bytes=8)
     owner = ("oversized-worker", 1)
 
-    assert cache.begin_claim(page.key, owner)
+    assert seams.begin_claim(cache, page.key, owner)
     assert cache.begin_owner_work(owner)
     cache.admit_as(page.key, page, owner=owner)
 
     assert cache.peek(page.key) is None
     assert cache.pending_count == 0
     assert cache.finish_owner_work(owner) == ()
-    assert cache.begin_claim(page.key, owner)
+    assert seams.begin_claim(cache, page.key, owner)
     assert cache.release_owner_claims(owner) == (page.key,)
 
 

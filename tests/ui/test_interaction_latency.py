@@ -192,7 +192,7 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, backend):
 
         _wait_for_backend_residency(win, qtbot, backend)
         assert win.operation_evaluator.image_evaluations == evaluations_before
-        assert len(win._committed_display_frame.scene.resident_region_ids) == 2
+        assert len(win._committed_display_frame.scene._resident_region_ids) == 2
         assert set(_backend_residency_snapshot(win, backend)) == {0, 1}
     finally:
         win.close()

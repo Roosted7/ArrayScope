@@ -2,6 +2,20 @@ import os
 
 import pytest
 
+
+def _remap_geometry(previous_plan, next_plan, geometry):
+    """One ROI geometry through a layout reflow, as the selection remap does."""
+
+    from arrayscope.window.montage_viewport import (
+        _remap_montage_roi_geometry_with_layout,
+        _source_layout,
+    )
+
+    return _remap_montage_roi_geometry_with_layout(
+        _source_layout(previous_plan), _source_layout(next_plan), geometry
+    )
+
+
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -242,31 +256,6 @@ def test_effective_montage_columns_auto_without_latch_reflows():
     )
     # First layout (nothing committed, nothing pinned) is still automatic.
     assert columns == optimal_montage_columns(count, tile_shape, viewport_shape)
-
-
-def test_montage_viewport_intent_observes_without_promoting():
-    from arrayscope.window.montage_viewport import montage_viewport_intent
-
-    class Controller:
-        def __init__(self):
-            self.promoted = False
-
-        def is_fit_locked(self):
-            return False
-
-        def is_auto_active(self):
-            return self.promoted
-
-        def promote_near_auto(self, _view_range):
-            self.promoted = True
-            return True
-
-    controller = Controller()
-    intent = montage_viewport_intent(controller, ((100.0, 120.0), (100.0, 120.0)))
-
-    assert not intent.auto_active
-    assert not intent.auto_like
-    assert not controller.promoted
 
 
 def test_remap_montage_view_range_keeps_tile_anchor_and_manual_zoom_scale():
@@ -664,7 +653,6 @@ def test_retarget_montage_viewport_plan_manual_one_edge_far_does_not_refit():
 
 def test_remap_montage_roi_geometry_moves_same_source_rectangle():
     from arrayscope.core.roi import RoiGeometry, RoiKind
-    from arrayscope.window.montage_viewport import remap_montage_roi_geometry
 
     previous = _plan_with_columns(2)
     next_plan = _plan_with_columns(3)
@@ -675,7 +663,7 @@ def test_remap_montage_roi_geometry_moves_same_source_rectangle():
         rect=(previous_tile.x0 + 2.0, previous_tile.y0 + 3.0, 4.0, 5.0),
     )
 
-    remapped = remap_montage_roi_geometry(previous, next_plan, geometry)
+    remapped = _remap_geometry(previous, next_plan, geometry)
 
     assert remapped is not None
     assert remapped.rect == (
@@ -690,7 +678,6 @@ def test_remap_montage_roi_geometry_keeps_position_for_scrolled_sources():
     from arrayscope.core.roi import RoiGeometry, RoiKind
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import make_montage_plan
-    from arrayscope.window.montage_viewport import remap_montage_roi_geometry
 
     first_state = ViewState.from_shape((10, 10, 8)).with_montage_axis(
         2, indices=(0, 1, 2, 3), text="0:4"
@@ -706,12 +693,11 @@ def test_remap_montage_roi_geometry_keeps_position_for_scrolled_sources():
     )
     geometry = RoiGeometry(RoiKind.RECTANGLE, rect=(2.0, 3.0, 4.0, 5.0))
 
-    assert remap_montage_roi_geometry(first, next_plan, geometry) is None
+    assert _remap_geometry(first, next_plan, geometry) is None
 
 
 def test_remap_montage_roi_geometry_moves_cross_tile_rectangle_by_anchor():
     from arrayscope.core.roi import RoiGeometry, RoiKind
-    from arrayscope.window.montage_viewport import remap_montage_roi_geometry
 
     previous = _plan_with_columns(2)
     next_plan = _plan_with_columns(3)
@@ -722,7 +708,7 @@ def test_remap_montage_roi_geometry_moves_cross_tile_rectangle_by_anchor():
         rect=(anchor_tile.x0 + 8.0, anchor_tile.y0 + 1.0, 16.0, 4.0),
     )
 
-    remapped = remap_montage_roi_geometry(previous, next_plan, geometry)
+    remapped = _remap_geometry(previous, next_plan, geometry)
 
     assert remapped is not None
     assert remapped.rect == (next_anchor.x0 + 8.0, next_anchor.y0 + 1.0, 16.0, 4.0)
@@ -730,7 +716,6 @@ def test_remap_montage_roi_geometry_moves_cross_tile_rectangle_by_anchor():
 
 def test_remap_montage_roi_geometry_moves_point_rois_by_source_local_position():
     from arrayscope.core.roi import RoiGeometry, RoiKind
-    from arrayscope.window.montage_viewport import remap_montage_roi_geometry
 
     previous = _plan_with_columns(2)
     next_plan = _plan_with_columns(3)
@@ -743,7 +728,7 @@ def test_remap_montage_roi_geometry_moves_point_rois_by_source_local_position():
         points=((first.x0 + 1.0, first.y0 + 2.0), (fourth.x0 + 3.0, fourth.y0 + 4.0)),
     )
 
-    remapped = remap_montage_roi_geometry(previous, next_plan, geometry)
+    remapped = _remap_geometry(previous, next_plan, geometry)
 
     assert remapped is not None
     assert remapped.points == (
@@ -808,7 +793,6 @@ def test_committed_tiled_roi_stats_follow_remapped_layout_geometry():
     )
     from arrayscope.display.montage import MontageTileState
     from arrayscope.window.inspection import InspectionWorkflowMixin
-    from arrayscope.window.montage_viewport import remap_montage_roi_geometry
 
     state = ViewState.from_shape((2, 2, 6)).with_montage_axis(2, indices=tuple(range(6)), text=":")
     previous = _plan_with_columns(2)
@@ -816,7 +800,7 @@ def test_committed_tiled_roi_stats_follow_remapped_layout_geometry():
     previous_tile = previous.tiles[4]
     next_tile = next_plan.tiles[4]
     geometry = RoiGeometry(RoiKind.RECTANGLE, rect=(previous_tile.x0, previous_tile.y0, 2.0, 2.0))
-    remapped = remap_montage_roi_geometry(previous, next_plan, geometry)
+    remapped = _remap_geometry(previous, next_plan, geometry)
     assert remapped is not None
     assert remapped.rect == (next_tile.x0, next_tile.y0, 2.0, 2.0)
     payloads = {
@@ -1385,3 +1369,28 @@ def test_frame_session_key_excludes_effective_columns():
     assert frame_session_key("doc", state, plan(left), None) == frame_session_key(
         "doc", state, plan(right), None
     )
+
+
+def test_montage_viewport_intent_observes_without_promoting():
+    from arrayscope.window.montage_viewport import montage_viewport_intent
+
+    class Controller:
+        def __init__(self):
+            self.promoted = False
+
+        def is_fit_locked(self):
+            return False
+
+        def is_auto_active(self):
+            return self.promoted
+
+        def promote_near_auto(self, _view_range):
+            self.promoted = True
+            return True
+
+    controller = Controller()
+    intent = montage_viewport_intent(controller, ((100.0, 120.0), (100.0, 120.0)))
+
+    assert not intent.auto_active
+    assert not intent.auto_like
+    assert not controller.promoted

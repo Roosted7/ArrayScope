@@ -133,10 +133,6 @@ class TilePayloadRef:
         object.__setattr__(self, "source_index", int(self.source_index))
 
     @property
-    def is_target_quality(self) -> bool:
-        return self.quality == "exact"
-
-    @property
     def acknowledged_identity(self) -> object:
         return self.identity if self.identity is not None else self.source_id
 
@@ -657,12 +653,6 @@ class TileLifecycle:
         if rec.presentation is not Presentation.PRESENTED:
             rec.presentation = Presentation.UNPRESENTED
 
-    def task_requested(self, tile_number: int, *, stage_key=None, stage_producer_key=None) -> None:
-        rec = self.record(tile_number)
-        rec.stage_key = stage_key
-        rec.stage_producer_key = stage_producer_key
-        _trace_lifecycle(rec, "task_requested", stage_key=stage_key)
-
     def task_admitted(
         self, tile_number: int, task_key, *, stage_key=None, stage_producer_key=None
     ) -> None:
@@ -838,48 +828,6 @@ class TileLifecycle:
     def __iter__(self) -> Iterator[TileRecord]:
         return iter(self._records.values())
 
-    def feedback_signature(
-        self, tile_numbers: Iterable[int] = ()
-    ) -> tuple[tuple[object, ...], ...]:
-        """Compact lifecycle-owned work signature for feedback reuse.
-
-        The governor should reset learned pacing when the presentation work
-        changes class.  Texture shape and bytes belong to the display layer,
-        but preview/exact ownership, level phase, and presented/emitted state
-        are lifecycle facts; expose them here so callers do not rediscover the
-        machine state through parallel counters.
-        """
-
-        scope = {int(tile) for tile in tile_numbers}
-        records = (
-            (self._records.get(tile) for tile in sorted(scope))
-            if scope
-            else tuple(self._records.get(tile) for tile in sorted(self._records))
-        )
-        groups: set[tuple[object, ...]] = set()
-        for rec in records:
-            if rec is None:
-                continue
-            level_groups = tuple(
-                sorted(
-                    (
-                        str(entry.owner.value),
-                        str(entry.phase.value),
-                        getattr(key, "component", None),
-                        tuple(getattr(key, "level_xy", ()) or ()),
-                    )
-                    for key, entry in rec.levels.items()
-                    if entry.phase is not LevelPhase.RELEASED
-                )
-            )
-            group = (
-                str(rec.semantic.value),
-                str(rec.presentation.value),
-                level_groups,
-            )
-            groups.add(group)
-        return tuple(sorted(groups, key=repr))
-
     # -- semantic axis -----------------------------------------------------
 
     def plan_applied(self, tile_numbers: Iterable[int]) -> None:
@@ -966,43 +914,6 @@ class TileLifecycle:
             return None
         ref = rec.target_payload or rec.fallback_payload
         return None if ref is None else ref.payload
-
-    def best_presentable(
-        self, tile_number: int, semantic_source=None, target_level: int | None = None
-    ):
-        """Return the best safe fallback payload for this tile, or ``None``.
-
-        Ordering is exact before preview, then finer/equal LOD before coarser
-        for the same semantic source.  The method is intentionally payload-
-        shape agnostic so lifecycle owns the policy without importing display
-        model types.
-        """
-
-        rec = self._records.get(int(tile_number))
-        if rec is None or not rec.presentable_payloads:
-            return None
-        target_level = 0 if target_level is None else int(target_level)
-        candidates = []
-        for payload in rec.presentable_payloads.values():
-            source_id = getattr(payload, "source_id", None)
-            if (
-                semantic_source is not None
-                and _payload_base_source_id(source_id) != semantic_source
-            ):
-                continue
-            quality = str(getattr(payload, "quality", "exact") or "exact")
-            lod = getattr(payload, "lod", None)
-            level = int(getattr(lod, "level", 0) or 0)
-            # exact/finer current source, target/equal, preview current source,
-            # coarser fallback.  Negative level distance means finer than
-            # requested and is preferred over coarser.
-            exact_rank = 0 if quality == "exact" else 1
-            level_rank = 0 if level <= target_level else 1
-            candidates.append((exact_rank, level_rank, abs(level - target_level), level, payload))
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: item[:4])
-        return candidates[0][4]
 
     def acknowledge_presented(
         self,
@@ -1163,12 +1074,6 @@ class TileLifecycle:
         if rec is not None:
             self._request_cleared(rec)
 
-    def evaluation_requests_cleared(self) -> None:
-        """Session retarget: every in-flight request is superseded wholesale."""
-
-        for index in tuple(self._active_requests):
-            self._request_cleared(self._records[index])
-
     def preview_claimed(
         self, tile_number: int, rung: int, level: int, semantic_key: object
     ) -> bool:
@@ -1207,13 +1112,6 @@ class TileLifecycle:
         rec.preview_claims.pop(rung, None)
         return True
 
-    def preview_claim_active(self, tile_number: int, semantic_key: object) -> bool:
-        rec = self._records.get(int(tile_number))
-        return bool(
-            rec is not None
-            and any(key == semantic_key for _level, key in rec.preview_claims.values())
-        )
-
     def materialization_request_for(self, tile_number: int, level_key=None):
         rec = self._records.get(int(tile_number))
         if rec is None:
@@ -1239,11 +1137,6 @@ class TileLifecycle:
         self._stage_unbound(rec)
         rec.stage_key = stage_key
         self._stage_blocked.setdefault(stage_key, set()).add(rec.tile_number)
-
-    def stage_detached(self, tile_number: int) -> None:
-        rec = self._records.get(int(tile_number))
-        if rec is not None:
-            self._stage_unbound(rec)
 
     def stage_resolved(self, stage_key: object) -> tuple[int, ...]:
         """A stage completed/failed/released: unbind every stage-blocked tile.
@@ -1291,10 +1184,6 @@ class TileLifecycle:
                     rec.stage_key = key
                     self._stage_blocked.setdefault(key, set()).add(rec.tile_number)
 
-    @property
-    def stage_blocked_tiles(self) -> frozenset[int]:
-        return frozenset(index for waiting in self._stage_blocked.values() for index in waiting)
-
     # -- residency axis ----------------------------------------------------
 
     def level_claimed(
@@ -1334,15 +1223,6 @@ class TileLifecycle:
         # even when the phase itself is unchanged.
         self._level_revision += 1
         _trace_lifecycle(rec, "level_resident", level_key=level_key)
-
-    def level_declined(self, tile_number: int, level_key) -> tuple[ReleaseClaim, ...]:
-        rec = self.record(tile_number)
-        entry = rec.levels.get(level_key)
-        if entry is None or entry.phase in (LevelPhase.RESIDENT, LevelPhase.RELEASED):
-            return ()
-        entry.phase = LevelPhase.RELEASED
-        self._level_revision += 1
-        return (ReleaseClaim(rec.tile_number, level_key, entry.owner),)
 
     def materialization_planned(
         self,
@@ -1761,24 +1641,6 @@ class TileLifecycle:
                     continue
                 entries.append((rec, level_key, entry))
         return tuple(sorted(entries, key=lambda item: int(item[2].order)))
-
-
-def _payload_base_source_id(source_id) -> object:
-    if isinstance(source_id, tuple) and len(source_id) >= 3 and source_id[1] == "texture_kind":
-        return source_id[0]
-    if isinstance(source_id, tuple) and "floor" in source_id:
-        marker = source_id.index("floor")
-        prefix = source_id[:marker]
-        if not prefix:
-            return None
-        return prefix[0] if len(prefix) == 1 else prefix
-    if isinstance(source_id, tuple) and "texture_kind" in source_id:
-        marker = source_id.index("texture_kind")
-        prefix = source_id[:marker]
-        if not prefix:
-            return None
-        return prefix[0] if len(prefix) == 1 else prefix
-    return source_id
 
 
 def _request_level_keys(request: object) -> tuple[object, ...]:

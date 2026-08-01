@@ -110,27 +110,6 @@ def plan_slab(document: ArrayDocument, request: SlabRequest) -> SlabPlan:
     )
 
 
-def evaluate_slab(
-    document: ArrayDocument,
-    request: SlabRequest,
-    *,
-    stage_cache=None,
-    document_key=None,
-    cancellation_token=None,
-    evaluation_context=None,
-):
-    plan = plan_slab(document, request)
-    return evaluate_slab_from_plan(
-        document,
-        request,
-        plan,
-        stage_cache=stage_cache,
-        document_key=document_key,
-        cancellation_token=cancellation_token,
-        evaluation_context=evaluation_context,
-    )
-
-
 def evaluate_slab_from_plan(
     document: ArrayDocument,
     _request: SlabRequest,

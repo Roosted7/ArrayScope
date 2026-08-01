@@ -288,6 +288,30 @@ def test_tiled_value_source_reads_exact_semantic_data_not_lod_texture():
     assert kind == "committed_tile_payload"
 
 
+def test_eager_region_source_matches_existing_display_image_slices():
+    from arrayscope.display.slice_engine import DisplayImage
+    from tests.display.region_source_double import EagerDisplayRegionSource
+
+    state = ViewState.from_shape((4, 4)).with_image_axes(0, 1)
+    frame_plan = FramePlanner(internal_tile_shape=(2, 2)).plan(
+        target=FrameTarget("semantic", "viewport", "presentation", "exact-visible"),
+        view_state=state,
+        display_shape=(4, 4),
+        backend_capabilities=PYQTGRAPH_CAPABILITIES,
+    )
+    image = np.arange(16, dtype=np.float32).reshape(4, 4)
+    hist = image + 100.0
+    source = EagerDisplayRegionSource(
+        DisplayImage(image, histogram_data=hist), source_key=("source",)
+    )
+
+    payload = source.read_region(frame_plan.regions[3], quality="exact-visible", deadline_ns=123)
+
+    np.testing.assert_array_equal(payload.image, image[2:4, 2:4])
+    np.testing.assert_array_equal(payload.histogram_data, hist[2:4, 2:4])
+    assert payload.tile_number == 3
+
+
 def test_single_plane_commits_with_internal_tile_geometry():
     view = _FakeImageView()
     state = ViewState.from_shape((4, 4)).with_image_axes(0, 1)
@@ -344,7 +368,7 @@ def test_single_plane_commits_with_internal_tile_geometry():
 
     assert view.commit["geometry"].montage == frame_plan.geometry.montage
     assert frame.scene.layout.value == "single"
-    assert frame.scene.resident_region_ids == (0, 1, 2, 3)
+    assert frame.scene._resident_region_ids == (0, 1, 2, 3)
     assert frame.value_source.value_at(SimpleNamespace(tile_number=3, local_y=1, local_x=1)) == 15.0
     region, hist, kind = frame.value_source.tile_region(
         SimpleNamespace(region_id=3), (slice(0, 2), slice(0, 2))
@@ -352,27 +376,3 @@ def test_single_plane_commits_with_internal_tile_geometry():
     np.testing.assert_array_equal(region, image[2:4, 2:4])
     np.testing.assert_array_equal(hist, image[2:4, 2:4])
     assert kind == "committed_tile_payload"
-
-
-def test_eager_region_source_matches_existing_display_image_slices():
-    from arrayscope.display.region_source import EagerDisplayRegionSource
-    from arrayscope.display.slice_engine import DisplayImage
-
-    state = ViewState.from_shape((4, 4)).with_image_axes(0, 1)
-    frame_plan = FramePlanner(internal_tile_shape=(2, 2)).plan(
-        target=FrameTarget("semantic", "viewport", "presentation", "exact-visible"),
-        view_state=state,
-        display_shape=(4, 4),
-        backend_capabilities=PYQTGRAPH_CAPABILITIES,
-    )
-    image = np.arange(16, dtype=np.float32).reshape(4, 4)
-    hist = image + 100.0
-    source = EagerDisplayRegionSource(
-        DisplayImage(image, histogram_data=hist), source_key=("source",)
-    )
-
-    payload = source.read_region(frame_plan.regions[3], quality="exact-visible", deadline_ns=123)
-
-    np.testing.assert_array_equal(payload.image, image[2:4, 2:4])
-    np.testing.assert_array_equal(payload.histogram_data, hist[2:4, 2:4])
-    assert payload.tile_number == 3

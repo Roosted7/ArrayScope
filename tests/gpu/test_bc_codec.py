@@ -12,7 +12,19 @@ import numpy as np
 import pytest
 
 from arrayscope.gpu import bc_codec
-from arrayscope.gpu.chunk_codec import BitpackCodec, get_codec, gpu_decodable_codec_names
+from arrayscope.gpu.chunk_codec import (
+    _BITPACK_HEADER,
+    _BITPACK_MODE_PACKED,
+    BitpackCodec,
+    get_codec,
+)
+
+
+def _is_packed(blob: bytes) -> bool:
+    """Whether the blob is genuinely bit-packed rather than stored raw."""
+
+    header = np.frombuffer(blob, dtype=_BITPACK_HEADER, count=1)[0]
+    return int(header["mode"]) == _BITPACK_MODE_PACKED
 
 
 def _smooth_tile(shape=(256, 256)) -> np.ndarray:
@@ -71,17 +83,6 @@ def test_numba_bc4_accelerator_is_byte_identical_after_explicit_prewarm(shape):
     assert quality.psnr_db == pytest.approx(expected_quality.psnr_db)
     assert quality.max_abs_diff == pytest.approx(expected_quality.max_abs_diff)
     assert quality.rmse == pytest.approx(expected_quality.rmse)
-
-
-def test_bc4_plan_engages_on_smooth_declines_on_noise():
-    smooth = _smooth_tile()
-    noisy = np.random.default_rng(0).standard_normal((256, 256)).astype(np.float32)
-    p_smooth = bc_codec.bc4_plan(smooth)
-    p_noisy = bc_codec.bc4_plan(noisy)
-    assert p_smooth.engage is True
-    assert p_smooth.vram_ratio == 8.0
-    assert p_noisy.engage is False  # loss too high -> keep raw
-    assert "decline" in p_noisy.reason
 
 
 # --------------------------------------------------------------------------- BC5
@@ -149,7 +150,7 @@ def test_bitpack_lossless_roundtrip_in_range(dtype, kbits):
     a = (rng.integers(0, 2**kbits, size=(64, 64)).astype(np.int64) + lo).astype(dtype)
     codec = BitpackCodec()
     blob = codec.encode(a)
-    assert codec.is_packed(blob)
+    assert _is_packed(blob)
     back = codec.decode(blob, shape=a.shape, dtype=a.dtype)
     assert np.array_equal(back, a)  # bit-exact
     assert len(blob) < a.nbytes  # actually compressed
@@ -159,45 +160,15 @@ def test_bitpack_declines_full_width_and_float_but_stays_lossless():
     codec = BitpackCodec()
     full = np.arange(256, dtype=np.uint8).reshape(16, 16)  # needs all 8 bits
     blob = codec.encode(full)
-    assert not codec.is_packed(blob)  # declined to raw mode
+    assert not _is_packed(blob)  # declined to raw mode
     assert np.array_equal(codec.decode(blob, shape=full.shape, dtype=full.dtype), full)
 
     flt = np.random.default_rng(0).standard_normal((8, 8)).astype(np.float32)
     fblob = codec.encode(flt)
-    assert not codec.is_packed(fblob)
+    assert not _is_packed(fblob)
     assert np.array_equal(codec.decode(fblob, shape=flt.shape, dtype=flt.dtype), flt)
 
 
 def test_bitpack_is_the_registered_gpu_decodable_codec():
-    assert "bitpack" in gpu_decodable_codec_names()
     assert get_codec("bitpack").gpu_decodable is True
     assert get_codec("raw").gpu_decodable is False
-
-
-# ---------------------------------------------------------- unified texture layer
-
-
-def test_chunk_texture_codec_dispatches_bc_and_measures_quality():
-    from arrayscope.gpu.cache_policy import decide_texture_codec
-    from arrayscope.gpu.chunk_texture_codec import (
-        encode_complex_tile,
-        encode_scalar_tile,
-    )
-    from arrayscope.gpu.device_topology import DeviceTopology
-
-    discrete = DeviceTopology(kind="discrete", unified_memory=False)
-    decision = decide_texture_codec(topology=discrete, enable=True, astc_supported=False)
-
-    scalar = _smooth_tile()
-    enc = encode_scalar_tile(scalar, decision)
-    assert enc.family == "bc"
-    assert enc.wgpu_format == "bc4-r-unorm"
-    assert enc.vram_ratio == 8.0
-    assert enc.quality.psnr_db > 45.0
-
-    re = _smooth_tile()
-    im = _smooth_tile()[:, ::-1] * 0.5
-    cx = encode_complex_tile(re, im, decision)
-    assert cx.wgpu_format == "bc5-rg-unorm"
-    assert cx.quality.magnitude_psnr_db > 40.0
-    assert cx.quality.phase_weighted_rmse_rad < 0.1

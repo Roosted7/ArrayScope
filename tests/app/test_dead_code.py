@@ -6,49 +6,64 @@ here: it is a lint, gated at commit time by ``.githooks/pre-commit`` through
 every suite run to re-answer a question the hook already refused to let past.
 
 What is left is the part pytest is actually for: a synthetic package where
-every rule has a case that would otherwise pass silently, plus the shape of
-the two excuse lists. Both are instant — no real tree is read.
+every rule has a case that would otherwise pass silently. There are no excuse
+lists to check the shape of any more — every definition the scan flagged has
+been deleted, moved to the harness package, or given a real caller — so the
+rules are all this file has to keep falsifiable. Instant: no real tree is read.
 """
 
 from __future__ import annotations
 
 from tests.dead_code import (
-    _ALLOWLIST,
-    _PENDING_ADJUDICATION,
-    _PENDING_CEILING,
-    _PENDING_METHOD_CEILING,
-    _PENDING_METHODS,
     dangling_module_attributes,
     unreferenced_definitions,
     unreferenced_methods,
+    unreferenced_test_helpers,
 )
 
 
-def test_allowlist_entries_each_carry_a_reason_and_are_not_also_pending():
-    """The allowlist is the rule's only widening, so it stays legible."""
+def test_the_helper_rule_reports_an_unused_test_seam(tmp_path):
+    """Falsifiability for the suite's own support code.
 
-    missing_reason = [f"{path}::{name}" for path, name, reason in _ALLOWLIST if not reason.strip()]
-    overlap = [
-        f"{path}::{name} is both allowlisted and pending; pick one"
-        for path, name, _ in _ALLOWLIST
-        if (path, name) in _PENDING_ADJUDICATION
-    ]
-    duplicated = [
-        f"{path}::{name} is listed twice"
-        for path, name, _ in _ALLOWLIST
-        if sum(1 for other, other_name, _ in _ALLOWLIST if (other, other_name) == (path, name)) > 1
-    ]
+    A seam that moves out of ``arrayscope/`` to live beside its assertions is
+    still dead the moment its last caller goes -- and neither production scan
+    can see it, because nothing there is production. Without this rule, "delete
+    the method, keep a shim" would be a way to launder dead code past the gate.
+    """
 
-    assert missing_reason + overlap + duplicated == []
+    (tmp_path / "arrayscope").mkdir()
+    (tmp_path / "arrayscope" / "__init__.py").write_text("")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "seams.py").write_text(
+        "def used_seam():\n    return 1\n\n\ndef orphan_seam():\n    return 2\n"
+    )
+    (tests_dir / "test_thing.py").write_text(
+        "from tests import seams\n\n\ndef test_it():\n    assert seams.used_seam() == 1\n"
+    )
+
+    found = {definition.name for definition in unreferenced_test_helpers(tmp_path)}
+
+    assert found == {"orphan_seam"}
 
 
-def test_the_pending_backlog_declares_a_ceiling_it_is_within():
-    """A backlog whose ceiling is set to its own size can only shrink."""
+def test_a_helper_used_only_by_its_own_module_is_not_dead(tmp_path):
+    """A sibling in the same support module is a real caller."""
 
-    assert len(_PENDING_ADJUDICATION) <= _PENDING_CEILING
-    assert len(set(_PENDING_ADJUDICATION)) == len(_PENDING_ADJUDICATION)
-    assert len(_PENDING_METHODS) <= _PENDING_METHOD_CEILING
-    assert len(set(_PENDING_METHODS)) == len(_PENDING_METHODS)
+    (tmp_path / "arrayscope").mkdir()
+    (tmp_path / "arrayscope" / "__init__.py").write_text("")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "seams.py").write_text(
+        "def inner():\n    return 1\n\n\ndef outer():\n    return inner() + 1\n"
+    )
+    (tests_dir / "test_thing.py").write_text(
+        "from tests import seams\n\n\ndef test_it():\n    assert seams.outer() == 2\n"
+    )
+
+    found = {definition.name for definition in unreferenced_test_helpers(tmp_path)}
+
+    assert found == set()
 
 
 def test_method_guard_reports_rot_without_accusing_dispatched_classes(tmp_path):

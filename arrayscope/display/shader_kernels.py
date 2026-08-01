@@ -165,13 +165,6 @@ def ensure_prewarming() -> None:
     _GROUP.prewarm_async()
 
 
-def prewarm_blocking() -> bool:
-    """Compile synchronously (for tests/benchmarks). Returns availability."""
-
-    _GROUP.prewarm()
-    return _GROUP.ready()
-
-
 def ready() -> bool:
     return _GROUP.ready()
 

@@ -1712,15 +1712,6 @@ class FramePipelineEffects:
             )
             handle_ui_exception("montage presentation commit", exc)
 
-    def admit_tile_result(self, tile, result) -> int:
-        """Admit one native target result into session/lifecycle state.
-
-        Kernel bridge callbacks are already bounded; the old
-        frame_renderer-side result deque/timer was a second fan-in queue.
-        """
-
-        return self._admit_evaluation_result(tile, result)
-
     def commit_pending_session(self) -> None:
         if not self._session_is_current():
             return

@@ -31,7 +31,7 @@ def test_frame_geometry_is_one_tile_scene_without_payloads():
     assert len(scene.regions) == 1
     assert scene.regions[0].bounds == scene.bounds
     assert scene.active_region_ids == (0,)
-    assert scene.resident_region_ids == ()
+    assert scene._resident_region_ids == ()
 
 
 def _montage_geometry():
@@ -82,7 +82,7 @@ def test_montage_scene_separates_visibility_nearness_and_residency():
     assert scene.active_region_ids == (1,)
     assert scene.planned_region_ids == (0, 1, 2)
     assert scene.near_region_ids == (0, 1)
-    assert scene.resident_region_ids == (0,)
+    assert scene._resident_region_ids == (0,)
     assert scene.region(2).source_index == 2
     assert scene.region(2).bounds == (0.0, 4.0, 3.0, 6.0)
 

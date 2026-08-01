@@ -13,7 +13,6 @@ import numpy as np
 import pytest
 
 from arrayscope.display import _numba_pyramid
-from arrayscope.display.pyramid import reduce_source_grid
 from arrayscope.gpu.keys import (
     REDUCER_MEAN,
     REDUCER_MEAN_ABS,
@@ -22,6 +21,7 @@ from arrayscope.gpu.keys import (
     REDUCER_POWER,
     REDUCER_RMS,
 )
+from arrayscope.tools import pyramid_reference
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -30,7 +30,7 @@ def _warm_numba():
     _numba_pyramid.prewarm()
     if not _numba_pyramid.NUMBA_AVAILABLE:
         pytest.skip("numba not available in this environment")
-    assert _numba_pyramid.is_ready()
+    assert _numba_pyramid._GROUP.ready()
 
 
 def _numpy_two_pass(acc, y_starts, y_counts, x_starts, x_counts):
@@ -166,7 +166,7 @@ _COMPLEX_RECT = (40, 51, 60, 77)
 def _run(reducer, *, complex_source):
     rect = _COMPLEX_RECT if complex_source else _REAL_RECT
     source = _global_complex_plane(rect) if complex_source else _global_real_plane(rect)
-    result = reduce_source_grid(
+    result = pyramid_reference.reduce_source_grid(
         source,
         source_origin_yx=(rect[0], rect[2]),
         valid_source_rect_yx=rect,
@@ -217,7 +217,7 @@ def test_native_path_bypasses_accelerator(monkeypatch):
     monkeypatch.setattr(_numba_pyramid, "reduce_accumulated_if_ready", _spy)
 
     rect = (0, 4, 0, 4)
-    native = reduce_source_grid(
+    native = pyramid_reference.reduce_source_grid(
         _global_real_plane(rect),
         source_origin_yx=(0, 0),
         valid_source_rect_yx=rect,
@@ -231,7 +231,7 @@ def test_native_path_bypasses_accelerator(monkeypatch):
 def test_numba_unavailable_fallback(monkeypatch):
     """With numba reported absent, the seam declines and NumPy still reduces."""
     monkeypatch.setattr(_numba_pyramid, "NUMBA_AVAILABLE", False)
-    assert not _numba_pyramid.is_ready()
+    assert not _numba_pyramid.NUMBA_AVAILABLE
     starts = np.array([0, 2], dtype=np.intp)
     counts = np.array([2.0, 2.0], dtype=np.float32)
     assert (
@@ -242,7 +242,7 @@ def test_numba_unavailable_fallback(monkeypatch):
     )
     # And the public reducer keeps producing the exact oracle mean.
     rect = (0, 4, 0, 4)
-    result = reduce_source_grid(
+    result = pyramid_reference.reduce_source_grid(
         _global_real_plane(rect),
         source_origin_yx=(0, 0),
         valid_source_rect_yx=rect,
@@ -256,4 +256,4 @@ def test_numba_unavailable_fallback(monkeypatch):
 def test_prewarm_is_idempotent():
     _numba_pyramid.prewarm()
     _numba_pyramid.prewarm()
-    assert _numba_pyramid.is_ready() == _numba_pyramid.NUMBA_AVAILABLE
+    assert _numba_pyramid._GROUP.ready() == _numba_pyramid.NUMBA_AVAILABLE

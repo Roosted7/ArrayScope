@@ -28,10 +28,6 @@ MEMMAP_SOURCE_SUFFIXES = (".npy", ".cfl")
 SCALED_SOURCE_SUFFIXES = (".nii",)
 
 
-def supports_memmap_source(suffix: str) -> bool:
-    return str(suffix).lower() in MEMMAP_SOURCE_SUFFIXES
-
-
 def supports_lazy_source(suffix: str) -> bool:
     """True for any suffix ArrayScope can open through the out-of-core seam."""
 
@@ -168,5 +164,4 @@ __all__ = [
     "scaled_nifti_source",
     "should_load_lazily",
     "supports_lazy_source",
-    "supports_memmap_source",
 ]

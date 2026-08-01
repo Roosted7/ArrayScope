@@ -52,7 +52,7 @@ def test_large_data_under_pressure_engages_lossless_codec():
     assert d.engage is True
     # Float/complex/int16 prefer zfp's lossless transform.
     assert d.codec_name == "zfp"
-    assert d.pressure_ratio > 1.0
+    assert d.working_set_bytes > d.budget_bytes
 
 
 def test_codec_choice_is_dtype_driven():

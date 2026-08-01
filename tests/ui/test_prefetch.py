@@ -6,6 +6,15 @@ import numpy as np
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 
+
+def _cached_display_tile(evaluator, view_state, colormap_lut=None):
+    """The display cache entry for one view state, or ``None``."""
+
+    return evaluator._display_cache.get(
+        evaluator.display_tile_key(view_state, colormap_lut=colormap_lut)
+    )
+
+
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -42,7 +51,8 @@ def test_nearby_slice_prefetch_uses_prefetch_state_keys(qtbot):
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > 0
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_stored > 0
         assert (
-            win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 1)) is not None
+            _cached_display_tile(win.operation_evaluator, win.view_state.with_slice(2, 1))
+            is not None
         )
     finally:
         win.close()
@@ -973,9 +983,9 @@ def test_prefetch_gated_by_busy_visible_runs_after_drain(qtbot):
         )
         qtbot.waitUntil(
             lambda: (
-                win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 1))
+                _cached_display_tile(win.operation_evaluator, win.view_state.with_slice(2, 1))
                 is not None
-                or win.operation_evaluator.cached_display_tile(win.view_state.with_slice(2, 3))
+                or _cached_display_tile(win.operation_evaluator, win.view_state.with_slice(2, 3))
                 is not None
             ),
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,

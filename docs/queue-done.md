@@ -6,6 +6,38 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+- 2026-08-01 — **The dead-code backlog is closed and the excuse lists are
+  gone.** All 64 `_PENDING_ADJUDICATION` entries, all 115 `_PENDING_METHODS`,
+  and all 12 `_ALLOWLIST` entries are adjudicated; `tests/dead_code.py` no
+  longer has an allowlist, a backlog, or a ceiling, and there is deliberately
+  nowhere to put one. Net **−4.8k lines**. Four modules went whole
+  (`core/dimension_roles.py`, `gpu/chunk_grid.py`, `gpu/chunk_texture_codec.py`,
+  `operations/chunked.py`), superseded twins were deleted with their tests
+  migrated onto the survivor (`evaluate_slab` → `evaluate_slab_from_plan`,
+  `cache_policy.decide_texture_codec` → the executor's `_decide_codec_family`,
+  which had **no test at all** until its twin's four policy tests moved onto it,
+  `plugin_operation_ids` → `discover_plugin_entry_points`), and the retired
+  shared-preview cohort route went with the analytic FFT envelope that only it
+  could reach (ADR 0059 had already retired its scheduler). Three entries were
+  *wired* rather than deleted: the WGPU executor's histogram/overlay/atlas
+  counters are now published through the presentation diagnostics dict, so an
+  instrument a dossier can actually read is production surface. Oracles and
+  benchmark rings moved to the harness package `arrayscope/tools/`
+  (`shader_reference.py`, `pyramid_reference.py`, `operation_benchmarks.py`),
+  and cache-reset/drive seams moved to `tests/seams.py`. **Two guards were
+  added because this sweep needed them:** the scan now asks the same
+  reachability question of the suite's own support modules — without it,
+  "delete the method, keep a shim in tests/" would have been a way to launder
+  dead code past the gate, and it immediately proved non-vacuous; and
+  `tests/app/test_architecture_guards.py` now refuses any import of `tests`
+  from shipped code, since a seam imported from `tests/` would read as live to
+  the reachability scan. Three findings are named rather than fixed: the
+  shared-preview *consumer* branch in `window/frame_effects.py` +
+  `render/level_stats.py` now has no producer at all; `frame_planner`'s
+  `source_content_key` is produced and consumed by nobody; and the FFT/IFFT
+  stage-cache candidate test was asserting a shape the production optimizer
+  elides outright.
+
 - 2026-07-30 — **WGPU hidden-ROI overlay on a tiled single image CLOSED, and its
   PyQtGraph twin corrected:** the lifecycle-scope coverage fix (`d9ae625d`)
   closed the phase that never reached `setRoiInfoRows`, the strict xfail was

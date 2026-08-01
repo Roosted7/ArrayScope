@@ -29,28 +29,6 @@ class ViewportIntent(Enum):
     RESET_FOR_NEW_SHAPE = "reset_for_new_shape"
 
 
-def coerce_viewport_policy(
-    policy: ViewportPolicy | ViewportIntent | str,
-    auto_range: bool | None = None,
-) -> ViewportPolicy | ViewportIntent:
-    """Normalize Qt-style ``autoRange`` and semantic viewport requests once.
-
-    Rendering backends must not maintain independent translations of the
-    boolean.  ``True`` means a one-time fit request; persistent Fit is
-    represented explicitly by :class:`ViewportIntent.FIT`/controller state.
-    """
-
-    if auto_range is not None:
-        return ViewportPolicy.FIT_ONCE if bool(auto_range) else ViewportPolicy.PRESERVE
-    if isinstance(policy, (ViewportPolicy, ViewportIntent)):
-        return policy
-    value = str(policy)
-    try:
-        return ViewportPolicy(value)
-    except ValueError:
-        return ViewportIntent(value)
-
-
 @dataclass
 class ViewportController:
     mode: ViewportMode = ViewportMode.AUTO_UNTOUCHED
@@ -152,14 +130,6 @@ class ViewportController:
     def is_auto_active(self) -> bool:
         return self.mode == ViewportMode.AUTO_UNTOUCHED
 
-    def promote_near_auto(self, view_range=None) -> bool:
-        if self.mode == ViewportMode.FIT:
-            return False
-        if self.is_near_auto(view_range):
-            self.mode = ViewportMode.AUTO_UNTOUCHED
-            return True
-        return self.is_auto_active()
-
     def promote_content_fit(
         self,
         view_range,
@@ -255,16 +225,6 @@ class ViewportController:
             self.last_auto_view_range = _normalize_view_range(view_box.viewRange())
         except Exception:
             self.last_auto_view_range = view_range
-
-    def _current_view_is_near_auto(self, view_box, *, base_view_range=None) -> bool:
-        if self.last_auto_view_range is None:
-            return True
-        try:
-            return self.is_near_auto(
-                view_box.viewRange() if base_view_range is None else base_view_range
-            )
-        except Exception:
-            return False
 
 
 def _intent_from_policy(policy):

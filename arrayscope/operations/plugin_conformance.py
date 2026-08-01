@@ -139,19 +139,6 @@ class OperationCharacterization:
     def output_shape(self) -> Shape:
         return self.shape_rule.predict(self.input_shape)
 
-    def predict_shape(self, input_shape: Shape) -> Shape:
-        return self.shape_rule.predict(tuple(input_shape))
-
-
-def characterization_stats() -> dict[str, int]:
-    return dict(_CHARACTERIZATION_STATS)
-
-
-def reset_characterization_cache() -> None:
-    _CHARACTERIZATION_CACHE.clear()
-    for name in _CHARACTERIZATION_STATS:
-        _CHARACTERIZATION_STATS[name] = 0
-
 
 def characterize_operation(
     spec,
@@ -407,94 +394,6 @@ class ConformanceResult:
         return self.honored
 
 
-def verify_region_conformance(
-    spec,
-    sample_shape: Shape,
-    dtype,
-    *,
-    rng: np.random.Generator,
-    axis: int | None = None,
-    params=None,
-    samples: int = 12,
-    rtol: float = 0.0,
-    atol: float = 0.0,
-) -> ConformanceResult:
-    """Property-test a plugin op's Tier-2 (windowable) claim.
-
-    Builds a deterministic array from ``rng``, computes ``fn(whole)`` once, then
-    for ``samples`` sampled sub-regions checks
-    ``fn(whole[region]) == fn(whole)[region]``.  Returns the first mismatching
-    region on failure.
-
-    Equality is **exact by default** (``rtol == atol == 0`` -> ``array_equal``).
-    A windowable op is per-element by nature, so a truthful float op is bit-exact
-    whether or not the input was windowed -- exactness is both correct and the
-    strongest possible discriminator.  ``rtol``/``atol`` are exposed only for a
-    float op that legitimately reorders arithmetic (and for the non-vacuity
-    proof: widening the tolerance to swallow a real mismatch must be a
-    deliberate, visible choice, not the default).
-    """
-
-    op_id = str(getattr(spec, "id", "<anonymous>"))
-    param_map = dict(params or {})
-    fn = spec.resolve_fn(axis, param_map)
-
-    whole = _deterministic_array(rng, sample_shape, dtype)
-    whole_result = np.asarray(fn(whole))
-
-    # A windowable op must be shape-preserving: windowing an axis only makes
-    # sense if that axis still exists (and lines up) in the output.  A
-    # shape-changing op cannot be Tier-2 in this contract.
-    if whole_result.shape != whole.shape:
-        return ConformanceResult(
-            honored=False,
-            op_id=op_id,
-            samples_checked=0,
-            reason=(
-                f"region-capable op must be shape-preserving; output shape "
-                f"{whole_result.shape} != input shape {whole.shape}"
-            ),
-        )
-
-    regions = _sample_regions(rng, sample_shape, samples)
-    for checked, region in enumerate(regions, start=1):
-        sub_input = apply_region(whole, region)
-        sub_result = np.asarray(fn(sub_input))
-        expected = apply_region(whole_result, region)
-
-        if sub_result.shape != expected.shape:
-            return ConformanceResult(
-                honored=False,
-                op_id=op_id,
-                samples_checked=checked,
-                reason=(
-                    f"region path shape {sub_result.shape} != windowed whole-array "
-                    f"shape {expected.shape} at region {region_text(region)}"
-                ),
-                failing_region=region,
-            )
-
-        if not _values_equal(sub_result, expected, rtol=rtol, atol=atol):
-            return ConformanceResult(
-                honored=False,
-                op_id=op_id,
-                samples_checked=checked,
-                reason=(
-                    f"region path disagrees with whole-array result at region "
-                    f"{region_text(region)} (op is not windowable)"
-                ),
-                failing_region=region,
-                max_abs_diff=_max_abs_diff(sub_result, expected),
-            )
-
-    return ConformanceResult(
-        honored=True,
-        op_id=op_id,
-        samples_checked=len(regions),
-        reason=f"windowable claim verified on {len(regions)} sampled regions",
-    )
-
-
 def _verify_region_from_observation(
     spec,
     observation,
@@ -733,12 +632,6 @@ def _freeze(value):
     except TypeError:
         return repr(value)
     return value
-
-
-def _values_equal(left: np.ndarray, right: np.ndarray, *, rtol: float, atol: float) -> bool:
-    if rtol == 0.0 and atol == 0.0:
-        return bool(np.array_equal(left, right))
-    return bool(np.allclose(left, right, rtol=rtol, atol=atol))
 
 
 def _max_abs_diff(left: np.ndarray, right: np.ndarray) -> float:

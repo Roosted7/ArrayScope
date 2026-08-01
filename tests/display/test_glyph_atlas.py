@@ -46,7 +46,7 @@ def test_layout_text_places_lines_and_skips_spaces(qt_app):
     atlas = GlyphAtlas()
     layout = atlas.layout_text("ab cd\nx", "monospace", 9)
     assert len(layout.placements) == 5, "spaces advance but never place glyphs"
-    line_step = atlas.line_height("monospace", 9)
+    line_step = float(atlas._font_metrics("monospace", 9).lineSpacing())
     first_line = [p for p in layout.placements if p.y == 0.0]
     second_line = [p for p in layout.placements if p.y == pytest.approx(line_step)]
     assert len(first_line) == 4

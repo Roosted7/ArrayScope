@@ -43,7 +43,6 @@ from arrayscope.core.axis_utils import (
 from arrayscope.operations.cancellation import EvaluationCancelled, call_with_cancellation
 from arrayscope.operations.capabilities import (
     OperationCapabilities,
-    OperationClass,
     OperationKind,
     default_chunkable_axes,
 )
@@ -57,10 +56,8 @@ from arrayscope.operations.plugin_conformance import (
     CharacterizationMismatch,
     CharacterizationUnavailable,
     OperationCharacterization,
-    characterization_stats,
     characterize_operation,
     record_runtime_mismatch,
-    reset_characterization_cache,
 )
 from arrayscope.operations.regions import (
     AxisRegion,
@@ -100,17 +97,6 @@ def _accepts_arguments(function, *arguments) -> bool:
     except (TypeError, ValueError):
         return False
     return True
-
-
-def region_conformance_stats() -> dict[str, int]:
-    """Observable Tier-2 gate tally: verified / honored / rejected claims."""
-
-    stats = characterization_stats()
-    return {
-        "verified": stats["region_verified"],
-        "honored": stats["region_honored"],
-        "rejected": stats["region_rejected"],
-    }
 
 
 @dataclass(frozen=True)
@@ -589,12 +575,6 @@ class PluginOperation:
             dtype = self._dtype_hint or np.dtype("float64")
         return self._characterize(shape, dtype).region_honored
 
-    @property
-    def execution_class(self) -> OperationClass:
-        # A verified windowable op is a shader-on-read candidate; an OPAQUE
-        # (or downgraded) op always CPU-materializes the whole array.
-        return OperationClass.SHADER_ON_READ if self._region_honored() else OperationClass.OPAQUE
-
     def apply(self, data, *, evaluation_context=None):
         # The evaluation context is where a cancellation token lives, and an
         # out-of-process runtime is the one thing here that can run long enough
@@ -875,12 +855,6 @@ def discover_plugin_entry_points() -> dict[str, EntryPoint]:
     return discovered
 
 
-def plugin_operation_ids() -> tuple[str, ...]:
-    """Namespaced ids of installed plugin ops (lazy: no plugin import)."""
-
-    return tuple(sorted(discover_plugin_entry_points()))
-
-
 def is_plugin_operation_id(operation_id: str) -> bool:
     return operation_id in discover_plugin_entry_points()
 
@@ -1053,30 +1027,7 @@ def recipe_item_for_plugin_operation(operation: PluginOperation, *, enabled: boo
     return item
 
 
-def is_region_honored(
-    plugin_id: str, axis: int | None = None, params: tuple[tuple[str, object], ...] = ()
-) -> bool:
-    """Whether the default signature's joint characterization honors regions."""
-    spec = load_plugin_spec(plugin_id)
-    if not spec.region_capable:
-        return False
-    return characterize_operation(
-        spec,
-        _REGION_PROBE_SHAPE,
-        np.dtype("float64"),
-        axis=axis,
-        params=dict(params),
-    ).region_honored
-
-
 def _entry_point_origin(entry_point: EntryPoint) -> str:
     dist = getattr(entry_point, "dist", None)
     dist_name = getattr(dist, "name", None)
     return str(dist_name) if dist_name else entry_point.value
-
-
-def _reset_plugin_cache() -> None:
-    """Clear the loaded-spec cache (test seam for re-discovery)."""
-
-    _SPEC_CACHE.clear()
-    reset_characterization_cache()

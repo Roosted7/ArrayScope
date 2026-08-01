@@ -68,16 +68,6 @@ def operation_to_recipe_item(operation_or_step):
     return item
 
 
-def operations_from_recipe(recipe, base_shape, *, imported: bool = False, slot_resolver=None):
-    return tuple(
-        step.operation
-        for step in steps_from_recipe(
-            recipe, base_shape, imported=imported, slot_resolver=slot_resolver
-        )
-        if step.enabled
-    )
-
-
 def steps_from_recipe(recipe, base_shape, *, imported: bool = False, slot_resolver=None):
     if not isinstance(recipe, dict):
         raise ValueError("recipe must be a JSON object")

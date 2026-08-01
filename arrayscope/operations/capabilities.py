@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-import numpy as np
-
 
 class OperationKind(Enum):
     VIEW = "view"
@@ -14,27 +12,6 @@ class OperationKind(Enum):
     REDUCTION = "reduction"
     TRANSFORM = "transform"
     RESHAPE = "reshape"
-
-
-class OperationClass(Enum):
-    """Execution class of an operation (tensor-engine endpoint proposal).
-
-    The class states what an operation *is*, so backends can decide where it
-    runs: coordinate metadata never materializes an array (a flip is an index
-    map), shader-on-read work happens at sampling time, derived-chunk compute
-    produces content-keyed chunks, reductions return small results, global
-    transforms are cost-model territory (CPU vs GPU), and opaque operations
-    always CPU-materialize. Nothing maps to DERIVED_CHUNK_COMPUTE yet — it
-    exists so LOD/smoothing kernels land in a named class, not a special
-    case.
-    """
-
-    COORDINATE_METADATA = "coordinate_metadata"
-    SHADER_ON_READ = "shader_on_read"
-    DERIVED_CHUNK_COMPUTE = "derived_chunk_compute"
-    REDUCTION = "reduction"
-    GLOBAL_TRANSFORM = "global_transform"
-    OPAQUE = "opaque"
 
 
 @dataclass(frozen=True)
@@ -278,75 +255,6 @@ def pipeline_commutes_for_display_lod(
     return True
 
 
-def pipeline_has_complete_native_magnitude_envelope(operations, *, axis: int) -> bool:
-    """Whether a pipeline declares a closed-form complete magnitude envelope.
-
-    The declaration is intentionally separate from display-LOD commutation.
-    Commutation proves reduced pixels; this proves native-resolution bounds.
-    Unknown operations and unproved compositions fail closed.
-    """
-
-    roles = tuple(
-        (
-            getattr(operation, "native_magnitude_envelope_role", None),
-            int(getattr(operation, "axis", -1)),
-        )
-        for operation in tuple(operations or ())
-    )
-    axis = int(axis)
-    return roles in {
-        (("orthonormal_fft", axis),),
-        (("orthonormal_ifft", axis),),
-        (
-            ("orthonormal_fft", axis),
-            ("fft_shift", axis),
-            ("orthonormal_ifft", axis),
-        ),
-    }
-
-
-def pipeline_complete_native_magnitude_envelope(
-    operations,
-    native_values,
-    *,
-    axis: int,
-) -> float | None:
-    """Return the declared pipeline's complete native magnitude envelope."""
-
-    operations = tuple(operations or ())
-    axis = int(axis)
-    if not pipeline_has_complete_native_magnitude_envelope(operations, axis=axis):
-        raise ValueError("pipeline has no declared complete native magnitude envelope")
-    values = np.abs(np.asarray(native_values))
-    roles = tuple(
-        getattr(operation, "native_magnitude_envelope_role", None) for operation in operations
-    )
-    if roles == ("orthonormal_fft", "fft_shift", "orthonormal_ifft"):
-        finite = values[np.isfinite(values)]
-        return (
-            None
-            if finite.size == 0
-            else _outward_fft_magnitude_bound(float(np.max(finite)), native_values, axis=axis)
-        )
-    with np.errstate(invalid="ignore", over="ignore"):
-        line_l1 = np.sum(values, axis=axis, dtype=np.float64)
-    finite = np.asarray(line_l1)[np.isfinite(line_l1)]
-    if finite.size == 0:
-        return None
-    bound = float(np.max(finite) / np.sqrt(int(np.shape(native_values)[axis])))
-    return _outward_fft_magnitude_bound(bound, native_values, axis=axis)
-
-
-def _outward_fft_magnitude_bound(bound: float, native_values, *, axis: int) -> float:
-    """Inflate the mathematical envelope for finite-precision FFT roundoff."""
-
-    output_dtype = np.result_type(np.asarray(native_values).dtype, np.complex64)
-    real_dtype = np.empty((), dtype=output_dtype).real.dtype
-    stages = max(1.0, np.log2(max(2, int(np.shape(native_values)[int(axis)]))))
-    margin = max(1.0, abs(float(bound))) * 32.0 * stages * np.finfo(real_dtype).eps
-    return float(np.nextafter(float(bound) + margin, np.inf))
-
-
 def pipeline_supports_reduced_display_lod(operations, base_shape, base_dtype=None) -> bool:
     """True when display axes may be reduced before evaluating this pipeline.
 
@@ -438,39 +346,6 @@ def pipeline_windowable_display_axes(
         if callable(output_dtype):
             dtype = output_dtype(dtype)
     return tuple(candidates)
-
-
-def operation_execution_class(operation, base_shape, base_dtype=None) -> OperationClass:
-    """Execution class of one operation, derived from its capability kind.
-
-    Conservative by construction: anything without a capability declaration
-    is OPAQUE (CPU materialization). VIEW and RESHAPE steps are coordinate
-    metadata — they move or relabel samples without arithmetic, so a backend
-    may express them as index transforms instead of copies. ELEMENTWISE steps
-    are shader-on-read candidates; whether a given backend actually fuses
-    them stays a backend decision — the class only rules out *needing*
-    materialization. Only the declared kind is consulted (reshape steps
-    legitimately declare output-ndim axes, so full normalization against the
-    input shape is not applicable here).
-    """
-
-    capabilities = getattr(operation, "capabilities", None)
-    if not callable(capabilities):
-        return OperationClass.OPAQUE
-    try:
-        declared = capabilities(tuple(int(size) for size in base_shape), base_dtype)
-        kind = _normalize_kind(declared.kind)
-    except Exception:
-        return OperationClass.OPAQUE
-    if kind in (OperationKind.VIEW, OperationKind.RESHAPE):
-        return OperationClass.COORDINATE_METADATA
-    if kind is OperationKind.ELEMENTWISE:
-        return OperationClass.SHADER_ON_READ
-    if kind is OperationKind.REDUCTION:
-        return OperationClass.REDUCTION
-    if kind is OperationKind.TRANSFORM:
-        return OperationClass.GLOBAL_TRANSFORM
-    return OperationClass.OPAQUE
 
 
 def _normalize_kind(kind) -> OperationKind:

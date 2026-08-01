@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from tests import seams
 from tests.ui.helpers import (
     clear_arrayscope_settings,
 )
@@ -521,9 +522,7 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
         # Drop warm tile state (evaluator cache and resident payloads from the
         # startup render of the middle slice) so slice 1 starts uncached.
         win.operation_evaluator.clear_cache()
-        win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change(
-            "test-cold-start"
-        )
+        seams.clear_retained_store(win.renderer._retained_tiled_payload_store(), "test-cold-start")
         frame = getattr(win, "_committed_display_frame", None)
         payloads = getattr(getattr(frame, "value_source", None), "payloads", None)
         if isinstance(payloads, dict):

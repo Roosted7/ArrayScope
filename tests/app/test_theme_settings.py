@@ -15,10 +15,6 @@ MODULE_PATHS = {
         "arrayscope.core.cache_status",
         ROOT / "arrayscope" / "core" / "cache_status.py",
     ),
-    "dimension_roles": (
-        "arrayscope.core.dimension_roles",
-        ROOT / "arrayscope" / "core" / "dimension_roles.py",
-    ),
     "view_state": ("arrayscope.core.view_state", ROOT / "arrayscope" / "core" / "view_state.py"),
     "window_levels": (
         "arrayscope.core.window_levels",

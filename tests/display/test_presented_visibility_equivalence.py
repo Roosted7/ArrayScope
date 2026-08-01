@@ -43,6 +43,7 @@ from arrayscope.display.model.frame import (
 )
 from arrayscope.display.model.tile_identity import TileIdentity, TileLodIdentity
 from arrayscope.display.shader_mapping import TexturePlaneKind
+from tests import seams
 
 TILE = 8
 
@@ -142,7 +143,7 @@ def _check(view) -> set[int]:
     """Assert equivalence and return the agreed presented set."""
 
     layer = view._montage_tile_layer
-    layer.assert_presented_index_matches_scan()
+    seams.assert_presented_index_matches_scan(layer)
     return layer.presented_tiles
 
 
@@ -368,7 +369,7 @@ def test_explicit_hides_in_the_delta_agree(view):
 
 def test_a_levels_update_does_not_disturb_the_agreement(view):
     _present(view, _payloads(6))
-    view._montage_tile_layer.update_levels((0.0, 500.0))
+    seams.update_levels(view._montage_tile_layer, (0.0, 500.0))
 
     assert _check(view) == set(range(6))
 
@@ -412,7 +413,7 @@ def test_the_oracle_fails_when_the_index_is_deliberately_corrupted(view):
     layer._visible_intent_tiles.discard(2)
 
     with pytest.raises(AssertionError, match="scan-only=\\[2\\]"):
-        layer.assert_presented_index_matches_scan()
+        seams.assert_presented_index_matches_scan(layer)
 
 
 def test_the_oracle_fails_on_a_phantom_index_entry(view):
@@ -424,5 +425,5 @@ def test_the_oracle_fails_on_a_phantom_index_entry(view):
     # 1 is hidden in Qt so neither side counts it; 99 has no state at all, so
     # the confirmation step drops it too — the index may hold candidates that
     # are not presented, which is exactly why it is not the answer by itself.
-    layer.assert_presented_index_matches_scan()
+    seams.assert_presented_index_matches_scan(layer)
     assert layer.presented_tiles == {0, 2}

@@ -93,9 +93,7 @@ def test_chunk_lod_anisotropic_reduction_identity():
     assert native.reduction == ()
     assert native.reducer == REDUCER_NATIVE
     aniso = ChunkLod(reduction=(4, 1), reducer=REDUCER_MEAN_ABS)
-    assert aniso.axis_scale(0) == 16
-    assert aniso.axis_scale(1) == 2
-    assert aniso.axis_scale(2) == 1  # axes beyond the vector are native
+    assert aniso.reduction == (4, 1)  # 16x on axis 0, 2x on axis 1
     assert not aniso.is_native
     # Reduction vector and reducer are identity: same geometry, different
     # reducer, different chunk.

@@ -3758,7 +3758,8 @@ def test_adaptive_histogram_increases_detail_when_zoomed_in(qt_app):
 
 
 def test_adaptive_histogram_falls_back_for_degenerate_bounds(qt_app):
-    from arrayscope.display.histogram_controller import adaptive_histogram_for_view
+    from arrayscope.display.histogram_controller import histogram_plot_request_for_view
+    from arrayscope.display.histogram_plot import compute_histogram_plot
     from arrayscope.display.imageview2d import ImageView2D
 
     view = ImageView2D()
@@ -3766,15 +3767,17 @@ def test_adaptive_histogram_falls_back_for_degenerate_bounds(qt_app):
         data = np.zeros((8, 8), dtype=float)
         _present_tiled(view, data, histogramData=data, levels=(0.0, 1.0), histogramRange=(0.0, 1.0))
 
-        histogram = adaptive_histogram_for_view(
+        request = histogram_plot_request_for_view(
             view.histogramImageItem,
             view.histogram.item,
             histogram_bounds=(1.0, 1.0),
         )
+        assert request is not None
+        result = compute_histogram_plot(request)
 
-        assert histogram is not None
-        assert len(histogram[0]) >= 2
-        assert len(histogram[0]) == len(histogram[1])
+        assert result.has_data
+        assert len(result.x) >= 2
+        assert len(result.x) == len(result.y)
     finally:
         view.close()
 

@@ -15,7 +15,6 @@ from arrayscope.gpu import chunk_codec
 from arrayscope.gpu.chunk_codec import (
     Blosc2Codec,
     CodecError,
-    CompressedChunkCache,
     RawCodec,
     ZfpCodec,
     available_codec_names,
@@ -132,29 +131,27 @@ def test_default_setting_is_raw_and_raw_is_byte_identical():
     settings = settings_from_mapping({})
     assert settings.chunk_transport_codec is ChunkTransportCodecChoice.RAW
     # The explicit RAW value is a byte-for-byte pass-through: for every dtype the
-    # stored bytes equal the raw transport payload and the decoded chunk is exact.
-    cache = CompressedChunkCache(ChunkTransportCodecChoice.RAW.value)
-    assert cache.is_active() is False
+    # encoded bytes equal the raw transport payload and the decode is exact.
+    codec = get_codec(ChunkTransportCodecChoice.RAW.value)
     for dtype in _SUPPORTED_DTYPES:
         x = _sample(dtype)
-        stored = cache.store(("k", dtype), x)
-        assert stored == np.ascontiguousarray(x).tobytes().__len__()
-        back = cache.load(("k", dtype))
+        blob = codec.encode(x)
+        assert blob == np.ascontiguousarray(x).tobytes()
+        back = codec.decode(blob, shape=x.shape, dtype=x.dtype)
         assert np.array_equal(back, x)
         assert back.dtype == x.dtype
 
 
 @pytest.mark.parametrize("codec_name", ["raw", "zfp", "blosc2"])
-def test_compressed_cache_roundtrip_matches_raw(codec_name):
+def test_codec_roundtrip_matches_raw(codec_name):
     if codec_name != "raw" and not get_codec(codec_name).available():
         pytest.skip(f"{codec_name} not installed")
-    cache = CompressedChunkCache(codec_name)
     for dtype in _SUPPORTED_DTYPES:
         x = _sample(dtype)
-        cache.store((codec_name, dtype), x)
-        back = cache.load((codec_name, dtype))
-        # A codec round-trip through the host cache yields chunks identical to
-        # the raw path -- this is the correctness pin for the transport seam.
+        codec = resolve_codec(codec_name, x.dtype)
+        back = codec.decode(codec.encode(x), shape=x.shape, dtype=x.dtype)
+        # A codec round-trip yields chunks identical to the raw path -- this is
+        # the correctness pin for the transport seam.
         assert np.array_equal(back, x)
         assert back.dtype == x.dtype
 

@@ -6,6 +6,7 @@ from importlib.metadata import EntryPoint
 from pathlib import Path
 
 import arrayscope
+from tests import seams
 
 ROOT = Path(__file__).parents[2]
 
@@ -67,11 +68,11 @@ def test_building_the_operation_registry_does_not_import_a_plugin(tmp_path, monk
         "entry_points",
         lambda *, group=None: [entry] if group == plugins.PLUGIN_ENTRY_POINT_GROUP else [],
     )
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
     sys.modules.pop(sentinel, None)
     try:
         # Enumerating names and resolving the registry entry list stays lazy.
-        assert "sentinel:op" in plugins.plugin_operation_ids()
+        assert "sentinel:op" in plugins.discover_plugin_entry_points()
         registry.operation_entries()
         assert sentinel not in sys.modules, "building the registry must not import a plugin"
 
@@ -79,7 +80,7 @@ def test_building_the_operation_registry_does_not_import_a_plugin(tmp_path, monk
         plugins.load_plugin_spec("sentinel:op")
         assert sentinel in sys.modules
     finally:
-        plugins._reset_plugin_cache()
+        seams.reset_plugin_cache()
         sys.modules.pop(sentinel, None)
 
 

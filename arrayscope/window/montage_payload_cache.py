@@ -114,10 +114,6 @@ class RetainedTiledPayloadStore:
             if payload_lod_matches(payload, lod_factor)
         }
 
-    def clear_for_document_or_context_change(self, reason: str) -> None:
-        self._payloads.clear()
-        self.last_clear_reason = str(reason)
-
 
 def payload_lod_matches(payload, factor: int) -> bool:
     lod = getattr(payload, "lod", None)

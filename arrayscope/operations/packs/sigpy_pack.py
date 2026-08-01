@@ -10,14 +10,6 @@ reintroducing eager imports.
 
 from __future__ import annotations
 
-import importlib.util
-
-
-def sigpy_available() -> bool:
-    """Whether SigPy is importable, without importing it."""
-
-    return importlib.util.find_spec("sigpy") is not None
-
 
 def pack_specs() -> tuple:
     """Return no specs; Bundle A replaced every unary SigPy wrapper natively."""

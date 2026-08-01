@@ -279,14 +279,6 @@ class OperationEntry:
                 "arity only bounds an axis SET"
             )
 
-    @property
-    def axis_selection(self) -> str:
-        """``"none"`` / ``"one"`` / ``"set"`` -- the one thing surfaces branch on."""
-
-        if self.requires_axes:
-            return AXIS_SELECTION_SET
-        return AXIS_SELECTION_ONE if self.requires_axis else AXIS_SELECTION_NONE
-
 
 OPERATION_REGISTRY = {
     "crop": OperationEntry(
@@ -1031,14 +1023,6 @@ def load_operation_packs() -> None:
                 register()
         except Exception:  # pragma: no cover - a broken pack must not break the app
             _LOGGER.exception("failed to load operation pack %s", module_name)
-
-
-def _reset_operation_packs() -> None:
-    """Clear pack registration (test seam for re-loading with a changed backend)."""
-
-    global _PACKS_LOADED
-    _PACK_SPECS.clear()
-    _PACKS_LOADED = False
 
 
 def _pack_operation_entry(spec) -> OperationEntry:

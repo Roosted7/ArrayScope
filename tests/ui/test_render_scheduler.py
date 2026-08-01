@@ -3,6 +3,7 @@ import time
 import numpy as np
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from tests import seams
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
@@ -197,9 +198,7 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot):
             timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
         win.operation_evaluator.clear_cache()
-        win.renderer._retained_tiled_payload_store().clear_for_document_or_context_change(
-            "test-cold-start"
-        )
+        seams.clear_retained_store(win.renderer._retained_tiled_payload_store(), "test-cold-start")
         win.renderer._frame_session = None
         frame = getattr(win, "_committed_display_frame", None)
         payloads = getattr(getattr(frame, "value_source", None), "payloads", None)

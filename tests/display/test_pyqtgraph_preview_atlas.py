@@ -22,6 +22,7 @@ from arrayscope.display.shader_mapping import (
     default_phase_lut,
 )
 from arrayscope.gpu.keys import COMPLEX_RG32F, SCALAR_R32F
+from tests import seams
 
 
 class _Owner:
@@ -201,7 +202,9 @@ def test_large_raw_preview_is_one_compact_physical_item_with_per_tile_truth(qt_a
 
     assert len(owner.preview_items) == 1
     assert owner.tile_items == {}
-    assert layer.preview_atlas_page_count <= 2
+    assert (
+        0 if layer._preview_atlas_item is None else int(layer._preview_atlas_item.page_count)
+    ) <= 2
     assert layer.physically_visible_tile_count == count
     assert stats.items_created == 1
     assert stats.committed_upserts == tuple(range(count))
@@ -260,7 +263,7 @@ def test_large_complex_preview_is_cpu_composited_at_round_levels_and_rewindowabl
     assert all(row["physical_levels"] == levels for row in rows.values())
 
     wider_levels = (0.0, 2.0 * levels[1])
-    level_stats = layer.update_levels(wider_levels)
+    level_stats = seams.update_levels(layer, wider_levels)
     expected_wider = cpu_display_rgba(payloads[sample_tile].texture_data, item.mapping)[0, 0]
     after = item._images[sample_part.page_index].pixelColor(sample_x, sample_y)
     assert level_stats.items_updated == 0
@@ -331,7 +334,7 @@ def test_large_preview_prefix_uses_staged_items_without_torn_atlas(qt_app):
     assert set(owner.tile_items) == set(range(32))
     assert stats.committed_upserts == tuple(range(32))
     assert set(stats.presented_identities) == set(range(32))
-    assert layer.preview_atlas_decline_reason == "awaiting-complete-preview-transaction"
+    assert str(layer._preview_atlas_decline_reason) == "awaiting-complete-preview-transaction"
 
 
 def test_large_preview_completes_around_retained_exact_items(qt_app):
@@ -570,7 +573,7 @@ def _assert_presented_equivalence(layer):
     module works at direct-presentation scale.
     """
 
-    layer.assert_presented_index_matches_scan()
+    seams.assert_presented_index_matches_scan(layer)
 
 
 def test_presented_index_agrees_while_the_compact_preview_atlas_owns_the_frame(qt_app):

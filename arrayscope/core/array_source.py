@@ -438,10 +438,6 @@ class LazySourceArray:
         self._source.close()
 
 
-def is_lazy_source_array(obj) -> bool:
-    return isinstance(obj, LazySourceArray)
-
-
 def read_index_spec(array, index_spec: tuple):
     """Apply a plain per-axis index spec (int | slice | tuple of ints) to ``array``."""
 
@@ -486,6 +482,5 @@ __all__ = [
     "NdArraySource",
     "ScaledArraySource",
     "SourceReadRefused",
-    "is_lazy_source_array",
     "read_index_spec",
 ]

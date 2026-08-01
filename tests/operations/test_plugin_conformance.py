@@ -4,7 +4,7 @@ A Tier-2 plugin op *claims* it commutes with sub-region reads
 (``fn(whole)[region] == fn(whole[region])``) so the engine may run it per-region
 instead of materializing the whole array.  A FALSE claim yields
 plausible-but-wrong pixels at interactive speed, so the claim is never trusted on
-the author's word: :func:`verify_region_conformance` property-tests it, and the
+the author's word: ``characterize_operation`` property-tests it, and the
 registry gate in ``plugins.py`` honors it only if it passes -- otherwise the op is
 downgraded to the OPAQUE whole-array path (correct, just not the fast path).
 
@@ -18,24 +18,49 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from arrayscope.operations import plugins
-from arrayscope.operations.capabilities import OperationClass, OperationKind
+from arrayscope.operations import plugin_conformance, plugins
+from arrayscope.operations.capabilities import OperationKind
 from arrayscope.operations.plugin_conformance import (
     CharacterizationMismatch,
     CharacterizationUnavailable,
-    characterization_stats,
     characterize_operation,
-    verify_region_conformance,
 )
 from arrayscope.operations.plugins import PluginOperationSpec
 from arrayscope.operations.regions import (
     AxisRegionKind,
     apply_region,
-    region_axis_kinds,
+    axis_region_kind,
     region_from_index_spec,
 )
+from tests import seams
 
 PROBE_SHAPE = (5, 4, 3)
+
+
+def verify_region_conformance(
+    spec, sample_shape, dtype, *, rng, axis=None, params=None, samples=12
+):
+    """Build the observation ``characterize_operation`` feeds its verifier, then verify.
+
+    Production never property-tests a spec standalone: it probes the op once for
+    shape/dtype and reuses that whole-array observation for the region check.
+    This mirrors exactly that call so the harness under test IS the shipped one.
+    """
+
+    param_map = dict(params or {})
+    fn = spec.resolve_fn(axis, param_map)
+    whole = plugin_conformance._deterministic_array(rng, tuple(sample_shape), dtype)
+    whole_result = np.asarray(fn(whole))
+    observation = (
+        tuple(sample_shape),
+        tuple(whole_result.shape),
+        whole_result.dtype,
+        whole,
+        whole_result,
+    )
+    return plugin_conformance._verify_region_from_observation(
+        spec, observation, axis=axis, params=param_map, samples=samples
+    )
 
 
 # --- fake specs (duck-typed; no plugin install needed for the harness) -------
@@ -131,7 +156,7 @@ def test_shape_changing_op_cannot_be_region_capable():
     assert "shape-preserving" in result.reason
 
 
-def test_conformance_is_non_vacuous():
+def test_conformance_is_non_vacuous(monkeypatch):
     # Law #5: prove the check has teeth.  Under the real (exact) comparison the
     # mis-declared roll is rejected on a CONCRETE region with a non-zero diff...
     strict = verify_region_conformance(
@@ -140,17 +165,13 @@ def test_conformance_is_non_vacuous():
     assert strict.honored is False
     assert strict.max_abs_diff > 0
 
-    # ...and if we WEAKEN the equality check to swallow any difference, the exact
-    # same op is (wrongly) honored.  So it is the VALUE comparison -- not the
-    # shape/plumbing -- that triggers rejection: the harness is not vacuous.
+    # ...and if the equality check it runs is weakened to swallow any
+    # difference, the exact same op is (wrongly) honored.  So it is the VALUE
+    # comparison -- not the shape/plumbing -- that triggers rejection: the
+    # harness is not vacuous.
+    monkeypatch.setattr(np, "array_equal", lambda *args, **kwargs: True)
     weak = verify_region_conformance(
-        misdeclared_roll(),
-        PROBE_SHAPE,
-        "float64",
-        rng=_rng(),
-        samples=16,
-        rtol=1e18,
-        atol=1e18,
+        misdeclared_roll(), PROBE_SHAPE, "float64", rng=_rng(), samples=16
     )
     assert weak.honored is True
 
@@ -160,10 +181,10 @@ def test_conformance_is_non_vacuous():
 
 @pytest.fixture
 def primed():
-    """Prime the spec cache directly (the documented ``_reset_plugin_cache`` seam)
+    """Prime the spec cache directly (the documented ``seams.reset_plugin_cache`` seam)
     so gate behavior can be exercised without entry-point plumbing."""
 
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
     for spec in (
         honest_double(),
         misdeclared_roll(),
@@ -172,25 +193,23 @@ def primed():
     ):
         plugins._SPEC_CACHE[spec.id] = spec
     yield
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
 
 
 def test_honest_claim_is_honored_and_observable(primed):
     op = plugins.create_plugin_operation("demo:double")
 
-    assert plugins.is_region_honored("demo:double") is True
     assert op._region_honored() is True
 
     caps = op.capabilities(PROBE_SHAPE)
     assert caps.kind is OperationKind.ELEMENTWISE
     assert caps.blocking_axes == ()
     assert caps.expands_request_axes == ()
-    assert op.execution_class is OperationClass.SHADER_ON_READ
 
-    stats = plugins.region_conformance_stats()
-    assert stats["verified"] >= 1
-    assert stats["honored"] >= 1
-    assert stats["rejected"] == 0
+    stats = plugin_conformance._CHARACTERIZATION_STATS
+    assert stats["region_verified"] >= 1
+    assert stats["region_honored"] >= 1
+    assert stats["region_rejected"] == 0
 
 
 def test_honored_region_path_matches_the_whole_array_result(primed):
@@ -202,7 +221,7 @@ def test_honored_region_path_matches_the_whole_array_result(primed):
     # (not the whole axis), unlike the OPAQUE path which asks for ALL everywhere.
     input_region = op.required_input_region(data.shape, region)
     assert input_region == region
-    assert region_axis_kinds(input_region)[:2] == (
+    assert tuple(axis_region_kind(a.kind).value for a in input_region.axes)[:2] == (
         AxisRegionKind.SLICE.value,
         AxisRegionKind.POINT.value,
     )
@@ -216,7 +235,6 @@ def test_misdeclared_claim_is_downgraded_to_opaque_loudly(primed, caplog):
     with caplog.at_level("WARNING"):
         op = plugins.create_plugin_operation("demo:bad_roll")
 
-    assert plugins.is_region_honored("demo:bad_roll") is False
     assert op._region_honored() is False
 
     # Downgraded to the Tier-1 OPAQUE whole-array shape.
@@ -224,19 +242,18 @@ def test_misdeclared_claim_is_downgraded_to_opaque_loudly(primed, caplog):
     assert caps.kind is OperationKind.TRANSFORM
     assert caps.blocking_axes == (0, 1, 2)
     assert caps.expands_request_axes == (0, 1, 2)
-    assert op.execution_class is OperationClass.OPAQUE
 
     # The downgrade is observable: a loud warning + a rejected tally.
     assert "bad_roll" in caplog.text
     assert "FAILED conformance" in caplog.text
-    assert plugins.region_conformance_stats()["rejected"] >= 1
+    assert plugin_conformance._CHARACTERIZATION_STATS["region_rejected"] >= 1
 
     # And it still produces CORRECT pixels via the whole-array path: OPAQUE
     # required_input_region asks for ALL, apply_to_region gets the whole array.
     data = np.arange(int(np.prod(PROBE_SHAPE))).reshape(PROBE_SHAPE).astype(float)
     region = region_from_index_spec(data.shape, (slice(1, 4), 2, slice(None)))
     whole_region = op.required_input_region(data.shape, region)
-    assert region_axis_kinds(whole_region) == (
+    assert tuple(axis_region_kind(a.kind).value for a in whole_region.axes) == (
         AxisRegionKind.ALL.value,
         AxisRegionKind.ALL.value,
         AxisRegionKind.ALL.value,
@@ -249,14 +266,12 @@ def test_tier1_opaque_op_is_never_subjected_to_region_claims(primed):
     op = plugins.create_plugin_operation("demo:opaque")
 
     assert op._region_honored() is False
-    assert plugins.is_region_honored("demo:opaque") is False
     # region_capable=False -> the harness is never even invoked for it.
-    assert plugins.region_conformance_stats()["verified"] == 0
+    assert plugin_conformance._CHARACTERIZATION_STATS["region_verified"] == 0
 
     # Unchanged Tier-1: OPAQUE, whole-array.
     caps = op.capabilities(PROBE_SHAPE)
     assert caps.kind is OperationKind.TRANSFORM
-    assert op.execution_class is OperationClass.OPAQUE
 
 
 def test_honored_op_is_faithful_through_the_operation_evaluator(primed):
@@ -385,7 +400,7 @@ def test_runtime_mismatch_withholds_result_invalidates_and_demotes():
     assert operation.output_shape(data.shape) == (8, 9)
     assert operation.capabilities(data.shape, data.dtype).cache_stage is True
     assert operation._characterization_hint.predictable is False
-    assert characterization_stats()["invalidated"] == 1
+    assert plugin_conformance._CHARACTERIZATION_STATS["invalidated"] == 1
 
 
 # --- rank-changing shape rules ("fixed_and_mapped") --------------------------
@@ -444,7 +459,9 @@ def test_characterization_fits_rank_changing_shape_rules(
     assert result.output_shape == expected_shape
     # The rule must extrapolate, not merely describe the one probed signature.
     doubled = tuple(size * 2 for size in input_shape)
-    assert result.predict_shape(doubled) == tuple(np.asarray(fn(np.zeros(doubled))).shape)
+    assert result.shape_rule.predict(tuple(doubled)) == tuple(
+        np.asarray(fn(np.zeros(doubled))).shape
+    )
 
 
 # --- probe failure is a probe result, not the caller's exception -------------
@@ -475,7 +492,7 @@ def test_probe_failure_becomes_characterization_unavailable_with_the_original_ca
 def test_min_size_constrained_op_characterizes_and_evaluates_from_the_exact_input():
     from arrayscope.operations.pipeline import ArrayDocument
 
-    plugins._reset_plugin_cache()
+    seams.reset_plugin_cache()
     try:
         spec = _min_size_op("demo:min-size-exact")
         plugins._SPEC_CACHE[spec.id] = spec
@@ -491,4 +508,4 @@ def test_min_size_constrained_op_characterizes_and_evaluates_from_the_exact_inpu
         assert operation._characterization_hint.whole_array_calls == 1
         np.testing.assert_array_equal(document.materialize(), np.stack([data, data], axis=0))
     finally:
-        plugins._reset_plugin_cache()
+        seams.reset_plugin_cache()

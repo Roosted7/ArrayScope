@@ -174,21 +174,6 @@ class PageBackedPresentation:
     def materialized_by_key(self) -> dict[object, MaterializedLodPage]:
         return {page.key: page for page in self.materialized_pages}
 
-    def sample_presented_value_at_native(self, y_i: int, x_i: int):
-        """Sample displayed page values through exact clipped-bin geometry."""
-
-        y_i, x_i = int(y_i), int(x_i)
-        y0, y1, x0, x1 = self.source_coverage_yx
-        if not (y0 <= y_i < y1 and x0 <= x_i < x1):
-            return None
-        if self.resolved_page_set is None:
-            return None
-        values = self.sample_presented_values_at_native_coordinates(
-            np.asarray((y_i,), dtype=np.int64),
-            np.asarray((x_i,), dtype=np.int64),
-        )
-        return array_value_at(values, 0, 0)
-
     def sample_presented_values_at_native_coordinates(
         self,
         y_coordinates,
@@ -951,13 +936,6 @@ class TilePresentationState:
         return {
             int(tile): self.payloads[int(tile)]
             for tile in delta.active_tiles
-            if int(tile) in self.payloads
-        }
-
-    def near_payloads(self, delta: TilePresentationDelta) -> dict[int, DisplayTilePayload]:
-        return {
-            int(tile): self.payloads[int(tile)]
-            for tile in delta.near_tiles
             if int(tile) in self.payloads
         }
 

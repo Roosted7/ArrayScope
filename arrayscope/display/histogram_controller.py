@@ -974,29 +974,6 @@ class HistogramLevelEditPopup(QtWidgets.QWidget):
         self._apply_callback(float(value))
 
 
-def adaptive_histogram_for_view(
-    image_item,
-    histogram_item,
-    *,
-    histogram_bounds=None,
-    min_bin_screen_px: int = MIN_HISTOGRAM_BIN_SCREEN_PX,
-    bin_cap: int = DEFAULT_HISTOGRAM_BIN_CAP,
-):
-    request = histogram_plot_request_for_view(
-        image_item,
-        histogram_item,
-        histogram_bounds=histogram_bounds,
-        min_bin_screen_px=min_bin_screen_px,
-        bin_cap=bin_cap,
-    )
-    if request is None:
-        return None
-    result = compute_histogram_plot(request)
-    if not result.has_data:
-        return None
-    return result.x, result.y
-
-
 def histogram_plot_request_for_view(
     image_item,
     histogram_item,

@@ -94,20 +94,6 @@ class DisplayGeometry:
         object.__setattr__(self, "montage_origin_y", int(self.montage_origin_y))
         object.__setattr__(self, "montage_tile_states", tuple(self.montage_tile_states or ()))
 
-    def view_point_to_display_point(self, x: float, y: float) -> tuple[int, int] | None:
-        view_x = math.floor(float(x))
-        view_y = math.floor(float(y))
-        display_x = view_x - (self.montage_origin_x if self.montage is not None else 0)
-        display_y = view_y - (self.montage_origin_y if self.montage is not None else 0)
-        if (
-            display_x < 0
-            or display_y < 0
-            or display_x >= self.display_shape[1]
-            or display_y >= self.display_shape[0]
-        ):
-            return None
-        return display_x, display_y
-
     def view_point_to_tile_point(
         self, x: float, y: float, *, require_loaded: bool = True
     ) -> MontagePointStatus | None:

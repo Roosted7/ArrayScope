@@ -24,6 +24,12 @@ def chunk(n, generation=1):
     )
 
 
+def pin(table, *keys):
+    """Pin through the owner-set API the executor uses."""
+
+    table.replace_pin_set("test-owner", set(table.pin_set("test-owner")) | set(keys))
+
+
 class TestPageTable:
     def test_lookup_miss_is_explicit_none(self):
         table = PageTable()
@@ -35,7 +41,6 @@ class TestPageTable:
         slot = PageSlot("p", 0, 0)
         table.bind(chunk(0), slot, nbytes=64)
         assert table.lookup(chunk(0)) == slot
-        assert table.chunk_in_slot(slot) == chunk(0)
         assert table.resident_bytes() == 64
         assert table.unbind(chunk(0)) == slot
         assert table.lookup(chunk(0)) is None
@@ -53,7 +58,7 @@ class TestPageTable:
         table.bind(chunk(0), PageSlot("p", 0, 0), nbytes=1)
         table.bind(chunk(0), PageSlot("p", 0, 1), nbytes=1)
         assert table.lookup(chunk(0)) == PageSlot("p", 0, 1)
-        assert table.chunk_in_slot(PageSlot("p", 0, 0)) is None
+        assert table.lookup(chunk(0)) == PageSlot("p", 0, 1)
 
     def test_generation_counts_binding_changes_not_touches(self):
         table = PageTable()
@@ -72,14 +77,12 @@ class TestPageTable:
         for n in range(3):
             table.bind(chunk(n), PageSlot("p", 0, n), nbytes=1)
         table.touch(chunk(0))  # 1 is now least recently used
-        table.pin(chunk(1))
+        pin(table, chunk(1))
         walked = []
         while (victim := table.eviction_candidate()) is not None:
             walked.append(victim)
             table.unbind(victim)
         assert walked == [chunk(2), chunk(0)]  # the pinned 1 is never offered
-        with pytest.raises(KeyError):
-            table.pin(chunk(9))
 
     def test_the_victim_query_honours_the_executor_pool_filter(self):
         # ``_evict_one_unpinned`` needs a free layer in ONE physical pool: the
@@ -89,7 +92,7 @@ class TestPageTable:
         for n in range(4):
             table.bind(chunk(n), PageSlot("a" if n % 2 else "b", 0, n), nbytes=1)
         table.touch(chunk(0))  # 1 (pool a) and 2 (pool b) are now the oldest
-        table.pin(chunk(1))
+        pin(table, chunk(1))
         assert table.eviction_candidate() == chunk(2)
         assert table.eviction_candidate(lambda key, slot: slot.pool_id == "a") == chunk(3)
         assert table.eviction_candidate(lambda key, slot: slot.pool_id == "b") == chunk(2)
@@ -101,7 +104,7 @@ class TestPageTable:
         # its pool rather than silently drop somebody's coverage.
         table = PageTable()
         table.bind(chunk(0), PageSlot("p", 0, 0), nbytes=1)
-        table.pin(chunk(0))
+        pin(table, chunk(0))
         assert table.eviction_candidate() is None
 
     def test_superseded_generation_releases_its_slot_for_the_successor(self):
@@ -126,9 +129,7 @@ class TestPageTable:
         stamp = table.eviction_stamp
         table.bind(chunk(0), PageSlot("p", 0, 0), nbytes=1)
         table.touch(chunk(0))
-        table.pin(chunk(0))
-        assert table.eviction_stamp == stamp
-        table.remap_slots(lambda slot: PageSlot("p", 1, slot.slot_index))
+        pin(table, chunk(0))
         assert table.eviction_stamp == stamp
         table.unbind(chunk(0))
         assert table.eviction_stamp != stamp

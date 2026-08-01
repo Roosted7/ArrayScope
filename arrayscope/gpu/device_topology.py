@@ -23,7 +23,6 @@ from dataclasses import dataclass
 __all__ = [
     "DeviceTopology",
     "detect_topology",
-    "reset_topology_cache",
 ]
 
 
@@ -43,15 +42,6 @@ class DeviceTopology:
     unified_memory: bool = True
     device_name: str = ""
     backend: str = ""
-
-    @property
-    def is_discrete(self) -> bool:
-        return self.kind == "discrete"
-
-    @property
-    def is_integrated(self) -> bool:
-        # Unknown is treated as integrated / RAM-only: the safe fallback.
-        return self.kind in ("integrated", "unknown")
 
     @property
     def discrete_transfer_candidate(self) -> bool:
@@ -159,10 +149,3 @@ def detect_topology(*, force: bool = False) -> DeviceTopology:
         backend=str(info.get("backend_type", "")),
     )
     return _CACHED
-
-
-def reset_topology_cache() -> None:
-    """Drop the cached topology (tests; adapter/device lifecycle changes)."""
-
-    global _CACHED
-    _CACHED = None

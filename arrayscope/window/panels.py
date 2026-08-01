@@ -188,19 +188,6 @@ class PanelManager:
         panel.location = PanelLocation.DOCKED
         self._sync_view_action(panel)
 
-    def toggle_panel(self, name, *, reason):
-        if self.is_visible(name):
-            self.hide_panel(name, reason=reason)
-        else:
-            self.show_docked(name, reason=reason)
-
-    def reset_panel_layout(self):
-        for name in tuple(self._panels_by_name):
-            self.window.layout_manager.redock_managed_panel(
-                self._panels_by_name[name].dock, reason="reset", preserve_canvas=False
-            )
-            self.hide_panel(name, reason="reset", preserve_canvas=False)
-
     def _hide_detached_from_dialog(self, name):
         panel = self._panels_by_name[str(name)]
         self._remember_open_location(panel)

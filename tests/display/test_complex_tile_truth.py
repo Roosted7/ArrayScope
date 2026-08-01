@@ -33,6 +33,7 @@ from arrayscope.display.slice_engine import complex_to_rgb
 from arrayscope.display.tile_truth_overlay import tile_truth_overlay_text
 from arrayscope.render.lod import texture_source_for_rendered
 from arrayscope.window.frame_session import FrameSession
+from tests import seams
 
 _MAPPING = ShaderMapping(
     component=ShaderComponent.ABS,
@@ -484,7 +485,7 @@ def test_pyqtgraph_report_excludes_state_mirror_when_image_item_is_hidden(qt_app
         hidden.item.setVisible(False)
         hidden.visible = True
 
-        report = view._montage_tile_layer.update_levels((0.0, 900.0))
+        report = seams.update_levels(view._montage_tile_layer, (0.0, 900.0))
 
         assert 5 not in report.presented_tiles
         assert 5 not in report.presented_identities

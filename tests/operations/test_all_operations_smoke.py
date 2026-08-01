@@ -19,13 +19,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from arrayscope.operations import library, plugins, registry
+from arrayscope.operations import library, registry
 from arrayscope.operations.input_slots import (
     SLOT_DIMENSION_SET,
     ResolvedSlot,
     SlotBinding,
 )
 from arrayscope.operations.parameter_forms import build_parameter_form
+from tests import seams
 
 # Generic context used unless an op overrides it below.
 _DEFAULT_SHAPE = (6, 8, 10)
@@ -72,11 +73,11 @@ _EXPECTATIONS: dict[str, dict] = {
 
 @pytest.fixture(autouse=True)
 def _clean_pack_state():
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
     yield
-    registry._reset_operation_packs()
-    plugins._reset_plugin_cache()
+    seams.reset_operation_packs()
+    seams.reset_plugin_cache()
 
 
 @pytest.fixture

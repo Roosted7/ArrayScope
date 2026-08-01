@@ -236,13 +236,11 @@ def test_operation_evaluator_uses_bounded_display_cache_and_invalidates_by_docum
     second = evaluator.image(state)
     assert first is second
     assert evaluator.image_evaluations == 1
-    assert evaluator.derived_evaluations == 0
-    assert evaluator.cache_diagnostics().hits == 1
+    assert evaluator.display_cache_diagnostics().hits == 1
 
     evaluator.set_document(evaluator.document.with_operation(ReverseAxis(axis=0)))
     evaluator.image(state)
     assert evaluator.image_evaluations == 2
-    assert evaluator.derived_evaluations == 0
 
 
 def test_operation_evaluator_clear_cache_clears_stage_cache():
@@ -276,7 +274,7 @@ def test_prefetch_fills_cache_without_incrementing_visible_evaluation_count():
     evaluator.image(prefetch_state)
 
     assert evaluator.image_evaluations == visible_count
-    assert evaluator.cache_diagnostics().status == CacheStatus.CACHED
+    assert evaluator.display_cache_diagnostics().status == CacheStatus.CACHED
     assert evaluator.display_cache_diagnostics().prefetch_stored == 1
 
 
@@ -308,19 +306,12 @@ def test_prefetch_diagnostics_track_scheduling_outcomes():
     assert diagnostics.prefetch_stale == 1
 
 
-def test_evaluator_diagnostics_counts_degraded_refused_chunked_cancelled():
+def test_evaluator_diagnostics_counts_chunked_evaluations():
     evaluator = OperationEvaluator(ArrayDocument(np.arange(6).reshape(2, 3)))
 
-    evaluator.note_render_degraded()
-    evaluator.note_render_refused("too large")
     evaluator.note_chunked_evaluation()
-    evaluator.note_render_cancelled()
 
-    diagnostics = evaluator.display_cache_diagnostics()
-    assert diagnostics.degraded_evaluations == 1
-    assert diagnostics.refused_evaluations == 1
-    assert diagnostics.chunked_evaluations == 1
-    assert diagnostics.cancelled_evaluations == 1
+    assert evaluator.display_cache_diagnostics().chunked_evaluations == 1
 
 
 def test_cache_invalidates_when_document_revision_changes_for_same_array_object():
@@ -330,7 +321,7 @@ def test_cache_invalidates_when_document_revision_changes_for_same_array_object(
 
     first = evaluator.image(state)
     data[0, 0] = 999
-    evaluator.set_document(evaluator.document.with_data_changed())
+    evaluator.set_document(evaluator.document.mark_base_data_changed())
     second = evaluator.image(state)
 
     assert evaluator.document.revision == 1
