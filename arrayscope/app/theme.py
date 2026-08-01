@@ -129,8 +129,17 @@ def normalize_theme_choice(choice) -> ThemeChoice:
         return choice
     if choice is None or choice == "auto":
         return ThemeChoice.SYSTEM
+    # Resolve enum members by ``.value``. ``ThemeChoice`` subclasses ``str``,
+    # but ``Enum.__str__`` wins, so ``str(ThemeChoice.DARK)`` is
+    # "ThemeChoice.DARK" rather than "dark". A member that is not an instance
+    # of *this* class object -- one arriving from a re-imported copy of this
+    # module, as the test suite produces -- therefore missed the lookup below
+    # and was silently downgraded to SYSTEM, which resolves to whichever theme
+    # the platform prefers. An explicit dark or light request must never come
+    # out as "system"; an unrecognized value still falls back.
+    raw = getattr(choice, "value", choice)
     try:
-        return ThemeChoice(str(choice).lower())
+        return ThemeChoice(str(raw).lower())
     except ValueError:
         return ThemeChoice.SYSTEM
 
@@ -270,7 +279,18 @@ def apply_theme_to_qapplication(app, choice) -> ThemeResult:
         app.setPalette(app.style().standardPalette())
     else:
         _apply_palette(app, tokens)
-    app.setStyleSheet(build_stylesheet(tokens))
+    # Setting the application stylesheet restyles every live widget in the
+    # process, so its cost grows with what is already open: measured 202 ms to
+    # build the first window and 567 ms for the fifth, essentially all of it
+    # inside setStyleSheet. Every window construction applies the theme, so a
+    # second window used to pay a full re-style of the first one's widgets for
+    # a sheet it had already produced. Building the string is ~0.1 ms, so the
+    # cheap guard is to build it and compare. Comparing against the sheet the
+    # QApplication actually carries -- rather than against the tokens stored
+    # below -- keeps this correct if anything else has replaced or cleared it.
+    stylesheet = build_stylesheet(tokens)
+    if stylesheet != app.styleSheet():
+        app.setStyleSheet(stylesheet)
     app.setProperty("_arrayscope_theme_tokens", tokens)
     _apply_pyqtgraph_defaults(tokens)
     return result

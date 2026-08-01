@@ -5,6 +5,7 @@ import time
 import numpy as np
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from arrayscope.tools.presentation_settlement import presentation_is_settled
 from tests.settle import deliver_posted_events, settle_window
 from tests.ui.helpers import (
     settle_idle as _settle_idle,
@@ -1247,6 +1248,21 @@ def _halo_montage_window(qtbot, *, indices=64, tile=16, columns=8):
     # dependency.
     _settle_idle(win)
     session = win.renderer._frame_session
+    # Let the window's own viewport retarget land before imposing a synthetic
+    # one. Until the montage viewport converges, a geometry-driven
+    # ``_try_update_montage_viewport_only`` is still owed, and it re-plans from
+    # the real canvas: it resets ``view_range`` to the whole montage and
+    # flattens the halo this helper exists to produce, so the regime assertion
+    # below fails with "halo 64 of 64". Once converged that path short-circuits
+    # on its invariant key, leaving the retarget below as the last word.
+    # Waiting only for ``_frame_session is not None`` let the two land in
+    # either order, decided by how long the window happened to take to build --
+    # so it began failing when window construction got faster.
+    settle_window(
+        win,
+        lambda: presentation_is_settled(win, require_quiescent=True),
+        label="halo montage settles before the synthetic retarget",
+    )
 
     anchor = session.plan.tiles[len(session.plan.tiles) // 2]
     cx = float(anchor.x0) + float(anchor.width) * 0.5

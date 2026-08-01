@@ -105,6 +105,27 @@ def test_normalize_theme_choice_accepts_enum_values():
     assert theme.normalize_theme_choice(theme.ThemeChoice.DARK) == theme.ThemeChoice.DARK
 
 
+def test_normalize_theme_choice_resolves_an_equivalent_enum_by_its_value():
+    # Regression: ``ThemeChoice`` subclasses ``str``, but ``Enum.__str__`` wins,
+    # so ``str(ThemeChoice.DARK)`` is "ThemeChoice.DARK" and never matched the
+    # lookup. A member of an equivalent enum -- what a re-imported copy of this
+    # module produces, which the suite does create -- was therefore downgraded
+    # to SYSTEM, silently turning an explicit dark request into whichever theme
+    # the platform prefers. Normalizing must go through the member's value.
+    import enum
+
+    class ForeignThemeChoice(str, enum.Enum):
+        SYSTEM = "system"
+        NATIVE = "native"
+        DARK = "dark"
+        LIGHT = "light"
+
+    assert theme.normalize_theme_choice(ForeignThemeChoice.DARK) == theme.ThemeChoice.DARK
+    assert theme.normalize_theme_choice(ForeignThemeChoice.LIGHT) == theme.ThemeChoice.LIGHT
+    # An unrecognized value still falls back rather than raising.
+    assert theme.normalize_theme_choice("nonsense") == theme.ThemeChoice.SYSTEM
+
+
 def test_hover_token_is_distinct_from_alt_and_base_in_builtin_themes():
     # Regression: hover used to reuse surface_alt, so hovered list rows were
     # invisible on alternate (even) rows. Hover must be its own shade, and the
