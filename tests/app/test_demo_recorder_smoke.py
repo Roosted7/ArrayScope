@@ -11,6 +11,7 @@ fps, no encoding), which keeps a full scenario run to a few seconds.
 """
 
 import json
+import os
 import re
 import runpy
 import subprocess
@@ -23,17 +24,50 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[2]
 RECORDER = ROOT / "tools" / "demo_recorder.py"
 
-# The recorder overlaps its own scenario children; three is where the measured
-# curve flattens (76 s serial, 42 s at two, 32 s at three, 28 s at four against
-# a 19 s longest scenario). It is deliberately below the machine's worker share:
-# this file is one xdist worker's straggler, so overlapping its children
-# shortens the critical path rather than competing for it.
-RECORD_JOBS = 3
-
 
 def _scenario_names() -> tuple[str, ...]:
     namespace = runpy.run_path(str(RECORDER), run_name="arrayscope_demo_recorder")
     return tuple(namespace["SCENARIOS"])
+
+
+SCENARIO_NAMES = _scenario_names()
+
+
+def _record_jobs(scenarios: int) -> int:
+    """How many scenario children the recorder should overlap.
+
+    While they run, this xdist worker is doing nothing else -- it is parked in
+    ``subprocess.run`` -- so the cores to spend are the ones the *other* workers
+    are not using. ``-n auto`` is capped at half the logical cores
+    (``pytest_xdist_auto_num_workers``), so at most ``nproc // 2 - 1`` other
+    workers are busy and the remainder of the box is idle as far as this file is
+    concerned. Overlapping fewer than that leaves the straggler long for
+    nothing; overlapping more only queues children behind one another, because
+    there are only so many scenarios.
+
+    Deriving it matters more than the number: a literal is wrong on every
+    machine that is not the one it was measured on, over-subscribing a small box
+    and under-using a large one.
+
+    Measured in-suite on the 16-core reference machine, order-balanced ABAB
+    against the full suite, this file's block is 39.7 s at three children and
+    22.4 s at seven (isolated: 31.3 / 24.1 / 20.8 / 18.7 s at three, four, five
+    and seven, against a ~19 s longest scenario, so seven is the floor rather
+    than a point on a slope; consistent with the 76/42/32/28 s at one, two,
+    three and four this comment used to record). The suite's wall clock does
+    **not** move either way -- ``test_resident_crop_rebind.py`` and
+    ``test_montage_interactions.py`` own the largest blocks at 63-79 s, and the
+    suite is throughput-bound besides (763 s of work over 8 workers against a
+    155 s wall). So this buys a shorter straggler and ~17 s of CPU, not a
+    shorter suite; do not quote it as one.
+    """
+
+    cores = os.cpu_count() or 4
+    spare = cores - max(0, cores // 2 - 1)
+    return max(2, min(scenarios, spare))
+
+
+RECORD_JOBS = _record_jobs(len(SCENARIO_NAMES))
 
 
 @pytest.fixture(scope="module")
@@ -49,7 +83,9 @@ def recorded_scenarios(tmp_path_factory):
 
     Per-scenario status is parsed from the recorder's own ``[ok]/[FAIL] record``
     lines rather than the process exit code, so one broken scenario still fails
-    exactly its own case.
+    exactly its own case. Those lines are printed by the parent as futures
+    complete, not by the children, so raising ``RECORD_JOBS`` cannot interleave
+    them into an unparseable stream.
     """
 
     frames_root = tmp_path_factory.mktemp("demo-frames")
@@ -77,7 +113,7 @@ def recorded_scenarios(tmp_path_factory):
     return frames_root, recorded, proc
 
 
-@pytest.mark.parametrize("name", _scenario_names())
+@pytest.mark.parametrize("name", SCENARIO_NAMES)
 def test_demo_scenario_records_in_smoke_mode(name, recorded_scenarios):
     frames_root, recorded, proc = recorded_scenarios
     assert recorded.get(name), f"{name} failed:\n{proc.stdout}\n{proc.stderr}"

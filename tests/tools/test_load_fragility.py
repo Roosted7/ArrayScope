@@ -10,9 +10,10 @@ one already owns the box and runs zero loops -- while still printing
 like a run that did, and any "it passed under load" conclusion drawn from it is
 worthless. That is the failure this file exists to catch.
 
-Nothing here spins a CPU. The decoys sleep, and the one test that starts the
-real supervisor caps it at a single loop for a couple of seconds: a test for the
+Nothing here spins a CPU, and nothing here starts the supervisor: a test for the
 load tool must not itself become the load that poisons a concurrent measurement.
+The decoys sleep, and the clamp is read through ``-p``, which resolves and
+announces the plan and stops before any load exists.
 """
 
 from __future__ import annotations
@@ -94,6 +95,27 @@ def test_loop_detection_matches_real_loops_and_not_processes_that_merely_name_th
             proc.wait(timeout=5)
 
 
+def _plan(*argv: str) -> subprocess.CompletedProcess[str]:
+    """Resolve the load plan without starting the load or running any test.
+
+    The clamp is pure arithmetic over ``nproc`` and the flags, but reading it
+    used to cost ~10 s per call: the script started the supervisor (a fixed 2 s
+    sleep) and then booted a whole pytest on ``tests/_no_such_test.py`` purely
+    so the run would fail fast and let the supervisor die. ``-p`` stops between
+    the line that announces the resolved target and ``start_load``, so the
+    assertions below read the same two printfs a real run emits, for ~20 ms.
+    """
+
+    return subprocess.run(
+        [str(SCRIPT), "-p", *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=SCRIPT.parents[1],
+        timeout=60,
+    )
+
+
 @pytest.mark.parametrize("requested", ["999", "48"])
 def test_target_is_clamped_to_one_below_nproc(requested):
     """Asking for more runnable than the box has is rounded down, and said so.
@@ -104,16 +126,7 @@ def test_target_is_clamped_to_one_below_nproc(requested):
     """
 
     cap = max(1, (os.cpu_count() or 2) - 1)
-    # `-l 1` keeps this test from becoming load itself; the bogus target makes
-    # pytest fail immediately so the supervisor lives only a moment.
-    result = subprocess.run(
-        [str(SCRIPT), "-t", requested, "-l", "1", "-r", "1", "tests/_no_such_test.py"],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=SCRIPT.parents[1],
-        timeout=180,
-    )
+    result = _plan("-t", requested)
     assert f"target {requested} exceeds nproc-1; holding {cap} instead" in result.stdout
     assert f"holding {cap} runnable" in result.stdout
 
@@ -122,16 +135,38 @@ def test_a_target_under_the_cap_is_left_alone():
     cap = max(1, (os.cpu_count() or 2) - 1)
     if cap < 2:
         pytest.skip("needs at least two cores to have a value under the cap")
-    result = subprocess.run(
-        [str(SCRIPT), "-t", "2", "-l", "1", "-r", "1", "tests/_no_such_test.py"],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=SCRIPT.parents[1],
-        timeout=180,
-    )
+    result = _plan("-t", "2")
     assert "exceeds nproc-1" not in result.stdout
     assert "holding 2 runnable" in result.stdout
+
+
+def test_the_plan_reports_the_real_path_and_stops_before_it_costs_anything():
+    """``-p`` is a short-circuit of the real path, not a second implementation.
+
+    Both facts the two tests above assert are printed by lines the expensive
+    path runs as well; the flag only decides whether execution continues past
+    them. So those tests stay honest exactly as long as the gate sits after
+    both printfs and before ``start_load`` -- above the first printf it would
+    report nothing, below ``start_load`` it would stop being cheap. Assert that
+    ordering, and assert the stop itself: a ``-p`` that was accepted and then
+    ignored leaves both tests above green and slow, which is the whole reason
+    they were rewritten.
+    """
+
+    result = _plan("-t", "2")
+    assert result.returncode == 0
+    assert "plan only (-p): no load started, no tests run" in result.stdout
+    assert "--- run " not in result.stdout, "-p must not reach the pytest invocation"
+
+    text = _script_text()
+    announced = text.index("load: holding %s runnable on %s cores")
+    gate = text.index('if [ "$plan_only" -eq 1 ]; then', announced)
+    started = text.index("\nstart_load\n", announced)
+    assert announced < gate < started, (
+        "the plan gate must sit between the announcement it reports and the "
+        "first thing that costs; anywhere else it reports the wrong numbers "
+        "or reports them just as slowly"
+    )
 
 
 def test_cleanup_is_scoped_to_this_instance():

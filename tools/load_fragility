@@ -6,6 +6,7 @@
 #     tools/load_fragility -r 5            # 5 repeats
 #     tools/load_fragility -t 12           # hold the box at 12 runnable
 #                                          # (clamped to nproc-1; see below)
+#     tools/load_fragility -t 12 -p        # print the resolved plan and stop
 #     tools/load_fragility tests/ui/x.py::test_y   # something specific
 #
 # The load is CO-OPERATIVE: -t names a total for the machine, not a number of
@@ -67,13 +68,19 @@ load_cap=$(( $(nproc) - 1 ))
 # count of our own loops. See ``start_load``.
 target=$(( $(nproc) * 3 / 2 ))
 max_loaders=0   # 0 means "whatever the target needs"
+# Resolve the load plan, announce it, and stop -- before any load is started and
+# before pytest is invoked. What the box will be held at is pure arithmetic over
+# nproc and the flags, so asking that question should not cost a supervisor
+# start-up and a full pytest boot. See the gate below ``start_load``.
+plan_only=0
 
-while getopts "r:l:t:h" opt; do
+while getopts "r:l:t:ph" opt; do
   case "$opt" in
     r) repeats="$OPTARG" ;;
     t) target="$OPTARG" ;;
     l) max_loaders="$OPTARG" ;;
-    h) sed -n '2,52p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    p) plan_only=1 ;;
+    h) sed -n '2,53p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) exit 2 ;;
   esac
 done
@@ -259,6 +266,16 @@ start_load() {
 
 printf 'load: holding %s runnable on %s cores (foreign load counts; max %s of our own); %s repeat(s) over %s target(s)\n' \
   "$target" "$(nproc)" "$max_loaders" "$repeats" "${#targets[@]}"
+
+# Deliberately HERE, between the announcement and the first thing that costs:
+# every number -p reports is one the real path just computed and printed on the
+# lines above, so the cheap answer cannot drift from the expensive one. Moving
+# this gate above either printf, or below start_load, is what the plan test
+# checks for.
+if [ "$plan_only" -eq 1 ]; then
+  printf 'load: plan only (-p): no load started, no tests run\n'
+  exit 0
+fi
 
 start_load
 trap 'echo; echo "interrupted — stopping load"; exit 130' INT
