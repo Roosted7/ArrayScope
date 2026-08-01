@@ -30,17 +30,15 @@ through to the ordinary evaluation.
 
 from __future__ import annotations
 
-from time import perf_counter
-
 import numpy as np
 import pytest
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore
 
 from arrayscope.display.model.frame import PayloadSourceAnchor
 from arrayscope.display.model.montage_levels import LevelEvidenceQuality
 from arrayscope.tools.framebuffer_reference import assert_wgpu_frame_matches_cpu_reference
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from arrayscope.window.frame_effects import canonical_plane_memo_bytes
+from tests.settle import settle_window
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
@@ -80,16 +78,19 @@ def _display_producers_completed(win) -> int:
     )
 
 
-def _busy_pump_until(predicate, budget_s, label) -> None:
-    # A busy pump, not qtbot.waitUntil: a real event loop never idles, so the
+def _busy_pump_until(win, predicate, label) -> None:
+    # A busy pump, not the idle one: a real event loop never idles, so the
     # low-priority planning continuations only run under sustained queue
-    # pressure.  The idle qtbot loop would dispatch them instantly and hide the
-    # field scheduling entirely.
-    app = QtWidgets.QApplication.instance()
-    deadline = perf_counter() + budget_s
-    while not predicate():
-        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
-        assert perf_counter() < deadline, f"{label} failed to settle within {budget_s:.1f}s"
+    # pressure.  An idle loop would dispatch them instantly and hide the field
+    # scheduling entirely.
+    #
+    # The budgets this used to take were 1x, 2x and 4x the interaction cap,
+    # hand-picked per call site -- which is the "widen it until it passes" shape
+    # the repository has a guard against, hiding here because the guard does not
+    # recognise this helper's name.  There is one budget now and it bounds a
+    # stalled pipeline rather than a slow one, so the multipliers have nothing
+    # left to express.
+    settle_window(win, predicate, label=label, allow_idle=False)
 
 
 def _uniform_source() -> np.ndarray:
@@ -127,11 +128,7 @@ def _fill_full_plane_then_crop(win, start: int) -> None:
     )
     win._set_view_state(full)
     win.update_image_view()
-    _busy_pump_until(
-        lambda: frame_session_settled(win),
-        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-        "full-plane fill",
-    )
+    _busy_pump_until(win, lambda: frame_session_settled(win), "full-plane fill")
     win._apply_slice_state(
         0,
         _cropped_state(win, start),
@@ -139,11 +136,7 @@ def _fill_full_plane_then_crop(win, start: int) -> None:
         interactive=True,
         immediate_axis_only=False,
     )
-    _busy_pump_until(
-        lambda: _crop_settled(win, start),
-        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-        "cold cropped fill",
-    )
+    _busy_pump_until(win, lambda: _crop_settled(win, start), "cold cropped fill")
 
 
 def test_resident_crop_scrub_schedules_no_producers(qtbot):
@@ -162,8 +155,8 @@ def test_resident_crop_scrub_schedules_no_producers(qtbot):
             before = _preparation_completed(win)
             win._on_slice_text_changed(0, f"{start}:{start + _CROP}")
             _busy_pump_until(
+                win,
                 lambda start=start: _crop_settled(win, start),
-                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
                 f"resident scrub {start}",
             )
             assert _preparation_completed(win) - before == 0, (
@@ -200,11 +193,7 @@ def test_crop_scrub_without_the_capability_still_evaluates(qtbot):
         assert bool(getattr(win.app_settings, "resident_crop_rebind", False)) is False
         win._set_view_state(_cropped_state(win, 47))
         win.update_image_view()
-        _busy_pump_until(
-            lambda: _crop_settled(win, 47),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "cold cropped fill",
-        )
+        _busy_pump_until(win, lambda: _crop_settled(win, 47), "cold cropped fill")
         session = win.renderer._frame_session
         payload = session.display_tile_payloads[0]
         assert payload.source_anchor.plane_shape == (_PLANE, _PLANE)
@@ -219,11 +208,7 @@ def test_crop_scrub_without_the_capability_still_evaluates(qtbot):
 
         before = _display_producers_completed(win)
         win._on_slice_text_changed(0, "48:148")
-        _busy_pump_until(
-            lambda: _crop_settled(win, 48),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
-            "cold scrub",
-        )
+        _busy_pump_until(win, lambda: _crop_settled(win, 48), "cold scrub")
         assert _display_producers_completed(win) - before > 0, (
             "a non-resident crop window must still schedule its producers"
         )
@@ -268,9 +253,7 @@ def test_slice_change_does_not_reuse_residency(qtbot):
             plan_sources = tuple(int(tile.source_index) for tile in session.plan.tiles)
             return bool(plan_sources == shifted and frame_session_settled(win))
 
-        _busy_pump_until(
-            montage_settled, INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0, "content change"
-        )
+        _busy_pump_until(win, montage_settled, "content change")
         assert _preparation_completed(win) - before > 0, (
             "a content-identity change must not be served by a resident rebind"
         )
@@ -314,11 +297,7 @@ def _single_slice_fill_full_plane_then_crop(win, start: int) -> None:
 
     win._set_view_state(win.view_state.with_montage_axis(None))
     win.update_image_view()
-    _busy_pump_until(
-        lambda: frame_session_settled(win),
-        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-        "single-slice full-plane fill",
-    )
+    _busy_pump_until(win, lambda: frame_session_settled(win), "single-slice full-plane fill")
     win._apply_slice_state(
         0,
         _single_slice_cropped_state(win, start),
@@ -326,11 +305,7 @@ def _single_slice_fill_full_plane_then_crop(win, start: int) -> None:
         interactive=True,
         immediate_axis_only=False,
     )
-    _busy_pump_until(
-        lambda: _crop_settled(win, start),
-        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-        "single-slice cold cropped fill",
-    )
+    _busy_pump_until(win, lambda: _crop_settled(win, start), "single-slice cold cropped fill")
 
 
 def test_single_slice_resident_crop_scrub_schedules_no_producers(qtbot):
@@ -357,8 +332,8 @@ def test_single_slice_resident_crop_scrub_schedules_no_producers(qtbot):
             before = _preparation_completed(win)
             win._on_slice_text_changed(0, f"{start}:{start + 200}")
             _busy_pump_until(
+                win,
                 lambda start=start: _crop_settled(win, start),
-                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
                 f"single-slice resident scrub {start}",
             )
             assert _preparation_completed(win) - before == 0, (
@@ -398,8 +373,8 @@ def test_single_slice_rebind_carries_the_new_window_semantics(qtbot):
             before = _preparation_completed(win)
             win._on_slice_text_changed(0, f"{start}:{start + 200}")
             _busy_pump_until(
+                win,
                 lambda start=start: _crop_settled(win, start),
-                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
                 f"semantics scrub {start}",
             )
             assert _preparation_completed(win) - before == 0, (
@@ -476,11 +451,7 @@ def test_single_slice_rebind_hover_reads_the_new_window_value(qtbot):
 
         before = _preparation_completed(win)
         win._on_slice_text_changed(0, "96:296")
-        _busy_pump_until(
-            lambda: _crop_settled(win, 96),
-            INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
-            "hover scrub 96",
-        )
+        _busy_pump_until(win, lambda: _crop_settled(win, 96), "hover scrub 96")
         assert _preparation_completed(win) - before == 0, (
             "window 96 was evaluated, so it does not exercise the rebind"
         )
@@ -497,8 +468,8 @@ def test_single_slice_rebind_hover_reads_the_new_window_value(qtbot):
             before = _preparation_completed(win)
             win._on_slice_text_changed(0, f"{start}:{start + 200}")
             _busy_pump_until(
+                win,
                 lambda start=start: _crop_settled(win, start),
-                INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
                 f"evaluated scrub {start}",
             )
         assert _preparation_completed(win) - before > 0, (
@@ -536,22 +507,14 @@ def test_born_cropped_single_slice_warms_its_plane_and_rebinds(qtbot):
         win.show()
         win._set_view_state(_single_slice_cropped_state(win, 94))
         win.update_image_view()
-        _busy_pump_until(
-            lambda: _crop_settled(win, 94),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "born-cropped single-slice fill",
-        )
+        _busy_pump_until(win, lambda: _crop_settled(win, 94), "born-cropped single-slice fill")
         slice_index = int(win.view_state.slice_indices[2])
         payload = win.renderer._frame_session.display_tile_payloads[0]
         assert tuple(np.shape(payload.native_residency_data)[:2]) == (336, 336)
 
         before = _preparation_completed(win)
         win._on_slice_text_changed(0, "96:296")
-        _busy_pump_until(
-            lambda: _crop_settled(win, 96),
-            INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
-            "born-cropped single-slice scrub",
-        )
+        _busy_pump_until(win, lambda: _crop_settled(win, 96), "born-cropped single-slice scrub")
         assert _preparation_completed(win) - before == 0, (
             "a born-cropped single-slice scrub over its warmed plane must rebind"
         )
@@ -599,9 +562,7 @@ def test_single_slice_slice_change_does_not_reuse_residency(qtbot):
                 return False
             return frame_session_settled(win)
 
-        _busy_pump_until(
-            slice_settled, INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0, "single-slice re-slice"
-        )
+        _busy_pump_until(win, slice_settled, "single-slice re-slice")
         assert _preparation_completed(win) - before > 0, (
             "a content-identity change must not be served by a resident rebind"
         )
@@ -863,11 +824,7 @@ def _fill_exact_montage_then_crop(win, start: int) -> None:
     full = win.view_state.with_montage_axis(2, columns=10, indices=_EXACT_TILE_INDICES, text="0:50")
     win._set_view_state(full)
     win.update_image_view()
-    _busy_pump_until(
-        lambda: frame_session_settled(win),
-        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-        "full-plane fill",
-    )
+    _busy_pump_until(win, lambda: frame_session_settled(win), "full-plane fill")
     win._apply_slice_state(
         0,
         _exact_cropped_state(win, start),
@@ -875,11 +832,7 @@ def _fill_exact_montage_then_crop(win, start: int) -> None:
         interactive=True,
         immediate_axis_only=False,
     )
-    _busy_pump_until(
-        lambda: _exact_crop_settled(win, start),
-        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-        "cropped fill",
-    )
+    _busy_pump_until(win, lambda: _exact_crop_settled(win, start), "cropped fill")
 
 
 def test_exact_montage_crop_scrub_rebinds_every_visible_tile(qtbot):
@@ -911,8 +864,8 @@ def test_exact_montage_crop_scrub_rebinds_every_visible_tile(qtbot):
             before = _preparation_completed(win)
             win._on_slice_text_changed(0, f"{start}:{start + 40}")
             _busy_pump_until(
+                win,
                 lambda start=start: _exact_crop_settled(win, start),
-                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
                 f"exact resident scrub {start}",
             )
             assert _preparation_completed(win) - before == 0, (
@@ -953,11 +906,7 @@ def test_born_cropped_exact_montage_rebinds_without_a_whole_plane_frame(qtbot):
         win.show()
         win._set_view_state(_exact_cropped_state(win, 10))
         win.update_image_view()
-        _busy_pump_until(
-            lambda: _exact_crop_settled(win, 10),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "born-cropped exact fill",
-        )
+        _busy_pump_until(win, lambda: _exact_crop_settled(win, 10), "born-cropped exact fill")
         session = win.renderer._frame_session
         payload = session.display_tile_payloads[0]
         assert payload.quality == "exact"
@@ -978,8 +927,8 @@ def test_born_cropped_exact_montage_rebinds_without_a_whole_plane_frame(qtbot):
             before = _preparation_completed(win)
             win._on_slice_text_changed(0, f"{start}:{start + 40}")
             _busy_pump_until(
+                win,
                 lambda start=start: _exact_crop_settled(win, start),
-                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
                 f"born-cropped exact scrub {start}",
             )
             assert _preparation_completed(win) - before == 0, (
@@ -1049,8 +998,8 @@ def test_returning_to_a_committed_window_keeps_semantics_with_the_anchor(qtbot):
         for start in (11, 12, 13, 12, 11, 10, 11):
             win._on_slice_text_changed(0, f"{start}:{start + 40}")
             _busy_pump_until(
+                win,
                 lambda start=start: _exact_crop_settled(win, start),
-                INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
                 f"return scrub {start}",
             )
             payloads = win.renderer._frame_session.display_tile_payloads
@@ -1128,11 +1077,7 @@ def test_document_change_releases_the_pinned_canonical_planes(qtbot):
         assert pinned_bytes > 0
 
         win.notify_data_changed()
-        _busy_pump_until(
-            lambda: frame_session_settled(win),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "settle after document change",
-        )
+        _busy_pump_until(win, lambda: frame_session_settled(win), "settle after document change")
         assert _pinned_canonical_planes(win) == (0, 0), (
             "planes of the retired document generation stayed pinned"
         )
@@ -1164,11 +1109,7 @@ def test_operation_change_releases_the_pinned_canonical_planes(qtbot):
         assert pinned_bytes > 0
 
         win.request_operation("centered_fft", 2)
-        _busy_pump_until(
-            lambda: frame_session_settled(win),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 6 / 1000.0,
-            "settle after operation change",
-        )
+        _busy_pump_until(win, lambda: frame_session_settled(win), "settle after operation change")
         assert _pinned_canonical_planes(win) == (0, 0), (
             "planes of the pre-edit operation chain stayed pinned"
         )
@@ -1199,8 +1140,8 @@ def test_disabling_the_capability_releases_the_pinned_canonical_planes(qtbot):
         win._set_resident_crop_rebind_enabled(False)
         win._on_slice_text_changed(0, "11:51")
         _busy_pump_until(
+            win,
             lambda: _exact_crop_settled(win, 11),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
             "scrub with the capability off",
         )
         assert _pinned_canonical_planes(win) == (0, 0)
@@ -1268,11 +1209,7 @@ def test_born_cropped_montage_warms_canonical_planes_and_rebinds(qtbot):
         win.show()
         win._set_view_state(_field_cropped_state(win, 38))
         win.update_image_view()
-        _busy_pump_until(
-            lambda: _crop_settled(win, 38),
-            INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-            "born-cropped fill",
-        )
+        _busy_pump_until(win, lambda: _crop_settled(win, 38), "born-cropped fill")
         session = win.renderer._frame_session
         payload = session.display_tile_payloads[0]
         assert payload.source_anchor.source_rect == (38, 238, 66, 266)
@@ -1289,8 +1226,8 @@ def test_born_cropped_montage_warms_canonical_planes_and_rebinds(qtbot):
             before = _preparation_completed(win)
             win._on_slice_text_changed(0, f"{start}:{start + 200}")
             _busy_pump_until(
+                win,
                 lambda start=start: _crop_settled(win, start),
-                INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
                 f"born-cropped scrub {start}",
             )
             assert _preparation_completed(win) - before == 0, (
@@ -1393,7 +1330,7 @@ def _gradient_levels_anchored(win, start: int) -> bool:
     return displayed == tuple(round(float(value), 4) for value in summary.bounds)
 
 
-def _gradient_scrub(win, starts, *, deadline_ms, operations=()) -> list[dict]:
+def _gradient_scrub(win, starts, *, operations=()) -> list[dict]:
     """Fill the whole plane, crop, scrub, and report each settled step."""
 
     if operations:
@@ -1405,11 +1342,7 @@ def _gradient_scrub(win, starts, *, deadline_ms, operations=()) -> list[dict]:
     )
     win._set_view_state(full)
     win.update_image_view()
-    _busy_pump_until(
-        lambda: frame_session_settled(win),
-        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-        "full-plane fill",
-    )
+    _busy_pump_until(win, lambda: frame_session_settled(win), "full-plane fill")
     first = int(starts[0])
     win._apply_slice_state(
         0,
@@ -1418,21 +1351,16 @@ def _gradient_scrub(win, starts, *, deadline_ms, operations=()) -> list[dict]:
         interactive=True,
         immediate_axis_only=False,
     )
-    _busy_pump_until(
-        lambda: _gradient_levels_anchored(win, first),
-        INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
-        "cropped fill",
-    )
+    _busy_pump_until(win, lambda: _gradient_levels_anchored(win, first), "cropped fill")
 
     steps = []
     for start in tuple(starts)[1:]:
         start = int(start)
         before = _preparation_completed(win)
-        started = perf_counter()
         win._on_slice_text_changed(0, f"{start}:{start + 40}")
         _busy_pump_until(
+            win,
             lambda start=start: _gradient_levels_anchored(win, start),
-            deadline_ms / 1000.0,
             f"gradient scrub {start}",
         )
         steps.append(
@@ -1440,7 +1368,6 @@ def _gradient_scrub(win, starts, *, deadline_ms, operations=()) -> list[dict]:
                 "start": start,
                 "producers": _preparation_completed(win) - before,
                 "levels": tuple(round(float(value), 4) for value in win.img_view.getLevels()),
-                "anchor_ms": (perf_counter() - started) * 1000.0,
             }
         )
     return steps
@@ -1468,7 +1395,7 @@ def test_rebound_crop_window_reanchors_its_own_auto_levels(qtbot):
     win.resize(790, 780)
     try:
         win.show()
-        steps = _gradient_scrub(win, (10, 11, 12, 13), deadline_ms=INTERACTION_SETTLE_HARD_LIMIT_MS)
+        steps = _gradient_scrub(win, (10, 11, 12, 13))
         for step in steps:
             assert step["producers"] == 0, (
                 f"window {step['start']}: re-anchoring must not schedule display producers "
@@ -1510,9 +1437,6 @@ def test_rebind_and_evaluation_paths_settle_identical_levels(qtbot):
             steps = _gradient_scrub(
                 win,
                 (10, 11, 12),
-                # The evaluation path re-runs every tile, so it needs the cold
-                # budget; the rebind path is measured for speed separately.
-                deadline_ms=INTERACTION_SETTLE_HARD_LIMIT_MS * 4,
             )
             return [step["levels"] for step in steps]
         finally:
@@ -1559,7 +1483,6 @@ def test_operation_pipeline_montage_reanchors_its_own_auto_levels(qtbot):
         steps = _gradient_scrub(
             win,
             (10, 11, 12),
-            deadline_ms=INTERACTION_SETTLE_HARD_LIMIT_MS * 4,
             operations=(CenteredFFT(axis=2),),
         )
         levels = [step["levels"] for step in steps]
@@ -1604,7 +1527,6 @@ def test_operation_pipeline_rebind_and_evaluation_paths_settle_identical_levels(
             steps = _gradient_scrub(
                 win,
                 (10, 11, 12),
-                deadline_ms=INTERACTION_SETTLE_HARD_LIMIT_MS * 4,
                 operations=(CenteredFFT(axis=2),),
             )
             return [step["levels"] for step in steps]

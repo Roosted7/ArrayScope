@@ -2,12 +2,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.operations.evaluator import EvaluationResult
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests import seams
+from tests.settle import SettleTimeout, settle_window
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
@@ -86,7 +85,8 @@ def _assert_view_contains_applied_montage_plan(win):
 
 def _wait_for_committed_session_geometry(win, qtbot, *, expected_indices=None):
     try:
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: (
                 win.renderer._frame_session is not None
                 and win.renderer._frame_session.visible_plan_complete()
@@ -96,9 +96,8 @@ def _wait_for_committed_session_geometry(win, qtbot, *, expected_indices=None):
                     or win.renderer._frame_session.plan.geometry.indices == tuple(expected_indices)
                 )
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
-    except QtBotTimeoutError:
+    except SettleTimeout:
         session = win.renderer._frame_session
         level_stats = win.renderer._montage_level_stats_for_session(session)
         pytest.fail(
@@ -152,10 +151,7 @@ def _use_slice_zero(win, qtbot):
     win._set_view_state(win.view_state.with_slice(2, 0))
     win.render(reason="test-initial-slice")
     _process_events(qtbot, count=20)
-    qtbot.waitUntil(
-        lambda: not win.montage_tile_evaluation_controller.is_busy(),
-        timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
-    )
+    settle_window(win, lambda: not win.montage_tile_evaluation_controller.is_busy())
     _reset_warm_tile_state(win)
 
 
@@ -165,14 +161,8 @@ def _settle_initial_render(win, qtbot):
     tiles, so tests control exactly which tiles are warm and which calls the
     patched montage controller sees."""
 
-    qtbot.waitUntil(
-        lambda: getattr(win, "_committed_display_frame", None) is not None,
-        timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
-    )
-    qtbot.waitUntil(
-        lambda: not win.montage_tile_evaluation_controller.is_busy(),
-        timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
-    )
+    settle_window(win, lambda: getattr(win, "_committed_display_frame", None) is not None)
+    settle_window(win, lambda: not win.montage_tile_evaluation_controller.is_busy())
     _reset_warm_tile_state(win)
 
 
@@ -213,7 +203,8 @@ def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbo
         win.update_image_view()
         _wait_for_committed_session_geometry(win, qtbot)
         tile_10 = win.renderer._frame_session.plan.tiles[10]
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: (
                 win.display_geometry.context_for_view_point(
                     tile_10.x0 + 1,
@@ -221,7 +212,6 @@ def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbo
                 )
                 is not None
             ),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
         context = win.display_geometry.context_for_view_point(tile_10.x0 + 1, tile_10.y0 + 1)
 
@@ -252,12 +242,12 @@ def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
 
         _wait_for_committed_session_geometry(win, qtbot)
         tile_10 = win.renderer._frame_session.plan.tiles[10]
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: (
                 win.display_geometry.context_for_view_point(tile_10.x0 + 1, tile_10.y0 + 1)
                 is not None
             ),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
         context = win.display_geometry.context_for_view_point(tile_10.x0 + 1, tile_10.y0 + 1)
 
@@ -323,12 +313,12 @@ def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qt
     win.show()
     qtbot.addWidget(win)
     try:
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: (
                 win.img_view.graphicsView.viewport().width() >= 600
                 and win.img_view.graphicsView.viewport().height() >= 400
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(5)), text=":")
@@ -336,10 +326,7 @@ def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qt
         win.render(reason="test-montage")
         _wait_for_committed_session_geometry(win, qtbot, expected_indices=range(5))
         win.img_view.getView().setRange(xRange=(0, 320), yRange=(0, 384), padding=0)
-        qtbot.waitUntil(
-            lambda: win.img_view.viewport_controller.mode.value == "user",
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-        )
+        settle_window(win, lambda: win.img_view.viewport_controller.mode.value == "user")
         before = win.img_view.getView().viewRange()
 
         win._set_view_state(
@@ -433,13 +420,13 @@ def test_wgpu_expanded_montage_never_hides_retained_sixty(qtbot):
                 surface.presentation_diagnostics().get("physically_visible_tile_count", 0) or 0
             )
 
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: bool(
                 win.renderer._frame_session is not None
                 and win.renderer._frame_session.visible_plan_complete()
                 and physical_count() == 60
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
         retained_sources = set(retained_indices)
@@ -482,21 +469,18 @@ def test_wgpu_expanded_montage_never_hides_retained_sixty(qtbot):
                 win.update_image_view()
             return bool(session.required_first_pixels_presented() and physical_count() >= 60)
 
-        qtbot.waitUntil(
-            expanded_and_fitted_without_loss,
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-        )
+        settle_window(win, expanded_and_fitted_without_loss)
         assert observations
         assert min(count for count, _missing in observations) >= 60, observations
         assert all(not missing for _count, missing in observations), observations
         session = win.renderer._frame_session
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: bool(
                 session.visible_plan_complete()
                 and session.required_target_settled()
                 and physical_count() == 272
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         assert set(_visible_backend_acknowledgements(win, "wgpu")) == set(range(272))
     finally:
@@ -548,12 +532,12 @@ def test_wgpu_zoom_out_completes_finer_resident_montage(qtbot):
                 surface.presentation_diagnostics().get("physically_visible_tile_count", 0) or 0
             )
 
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: bool(
                 win.renderer._frame_session.visible_plan_complete()
                 and physical_count() == tile_count
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         session = win.renderer._frame_session
         display_height, display_width = tuple(
@@ -566,12 +550,12 @@ def test_wgpu_zoom_out_completes_finer_resident_montage(qtbot):
             padding=0,
         )
         win.renderer.apply_montage_viewport_retarget()
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: any(
                 identity.lod.level == 0
                 for identity in _visible_backend_acknowledgements(win, "wgpu").values()
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
         win.img_view.getView().setRange(
@@ -581,13 +565,13 @@ def test_wgpu_zoom_out_completes_finer_resident_montage(qtbot):
         )
         win.update_image_view()
         session = win.renderer._frame_session
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: bool(
                 session.visible_plan_complete()
                 and session.required_target_settled()
                 and physical_count() == tile_count
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         assert set(_visible_backend_acknowledgements(win, "wgpu")) == set(range(tile_count))
     finally:
@@ -627,12 +611,12 @@ def test_pre_event_loop_complex_montage_eventually_fits_committed_plan(qtbot, ba
         win.update_image_view()
         win.resize(1200, 820)
 
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: (
                 win.renderer._frame_session is not None
                 and win.renderer._frame_session.visible_plan_complete()
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
         def committed_plan_is_fitted():
@@ -646,7 +630,7 @@ def test_pre_event_loop_complex_montage_eventually_fits_committed_plan(qtbot, ba
                 and view_range[1][1] >= float(height)
             )
 
-        qtbot.waitUntil(committed_plan_is_fitted, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+        settle_window(win, committed_plan_is_fitted)
         session = win.renderer._frame_session
         viewport = win.img_view.graphicsView.viewport()
         assert tuple(session.viewport_shape) == (viewport.height(), viewport.width())
@@ -897,11 +881,11 @@ def test_montage_interactive_render_commits_tiled_frame(qtbot):
             win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":")
         )
         win.render(reason="test-montage")
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: (
                 getattr(getattr(win, "_committed_display_frame", None), "scene", None) is not None
             ),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
 
         frame = win._committed_display_frame
@@ -930,10 +914,7 @@ def test_montage_commits_cached_tiles_immediately_with_loading_placeholders(qtbo
         )
         win.update_image_view()
 
-        qtbot.waitUntil(
-            lambda: win.renderer._frame_session.visible_plan_complete(),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
-        )
+        settle_window(win, lambda: win.renderer._frame_session.visible_plan_complete())
 
         states = win.renderer._frame_session.ensure_tile_states()
         assert states[0] == MontageTileState.LOADED
@@ -960,7 +941,8 @@ def test_montage_loading_overlay_clears_after_final_delayed_commit(qtbot, monkey
         win.renderer._show_frame_session_loading_overlay(win.renderer._frame_session)
         assert win.img_view._evaluation_overlay.isVisible()
 
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: bool(
                 win.renderer._frame_session.visible_plan_complete()
                 and (
@@ -968,7 +950,6 @@ def test_montage_loading_overlay_clears_after_final_delayed_commit(qtbot, monkey
                     or not win.img_view._evaluation_overlay.isVisible()
                 )
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         assert getattr(win.img_view, "_montage_tile_overlay_items", []) == []
         assert win.renderer._frame_session.visible_plan_complete()
@@ -1037,20 +1018,17 @@ def test_montage_active_tiles_are_all_accounted_for(qtbot, monkeypatch):
             win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(12)), text=":")
         )
         win.update_image_view()
-        qtbot.waitUntil(
-            lambda: win.renderer._frame_session is not None,
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
-        )
+        settle_window(win, lambda: win.renderer._frame_session is not None)
 
         active_ids = set(win.renderer._frame_session.visible_tile_numbers)
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: all(
                 win.renderer._frame_session.ensure_tile_states()[int(tile.montage_index)]
                 != MontageTileState.UNLOADED
                 for tile in win.renderer._frame_session.plan.tiles
                 if int(tile.montage_index) in active_ids
             ),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
         states = win.renderer._frame_session.ensure_tile_states()
         for tile in win.renderer._frame_session.plan.tiles:
@@ -1077,9 +1055,9 @@ def test_montage_pan_schedules_viewport_update(qtbot, monkeypatch):
             win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(12)), text=":")
         )
         win.update_image_view()
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: getattr(win.renderer._frame_session, "display_committed", False),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
         monkeypatch.setattr(
             win.renderer, "retarget_montage_viewport", lambda: calls.append("retargeted")
@@ -1087,7 +1065,7 @@ def test_montage_pan_schedules_viewport_update(qtbot, monkeypatch):
 
         win.img_view.getView().setRange(xRange=(6, 9), yRange=(0, 2), padding=0)
 
-        qtbot.waitUntil(lambda: bool(calls), timeout=min(1000, INTERACTION_SETTLE_HARD_LIMIT_MS))
+        settle_window(win, lambda: bool(calls))
     finally:
         win.close()
 
@@ -1115,10 +1093,7 @@ def test_cached_montage_tile_rebinds_to_current_layout(qtbot, monkeypatch):
         new_state = win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
         win._set_view_state(new_state)
         win.update_image_view()
-        qtbot.waitUntil(
-            lambda: win.renderer._frame_session.visible_plan_complete(),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
-        )
+        settle_window(win, lambda: win.renderer._frame_session.visible_plan_complete())
 
         new_tile = win.renderer._frame_session.plan.tiles[1]
         _assert_committed_tile_value(win, new_tile, 11)
@@ -1266,10 +1241,7 @@ def test_enabling_montage_with_cached_tile_preserves_relative_window_fractions(q
         )
         win._set_view_state(state)
         win.update_image_view()
-        qtbot.waitUntil(
-            lambda: win.renderer._frame_session.visible_plan_complete(),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
-        )
+        settle_window(win, lambda: win.renderer._frame_session.visible_plan_complete())
 
         bounds = tuple(float(value) for value in win.img_view.getHistogramDataBounds())
         expected = relative_levels((5.0, 15.0), (0.0, 19.0), bounds)
@@ -1317,12 +1289,12 @@ def test_shifting_montage_range_preserves_relative_window_fractions(qtbot, monke
             )
         win._set_view_state(first_state)
         win.update_image_view()
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: (
                 tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
                 == (0.0, 119.0)
             ),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (
             31.315789,
@@ -1336,12 +1308,12 @@ def test_shifting_montage_range_preserves_relative_window_fractions(qtbot, monke
         shifted_state = win.view_state.with_montage_axis(2, columns=2, indices=(1, 2), text="1:3")
         win._set_view_state(shifted_state)
         win.update_image_view()
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: (
                 tuple(round(float(value), 6) for value in win.img_view.getLevels())
                 == (131.315789, 193.947368)
             ),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (
@@ -1384,10 +1356,7 @@ def test_cached_montage_commit_uses_all_loaded_tiles_for_initial_histogram(qtbot
         win.img_view.getView().setRange(xRange=(0, 20), yRange=(0, 2), padding=0)
         win._set_view_state(state)
         win.update_image_view()
-        qtbot.waitUntil(
-            lambda: win.renderer._frame_session.visible_plan_complete(),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
-        )
+        settle_window(win, lambda: win.renderer._frame_session.visible_plan_complete())
 
         bounds = tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds())
         assert bounds[1] > 1000.0
@@ -1471,14 +1440,11 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
         )
         win.update_image_view()
 
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: getattr(win.renderer._frame_session, "display_committed", False),
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
-        qtbot.waitUntil(
-            lambda: win.img_view.montageDisplayMode() == "tile_layer",
-            timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
-        )
+        settle_window(win, lambda: win.img_view.montageDisplayMode() == "tile_layer")
         assert any(
             state.rgb_base is not None for state in win.img_view._montage_tile_layer.states.values()
         )
@@ -1492,12 +1458,12 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
         win.img_view._on_histogram_level_change_finished()
         assert win.renderer._frame_session.force_auto is False
         assert win.renderer._frame_session.level_generation.target_levels == desired
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: all(
                 tuple(state.levels) == desired
                 for state in win.img_view._montage_tile_layer.states.values()
             ),
-            timeout=min(1000, INTERACTION_SETTLE_HARD_LIMIT_MS),
         )
         assert win.renderer._frame_session.has_stale_level_presentations() is False
     finally:
@@ -1576,13 +1542,13 @@ def test_semantic_montage_transition_never_leaves_old_tiles_visible(
         win._set_view_state(state)
         win.update_image_view()
         try:
-            qtbot.waitUntil(
+            settle_window(
+                win,
                 lambda: bool(
                     getattr(win.renderer._frame_session, "display_committed", False)
                     and win.renderer._frame_session.visible_plan_complete()
                     and set(_visible_backend_acknowledgements(win, backend)) == set(range(6))
                 ),
-                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
             )
         except Exception:
             stalled = win.renderer._frame_session
@@ -1622,10 +1588,7 @@ def test_semantic_montage_transition_never_leaves_old_tiles_visible(
             win._set_view_state(win.view_state.transposed_image_axes())
         win.update_image_view()
 
-        qtbot.waitUntil(
-            lambda: win.renderer._frame_session is not previous,
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-        )
+        settle_window(win, lambda: win.renderer._frame_session is not previous)
         current = win.renderer._frame_session
         if transition == "axes":
             # An X/Y swap is a pure display transform on a canonical backend: the
@@ -1648,7 +1611,7 @@ def test_semantic_montage_transition_never_leaves_old_tiles_visible(
                 lifecycle.target.identity,
             )
 
-        qtbot.waitUntil(current.visible_plan_complete, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+        settle_window(win, current.visible_plan_complete)
         final_acknowledgements = _visible_backend_acknowledgements(win, backend)
         assert set(final_acknowledgements) == set(current.visible_tile_numbers), {
             "physical": set(final_acknowledgements),
@@ -1713,9 +1676,9 @@ def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend
         )
         win._set_view_state(initial)
         win.update_image_view()
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: bool(getattr(win.renderer._frame_session, "display_committed", False)),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         assert _visible_backend_acknowledgements(win, backend)
         previous = win.renderer._frame_session
@@ -1730,18 +1693,15 @@ def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend
         win._set_view_state(retargeted)
         win.update_image_view()
 
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: (
                 tuple(int(tile.source_index) for tile in win.renderer._frame_session.plan.tiles)
                 == tuple(range(2, 8))
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         current = win.renderer._frame_session
-        qtbot.waitUntil(
-            lambda: current.required_target_settled(),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-        )
+        settle_window(win, lambda: current.required_target_settled())
         assert current is previous
         assert current.semantic_key == previous_semantic_key
         for tile_number, acknowledged_identity in _visible_backend_acknowledgements(
@@ -1808,19 +1768,16 @@ def test_one_index_source_window_retarget_remaps_59_without_black_frame(
         )
         win._set_view_state(initial)
         win.update_image_view()
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: bool(
                 win.renderer._frame_session is not None
                 and win.renderer._frame_session.visible_plan_complete()
                 and len(_visible_backend_acknowledgements(win, backend)) == 60
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win.img_view.setLevels(-1.0, 200.0)
-        qtbot.waitUntil(
-            lambda: not win.renderer._frame_session.has_stale_level_presentations(),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-        )
+        settle_window(win, lambda: not win.renderer._frame_session.has_stale_level_presentations())
 
         surface = surface_for_view(win.img_view)
         original_invalidate = surface.invalidate_tiled_presentation
@@ -1872,14 +1829,14 @@ def test_one_index_source_window_retarget_remaps_59_without_black_frame(
         win.update_image_view()
 
         try:
-            qtbot.waitUntil(
+            settle_window(
+                win,
                 lambda: bool(
                     tuple(int(tile.source_index) for tile in win.renderer._frame_session.plan.tiles)
                     == target_indices
                     and win.renderer._frame_session.visible_plan_complete()
                     and len(_visible_backend_acknowledgements(win, backend)) == 60
                 ),
-                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
             )
         except Exception:
             stalled = win.renderer._frame_session
@@ -1982,9 +1939,9 @@ def test_large_complex_montage_auto_uses_tile_layer(qtbot):
         )
         win.update_image_view()
 
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: getattr(win.renderer._frame_session, "display_committed", False),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
         assert win.img_view.montageDisplayMode().endswith("tile_layer")
@@ -2013,22 +1970,16 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_update_base_im
             win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
         )
         win.update_image_view()
-        qtbot.waitUntil(
-            lambda: win.img_view.montageDisplayMode() == "tile_layer",
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-        )
-        qtbot.waitUntil(
-            lambda: bool(win.img_view._montage_tile_layer.states),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-        )
-        qtbot.waitUntil(
+        settle_window(win, lambda: win.img_view.montageDisplayMode() == "tile_layer")
+        settle_window(win, lambda: bool(win.img_view._montage_tile_layer.states))
+        settle_window(
+            win,
             lambda: (
                 not getattr(win.renderer._frame_session, "dirty_payloads", {})
                 and not getattr(win.renderer._frame_session, "pending_payload_upserts", {})
                 and not getattr(win.renderer._frame_session, "pending_removals", set())
                 and not getattr(win.renderer._frame_session, "active_tile_requests", set())
             ),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
 
         def fail_base_image_item_update(*args, **kwargs):
@@ -2040,9 +1991,9 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_update_base_im
         # Wait for the coalesced preview's actual tile-layer work. A fixed
         # qWait races the 33 ms timer under xdist and makes the last timing
         # channel depend on host load.
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: win.img_view.lastImageUploadTiming().tile_layer_visible_items > 0,
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
         win.img_view._on_histogram_level_change_finished()
 

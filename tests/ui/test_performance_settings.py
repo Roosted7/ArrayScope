@@ -1,5 +1,6 @@
 import numpy as np
 
+from tests.settle import settle_window
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
 from tests.ui.helpers import process_events as _process_events
 
@@ -384,7 +385,14 @@ def test_host_cache_compression_menu_switches_and_persists(qtbot):
         assert win.app_settings.chunk_transport_codec == ChunkTransportCodecChoice.RAW
         zfp = _submenu_action(win, "Performance", "Host Cache Compression", "ZFP (lossless)")
         zfp.trigger()
-        _process_events(qtbot)
+        # A fixed number of event-loop turns is how this went red under load: the
+        # codec switch tears down and rebuilds cache owners, and eighty
+        # milliseconds of pumping is enough for that only on an idle box. Wait
+        # for the switch the trigger promised instead of for a pump count.
+        settle_window(
+            win,
+            lambda: win.app_settings.chunk_transport_codec == ChunkTransportCodecChoice.ZFP,
+        )
         assert win.app_settings.chunk_transport_codec == ChunkTransportCodecChoice.ZFP
         assert win._settings.value("chunk_transport_codec") == "zfp"
         assert zfp.isChecked()

@@ -26,6 +26,11 @@ def _fake_npy_command(tmp_path: Path) -> Path:
         "import json, sys, time\n"
         "import numpy as np\n"
         "args = sys.argv[1:]\n"
+        # Written before the sleep, so its absence proves the child never ran
+        # -- the difference between refusing to spawn and killing what spawned.
+        "started = next((a.split('=', 1)[1] for a in args if a.startswith('--started=')), None)\n"
+        "if started:\n"
+        "    open(started, 'w').write('1')\n"
         "if '--sleep' in args:\n"
         "    time.sleep(float(args[args.index('--sleep') + 1]))\n"
         "input_path, output_path = args[-2:]\n"
@@ -248,16 +253,17 @@ def test_cfl_reader_floor_never_invents_axes_a_tool_did_not_write(tmp_path):
 # --- cancellation reaches the child through the builder path -----------------
 
 
-def _sleeping_command_spec(operation_id: str, executable: Path):
+def _sleeping_command_spec(operation_id: str, executable: Path, started_marker: Path | None = None):
     """A plugin spec whose bound fn is the real command-runtime builder."""
 
     from arrayscope.operations import library
     from arrayscope.operations.plugins import PluginOperationSpec
 
+    marker = "" if started_marker is None else f' --started="{started_marker}"'
     build = library._make_command_build(
         "command",
         {
-            "command_template": f'"{executable}" --sleep 5 {{in}} {{out}}',
+            "command_template": f'"{executable}"{marker} --sleep 5 {{in}} {{out}}',
             "handoff": "npy",
             "shell": False,
             "timeout_s": None,
@@ -295,21 +301,26 @@ def test_pipeline_evaluation_stops_a_command_op_on_a_pre_cancelled_token(tmp_pat
     from arrayscope.operations.pipeline import evaluate
 
     executable = _fake_npy_command(tmp_path)
+    started_marker = tmp_path / "child-started"
     seams.reset_plugin_cache()
     try:
-        spec = _sleeping_command_spec("demo:sleepy-pipeline", executable)
+        spec = _sleeping_command_spec("demo:sleepy-pipeline", executable, started_marker)
         plugins._SPEC_CACHE[spec.id] = spec
         operation = plugins.PluginOperation(plugin_id=spec.id)
         context = SimpleNamespace(cancellation_token=SimpleNamespace(cancelled=True))
 
-        started = time.monotonic()
         with pytest.raises(EvaluationCancelled):
             evaluate(np.ones((2, 2), dtype=np.float32), (operation,), evaluation_context=context)
-        elapsed = time.monotonic() - started
     finally:
         seams.reset_plugin_cache()
 
     # The token used to be dropped on the floor: apply() took no context and
-    # apply_to_region deleted the one it was handed, so this waited out the
-    # full 5 s sleep instead of refusing before the child was even spawned.
-    assert elapsed < 2.0
+    # apply_to_region deleted the one it was handed, so this waited out the full
+    # 5 s sleep instead of refusing before the child was even spawned.
+    #
+    # That was pinned as ``elapsed < 2.0``, which is the weaker claim and the
+    # load-sensitive one: it passes for a spawn that got killed early, and it
+    # fails for a correct refusal on a box too busy to return in two seconds.
+    # The child writes this marker before it sleeps, so its absence says exactly
+    # what the paragraph above says -- nothing was spawned at all.
+    assert not started_marker.exists(), "the pre-cancelled token still spawned the child"

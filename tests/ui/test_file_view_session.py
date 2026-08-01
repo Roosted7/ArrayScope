@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from arrayscope.window.file_view_session import FileViewSessionMixin
 from arrayscope.window.viewport_continuity import ViewportContinuityTransaction
+from tests.settle import settle_window
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
 
 
@@ -420,7 +421,10 @@ def test_settings_viewport_session_uses_viewport_continuity_transaction(qtbot, m
 
     window = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(window)
-    qtbot.wait(20)
+    # Twenty milliseconds is not a property of the restore, it is a guess about
+    # the machine.  The recorded call is the event this test is about, so wait
+    # for that; the assertions below still fail if the wrong one arrives.
+    settle_window(window, lambda: bool(calls))
 
     assert calls
     assert calls[0] == ((222, 333), "settings-restore")

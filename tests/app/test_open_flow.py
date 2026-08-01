@@ -12,6 +12,8 @@ import numpy as np
 import pytest
 from pyqtgraph.Qt import QtCore
 
+from tests.settle import settle_until
+
 
 @pytest.fixture(autouse=True)
 def _hermetic_backend_and_teardown():
@@ -74,17 +76,48 @@ def open_app():
     return ensure_open_app()
 
 
-def _pump_until(app, predicate, timeout_s=30.0):
-    deadline = time.monotonic() + timeout_s
-    while not predicate() and time.monotonic() < deadline:
-        app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
-    assert predicate(), "condition not reached before timeout"
+def _session_progress(session):
+    """What the load has published about itself, as one comparable snapshot.
+
+    The reader thread reports a fraction per slice and the session mirrors it
+    into ``_latest_fraction``; the window and the status widget appear on their
+    own edges.  Any of these moving means the load is running, however slowly.
+    """
+
+    return (
+        float(getattr(session, "_latest_fraction", 0.0) or 0.0),
+        session.window is not None,
+        session.loading_window is not None,
+        session._status_widget is not None,
+        bool(getattr(session, "_terminal", False)),
+    )
 
 
-def _run_session(app, session, timeout_s=30.0):
+def _pump_until(app, predicate, session, label):
+    del app  # the shared pump owns the event loop
+    settle_until(
+        predicate,
+        progress=lambda: _session_progress(session),
+        label=label,
+    )
+
+
+def _run_session(app, session):
     terminal = {"done": False}
     session.done.connect(lambda: terminal.__setitem__("done", True))
-    _pump_until(app, lambda: terminal["done"], timeout_s)
+    # ``done`` may already have fired: a caller that pumped the loop before
+    # handing the session over (the streaming test opens the viewer first) can
+    # have consumed the whole load, and connecting afterwards then waits for a
+    # signal that will never come again.  The old busy ``processEvents`` spin
+    # hid that by holding the GIL and starving the reader thread it was waiting
+    # for -- i.e. the test depended on its own wait being slow. ``_terminal`` is
+    # the state the signal announces, so ask about the state.
+    _pump_until(
+        app,
+        lambda: terminal["done"] or bool(session._terminal),
+        session,
+        "load reaches a terminal state",
+    )
     return session
 
 
@@ -200,7 +233,12 @@ def test_closing_viewer_mid_load_cancels_reader(open_app, tmp_path, monkeypatch)
     monkeypatch.setattr(progressive, "_check_cancel", blocking_check)
 
     session = open_path_async(path)
-    _pump_until(open_app, lambda: session.window is not None and reader_parked.is_set())
+    _pump_until(
+        open_app,
+        lambda: session.window is not None and reader_parked.is_set(),
+        session,
+        "viewer opens and the reader parks",
+    )
     win = session.window
 
     # Spy on the window mutations a terminal handler would perform.
@@ -223,7 +261,7 @@ def test_closing_viewer_mid_load_cancels_reader(open_app, tmp_path, monkeypatch)
     # (a) The reader thread is cancelled and joins promptly.
     assert session.wait(timeout=10.0)
     # Let any queued terminal signal (cancelled/finished) be delivered.
-    _pump_until(open_app, lambda: session._terminal)
+    _pump_until(open_app, lambda: session._terminal, session, "load reaches a terminal state")
     # (b) No terminal handler ran against the closed window.
     assert title_calls == []
     assert notify_calls == []
@@ -258,7 +296,12 @@ def test_finished_handler_ignores_closed_viewer(open_app, tmp_path, monkeypatch)
 
     session = open_path_async(path)
     try:
-        _pump_until(open_app, lambda: session.window is not None and reader_parked.is_set())
+        _pump_until(
+            open_app,
+            lambda: session.window is not None and reader_parked.is_set(),
+            session,
+            "viewer opens and the reader parks",
+        )
         win = session.window
 
         title_calls = []
@@ -316,20 +359,44 @@ def test_streaming_rec_updates_viewer_before_completion(open_app, tmp_path, monk
     monkeypatch.setattr(open_flow, "_STREAM_REFRESH_MIN_INTERVAL_S", 0.0)
     monkeypatch.setattr(open_flow, "_STREAM_REFRESH_MIN_FRACTION_STEP", 0.0)
 
-    session = open_path_async(path)
-    _pump_until(open_app, lambda: session.window is not None)
-    saw_status_widget = session._status_widget is not None
+    # Record the widget's creation instead of sampling for its presence later.
+    # A sample cannot express "it appeared and then went away": one pump slice
+    # can carry the probe, all four progress events and the terminal handler,
+    # and the sample then reads the post-load state and calls it the absence of
+    # a streaming phase.  This test used to pass only because the wait it ran
+    # first was slow enough to hold the reader thread back.
+    from arrayscope.ui import load_status
+
+    status_widgets = []
+    original_status_widget = load_status.LoadStatusWidget
+
+    class RecordingStatusWidget(original_status_widget):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            status_widgets.append(self)
+
+    monkeypatch.setattr(load_status, "LoadStatusWidget", RecordingStatusWidget)
+
+    # Patched on the class, before the session exists.  Bound to the instance
+    # after the viewer opens -- which is where this lived -- it misses every
+    # streaming refresh the load already delivered, and a load that finishes
+    # inside one pump slice delivers all of them before the recorder is on.
+    from arrayscope.window import ArrayScopeWindow
+
     autolevel_refreshes = []
-    original_notify = session.window.notify_data_changed
+    original_notify = ArrayScopeWindow.notify_data_changed
 
-    def record_notify(*, force_autolevel=False):
+    def record_notify(self, *, force_autolevel=False):
         autolevel_refreshes.append(bool(force_autolevel))
-        return original_notify(force_autolevel=force_autolevel)
+        return original_notify(self, force_autolevel=force_autolevel)
 
-    monkeypatch.setattr(session.window, "notify_data_changed", record_notify)
+    monkeypatch.setattr(ArrayScopeWindow, "notify_data_changed", record_notify)
+
+    session = open_path_async(path)
+    _pump_until(open_app, lambda: session.window is not None, session, "streaming viewer opens")
     _run_session(open_app, session)
     try:
-        assert saw_status_widget
+        assert status_widgets, "the streaming probe opened the viewer without a status widget"
         assert session._status_widget is None
         assert autolevel_refreshes
         assert all(autolevel_refreshes)

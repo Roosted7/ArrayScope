@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from tests.settle import settle_window
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
@@ -14,23 +13,26 @@ from tests.ui.helpers import (
     use_pyqtgraph_backend,
 )
 
+# ``complex-fft`` used to be xfail(raises=QtBotTimeoutError): the transition
+# does complete, it just takes longer than the 5 s interaction cap, so the wait
+# expired and the expired wait was declared the expected outcome.  That made the
+# xfail a latency assertion wearing a correctness test's clothes, and it cost
+# the correctness claim entirely — nothing in this file has ever verified that
+# the complex path presents the 272-tile physical union, because the run never
+# got that far.  The wait now bounds a wedge rather than a duration, so the
+# parameter is an ordinary one and the assertions below finally apply to it.
+#
+# The latency itself is unchanged and still red: R5 in docs/queue.md, measured
+# by ``arrayscope.tools.profile_montage_workflow``, whose FFT-over-dim-2 montage
+# stage records per-step settlement time on a quiet machine. A pytest worker
+# sharing a box with fifteen others cannot adjudicate a 5 s bar.
+
 
 @pytest.mark.parametrize(
     "complex_fft",
     [
         pytest.param(False, id="scalar"),
-        pytest.param(
-            True,
-            id="complex-fft",
-            marks=pytest.mark.xfail(
-                strict=False,
-                raises=QtBotTimeoutError,
-                reason=(
-                    "PyQtGraph complex operation transition exceeds the 5 s "
-                    "interaction cap; R5 latency remains red in docs/queue.md"
-                ),
-            ),
-        ),
+        pytest.param(True, id="complex-fft"),
     ],
 )
 def test_single_slice_to_full_montage_presents_around_retained_exact_tile(
@@ -52,10 +54,7 @@ def test_single_slice_to_full_montage_presents_around_retained_exact_tile(
     win.resize(950, 950)
     try:
         win.show()
-        qtbot.waitUntil(
-            lambda: frame_session_settled(win),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-        )
+        settle_window(win, lambda: frame_session_settled(win), label="single slice settles")
         previous_session_id = int(win.renderer._frame_session.session_id)
 
         win._set_view_state(
@@ -81,17 +80,11 @@ def test_single_slice_to_full_montage_presents_around_retained_exact_tile(
                 and len(win.img_view.tileTruthPhysicalRows()) == 272
             )
 
-        qtbot.waitUntil(
-            preview_is_physically_complete,
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-        )
+        settle_window(win, preview_is_physically_complete, label="montage preview completes")
         if complex_fft:
             previous_session_id = int(win.renderer._frame_session.session_id)
             assert win.request_operation("centered_fft", 2)
-            qtbot.waitUntil(
-                preview_is_physically_complete,
-                timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-            )
+            settle_window(win, preview_is_physically_complete, label="fft preview completes")
 
         rows = win.img_view.tileTruthPhysicalRows()
         storage_modes = {str(row.get("physical_storage_mode", "")) for row in rows.values()}

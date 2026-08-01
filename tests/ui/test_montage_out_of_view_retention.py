@@ -31,7 +31,7 @@ import contextlib
 import numpy as np
 
 from arrayscope.tools.framebuffer_reference import assert_wgpu_frame_matches_cpu_reference
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from tests.settle import settle_window
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
@@ -67,7 +67,7 @@ def _open_montage(qtbot, *, backend: str):
         )
     )
     win.update_image_view()
-    qtbot.waitUntil(lambda: frame_session_settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+    settle_window(win, lambda: frame_session_settled(win), label="montage open")
     return win
 
 
@@ -76,17 +76,14 @@ def _tile_extent(win) -> tuple[float, float]:
     return width / COLUMNS, height / ROWS
 
 
-def _goto(win, qtbot, box, *, settle_ms=INTERACTION_SETTLE_HARD_LIMIT_MS) -> None:
+def _goto(win, box) -> None:
     x0, x1, y0, y1 = box
     win.img_view.getView().setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
     win.update_image_view()
     # A slow offscreen fill is not this test's subject; the assertions below
     # read counters and payload state, not wall time.
     with contextlib.suppress(Exception):
-        qtbot.waitUntil(
-            lambda: frame_session_settled(win),
-            timeout=min(settle_ms, INTERACTION_SETTLE_HARD_LIMIT_MS),
-        )
+        settle_window(win, lambda: frame_session_settled(win), label="pan leg")
 
 
 def _republications(win) -> int:
@@ -102,14 +99,14 @@ def test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope(qtbot):
         away_x = (5 * tile_w, 8 * tile_w, 0.0, 2 * tile_h)
         away_y = (0.0, 3 * tile_w, (ROWS - 2) * tile_h, ROWS * tile_h)
 
-        _goto(win, qtbot, home)
-        _goto(win, qtbot, home)
+        _goto(win, home)
+        _goto(win, home)
         session = win.renderer._frame_session
         assert session.retain_out_of_view_payloads is True
         home_visible = set(session.visible_tile_numbers)
         assert home_visible, "the zoomed view must still show tiles"
 
-        _goto(win, qtbot, away_x)
+        _goto(win, away_x)
         session = win.renderer._frame_session
         away_visible = set(session.visible_tile_numbers)
         # The visible set genuinely turns over: this is not a nudge.
@@ -122,7 +119,7 @@ def test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope(qtbot):
         # The first return leg is measured on its own: coming back to a region
         # whose pixels never changed must cost no republication at all.
         before = _republications(win)
-        _goto(win, qtbot, home)
+        _goto(win, home)
         assert _republications(win) - before == 0
         assert_wgpu_frame_matches_cpu_reference(win)
 
@@ -136,7 +133,7 @@ def test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope(qtbot):
         legs = (away_y, home, away_x, home)
         before = _republications(win)
         for leg in legs:
-            _goto(win, qtbot, leg)
+            _goto(win, leg)
             assert_wgpu_frame_matches_cpu_reference(win)
             session = win.renderer._frame_session
             # The presentation scope never collapses back to the viewport.
@@ -146,9 +143,10 @@ def test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope(qtbot):
         # Completion, not merely retention: the R2 pathology this program has
         # already met keeps the retained tiles visible forever and never
         # finishes the round.
-        qtbot.waitUntil(
+        settle_window(
+            win,
             lambda: not win.renderer._frame_session.required_target_unsettled_tiles(),
-            timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+            label="required target completion",
         )
         session = win.renderer._frame_session
         assert session.visible_plan_complete()
@@ -169,8 +167,8 @@ def test_cpu_item_backend_does_not_retain_out_of_view_payloads(qtbot):
     win = _open_montage(qtbot, backend="pyqtgraph")
     try:
         tile_w, tile_h = _tile_extent(win)
-        _goto(win, qtbot, (0.0, 3 * tile_w, 0.0, 2 * tile_h))
-        _goto(win, qtbot, (5 * tile_w, 8 * tile_w, 0.0, 2 * tile_h))
+        _goto(win, (0.0, 3 * tile_w, 0.0, 2 * tile_h))
+        _goto(win, (5 * tile_w, 8 * tile_w, 0.0, 2 * tile_h))
         session = win.renderer._frame_session
         assert session.retain_out_of_view_payloads is False
         assert not session.retained_out_of_view

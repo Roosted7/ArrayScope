@@ -1,5 +1,6 @@
 import numpy as np
 
+from tests.settle import settle_window
 from tests.ui.helpers import (
     assert_panel_invariants as _assert_panel_invariants,
 )
@@ -586,7 +587,15 @@ def test_restored_layout_uses_saved_viewport_session(qtbot):
     restored = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(restored)
     try:
-        _process_events(qtbot, count=40)
+        # Forty event-loop turns is four hundred milliseconds, and the restore
+        # takes longer than that on a busy box -- the measurement below then
+        # reads a half-applied layout.  The continuity transaction is the
+        # product's own "this restore is finished" edge: it settles its shape
+        # and is released, after which the viewport size is the restored one.
+        settle_window(
+            restored,
+            lambda: (tx := restored._viewport_continuity_transaction()) is None or tx.released,
+        )
         restored_viewport = restored.img_view.graphicsView.viewport().size()
 
         assert abs(int(restored_viewport.height()) - saved_viewport_shape[0]) <= 2

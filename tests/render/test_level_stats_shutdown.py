@@ -157,16 +157,17 @@ def test_shutdown_during_level_evidence_batch_stops_at_tile_boundary(sweep_envir
     assert session.level_evidence_inflight is True
     assert first_sample_started.wait(timeout=5.0)
 
-    started = monotonic()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         kernel.shutdown(timeout=1.0)
-    elapsed = monotonic() - started
 
-    # A cooperative sweep bails at the next tile boundary (~0.15 s), well
-    # inside the join deadline. Waiting out the deadline means the current
-    # evaluation never observed cancellation.
-    assert elapsed < 0.6, f"shutdown join waited {elapsed:.3f}s for a running sweep"
+    # A cooperative sweep bails at the next tile boundary; waiting out the join
+    # deadline means the running evaluation never observed cancellation.  That
+    # used to be asserted twice -- once as ``elapsed < 0.6`` and once as the
+    # absence of a leaked-thread warning below -- and only the second one is a
+    # statement about this code.  The first measured the box: a worker that
+    # cancels correctly still takes longer than 0.6 s to be scheduled at all
+    # when sixteen other workers want the same cores.
     shutdown_warnings = [
         warning for warning in caught if issubclass(warning.category, RuntimeWarning)
     ]

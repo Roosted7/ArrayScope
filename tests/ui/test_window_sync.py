@@ -11,8 +11,9 @@ import uuid
 import numpy as np
 import pytest
 
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from tests.settle import settle_until, window_progress
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
+from tests.ui.helpers import frame_session_settled
 
 pytest.importorskip("pytestqt")
 
@@ -49,18 +50,64 @@ def _enable_all_facets(win):
     win.inspection_dock.sync_button.setChecked(True)
 
 
-_DEFAULT_SETTLE_TIMEOUT_MS = min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS)
+def _sync_progress():
+    """Every revision and applied key the live sync controllers publish.
+
+    A message crossing the QLocalSocket bus moves a sender revision and then a
+    receiver's ``_last_applied`` entry.  Those edges are the transfer itself, so
+    while they move the transfer is in progress no matter how slow the box is.
+    """
+
+    from pyqtgraph.Qt import QtWidgets
+
+    from arrayscope.window import ArrayScopeWindow
+
+    snapshot = []
+    for widget in QtWidgets.QApplication.instance().topLevelWidgets():
+        if not isinstance(widget, ArrayScopeWindow):
+            continue
+        controller = getattr(widget, "sync_controller", None)
+        if controller is None:
+            continue
+        snapshot.append(
+            (
+                id(widget),
+                controller.bus.role,
+                controller.bus.peer_count,
+                tuple(sorted(controller._revisions.items())),
+                tuple(sorted((facet, str(key)) for facet, key in controller._last_applied.items())),
+                window_progress(widget),
+            )
+        )
+    return tuple(sorted(snapshot))
 
 
-def _settled(
-    qtbot,
-    predicate,
-    timeout_ms=_DEFAULT_SETTLE_TIMEOUT_MS,
-):
-    qtbot.waitUntil(
-        lambda: bool(predicate()),
-        timeout=min(int(timeout_ms), INTERACTION_SETTLE_HARD_LIMIT_MS),
-    )
+def _settled(qtbot, predicate, *, label="sync facet arrives"):
+    del qtbot  # the shared pump owns the event loop
+    settle_until(lambda: bool(predicate()), progress=_sync_progress, label=label)
+
+
+def _linked(qtbot, *windows):
+    """Wait for the relay path to exist and every window to be done opening.
+
+    A fixed pause here is the setup race that made this file the load-fragility
+    leader, and it stood for two different preconditions at once.  ``peer_count``
+    is the bus's own documented readiness signal for the first — non-zero on the
+    broker once the server side has accepted every connection — and a publish
+    issued before that lands nowhere.  The second is the initial auto-fit: a
+    window still settling its own camera will overwrite an applied peer camera
+    moments later, so a facet that arrived correctly still reads as not applied.
+    """
+
+    def linked() -> bool:
+        buses = [window.sync_controller.bus for window in windows]
+        if not all(bus.is_running() for bus in buses):
+            return False
+        if max(bus.peer_count for bus in buses) < len(windows) - 1:
+            return False
+        return all(frame_session_settled(window) for window in windows)
+
+    _settled(qtbot, linked, label="sync group links up")
 
 
 def test_sync_buttons_toggle_controller_facets(qtbot, make_window):
@@ -179,7 +226,7 @@ def test_sustained_changes_publish_periodically_and_trail_final_value(
     assert timer is not None
     assert timer.isActive()
 
-    qtbot.waitUntil(lambda: len(_state_values()) == 3, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+    _settled(qtbot, lambda: len(_state_values()) == 3, label="trailing publish fires")
     assert _state_values() == [1, 3, 4]
 
 
@@ -275,7 +322,7 @@ def test_joining_window_pulls_group_state(qtbot, make_window):
     win_a = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
     win_a.sync_dims_button.setChecked(True)
     win_a.widgets["spins"]["slice_indices"][1].setValue(5)
-    qtbot.wait(300)
+    _settled(qtbot, lambda: win_a.view_state.slice_indices[1] == 5, label="publisher applies")
 
     win_b = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
     assert win_b.view_state.slice_indices[1] != 5
@@ -343,7 +390,7 @@ def test_dimension_role_and_transpose_sync_between_windows(qtbot, make_window):
     win_b = make_window(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
     win_a.sync_dims_button.setChecked(True)
     win_b.sync_dims_button.setChecked(True)
-    qtbot.wait(300)
+    _linked(qtbot, win_a, win_b)
 
     rendered_reasons = []
     original_render = win_b.renderer.render
@@ -370,7 +417,7 @@ def test_dimension_axis_flip_syncs_without_slice_change(qtbot, make_window):
     win_b = make_window(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
     win_a.sync_dims_button.setChecked(True)
     win_b.sync_dims_button.setChecked(True)
-    qtbot.wait(300)
+    _linked(qtbot, win_a, win_b)
 
     rendered_reasons = []
     original_render = win_b.renderer.render
@@ -403,7 +450,7 @@ def test_camera_pan_zoom_syncs_between_windows(qtbot, make_window):
     win_b = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
     win_a.sync_controller.set_facet_enabled(FACET_CAMERA, True)
     win_b.sync_controller.set_facet_enabled(FACET_CAMERA, True)
-    qtbot.wait(300)
+    _linked(qtbot, win_a, win_b)
 
     vb_a = win_a.img_view.getView()
     vb_b = win_b.img_view.getView()
@@ -442,7 +489,7 @@ def test_camera_apply_does_not_echo_a_republish(qtbot, make_window):
     win_b = make_window(np.arange(8 * 6 * 4, dtype=float).reshape(8, 6, 4))
     win_a.sync_controller.set_facet_enabled(FACET_CAMERA, True)
     win_b.sync_controller.set_facet_enabled(FACET_CAMERA, True)
-    qtbot.wait(300)
+    _linked(qtbot, win_a, win_b)
 
     win_a.img_view.getView().setRange(xRange=(15.0, 45.0), yRange=(5.0, 35.0), padding=0)
     _settled(
@@ -460,7 +507,7 @@ def test_dimension_role_change_publishes_payload_when_slices_are_unchanged(qtbot
 
     win = make_window(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
     win.sync_dims_button.setChecked(True)
-    qtbot.wait(300)
+    _settled(qtbot, win.sync_controller.bus.is_running, label="sync bus starts")
     controller = win.sync_controller
     before_revision = controller._revisions[FACET_DIMS]
     before_payload = controller._build_payload(FACET_DIMS)

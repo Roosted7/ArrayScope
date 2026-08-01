@@ -31,8 +31,8 @@ import contextlib
 import numpy as np
 import pytest
 
-from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from arrayscope.window.montage_prefetch import _busy
+from tests.settle import settle_window
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
@@ -63,10 +63,9 @@ def _montage_data(sources: int) -> np.ndarray:
 
 
 def _settle(win, qtbot) -> None:
+    del qtbot  # the shared pump owns the event loop
     with contextlib.suppress(Exception):
-        qtbot.waitUntil(
-            lambda: frame_session_settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS
-        )
+        settle_window(win, lambda: frame_session_settled(win), label="frame session settles")
 
 
 def _owed(session) -> dict[str, int]:
@@ -145,7 +144,7 @@ def test_settled_montage_after_a_data_change_owes_no_bookkeeping(qtbot, backend)
             live = win.renderer._frame_session
             return not any(_owed(live).values()) and not _busy(win.renderer, live)
 
-        qtbot.waitUntil(quiet, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
+        settle_window(win, quiet, label="bookkeeping goes quiet")
 
         session = win.renderer._frame_session
         assert _owed(session) == {
