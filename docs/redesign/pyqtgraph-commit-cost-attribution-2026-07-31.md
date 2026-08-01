@@ -203,6 +203,10 @@ no blink, no rejection reporting, atomic bypass).
   The gui-callback dossier saw this once on the real Wayland session; under
   Weston it is reproducible. Not touched here (frame-pacing-literate owner
   needed; compare D1's wgpu draw-debt latch).
+  **FIXED 2026-08-01** — and it was not frame pacing. It is the same
+  level-evidence coverage cycle as the fill-bistability dossier's §6:
+  [level-evidence-coverage-deadlock-2026-08-01](level-evidence-coverage-deadlock-2026-08-01.md).
+  Baselined at 4/4 on unmodified main with the full stage list; 0/3 after.
 - The 272-tile fills still measure gap p95 in the hundreds of ms on this
   backend either way — the fill owner is S1 (cold-entry stage plan), not this
   path.

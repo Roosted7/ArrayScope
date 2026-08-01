@@ -744,6 +744,15 @@ class FrameSession:
     # means a real preview pass is still producing the one complete source;
     # ``preview-cohort`` means that source was installed atomically.
     round_level_evidence_source: str = ""
+    # One cohort admission arrived without the whole expected source set, so
+    # this round's preview producer is NOT the atomic one the claim assumes.
+    preview_cohort_incomplete_observed: bool = False
+    # The round was handed back to the semantic sweep because first pixels
+    # were waiting on evidence the cohort had not produced. Terminal for the
+    # round: a re-claim would reset the sweep's cursor every time the preview
+    # ladder admitted another floor rung, and a late cohort install would
+    # restate levels a CPU backend has already baked into pixels (R3).
+    preview_cohort_round_claim_released: bool = False
     # Structural identity and the two R2b floors for one settled view target.
     # Planning/admission and resident tile population are deliberately absent.
     render_round_key: object = None
@@ -2185,6 +2194,8 @@ class FrameSession:
         self.semantic_level_evidence_target = None
         self.semantic_level_evidence_progress = None
         self.round_level_evidence_source = ""
+        self.preview_cohort_incomplete_observed = False
+        self.preview_cohort_round_claim_released = False
 
     def semantic_level_evidence_diagnostics(self) -> dict[str, object]:
         """Return constant-time owner progress for traces and diagnostics.

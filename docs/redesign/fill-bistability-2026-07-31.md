@@ -191,7 +191,14 @@ against a closing kernel (no claims taken, no ladder work, no churn), with
 residual race. Red-first test:
 `test_retarget_against_closed_kernel_takes_no_claims`.
 
-## 6. Named and left: the level-evidence coverage stall (queue-able)
+## 6. Named and left: the level-evidence coverage stall (FIXED 2026-08-01)
+
+**Closed by [level-evidence-coverage-deadlock-2026-08-01](level-evidence-coverage-deadlock-2026-08-01.md).**
+It was a closed cycle, not a slow producer: the preview cohort's claim parked
+the fallback semantic sweep on `coverage_open`, coverage closes on first
+pixels, and first pixels waited on the evidence the sweep would have produced.
+The `commit_bail` signature below was the right entry point. The original text
+follows unchanged.
 
 Intermittently (3/3 repeats of one process under heavy load, and identically
 on unmodified main), the 272-phase never opens refine at all: all 272 preview

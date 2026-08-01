@@ -41,6 +41,19 @@ This file records user-visible release changes. Detailed development history and
 
 ### Fixed
 
+- A montage round no longer freezes with nothing on screen while it waits for
+  level evidence that nothing is computing. Scrolling an FFT montage could
+  leave the view blank indefinitely — measured on a 60-tile PyQtGraph FFT index
+  scroll, 4 runs out of 4 either timed out or reported the montage frozen with
+  zero tiles presented. The round's levels have two producers, and a claim made
+  by the preview pass disabled the other one on a test that could never become
+  true: the fallback waited for the display's first pixels, and the first pixels
+  waited for the levels the fallback would have produced. The claim is now
+  released as soon as the preview pass proves it cannot supply the whole set at
+  once, and a level scan whose result is superseded mid-flight restarts instead
+  of dying silently. First tile on that scroll: 11.5–29.4 s to **1.0–1.4 s**.
+  Details in `docs/redesign/level-evidence-coverage-deadlock-2026-08-01.md`.
+
 - A scoped test run no longer deletes the change-selection map entries it never
   looked at. `pytest tests/kernel` — or, worse, `pytest file.py::test` — used to
   drop every recorded test that the working tree affected *outside* that scope,

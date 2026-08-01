@@ -531,6 +531,15 @@ class LevelStatsService:
             return 0
         if not session.note_first_pass_quality("preview"):
             return 0
+        if bool(getattr(session, "preview_cohort_round_claim_released", False)):
+            # The round was handed back, so these rows are no longer cohort
+            # candidates — they are ordinary first-pass rough evidence. A
+            # shader round has no other producer while coverage is open (the
+            # sweep is refinement work there and the phase machine refuses
+            # it), so dropping them on the floor leaves its first pixels
+            # waiting on evidence nothing is computing.
+            self._admit_first_pass_level_evidence_batch(session, rendered_items, quality="preview")
+            return 0
         if not self._expect_preview_cohort_level_evidence(session):
             return 0
         target = session.semantic_level_evidence_target
@@ -552,6 +561,12 @@ class LevelStatsService:
             )
             rendered_by_source[source_index] = rendered
         if frozenset(stats_by_source) != frozenset(expected):
+            # The claim assumes this producer is atomic ("a complete cohort is
+            # admitted atomically"). One short admission proves it is not for
+            # this round, which is what lets the round be handed back below
+            # instead of waiting on a set that may never arrive at once.
+            session.preview_cohort_incomplete_observed = True
+            self._note_level_evidence_gate(session, "cohort-incomplete")
             return 0
 
         ordered_stats = tuple(stats_by_source[source] for source in sorted(expected))
@@ -602,6 +617,8 @@ class LevelStatsService:
         """Claim round-level ownership when a real preview rung is admitted."""
 
         if not self._frame_session_is_current(session):
+            return False
+        if bool(getattr(session, "preview_cohort_round_claim_released", False)):
             return False
         expected = self._montage_level_expected_indices(session)
         if not expected:
@@ -1010,6 +1027,27 @@ class LevelStatsService:
             sources.append(source_index)
         return tuple(sources)
 
+    def _note_level_evidence_gate(self, session, door: str) -> None:
+        """Name which door one semantic-evidence scheduling attempt died at.
+
+        The sweep has ten early returns and a submit.  A round that never
+        produces evidence and a round that produced all of it read identically
+        from the outside, which is what made the coverage stall a multi-session
+        hunt; ``rung_prepare`` does the same job for planned steps.
+        """
+
+        from arrayscope.core.trace import emit_trace
+
+        emit_trace(
+            "level_evidence_gate",
+            door=str(door),
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            round_source=str(getattr(session, "round_level_evidence_source", "") or ""),
+            coverage_open=bool(session.scheduling_policy.verdict.coverage_open),
+            display_committed=bool(getattr(session, "display_committed", False)),
+            shader_display=bool(getattr(session, "shader_display", False)),
+        )
+
     def _schedule_semantic_level_evidence(self, session) -> None:
         if not self._frame_session_is_current(session):
             return
@@ -1026,6 +1064,7 @@ class LevelStatsService:
             # single-slice evidence gates caught exactly that).
             if self._montage_level_tracker().cached_histogram_data(session.level_key) is None:
                 self._schedule_montage_histogram_aggregate(session)
+            self._note_level_evidence_gate(session, "cohort-owns-round")
             return
         # A shader round that falls through still has to BOOTSTRAP the sweep it
         # is falling through to: the shader guard below refuses to start until
@@ -1039,29 +1078,58 @@ class LevelStatsService:
         ):
             self._schedule_montage_histogram_aggregate(session)
         if round_source == "preview-cohort-pending":
-            if bool(session.scheduling_policy.verdict.coverage_open):
+            # The claim parks this owner while the preview cohort is expected
+            # to install the round's one complete source. It may only park a
+            # producer the round is not WAITING on: first pixels wait for this
+            # evidence, and coverage closes on first pixels, so `coverage_open`
+            # alone is a circular terminality test. It held for a whole
+            # 60-tile FFT scroll step under load — the cohort never completed
+            # because previews arrived one at a time, the in-flight sweep's
+            # result was discarded when the claim replaced its target
+            # generation, and every re-drive returned here (measured: 0 tiles
+            # presented, `commit_bail outcome='level-evidence-wait'` until the
+            # harness's 10 s coverage budget expired, 3/3 under Weston).
+            handed_back = bool(
+                getattr(session, "preview_cohort_incomplete_observed", False)
+                and not bool(getattr(session, "display_committed", False))
+            )
+            if bool(session.scheduling_policy.verdict.coverage_open) and not handed_back:
+                self._note_level_evidence_gate(session, "cohort-pending-coverage-open")
                 return
-            # The preview pass ended without a complete cohort. The existing
-            # semantic-slab owner is the explicit no-preview/incomplete-preview
-            # fallback; start it only after the preview producer is terminal.
+            # Either the preview pass ended without a complete cohort, or it
+            # has proven it is not the atomic producer while first pixels are
+            # still owed. The semantic-slab owner is the explicit
+            # no-preview/incomplete-preview fallback; hand the round back to
+            # it. The hand-back is terminal for the round: see
+            # `preview_cohort_round_claim_released`.
             session.round_level_evidence_source = ""
             session.semantic_level_evidence_target = None
             session.semantic_level_evidence_progress = None
+            if handed_back:
+                session.preview_cohort_round_claim_released = True
+                self._note_level_evidence_gate(session, "cohort-handed-back")
         visible_dependency = bool(
             _montage_level_evidence_requires_refined(self, session)
             and not bool(getattr(session, "display_committed", False))
         )
         work_class = SchedulingWork.COVERAGE if visible_dependency else SchedulingWork.REFINEMENT
         if not session.scheduling_policy.verdict.admits(work_class):
+            self._note_level_evidence_gate(session, "work-class-not-admitted")
             return
         if bool(getattr(session, "shader_display", False)):
             if not bool(getattr(session, "first_pass_histogram_published", False)):
+                self._note_level_evidence_gate(session, "shader-histogram-unpublished")
                 return
             if not _montage_side_work_visible_settled(self, session):
+                self._note_level_evidence_gate(session, "shader-side-work-unsettled")
                 return
         target = self._ensure_semantic_level_evidence_target(session)
         progress = getattr(session, "semantic_level_evidence_progress", None)
         if target is None or progress is None or progress.inflight_generation is not None:
+            self._note_level_evidence_gate(
+                session,
+                "no-target" if target is None or progress is None else "already-in-flight",
+            )
             return
         # This sweep used to pause after one seed batch whenever preview
         # coverage was open, to keep its continuations off the workers the
@@ -1127,6 +1195,20 @@ class LevelStatsService:
                 or current_target.generation != generation
             ):
                 release(session)
+                self._note_level_evidence_gate(
+                    session,
+                    "result-discarded-session"
+                    if current is not session
+                    else "result-discarded-generation",
+                )
+                if current is session:
+                    # The target moved under an in-flight batch — the preview
+                    # cohort claim replaces it with its own generation ~150 ms
+                    # after the sweep is submitted. Discarding the result is
+                    # right; discarding the CONTINUATION is not. Nothing else
+                    # re-armed this owner, so the round's only guaranteed
+                    # evidence producer died silently mid-flight.
+                    self._schedule_semantic_level_evidence(current)
                 return
             release(current)
             progress.record_batch(result)
@@ -1229,6 +1311,9 @@ class LevelStatsService:
         if handle is None:
             release(session)
             progress.blocking_reason = "kernel-admission"
+            self._note_level_evidence_gate(session, "kernel-admission-refused")
+        else:
+            self._note_level_evidence_gate(session, "submitted")
 
     def _schedule_montage_cached_level_stats(self, session) -> None:
         if _preview_cohort_owns_cpu_round_levels(self, session):

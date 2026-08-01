@@ -327,6 +327,151 @@ def test_pending_preview_cohort_parks_sweep_only_while_first_presentation_is_blo
     )
 
 
+def _partial_preview_cohort(sources):
+    return tuple(
+        SimpleNamespace(
+            tile=SimpleNamespace(source_index=source_index),
+            level_stats=TileLevelStats(
+                source_index=source_index,
+                bounds=(float(source_index), float(source_index + 1)),
+                sample=np.asarray([source_index, source_index + 1], dtype=np.float32),
+                evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+            ),
+            image=np.asarray([[source_index]], dtype=np.float32),
+            histogram_data=None,
+            semantic_data=None,
+            semantic_histogram_data=None,
+            level_data=None,
+        )
+        for source_index in sources
+    )
+
+
+def test_short_preview_cohort_hands_the_round_back_while_first_pixels_are_owed():
+    """A non-atomic preview producer may not park the round's only fallback.
+
+    ``coverage_open`` cannot be the pending cohort's terminality test on its
+    own: first pixels wait for this evidence and coverage closes on first
+    pixels, so a cohort that arrives tile-by-tile parks the semantic sweep for
+    the whole round.  Measured on the 60-tile PyQtGraph FFT scroll under the
+    managed compositor: zero tiles presented and every commit bailing
+    ``level-evidence-wait`` until the harness gave up.  One short admission is
+    the proof that the producer is not the atomic one the claim assumes.
+    """
+
+    data = np.arange(8 * 10 * 20, dtype=np.float32).reshape(8, 10, 20)
+    session = _session(data)
+    session.scheduling_policy.retarget("preview-pass", (0,), progressive=True)
+    service, kernel = _service(session, capabilities=PYQTGRAPH_CAPABILITIES)
+
+    assert service._expect_preview_cohort_level_evidence(session)
+    service._schedule_semantic_level_evidence(session)
+    assert not kernel.tasks, "sweep ran before the cohort had its atomic chance"
+
+    # The preview ladder delivers 3 of the 20 expected sources, not the whole
+    # set. Coverage stays open throughout: nothing has been presented.
+    assert (
+        service._admit_preview_cohort_level_evidence(session, _partial_preview_cohort((0, 1, 2)))
+        == 0
+    )
+    assert session.preview_cohort_incomplete_observed
+    assert session.scheduling_policy.verdict.coverage_open
+
+    service._schedule_semantic_level_evidence(session)
+
+    assert session.round_level_evidence_source == ""
+    assert session.preview_cohort_round_claim_released
+    assert any(task["scope"] == "montage:semantic-level-evidence" for task in kernel.tasks)
+
+    # Terminal for the round: the preview ladder admitting another floor rung
+    # must not re-park the sweep (it would reset the cursor every time), and a
+    # late cohort must not restate levels a CPU backend has already baked.
+    assert not service._expect_preview_cohort_level_evidence(session)
+    assert session.round_level_evidence_source == ""
+    assert (
+        service._admit_preview_cohort_level_evidence(session, _partial_preview_cohort(range(20)))
+        == 0
+    )
+
+    while kernel.tasks:
+        kernel.run_next()
+    summary = service._montage_level_tracker().summary_for(session.level_key)
+    assert summary.source_indices == frozenset(range(20))
+    assert summary.rank in {
+        LevelSourceRank.MONTAGE_COMPLETE,
+        LevelSourceRank.MONTAGE_SAMPLED_FULL,
+    }
+
+
+def test_handed_back_round_admits_short_preview_rows_as_shader_first_pass_evidence():
+    """The shader complement of the hand-back.
+
+    A shader round cannot use the sweep during coverage at all — it is
+    refinement work and the phase machine refuses it — so retiring the cohort
+    leaves it with no producer unless preview rows become ordinary first-pass
+    rough evidence. Rough evidence is all a shader backend needs to present,
+    which is what ends the wait that `preview-cohort-pending` was holding open.
+    """
+
+    from arrayscope.window.frame_effects import tile_layer_first_pixels_wait_for_level_source
+
+    data = np.arange(8 * 10 * 20, dtype=np.float32).reshape(8, 10, 20)
+    session = _session(data)
+    session.shader_display = True
+    session.scheduling_policy.retarget("preview-pass", (0,), progressive=True)
+    service, _kernel = _service(session, capabilities=WGPU_CAPABILITIES)
+
+    assert service._expect_preview_cohort_level_evidence(session)
+    short = _partial_preview_cohort((0, 1, 2))
+    assert service._admit_preview_cohort_level_evidence(session, short) == 0
+    service._schedule_semantic_level_evidence(session)
+    assert session.preview_cohort_round_claim_released
+    assert session.round_level_evidence_source == ""
+
+    # Nothing has merged yet, so the round still owes its first pixels.
+    assert tile_layer_first_pixels_wait_for_level_source(
+        service,
+        session,
+        True,
+        service._montage_level_tracker().summary_for(session.level_key),
+    )
+
+    # The next preview admission goes through the same cohort entry point the
+    # ladder always calls; the retired owner routes it to first-pass evidence.
+    assert service._admit_preview_cohort_level_evidence(session, short) == 0
+    summary = service._montage_level_tracker().summary_for(session.level_key)
+    assert summary.evidence_quality >= LevelEvidenceQuality.ROUGH_PREVIEW
+    assert not tile_layer_first_pixels_wait_for_level_source(service, session, True, summary)
+
+
+def test_discarded_semantic_batch_rearms_the_owner_it_was_superseded_by():
+    """A target replaced mid-flight must not strand the sweep's continuation.
+
+    ``rung_admitted`` claims the round for the preview cohort about 150 ms
+    after the sweep is submitted, which replaces the target generation. The
+    result is rightly discarded; the continuation was not, and the round's one
+    guaranteed evidence producer died silently.
+    """
+
+    data = np.arange(8 * 10 * 20, dtype=np.float32).reshape(8, 10, 20)
+    session = _session(data)
+    session.scheduling_policy.retarget("preview-pass", (0,), progressive=True)
+    service, kernel = _service(session, capabilities=PYQTGRAPH_CAPABILITIES)
+
+    service._schedule_semantic_level_evidence(session)
+    inflight = [task for task in kernel.tasks if task["scope"] == "montage:semantic-level-evidence"]
+    assert len(inflight) == 1
+
+    # The preview ladder claims the round while that batch is still running.
+    assert service._expect_preview_cohort_level_evidence(session)
+    assert session.round_level_evidence_source == "preview-cohort-pending"
+    session.preview_cohort_incomplete_observed = True
+
+    kernel.run_next()
+
+    assert any(task["scope"] == "montage:semantic-level-evidence" for task in kernel.tasks)
+
+
 def test_wgpu_target_evidence_only_widens_preview_cohort_before_commit():
     data = np.arange(8 * 10 * 20, dtype=np.float32).reshape(8, 10, 20)
     session = _session(data)
