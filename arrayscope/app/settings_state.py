@@ -143,19 +143,20 @@ class AppSettingsState:
 
 def settings_from_mapping(values) -> AppSettingsState:
     values = dict(values or {})
+    # Resolved once: the responsiveness default consults it to decide whether a
+    # GPU topology probe is allowed at all (a PyQtGraph pin means no wgpu).
+    image_backend = normalize_image_rendering_backend_choice(values.get("image_rendering_backend"))
     return AppSettingsState(
         theme=normalize_theme_choice(values.get("theme")),
         prefetch_nearby_slices=_to_bool(values.get("prefetch_nearby_slices", False)),
         panel_resize_behavior=normalize_panel_resize_behavior(values.get("panel_resize_behavior")),
         fft_backend=normalize_fft_backend_choice(values.get("fft_backend")),
         fft_workers=normalize_fft_workers_choice(values.get("fft_workers")),
-        image_rendering_backend=normalize_image_rendering_backend_choice(
-            values.get("image_rendering_backend")
-        ),
+        image_rendering_backend=image_backend,
         render_responsiveness=(
             normalize_render_responsiveness_choice(values.get("render_responsiveness"))
             if "render_responsiveness" in values
-            else default_render_responsiveness_choice()
+            else default_render_responsiveness_choice(image_backend=image_backend)
         ),
         render_responsiveness_explicit="render_responsiveness" in values,
         wgpu_present_method=normalize_wgpu_present_method_choice(values.get("wgpu_present_method")),
@@ -258,8 +259,19 @@ def default_render_responsiveness_choice(
     *,
     environ=None,
     topology=None,
+    image_backend=None,
 ) -> RenderResponsivenessChoice:
-    """Seed the preset from session facts; a persisted choice always wins."""
+    """Seed the preset from session facts; a persisted choice always wins.
+
+    ``image_backend`` is the session's configured image-rendering backend.  An
+    explicit PyQtGraph pin skips the topology probe, because that probe is the
+    *only* thing in a PyQtGraph session that imports wgpu and requests an
+    adapter -- it initialized the Vulkan backend (and printed wgpu-native's
+    adapter warnings) for a session that never issues a GPU draw.  Skipping it
+    loses nothing: the adapter it would find describes hardware PyQtGraph does
+    not use, since that backend shades on the CPU.  AUTO still probes -- it
+    cannot resolve without asking whether a usable device exists.
+    """
 
     environment = os.environ if environ is None else environ
     remote_keys = (
@@ -298,6 +310,15 @@ def default_render_responsiveness_choice(
     }:
         return RenderResponsivenessChoice.THROUGHPUT
     if topology is None:
+        if (
+            image_backend is not None
+            and normalize_image_rendering_backend_choice(image_backend)
+            == ImageRenderingBackendChoice.PYQTGRAPH
+        ):
+            # CPU display path pinned: no device to ask about, and asking is
+            # what would build one.  Same answer as a healthy GPU because the
+            # GPU is not in this session's render path either way.
+            return RenderResponsivenessChoice.BALANCED
         from arrayscope.gpu.device_topology import detect_topology
 
         topology = detect_topology()

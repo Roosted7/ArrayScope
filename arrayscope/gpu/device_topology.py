@@ -113,6 +113,13 @@ def _adapter_info_from_probe() -> dict | None:
         import wgpu
     except Exception:
         return None
+    # Second wgpu entry point of the process (the display's shared device is the
+    # other one), so it owes the same post-import filter install: the noise
+    # filter can only attach once wgpu-py has registered its own logger class,
+    # and the adapter request below is what emits the messages it drops.
+    from arrayscope.app.log_noise import install_wgpu_log_noise_filter
+
+    install_wgpu_log_noise_filter()
     try:
         adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
     except Exception:

@@ -324,6 +324,59 @@ def test_performance_settings_normalize_unknowns_and_clamp_budget():
     )
 
 
+def test_pyqtgraph_pin_skips_the_gpu_topology_probe(monkeypatch):
+    """An explicit PyQtGraph pin must not reach the wgpu adapter probe.
+
+    The probe imports wgpu and requests an adapter; on a PyQtGraph session it
+    was the only wgpu entry point in the whole process, so it initialized the
+    Vulkan backend (and printed its adapter warnings) for a session that never
+    issues a GPU draw.
+    """
+
+    from types import SimpleNamespace
+
+    from arrayscope.gpu import device_topology
+
+    probes = []
+
+    def _record_probe(**kwargs):
+        probes.append(kwargs)
+        return SimpleNamespace(kind="integrated", device_name="gpu")
+
+    monkeypatch.setattr(device_topology, "detect_topology", _record_probe)
+
+    pinned = settings_state.default_render_responsiveness_choice(
+        environ={}, image_backend="pyqtgraph"
+    )
+
+    assert probes == []
+    assert pinned == settings_state.RenderResponsivenessChoice.BALANCED
+
+    # Control: AUTO must still probe -- it cannot resolve a backend without
+    # asking whether a device exists, and without this arm the assertion above
+    # would also pass for a probe that never runs for any backend.
+    auto = settings_state.default_render_responsiveness_choice(environ={}, image_backend="auto")
+
+    assert len(probes) == 1
+    assert auto == settings_state.RenderResponsivenessChoice.BALANCED
+
+
+def test_settings_mapping_forwards_the_backend_pin_to_the_responsiveness_default(monkeypatch):
+    """The pin only suppresses the probe if the mapping actually passes it on."""
+
+    seen = {}
+
+    def _record(**kwargs):
+        seen.update(kwargs)
+        return settings_state.RenderResponsivenessChoice.BALANCED
+
+    monkeypatch.setattr(settings_state, "default_render_responsiveness_choice", _record)
+
+    settings_state.settings_from_mapping({"image_rendering_backend": "pyqtgraph"})
+
+    assert seen["image_backend"] == settings_state.ImageRenderingBackendChoice.PYQTGRAPH
+
+
 def test_render_responsiveness_default_detects_remote_but_explicit_choice_wins():
     from types import SimpleNamespace
 
