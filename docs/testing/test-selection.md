@@ -556,6 +556,86 @@ If the map is missing or unreadable, every code path degrades to running
 everything. There is no state in which selection silently skips more than it
 should because the map broke.
 
+### A corrupt map costs a rebuild, not the run
+
+That paragraph above was true of every reader in `tests/` and false of the run
+as a whole, which is a bad place for a gap. A malformed map made `peek` report
+"no usable map" and then killed the session seconds later from inside testmon:
+
+```
+INTERNALERROR> sqlite3.DatabaseError: database disk image is malformed
+```
+
+— out of `testmon/db.py:initiate_execution`, a traceback that names neither the
+map nor whatever put it in that state. So the first thing a run does now is ask
+the map whether it is sound (`PRAGMA quick_check`, ~70 ms on a 12 MB map). One
+that is not is **moved aside to `.testmondata-broken` and rebuilt**, which in a
+worktree means one copy from main and everywhere else means one traced run:
+
+```
+test selection: this checkout's map is corrupt (...) — rebuilding.
+test selection: the unreadable map is at /…/.testmondata-broken if it is worth a look.
+```
+
+Moved rather than deleted, because *which* pages broke is a question you only
+get to ask once. The flake and skip ledgers stay where they are: they are JSON,
+they are keyed by node id, and they re-attach to the rebuilt map's records.
+
+**How a map got corrupt is worth knowing, because only one answer was real.**
+An interrupted run is not it — measured 2026-08-01, a `SIGKILL` landing
+mid-transaction left a sound database 12 times out of 12, which is WAL recovery
+working as designed, and testmon already opens the file with a 60 s busy
+timeout. What broke it was the copying below.
+
+### Copying the map is a SQLite operation, not a file operation
+
+`.testmondata` runs in `journal_mode=wal`, and **a plain file copy of a WAL
+database is only safe when nothing has it open** — which on a box running
+several agent worktrees is the exception, not the rule. Two things go wrong,
+and only one of them is benign:
+
+* recently committed transactions live in the `-wal` sidecar, which the copy
+  does not take, so the copy is merely *stale*; and
+* a checkpoint writing pages back into the main file *while the copy reads it*
+  yields a mixture of two page images that belongs to neither — a file that
+  opens, and then fails `PRAGMA integrity_check` with `2nd reference to page N`
+  or `Rowid out of order`.
+
+Measured 2026-08-01, copying the real 12 MB `.testmondata` 45 times while a real
+`pytest tests/app -n 4` wrote it, all three arms from the same source at the
+same instants:
+
+| primitive | broken |
+| --- | --- |
+| `shutil.copyfile` | 0/45 |
+| the same read stretched over ~2 s | **5/45** |
+| `sqlite3.Connection.backup` | 0/45 |
+
+with `Freelist: …`, `wrong # of entries in index …` and `2nd reference to page
+N` among the complaints, and the five failures clustered at suite startup and
+shutdown — where the checkpointing is. A synthetic writer forced to checkpoint
+on every commit put the stretched arm at 8/8 and the backup at 0/8.
+
+**The exposure is the duration of the read**, which is why a fast `cp` on an
+idle box survives and why nothing here was ever reproducible on demand. "It
+worked when I tried it" was never evidence; a 0/45 arm and a 5/45 arm are the
+same primitive under two amounts of load.
+
+The blast radius was the whole harness rather than one checkout, because both
+places that copy the map hand it to somebody else: `seed_map` gives a new
+worktree main's map, and the `post-merge` adoption gives the *main checkout* a
+branch's. It forced a full `--testmon-noselect` rebuild at the start of two
+consecutive integration sessions, and in between, `--since` gates were answering
+from poisoned records with nothing to say so.
+
+So both copies now go through `Connection.backup`, which takes a read lock,
+reads through SQLite, and therefore sees WAL content and never a
+half-checkpointed page. The result is `quick_check`ed before it is put in place,
+and staged under a temporary name and `rename()`d in, so a killed copy leaves no
+half-file where a map belongs. **A donor that fails either check is not copied
+at all** — that is how one corrupt map became three, seeded onward into every
+worktree created after it broke.
+
 ### The map is only as honest as the tracer's context attribution
 
 testmon batches up to 250 tests into one live `Coverage` object and switches a
@@ -828,6 +908,10 @@ allowed to mark anything unaffected — and it costs once, per checkout.
 records its own tree's fingerprints over the other's and vacuums what the other
 still references, so both would end up seeing everything as changed — with
 SQLite serializing their runs on top of that.
+
+**And copy through SQLite, never through the filesystem** — see
+[Copying the map is a SQLite operation](#copying-the-map-is-a-sqlite-operation-not-a-file-operation).
+A `cp` of the donor is how the main checkout's map got corrupted twice.
 
 Pass `--no-seed-map` to opt out and record from scratch.
 

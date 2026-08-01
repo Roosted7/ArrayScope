@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests import testmon_policy
+from tests.app.conftest import break_a_page, read_map, write_map
 
 REPO_ROOT = testmon_policy.REPO_ROOT
 
@@ -654,8 +655,7 @@ def test_seeding_copies_rather_than_links(tmp_path, monkeypatch):
     worktree = tmp_path / "worktree"
     donor_checkout.mkdir()
     worktree.mkdir()
-    donor = donor_checkout / "themap"
-    donor.write_bytes(b"donor-map")
+    donor = write_map(donor_checkout / "themap", "donor-map")
     monkeypatch.setenv("TESTMON_DATAFILE", "themap")
     monkeypatch.setattr(
         testmon_policy,
@@ -665,10 +665,220 @@ def test_seeding_copies_rather_than_links(tmp_path, monkeypatch):
 
     assert testmon_policy.seed_map(worktree) == str(donor)
     seeded = worktree / "themap"
-    assert seeded.read_bytes() == b"donor-map"
+    assert read_map(seeded) == "donor-map"
     assert not seeded.is_symlink()
     assert seeded.stat().st_ino != donor.stat().st_ino, "a hard link is a shared map too"
     assert not list(worktree.glob(".themap.*")), "the staging file must not survive"
+
+
+# --- The map is SQLite, and a copy of SQLite is not a copy of a file --------
+
+
+def test_the_copy_takes_what_lives_only_in_the_wal(tmp_path, monkeypatch):
+    """A plain file copy of the map copies the map's *past*, or worse.
+
+    ``.testmondata`` runs in ``journal_mode=wal``. Recently committed
+    transactions live in the ``-wal`` sidecar until a checkpoint folds them
+    back, so a copy of the main file alone arrives without them — and that is
+    the *benign* half. The other half is what actually bit: a checkpoint
+    writing pages into the main file while the copy reads it yields a mixture
+    of two page images that is a valid-looking file and a malformed database,
+    which then kills an unrelated suite four minutes in with ``INTERNALERROR>
+    sqlite3.DatabaseError: database disk image is malformed``.
+
+    Both halves have the same cause — reading the file behind SQLite's back —
+    and one primitive fixes both. This asserts the cheap, deterministic half:
+    a donor whose latest commit is still in the WAL. The torn-page half cannot
+    be raced for reliably in a unit test, so it is stated here rather than
+    reproduced; see ``testmon_policy._snapshot_sqlite`` for the measurement.
+    """
+
+    import sqlite3
+
+    donor_checkout, worktree = tmp_path / "main", tmp_path / "worktree"
+    donor_checkout.mkdir()
+    worktree.mkdir()
+    donor = write_map(donor_checkout / "themap", "checkpointed")
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: donor)
+
+    # A run holding its map open, exactly as every pytest on this box does:
+    # committed, and not yet checkpointed into the file a `cp` would read.
+    live = sqlite3.connect(str(donor))
+    try:
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE marker SET mark = 'only-in-the-wal'")
+        live.commit()
+        assert testmon_policy.seed_map(worktree) == str(donor)
+    finally:
+        live.close()
+
+    assert read_map(worktree / "themap") == "only-in-the-wal"
+
+
+def test_a_donor_that_is_not_a_sound_database_is_not_copied(tmp_path, monkeypatch):
+    """Seeding may not launder a broken map into a second checkout.
+
+    This is how one corrupt map became three: the donor was copied on to every
+    worktree created after it broke, and each arrived looking like an ordinary
+    seeded map. Refusing costs one traced run in a fresh checkout, which is the
+    price of having no map at all — the price the whole design already pays
+    whenever there is no donor.
+    """
+
+    donor_checkout, worktree = tmp_path / "main", tmp_path / "worktree"
+    donor_checkout.mkdir()
+    worktree.mkdir()
+    donor = write_map(donor_checkout / "themap", "poisoned", pages=8)
+    break_a_page(donor)
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: donor)
+
+    assert testmon_policy.seed_map(worktree) is None
+    assert not (worktree / "themap").exists()
+    assert not list(worktree.glob(".themap.*")), "the staging file must not survive"
+
+
+def test_a_map_that_is_not_a_database_at_all_is_refused(tmp_path, monkeypatch):
+    """The other shape a killed copy leaves: a file that is not SQLite."""
+
+    donor_checkout, worktree = tmp_path / "main", tmp_path / "worktree"
+    donor_checkout.mkdir()
+    worktree.mkdir()
+    donor = donor_checkout / "themap"
+    donor.write_bytes(b"half a copy, and then the box rebooted")
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: donor)
+
+    assert testmon_policy.seed_map(worktree) is None
+    assert not (worktree / "themap").exists()
+
+
+# --- A corrupt map costs time, never a wall --------------------------------
+
+
+def test_a_sound_map_is_reported_sound(tmp_path, monkeypatch):
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    write_map(tmp_path / "themap", "fine", pages=4)
+    assert testmon_policy.map_health(tmp_path) is None
+    assert testmon_policy.quarantine_broken_map(tmp_path) is None
+    assert (tmp_path / "themap").exists()
+
+
+def test_a_missing_or_empty_map_is_not_a_corrupt_one(tmp_path, monkeypatch):
+    """Both are states every reader already handles, and neither is damage."""
+
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    assert testmon_policy.map_health(tmp_path) is None
+    (tmp_path / "themap").write_bytes(b"")
+    assert testmon_policy.map_health(tmp_path) is None
+    assert testmon_policy.quarantine_broken_map(tmp_path) is None
+
+
+def test_a_broken_map_is_moved_aside_rather_than_opened(tmp_path, monkeypatch):
+    """The whole point: a corrupt map costs a rebuild, never the session.
+
+    Every reader in this module degrades politely on a malformed map — and then
+    testmon's own ``init_testmon_data`` opens the same file seconds later and
+    takes the run down from inside ``initiate_execution``, out of a traceback
+    that names neither the map nor the checkout that copied it in.
+
+    Moved, not deleted: 12 MB is a cheap price for being able to ask *which*
+    pages later, and the question cannot be asked twice.
+    """
+
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    map_file = write_map(tmp_path / "themap", "poisoned", pages=8)
+    break_a_page(map_file)
+    (tmp_path / "themap-wal").write_bytes(b"frames describing a file that is leaving")
+
+    complaint = testmon_policy.map_health(tmp_path)
+    assert complaint, "a scribbled-over b-tree page must not read as healthy"
+
+    quarantined = testmon_policy.quarantine_broken_map(tmp_path)
+    assert quarantined is not None
+    said, where = quarantined
+    assert said == complaint
+    assert not map_file.exists(), "the run must find no map, which every path handles"
+    assert where.exists()
+    assert where.name.endswith(testmon_policy.QUARANTINE_SUFFIX)
+    assert not (tmp_path / "themap-wal").exists(), (
+        "WAL frames outlive the file they describe and would be adopted by the rebuild"
+    )
+
+
+def test_the_run_says_the_map_was_corrupt_and_carries_on(tmp_path, monkeypatch, capsys):
+    """Loudly, early, and to stderr, because there is no reporter yet.
+
+    ``_ensure_map_seeded`` runs from ``pytest_cmdline_main`` as well as
+    ``pytest_configure``, and the earlier of those is before pytest has a
+    terminal writer. The sentence still has to arrive: a run that silently
+    rebuilds looks identical to a run that inexplicably stopped selecting.
+    """
+
+    from tests import conftest as harness
+
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    monkeypatch.setattr(harness, "_XDIST_WORKER", None)
+    monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: None)
+    break_a_page(write_map(tmp_path / "themap", "poisoned", pages=8))
+
+    config = SimpleNamespace(rootdir=tmp_path, getoption=lambda name, default=None: default)
+    harness._ensure_map_seeded(config)
+
+    said = capsys.readouterr().err
+    assert "map is corrupt" in said
+    assert "rebuilding" in said
+    assert config.arrayscope_map_rebuilt
+    assert not (tmp_path / "themap").exists(), "the rebuild starts from no map"
+
+
+def test_a_corrupt_map_is_replaced_by_a_donor_when_there_is_one(tmp_path, monkeypatch):
+    """Quarantine leaves the checkout looking fresh, so seeding is the rebuild.
+
+    That ordering is the whole reason the health check lives where it does: a
+    corrupt map in a worktree costs a copy from main rather than a four-minute
+    traced suite.
+    """
+
+    from tests import conftest as harness
+
+    monkeypatch.setenv("TESTMON_DATAFILE", "themap")
+    monkeypatch.setattr(harness, "_XDIST_WORKER", None)
+    donor_checkout, worktree = tmp_path / "main", tmp_path / "worktree"
+    donor_checkout.mkdir()
+    worktree.mkdir()
+    donor = write_map(donor_checkout / "themap", "the-donors-records")
+    monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: donor)
+    break_a_page(write_map(worktree / "themap", "poisoned", pages=8))
+
+    config = SimpleNamespace(rootdir=worktree, getoption=lambda name, default=None: default)
+    harness._ensure_map_seeded(config)
+
+    assert config.arrayscope_map_rebuilt
+    assert config.arrayscope_selection_seed == str(donor)
+    assert read_map(worktree / "themap") == "the-donors-records"
+
+
+def test_a_health_check_that_fails_may_not_fail_the_run(tmp_path, monkeypatch):
+    """The backstop. This runs inside ``pytest_configure``; anything that
+    escapes it takes the whole session, which is the outcome it exists to
+    prevent — so an unforeseen failure here must cost the check, not the run.
+    """
+
+    from tests import conftest as harness
+
+    monkeypatch.setattr(harness, "_XDIST_WORKER", None)
+
+    def explode(rootdir):
+        raise ValueError("a shape of database nobody planned for")
+
+    monkeypatch.setattr(testmon_policy, "quarantine_broken_map", explode)
+    monkeypatch.setattr(testmon_policy, "seed_map", lambda rootdir, seeding=True: None)
+
+    config = SimpleNamespace(rootdir=tmp_path, getoption=lambda name, default=None: default)
+    harness._ensure_map_seeded(config)
+    assert config.arrayscope_selection_seed is None
 
 
 def test_testmon_still_exposes_what_the_policy_reaches_into():
@@ -1256,8 +1466,7 @@ def test_seeding_carries_the_coverage_sidecar_across(tmp_path, monkeypatch):
     worktree = tmp_path / "worktree"
     donor_checkout.mkdir()
     worktree.mkdir()
-    donor = donor_checkout / "themap"
-    donor.write_bytes(b"donor-map")
+    donor = write_map(donor_checkout / "themap", "donor-map")
     coverage_map.write_sidecar(
         donor, structure={"a.py": {"fsha": "x"}}, baselines={"offscreen": {"covered": 7}}
     )
@@ -1276,13 +1485,12 @@ def test_seeding_without_a_donor_sidecar_is_not_an_error(tmp_path, monkeypatch):
     worktree = tmp_path / "worktree"
     donor_checkout.mkdir()
     worktree.mkdir()
-    donor = donor_checkout / "themap"
-    donor.write_bytes(b"donor-map")
+    donor = write_map(donor_checkout / "themap", "donor-map")
     monkeypatch.setenv("TESTMON_DATAFILE", "themap")
     monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: donor)
 
     assert testmon_policy.seed_map(worktree) == str(donor)
-    assert (worktree / "themap").read_bytes() == b"donor-map"
+    assert read_map(worktree / "themap") == "donor-map"
 
 
 # --- Reaching the inherited reds without leaving selection ------------------
@@ -1428,15 +1636,15 @@ def test_a_merge_adopts_the_map_of_the_worktree_that_did_the_work(tmp_path, monk
     root, branch = tmp_path / "main", tmp_path / "wt"
     root.mkdir()
     branch.mkdir()
-    (root / "themap").write_bytes(b"stale")
-    (branch / "themap").write_bytes(b"recorded-the-merge")
+    write_map(root / "themap", "stale")
+    write_map(branch / "themap", "recorded-the-merge")
     os.utime(root / "themap", (1, 1))
     os.utime(branch / "themap", (2, 2))
 
     _fake_worktrees(monkeypatch, [(root, "abc123"), (branch, "abc123")])
 
     assert testmon_policy.adopt_map_from_identical_worktree(root) == str(branch / "themap")
-    assert (root / "themap").read_bytes() == b"recorded-the-merge"
+    assert read_map(root / "themap") == "recorded-the-merge"
 
 
 def test_adoption_refuses_a_different_commit_or_an_older_map(tmp_path, monkeypatch):
@@ -1446,21 +1654,21 @@ def test_adoption_refuses_a_different_commit_or_an_older_map(tmp_path, monkeypat
     root, branch = tmp_path / "main", tmp_path / "wt"
     root.mkdir()
     branch.mkdir()
-    (root / "themap").write_bytes(b"ours")
-    (branch / "themap").write_bytes(b"theirs")
+    write_map(root / "themap", "ours")
+    write_map(branch / "themap", "theirs")
     os.utime(root / "themap", (1, 1))
     os.utime(branch / "themap", (2, 2))
 
     # A worktree on another commit is not this tree, so its map is not free.
     _fake_worktrees(monkeypatch, [(root, "abc123"), (branch, "def456")])
     assert testmon_policy.adopt_map_from_identical_worktree(root) is None
-    assert (root / "themap").read_bytes() == b"ours"
+    assert read_map(root / "themap") == "ours"
 
     # Same commit, but ours ran later: adopting would throw that run away.
     os.utime(root / "themap", (3, 3))
     _fake_worktrees(monkeypatch, [(root, "abc123"), (branch, "abc123")])
     assert testmon_policy.adopt_map_from_identical_worktree(root) is None
-    assert (root / "themap").read_bytes() == b"ours"
+    assert read_map(root / "themap") == "ours"
 
 
 def test_a_bare_since_says_what_it_decided_to_compare_against(monkeypatch):

@@ -78,6 +78,21 @@ def _ini_value(key: str, default):
     return config.get("tool", {}).get("pytest", {}).get("ini_options", {}).get(key, default)
 
 
+def _why_unusable() -> str:
+    """The distinction between "never recorded" and "damaged", when it applies.
+
+    Both arrive here as "no usable map", and only one of them means something
+    went wrong. Without this the tool tells someone to record a map they
+    already have, and the fact that it is corrupt — which `pytest` would fix on
+    its next run, and which is worth knowing about either way — goes unsaid.
+    """
+
+    complaint = testmon_policy.map_health(REPO_ROOT)
+    if not complaint:
+        return ""
+    return f"It exists and is corrupt ({complaint}); the next `pytest` rebuilds it.\n"
+
+
 def _read_map(environment: str, with_changed_files: bool):
     ignore = tuple(_ini_value("testmon_ignore_dependencies", []))
     peek = testmon_policy.peek(
@@ -89,7 +104,7 @@ def _read_map(environment: str, with_changed_files: bool):
     if peek is None:
         raise SystemExit(
             f"No usable selection map at {testmon_policy.map_path(REPO_ROOT)}.\n"
-            "Record one by running the suite once: pytest"
+            f"{_why_unusable()}Record one by running the suite once: pytest"
         )
     if peek.empty:
         raise SystemExit(
@@ -346,7 +361,7 @@ def _coverage(args, *, with_changed_files: bool = False):
     if reach is None:
         raise SystemExit(
             f"No readable selection map at {map_path}.\n"
-            "Record one by running the suite once: pytest"
+            f"{_why_unusable()}Record one by running the suite once: pytest"
         )
     # Retain a revision of every file the map depends on, not just the source
     # roots — that history is what module-block forgiveness compares an edited

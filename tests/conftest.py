@@ -287,19 +287,62 @@ def _new_reds(config):
 def _ensure_map_seeded(config):
     """Give a fresh checkout a map to work from, once, and remember the donor.
 
-    Idempotent and safe to call from either of the two entry points that need
-    it: xdist sizes its pool before ``pytest_configure`` runs, so whichever
-    comes first does the copy.
+    Idempotent and safe to call from any of the three entry points that need
+    it — xdist's pool sizing, ``pytest_cmdline_main`` and ``pytest_configure``,
+    in that order, none of which is guaranteed to be the one that fires. The
+    first to arrive does the copy; the rest cost a single attribute read.
+
+    The health check comes first and is the reason this is the right moment for
+    it: a map that fails it is taken out of the way, which leaves the checkout
+    looking exactly like a fresh one — so the seeding two lines down is also
+    the rebuild, and a corrupt map costs a copy rather than a traced suite.
     """
 
     if getattr(config, "arrayscope_selection_seed", "unset") != "unset" or _XDIST_WORKER:
         return
+    _refuse_to_open_a_broken_map(config)
     try:
         config.arrayscope_selection_seed = testmon_policy.seed_map(
             config.rootdir, seeding=not config.getoption("no_seed_map", False)
         )
     except Exception:  # an unseeded run is slow, never wrong
         config.arrayscope_selection_seed = None
+
+
+def _refuse_to_open_a_broken_map(config):
+    """Take an unreadable map away before anything tries to read it.
+
+    A malformed map is the one failure the harness had no answer for. Every
+    reader here degrades politely — ``peek`` catches the error and reports "no
+    usable map" — and then testmon's own ``init_testmon_data`` opens the same
+    file seconds later and takes the session down with ``INTERNALERROR>
+    sqlite3.DatabaseError: database disk image is malformed``, out of a
+    traceback that names neither the map nor the checkout that copied it. Twice
+    in two integration sessions that cost a full ``--testmon-noselect``
+    rebuild, and, worse, the `--since` gates run in between had been answering
+    from those same records.
+
+    Printed rather than raised, straight to stderr rather than through the
+    terminal reporter: this runs from ``pytest_cmdline_main`` as well as
+    ``pytest_configure``, and the earlier of those is before there is a
+    reporter to write to. The run continues — recording from scratch is the
+    documented cost of having no map, and it is the cost this converts the
+    crash into.
+    """
+
+    try:
+        quarantined = testmon_policy.quarantine_broken_map(config.rootdir)
+    except Exception:  # a health check may never be the thing that fails a run
+        return
+    if quarantined is None:
+        return
+    complaint, where = quarantined
+    config.arrayscope_map_rebuilt = complaint
+    print(
+        f"test selection: this checkout's map is corrupt ({complaint}) — rebuilding.\n"
+        f"test selection: the unreadable map is at {where} if it is worth a look.",
+        file=sys.stderr,
+    )
 
 
 #: A run that bypasses selection may cost at most this. Above it, retyping the
@@ -1099,6 +1142,15 @@ def pytest_cmdline_main(config):
         return None
     _refuse_harmful_plugin_disables(config)
     _refuse_pointless_flags(config)
+    # Before the ``_map_peek`` below, which is this run's first read of the
+    # map. ``-n auto`` already reaches this through
+    # ``pytest_xdist_auto_num_workers`` and pays nothing twice; an explicit
+    # ``-n`` never fired that hook, so the peek came first and cached "no
+    # usable map" for the rest of the run — leaving a checkout that was about
+    # to be handed one unable to use it until the *next* run. That is the case
+    # a corrupt map lands in, and it is the run that most wants its rebuild to
+    # count now.
+    _ensure_map_seeded(config)
 
     options = vars(config.option)
     inspecting = any(options.get(name) for name in _INSPECTION_OPTIONS)
@@ -1582,6 +1634,12 @@ def pytest_report_header(config):
     if since is not None:
         lines.append(testmon_policy.describe_baseline(config.rootdir, since or None))
 
+    rebuilt = getattr(config, "arrayscope_map_rebuilt", None)
+    if rebuilt:
+        # Also on stderr, from before there was a reporter to say it to. Said
+        # twice on purpose: this is the line that explains why a run that
+        # should have selected four tests is running the suite.
+        lines.append(f"test selection: the map was corrupt ({rebuilt}) and was rebuilt")
     donor = getattr(config, "arrayscope_selection_seed", None)
     if donor:
         lines.append(f"test selection: seeded this checkout's map from {donor}")

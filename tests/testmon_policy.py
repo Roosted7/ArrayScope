@@ -421,6 +421,118 @@ def map_path(rootdir: os.PathLike[str] | str) -> Path:
     return Path(rootdir) / os.environ.get("TESTMON_DATAFILE", MAP_FILENAME)
 
 
+#: Where a map that failed its health check is put, so it can be looked at
+#: rather than only described. One fixed name: the interesting copy is the one
+#: that just broke, and an accumulating pile of 12 MB corpses is its own bug.
+QUARANTINE_SUFFIX = "-broken"
+
+#: How long a read of the map waits for whoever is writing it. Both readers
+#: here are optimisations, so waiting forever is wrong; giving up in a second
+#: is too, because a suite mid-commit holds the write lock for far less than
+#: this and the alternative to waiting is a four-minute traced run.
+_SQLITE_BUSY_SECONDS = 30.0
+
+#: How much of SQLite's complaint reaches a one-line report. The fault is the
+#: first line; the rest is the damage it caused, and the quarantined file keeps
+#: all of it.
+_COMPLAINT_LIMIT = 160
+
+
+def map_health(rootdir: os.PathLike[str] | str) -> str | None:
+    """``None`` if the map is sound, else SQLite's own words for what is wrong.
+
+    ``PRAGMA quick_check`` rather than ``integrity_check``: it does the same
+    page and b-tree structure walk and skips only the index-vs-table
+    cross-check, which is the expensive half. Measured at 67-94 ms on the real
+    12 MB map on a loaded box, against a run it can save from dying four
+    minutes in.
+
+    Because that is the failure this exists to prevent. A malformed map does
+    not degrade — ``peek`` swallows the error and reports "no usable map", and
+    then testmon builds its *own* ``TestmonData`` seconds later, hits the same
+    pages, and takes the whole session down with ``INTERNALERROR>
+    sqlite3.DatabaseError: database disk image is malformed``. Nothing in that
+    sentence names the map, so the run reads as a harness crash.
+    """
+
+    path = map_path(rootdir)
+    if not path.is_file() or path.stat().st_size == 0:
+        return None  # no map is a state every path already handles
+
+    import sqlite3
+
+    try:
+        connection = sqlite3.connect(str(path), timeout=_SQLITE_BUSY_SECONDS)
+    except sqlite3.Error as error:
+        return str(error)
+    try:
+        rows = connection.execute("PRAGMA quick_check").fetchall()
+    except sqlite3.Error as error:
+        return str(error)
+    finally:
+        with contextlib.suppress(sqlite3.Error):
+            connection.close()
+    complaints = [str(row[0]) for row in rows if str(row[0]) != "ok"]
+    if not complaints:
+        return None
+    # One row, with newlines inside it ("*** in database main ***\nTree 9 page
+    # 40: ..."), and it can carry hundreds of lines: one broken page orphans
+    # every page below it, so the real fault arrives followed by a hundred
+    # "Page N: never used". This ends up in a one-line report printed twice, so
+    # keep the fault and count the rest — the whole report is in the
+    # quarantined file for anyone who wants it.
+    lines = [" ".join(line.split()) for line in complaints[0].splitlines()]
+    lines = [line for line in lines if line and not line.startswith("*** in database")]
+    if not lines:
+        return " ".join(complaints[0].split())[:_COMPLAINT_LIMIT]
+    fault = lines[0][:_COMPLAINT_LIMIT]
+    remaining = len(lines) - 1
+    return fault if not remaining else f"{fault} (+{remaining} more)"
+
+
+def quarantine_broken_map(rootdir: os.PathLike[str] | str) -> tuple[str, Path] | None:
+    """Move an unsound map aside so the run rebuilds. ``(complaint, where)``.
+
+    A corrupt map must cost time, never a wall. Recording from scratch is ~4
+    min and every path downstream of here already copes with there being no
+    map at all, so taking the broken one out of the way turns the worst
+    outcome the harness has (a suite that dies mid-run, twice in two
+    integration sessions, having quietly answered `--since` from poisoned
+    records in between) into the second-cheapest one it has.
+
+    Moved rather than deleted. The evidence is 12 MB and the question it
+    answers — *which* pages, and does it match what a `cp` produces — is one
+    nobody can ask again once it is gone.
+
+    The sidecars stay: the flake and skip ledgers are JSON, independent of the
+    page that broke, and they are keyed by node id, so they attach themselves
+    to the rebuilt map's records as soon as it has any.
+    """
+
+    complaint = map_health(rootdir)
+    if complaint is None:
+        return None
+    path = map_path(rootdir)
+    quarantined = path.with_name(path.name + QUARANTINE_SUFFIX)
+    try:
+        os.replace(path, quarantined)
+    except OSError:
+        # Cannot move it, so it must not stay: a map left in place is a map
+        # testmon will open and die on, which is the outcome this prevents.
+        try:
+            path.unlink()
+        except OSError:
+            return None
+        return (complaint, path)
+    # WAL sidecars describe pages of a file that is no longer there. Leaving
+    # them next to the rebuilt map is how a healthy new database inherits a
+    # dead one's frames.
+    for trailing in ("-wal", "-shm"):
+        with contextlib.suppress(OSError):
+            Path(str(path) + trailing).unlink(missing_ok=True)
+    return (complaint, quarantined)
+
+
 def rerun_known_red_tests(config=None) -> bool:
     """Whether *every* previously-failing test re-runs, changed or not.
 
@@ -658,16 +770,19 @@ def _copy_map(donor: Path, destination: Path) -> bool:
     Four files travel, and the map is the only one that has to arrive. The three
     passengers are copied — never linked, for the same reason the map is not —
     after the map is in place, so a failure in any one costs what it carries and
-    nothing else.
+    nothing else. They are plain JSON, so a plain copy is the right primitive
+    for them; the map is SQLite and :func:`_snapshot_sqlite` states why it is
+    not.
     """
 
-    import shutil
     from tempfile import mkstemp
 
     handle, staged = mkstemp(dir=str(destination.parent), prefix=f".{destination.name}.")
     os.close(handle)
     try:
-        shutil.copyfile(donor, staged)
+        if not _snapshot_sqlite(donor, Path(staged)):
+            Path(staged).unlink(missing_ok=True)
+            return False
         os.replace(staged, destination)
     except OSError:
         Path(staged).unlink(missing_ok=True)
@@ -676,6 +791,68 @@ def _copy_map(donor: Path, destination: Path) -> bool:
     _seed_flake_ledger(donor, destination)
     _seed_skip_ledger(donor, destination)
     return True
+
+
+def _snapshot_sqlite(source: Path, destination: Path) -> bool:
+    """Copy a live SQLite database consistently. ``False`` if it could not be.
+
+    **Never ``shutil.copyfile``.** The map runs in ``journal_mode=wal``, and a
+    plain file copy reads the main database file behind SQLite's back. That is
+    safe only if nothing has it open, which on this box is the exception rather
+    than the rule — several agent worktrees run suites at once. Two things go
+    wrong, and only one of them is benign:
+
+    * recently committed transactions live in the ``-wal`` sidecar, which the
+      copy does not take, so the copy is merely *stale*; and
+    * a checkpoint writing pages back into the main file while the copy reads
+      it yields a mixture of two page images that belongs to neither — a
+      database that opens, and then fails ``PRAGMA integrity_check`` with
+      ``2nd reference to page N`` or ``Rowid out of order``.
+
+    The second is what poisoned the main checkout twice, and it surfaces as far
+    from the copy as it possibly could: ``INTERNALERROR>
+    sqlite3.DatabaseError: database disk image is malformed`` out of testmon's
+    ``initiate_execution``, killing a suite that had nothing to do with
+    whichever worktree was created hours earlier.
+
+    Measured 2026-08-01, copying the real 12 MB map 45 times while a real
+    ``pytest tests/app -n 4`` wrote it: ``shutil.copyfile`` 0/45 broken, the
+    same read stretched over ~2 s (a `cp` on a box running three suites) 5/45,
+    the backup below 0/45 — all three from the same source at the same
+    instants, with the five failures at suite startup and shutdown, where the
+    checkpointing is. The exposure is the *duration of the read*, which is
+    exactly how a bug this destructive stayed invisible: on an idle box the
+    copy is too fast to catch a checkpoint, and it works every time you try it.
+
+    ``Connection.backup`` takes a read lock, reads through SQLite, and
+    therefore sees WAL content and never a half-checkpointed page. The result
+    is verified before the caller is told it arrived: a snapshot is worth
+    taking only if it is worth trusting.
+
+    Read-write on the source, deliberately. A read-only connection to a WAL
+    database needs to create the ``-shm`` file when one is not already there,
+    which is precisely the quiet case this has to work in.
+    """
+
+    import sqlite3
+
+    try:
+        origin = sqlite3.connect(str(source), timeout=_SQLITE_BUSY_SECONDS)
+    except sqlite3.Error:
+        return False
+    try:
+        copy = sqlite3.connect(str(destination), timeout=_SQLITE_BUSY_SECONDS)
+        try:
+            origin.backup(copy)
+            verdict = copy.execute("PRAGMA quick_check").fetchone()
+        finally:
+            copy.close()
+    except sqlite3.Error:
+        return False
+    finally:
+        with contextlib.suppress(sqlite3.Error):
+            origin.close()
+    return bool(verdict) and verdict[0] == "ok"
 
 
 def _seed_skip_ledger(donor: Path, destination: Path) -> None:

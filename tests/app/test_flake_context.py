@@ -33,6 +33,7 @@ import sys
 from types import SimpleNamespace
 
 from tests import load_report, red_ledger, testmon_policy
+from tests.app.conftest import read_map, write_map
 from tests.conftest import _run_conditions, _worker_count
 
 FLAKY = "tests/e/test_e.py::test_flaky"
@@ -287,8 +288,7 @@ def _donor_and_worktree(tmp_path, monkeypatch):
     donor_checkout, worktree = tmp_path / "main", tmp_path / "worktree"
     donor_checkout.mkdir()
     worktree.mkdir()
-    donor = donor_checkout / "themap"
-    donor.write_bytes(b"donor-map")
+    donor = write_map(donor_checkout / "themap", "donor-map")
     monkeypatch.setenv("TESTMON_DATAFILE", "themap")
     monkeypatch.setattr(testmon_policy, "_best_donor_map", lambda rootdir, filename: donor)
     return donor, worktree
@@ -323,8 +323,8 @@ def test_adoption_carries_the_observations_home(tmp_path, monkeypatch):
     root, branch = tmp_path / "main", tmp_path / "wt"
     root.mkdir()
     branch.mkdir()
-    (root / "themap").write_bytes(b"stale")
-    (branch / "themap").write_bytes(b"recorded-the-merge")
+    write_map(root / "themap", "stale")
+    write_map(branch / "themap", "recorded-the-merge")
     os.utime(root / "themap", (1, 1))
     os.utime(branch / "themap", (2, 2))  # the newer map wins
     _write_ledger(branch / "themap", {FLAKY: {"count": 1, "last_seen": "2026-07-30T00:00"}})
@@ -394,7 +394,7 @@ def test_a_ledger_that_cannot_be_written_costs_observations_and_nothing_else(tmp
     red_ledger.carry_flakes(donor, worktree / "themap")
     # ...and the seed, which is the caller that must not fail, completes.
     assert testmon_policy.seed_map(worktree) == str(donor)
-    assert (worktree / "themap").read_bytes() == b"donor-map"
+    assert read_map(worktree / "themap") == "donor-map"
     assert red_ledger.read_flakes(worktree / "themap", "env") == {}
 
 
@@ -417,4 +417,4 @@ def test_a_carrier_that_fails_in_an_unforeseen_way_still_cannot_fail_the_seed(
     monkeypatch.setattr(red_ledger, "carry_flakes", explode)
 
     assert testmon_policy.seed_map(worktree) == str(donor)
-    assert (worktree / "themap").read_bytes() == b"donor-map"
+    assert read_map(worktree / "themap") == "donor-map"
