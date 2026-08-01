@@ -306,8 +306,8 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   and PyQtGraph in 3178 ms, versus no preview ACKs on the parent. Target
   settlement remained beyond 5 s on both and the standing R1/R2 failures did
   not increase ([evidence](redesign/unconditional-native-output-preview-2026-07-27.md)).
-- **A WGPU montage pan wedges the pipeline under CPU load — OPEN, found
-  2026-08-01.** Panning the 64-tile `gpu_atlas` montage of
+- **A WGPU montage pan wedged the pipeline under CPU load — FIXED
+  2026-08-01 (`4ca5c918`).** Panning the 64-tile `gpu_atlas` montage of
   `test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope` on a
   loaded box leaves the session with unsettled tiles and **nothing at all
   scheduled to finish them**. Census taken repeatedly inside the stall, with a
@@ -332,9 +332,31 @@ Safe to pick up alongside the numbered queue; each is self-contained.
 
   which is a far better handle than the three-concurrent-suite run that found
   it (1/3, ~15 min). `tests/settle.py` reports it as a wedge carrying the
-  watchdog's own signature rather than as `waitUntil timed out`. Start from the
-  trace the watchdog dumps (`ARRAYSCOPE_STALL_DUMP_DIR`), whose `owner_chain`
-  names the strand; do not widen a wait to hide it.
+  watchdog's own signature rather than as `waitUntil timed out`.
+
+  **Cause: `mark_presented` asked the wrong question.** It popped a tile's
+  dirty entry on acknowledgement and re-armed it only when what was
+  acknowledged was a *preview*. A tile showing an exact level-1 payload while a
+  level-0 evaluation already sat in `rendered_tiles` is not a preview upgrade,
+  so the debt was popped and never re-armed — and `prepare_rung` then refused
+  every replacement producer at `already-rendered-or-skipped`, because that
+  evaluation had moved the semantic axis to EVALUATED. Unproducible and
+  unpresentable at once: the R2 pathology the progressive-render contract names
+  ("skipping production is not skipping presentation"). Load is the gate, not
+  the cause — the ordering only inverts when a level-0 `mark_materialized`
+  lands before the in-flight level-1 acknowledgement. It now re-arms on the
+  lifecycle's own verdict (a rendered result whose target the record still
+  calls unsettled), scoped to the round's required tiles so out-of-view
+  retention — which deliberately holds coarser pixels than the target names —
+  cannot accrue permanent debt. A/B at `-t 15`, 3 rounds: main FAIL/PASS/FAIL
+  with 7 stall assertions, fixed PASS/PASS/PASS with 0.
+
+  The watchdog was also asserting while discarding the rows that explained it:
+  `_stall_tile_probe_row_actionable` suppressed "presented coarser while
+  refinement is queued" as telemetry, but it is consulted only from the stall
+  assertion, which fires *after* the kernel reports nothing queued — so that
+  suppression could only ever hide the defect. It reported `tile_rows: []`
+  against ten stranded tiles; it now names them.
 - **WGPU odd-origin resident-crop geometry is rejected — OPEN.** The
   managed-Weston 336×336×272 `display_x_axis_slice`/`display_y_axis_slice`
   matrix reproducibly reaches `tiledPayloadResident()` with a globally

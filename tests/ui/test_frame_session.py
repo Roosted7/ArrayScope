@@ -325,6 +325,18 @@ def test_montage_render_session_materialized_tile_stays_loading_until_presented(
 
 
 def test_stall_probe_row_classifies_presented_preview_pending_as_refinement_backlog():
+    """Benign only while no round is waiting on the tile.
+
+    "Presented at a coarser level with refinement queued" is telemetry for a
+    RETAINED tile: out-of-view retention deliberately holds coarser pixels than
+    the target names.  For a tile the round still requires it is the defect,
+    because this predicate is consulted from the stall assertion and nowhere
+    else, and that assertion has already established the kernel is idle — so
+    "refinement remains queued" is false where it is read.  Suppressing it
+    there dropped every row that explained the 2026-08-01 WGPU pan wedge, which
+    reported ``tile_rows: []`` while ten required tiles sat unsettled.
+    """
+
     from arrayscope.window.frame_runtime import _stall_tile_probe_row_actionable
 
     session = _session()
@@ -356,7 +368,16 @@ def test_stall_probe_row_classifies_presented_preview_pending_as_refinement_back
     assert row["desired_payload_lod"] == 2
     assert row["presented_quality"] == "preview"
     assert row["presented_lod"] == 2
-    assert not _stall_tile_probe_row_actionable(row)
+
+    # This tile is one the round requires, so its unsettled target is the
+    # defect the assertion exists to name.
+    assert row["required"] is True
+    assert _stall_tile_probe_row_actionable(row)
+
+    # The same row for a tile no round is waiting on stays benign telemetry —
+    # which is what keeps out-of-view retention from asserting on every
+    # deliberately-coarse tile it holds.
+    assert not _stall_tile_probe_row_actionable({**row, "required": False})
 
 
 def test_stall_probe_row_keeps_stale_presented_identity_actionable():
