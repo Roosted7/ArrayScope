@@ -2315,6 +2315,12 @@ class FrameSession:
         level_scope_additions: list[int] = []
         confirmed: list[int] = []
         shown_identities = dict(self.lifecycle.backend_presented_identities)
+        # Hoisted once: the refinement re-arm below is scoped to the tiles this
+        # round must finish, and the set is O(visible) to build.  Out-of-view
+        # retention deliberately keeps coarser pixels than the target names, so
+        # re-arming those would manufacture permanent debt for tiles no round is
+        # waiting on.
+        required_numbers = frozenset(self.required_tile_numbers())
         for tile_number in tuple(tile_numbers or ()):
             index = int(tile_number)
             payload = self.display_tile_payloads.get(index)
@@ -2374,8 +2380,31 @@ class FrameSession:
                 self.loading_tiles.discard(index)
             self.skipped_tiles.discard(index)
             self.dirty_payloads.pop(index, None)
-            if preview_presented and index in self.rendered_tiles:
-                self.dirty_payloads[index] = None
+            if index in self.rendered_tiles:
+                # The acknowledgement closes the debt for the payload it just
+                # confirmed, never for a finer result already sitting in
+                # `rendered_tiles`.  Asking whether the ACKNOWLEDGED payload was
+                # a preview answers the wrong question: a tile showing an
+                # *exact* level-1 payload while a level-0 evaluation waits in
+                # `rendered_tiles` is not a preview upgrade, so the debt was
+                # popped and never re-armed — and `prepare_rung` then refuses
+                # every replacement producer at `already-rendered-or-skipped`,
+                # because that evaluation had already moved the semantic axis to
+                # EVALUATED.  The tile is left unproducible AND unpresentable
+                # with no work and no timer anywhere (ADR 0051's lost-wakeup
+                # class), reached whenever a loaded box lets a level-0
+                # `mark_materialized` land before the in-flight level-1
+                # acknowledgement.  Measured on the WGPU montage pan: 10 of 12
+                # target tiles stranded at `presented_level=1` against a level-0
+                # target, recovered only by the next gesture.
+                # `acknowledge_presented` has already been applied above, so the
+                # record's own verdict is the current one to ask.
+                record = self.lifecycle.peek(index)
+                refinement_owed = bool(
+                    index in required_numbers and record is not None and not record.target_settled
+                )
+                if preview_presented or refinement_owed:
+                    self.dirty_payloads[index] = None
             self.pending_removals.discard(index)
             if 0 <= index < len(self.plan.tiles):
                 state = (

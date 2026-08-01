@@ -1399,9 +1399,21 @@ def _stall_tile_probe_row_actionable(row: dict[str, object]) -> bool:
     exact/native refinement remains queued.  That state is useful telemetry,
     but it is not a stall assertion.  Keep source mismatches and live work
     claims actionable.
+
+    The one exception is the caller's own precondition.  This predicate is
+    consulted from the stall assertion and nowhere else, and that assertion
+    fires only after the kernel reports queued/running/parked all zero with an
+    empty completion queue.  "Refinement remains queued" is therefore provably
+    false at the moment it runs, so a REQUIRED tile whose target is unsettled
+    is the defect rather than benign telemetry — and suppressing it dropped
+    every row that explained a real wedge: 10 tiles holding `presented_lod=1`
+    against a level-0 target with a level-0 result already in `rendered_tiles`
+    reported `tile_rows: []`, leaving the assertion with nothing to name.
     """
 
     live_work = any(bool(row.get(key)) for key in ("loading", "active", "dirty", "pending_upsert"))
+    if bool(row.get("required")) and bool(row.get("target_unsettled")):
+        return True
     evaluation_conflict = row.get("evaluation_claim_source_index") is not None and not bool(
         row.get("evaluation_claim_matches_current_source")
     )
