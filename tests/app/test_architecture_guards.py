@@ -1572,7 +1572,11 @@ def test_operation_evaluator_owns_unified_display_cache():
 
 
 def test_scheduler_v2_pure_modules_are_qt_free():
-    for rel in (Path("arrayscope/operations/chunked.py"),):
+    # Follows the live chunked materializer. This named
+    # ``arrayscope/operations/chunked.py`` until that module was deleted as
+    # rot; the invariant belongs to whichever module actually does chunked
+    # stage materialization, so it moved rather than going away with it.
+    for rel in (Path("arrayscope/operations/chunked_stage.py"),):
         text = (ROOT / rel).read_text()
         assert "Qt" not in text
         assert "pyqtgraph" not in text
