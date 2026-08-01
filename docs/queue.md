@@ -323,13 +323,18 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   to pass: each `_goto` leg pokes the pipeline the previous leg wedged. In the
   application that reads as a pan whose tiles never fill until the user touches
   the view again. This is the lost-wakeup class the watchdog exists to catch,
-  and it is reachable on unmodified `ea9c5ec4`. Reproduce with ~32 busy loops
-  on 16 cores and a single-node run of that test; `tests/settle.py` now reports
-  it as a wedge with the watchdog's own signature rather than as
-  `waitUntil timed out`. Intermittent — one quiet 14-test batch run reproduced
-  it at load average 2.1 and another passed at 6. Start from the trace the
-  watchdog dumps (`ARRAYSCOPE_STALL_DUMP_DIR`), whose `owner_chain` names the
-  strand; do not widen a wait to hide it.
+  and it is reachable on unmodified `ea9c5ec4`. **Reproduces 2/2 in ~90 s
+  each** with
+
+  ```
+  tools/load_fragility -r 2 tests/ui/test_montage_out_of_view_retention.py::test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope
+  ```
+
+  which is a far better handle than the three-concurrent-suite run that found
+  it (1/3, ~15 min). `tests/settle.py` reports it as a wedge carrying the
+  watchdog's own signature rather than as `waitUntil timed out`. Start from the
+  trace the watchdog dumps (`ARRAYSCOPE_STALL_DUMP_DIR`), whose `owner_chain`
+  names the strand; do not widen a wait to hide it.
 - **WGPU odd-origin resident-crop geometry is rejected — OPEN.** The
   managed-Weston 336×336×272 `display_x_axis_slice`/`display_y_axis_slice`
   matrix reproducibly reaches `tiledPayloadResident()` with a globally
