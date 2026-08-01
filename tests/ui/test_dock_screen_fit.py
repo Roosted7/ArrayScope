@@ -19,11 +19,38 @@ reading it would make the test measure the platform instead of the clamp.
 import numpy as np
 from pyqtgraph.Qt import QtCore
 
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
 from tests.ui.helpers import process_events as _process_events
-from tests.ui.helpers import wait_for_panel_preserve as _wait_for_panel_preserve
 
 _WORK_AREA = QtCore.QSize(1400, 900)
+
+
+def _preserve_settled(qtbot, win, *, since):
+    """Wait for the canvas preserver to finish THIS transition's correction.
+
+    Every wait in this file used to be a fixed pump -- 50 event turns for the
+    preserve, then 20 more -- which is a stopwatch standing in for a condition
+    the controller already publishes.  ``CanvasPreserveController.run`` bumps
+    the generation and sets ``active`` synchronously before it returns, and the
+    ``singleShot`` retry chain ends in ``_finish``, which clears ``active`` and
+    writes the very ``last_result``/``attempts_used`` the assertions below
+    read.  So the settled state IS the thing to wait on.
+
+    ``since`` is the generation captured before the transition, and it is what
+    keeps this from being a wait that passes at t=0: a transition that never
+    reached the preserver at all leaves the generation where it was and this
+    fails, instead of reporting the previous transition's finished state.
+    """
+
+    preserver = win.layout_manager.canvas_preserver
+    qtbot.waitUntil(
+        lambda: preserver.generation > since and not preserver.diagnostics().active,
+        timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
+    )
+    # One turn for Qt to publish the geometry the correction just applied; the
+    # assertions read widget sizes, not the preserver's own record of them.
+    _process_events(qtbot, count=2)
 
 
 def _window(qtbot, data=None):
@@ -41,10 +68,16 @@ def _window(qtbot, data=None):
 
 
 def _open(qtbot, win, dock_name):
+    since = win.layout_manager.canvas_preserver.generation
     getattr(win.layout_manager, f"set_{dock_name}_dock_visible_from_user")(True)
-    _wait_for_panel_preserve(qtbot)
-    _process_events(qtbot, count=20)
+    _preserve_settled(qtbot, win, since=since)
     return getattr(win, f"{dock_name}_dock")
+
+
+def _hide(qtbot, win, dock_name):
+    since = win.layout_manager.canvas_preserver.generation
+    getattr(win.layout_manager, f"set_{dock_name}_dock_visible_from_user")(False)
+    _preserve_settled(qtbot, win, since=since)
 
 
 def test_profile_dock_opens_at_its_intended_share_not_its_size_hint(qtbot):
@@ -137,9 +170,7 @@ def test_a_clamped_show_hide_cycle_gives_the_canvas_its_pixels_back(qtbot):
         _open(qtbot, win, "inspection")
         assert win.centralWidget().width() < before_canvas, "expected a clamped shrink"
 
-        win.layout_manager.set_inspection_dock_visible_from_user(False)
-        _wait_for_panel_preserve(qtbot)
-        _process_events(qtbot, count=20)
+        _hide(qtbot, win, "inspection")
 
         assert abs(win.centralWidget().width() - before_canvas) <= 2, (
             f"canvas ratcheted down: {before_canvas} -> {win.centralWidget().width()}"
@@ -160,9 +191,7 @@ def test_a_manually_resized_dock_keeps_its_size_across_a_reopen(qtbot):
         _process_events(qtbot, count=20)
         chosen = int(dock.height())
 
-        win.layout_manager.set_profile_dock_visible_from_user(False)
-        _wait_for_panel_preserve(qtbot)
-        _process_events(qtbot, count=20)
+        _hide(qtbot, win, "profile")
         _open(qtbot, win, "profile")
 
         assert abs(int(dock.height()) - chosen) <= 8, (

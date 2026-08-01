@@ -112,6 +112,17 @@ def _open(qtbot, *, backend, grid=LARGE):
         )
     )
     win.update_image_view()
+    # The first settle fills the montage at the FULL viewport, which is where
+    # most of this file's clock goes: 5.0 s of the ordering test's 6.8-9.9 s at
+    # 272 tiles.  Narrowing to ``_home`` before settling -- so the cold fill is
+    # nine tiles instead of 272 -- is REFUSED, and not for a timing reason.
+    # The narrowing is itself a retarget: measured, it left 64 out-of-view
+    # removals sitting unacknowledged in ``pending_removals`` when the data
+    # change arrived (0 without it), and ``pending_removals`` re-enters the
+    # ``removals`` tuple of every commit until the backend acknowledges it.
+    # The ordering test then attributed those 64 to the data change and failed
+    # against a healthy product.  What the full-viewport fill buys is a session
+    # with nothing owed at the moment the measurement starts.
     with contextlib.suppress(Exception):
         qtbot.waitUntil(
             lambda: frame_session_settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS
@@ -561,22 +572,16 @@ def test_data_change_serves_the_visible_set_before_any_out_of_view_removal(qtbot
 
         _goto(win, qtbot, _home(win))
         _goto(win, qtbot, _home(win))
-        # Warm the target slice for the VISIBLE set only.  Unlike the two
-        # stale-reveal tests, this one's subject is what the commits carry, not
-        # what the surface draws, and the retarget queues an out-of-view
-        # invalidation whether or not the visible tiles are cached — cached
-        # tiles reach the retarget only for the visible display tiles, so every
-        # out-of-view tile takes the miss branch either way (the guard below
-        # fails outright if that stops being true).  What the warm buys is a
-        # 272-tile fill that fits inside the one interaction settle cap on a
-        # loaded machine.
-        for index in (0, 2):
-            win._set_view_state(win.view_state.with_slice(3, index))
-            win.render(reason="test-target-warmup")
-            with contextlib.suppress(Exception):
-                qtbot.waitUntil(
-                    lambda: frame_session_settled(win), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS
-                )
+        # The target slice is deliberately NOT warmed here.  This used to step
+        # the visible set through slices 0 and 2 before measuring, so that a
+        # 272-tile fill would fit the interaction settle cap on a loaded
+        # machine, and that warm silently emptied the measurement: with every
+        # visible tile a display-cache hit, ``visible_plan_complete()`` was
+        # already true when the retarget returned and
+        # ``build_tile_presentation`` never ran again before the wait below
+        # came back — measured ZERO commits after the data change on both
+        # backends, so "no out-of-view removal reached an early commit" was
+        # true of every product, fixed or not.
         session = win.renderer._frame_session
         visible = set(session.visible_tile_numbers)
         out_of_view = len(tuple(session.plan.tiles)) - len(visible)
@@ -585,6 +590,7 @@ def test_data_change_serves_the_visible_set_before_any_out_of_view_removal(qtbot
             f"the ordering is unmeasurable: {len(visible)} vs {out_of_view}"
         )
 
+        deferred_before = int(session.deferred_out_of_view_deferred)
         early_removals: list[int] = []
         original = FrameSession.build_tile_presentation
 
@@ -605,6 +611,34 @@ def test_data_change_serves_the_visible_set_before_any_out_of_view_removal(qtbot
             assert session.deferred_out_of_view_invalidations, (
                 "the data change queued no deferred out-of-view invalidation, "
                 "so this test is measuring nothing"
+            )
+            # The ordering property, stated where it is DECIDED rather than
+            # where it happens to show.  At the retarget seam every superseded
+            # out-of-view tile must take the deferral branch instead of
+            # entering ``pending_removals``, which is what re-enters the
+            # ``removals`` tuple of every commit until the backend
+            # acknowledges it.  ``deferred_out_of_view_deferred`` is a
+            # monotone counter of exactly that branch, so this is true or
+            # false the instant the retarget returns, on any machine.
+            #
+            # Two nearby formulations are NOT usable, both measured:
+            #
+            #  * the observed form below needs a commit to run WHILE the
+            #    visible plan is incomplete, and whether one does is a
+            #    scheduling accident — under three concurrent suites the wgpu
+            #    arm ran zero such commits, because the GUI turn that would
+            #    have committed partial progress was starved and by the time
+            #    one ran all nine visible tiles were ready.  It stays as
+            #    corroboration; it cannot carry the test.
+            #  * reading ``pending_removals`` here instead cannot tell a
+            #    violation from the legitimate post-completion drain, which on
+            #    a loaded box has often already run by the time ``render()``
+            #    returns — measured 242 entries on a healthy product.
+            assert session.deferred_out_of_view_deferred - deferred_before >= out_of_view, (
+                "the retarget did not defer every superseded out-of-view tile: "
+                f"{session.deferred_out_of_view_deferred - deferred_before} deferred "
+                f"against {out_of_view} out of view, so the rest went straight into "
+                "pending_removals for every commit before the visible set completes"
             )
             qtbot.waitUntil(
                 lambda: win.renderer._frame_session.visible_plan_complete(),

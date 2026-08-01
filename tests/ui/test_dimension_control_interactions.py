@@ -613,7 +613,17 @@ def test_wgpu_transposed_nonsquare_montage_floor_admission_survives(qtbot):
 
     # Many NON-SQUARE planes so each tile renders heavily reduced (floors),
     # montaged on axis 0 -> image_axes (1, 2).
-    k, n, m = 64, 256, 192
+    #
+    # The plane count is what puts the montage into the reduced-LOD regime, and
+    # it is not free to lower: measured, 64 and 40 planes commit every tile
+    # page-backed at level 1, while 24 commits every tile at level 0 with NO
+    # page backing at all -- the floor-admission path this test exists for does
+    # not run, and the test passes against the reintroduced defect (checked by
+    # reverting ``canonical_source_tile_shape`` to the display-oriented
+    # ``plan.tile_shape``: 64 and 40 catch it, 24 does not).  40 is the shape
+    # kept, and the precondition below is asserted rather than assumed so a
+    # future layout change cannot quietly move it back into the vacuous regime.
+    k, n, m = 40, 256, 192
     data = np.random.default_rng(0).standard_normal((k, n, m)).astype(np.float32)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
@@ -644,6 +654,22 @@ def test_wgpu_transposed_nonsquare_montage_floor_admission_survives(qtbot):
             win._set_view_state(win.view_state.transposed_image_axes())
             win.update_image_view()
             _process_events(qtbot, count=40)
+        # Precondition: floor admission actually ran.  A montage that fits at
+        # level 0 builds no page-backed floors, and then "no page-LOD shape
+        # mismatch was logged" is true of every product.
+        payloads = [
+            payload
+            for payload in win.renderer._frame_session.display_tile_payloads.values()
+            if payload is not None
+        ]
+        page_backed = [
+            payload for payload in payloads if getattr(payload, "page_backing", None) is not None
+        ]
+        assert page_backed, (
+            f"no tile committed a page-backed floor ({len(payloads)} payloads at levels "
+            f"{sorted({int(getattr(p.lod, 'level', -1)) for p in payloads if p.lod is not None})}); "
+            "the montage fits without a reduced LOD, so this test cannot reproduce"
+        )
         assert not floor_errors, (
             "transposed non-square floor admission raised a page-LOD shape mismatch"
         )
