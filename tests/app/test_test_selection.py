@@ -4,10 +4,12 @@ Ring 0 — no Qt, no rendering. These pin the seams where selection can fail
 *silently*, which is the only way it can hurt: a test that is never selected
 reads exactly like a test that keeps passing.
 
-Two of them are the loud channel for testmon's blind spot. Coverage cannot see
-into a child process, so a test that spawns one must declare what that child
+A group of them is the loud channel for testmon's blind spot. Coverage cannot
+see into a child process, so a test that spawns one must declare what that child
 runs; if the declaration is missing or stale, the test stops being selected by
-anything and nothing else in the suite would notice.
+anything and nothing else in the suite would notice. A declaration is a static
+fact, so every way one can be wrong is answered here, by reading it — including
+the way that used to be answered by testmon raising ``IndexError`` mid-suite.
 """
 
 from __future__ import annotations
@@ -90,6 +92,113 @@ def test_declared_entry_points_still_exist():
         if not (REPO_ROOT / entry_point).exists()
     ]
     assert not missing, f"declared child-process entry points have moved: {missing}"
+
+
+def _source_tree():
+    """testmon's own file reader, with the policy's patch installed."""
+
+    from testmon.testmon_core import SourceTree
+
+    assert testmon_policy.install_extensionless_dependency_support()
+    return SourceTree(rootdir=str(REPO_ROOT))
+
+
+def test_every_declared_entry_point_is_one_testmon_can_key():
+    """A declaration testmon cannot fingerprint must fail *here*, not mid-suite.
+
+    ``SourceTree.get_file`` is where a declared path becomes a fingerprint, and
+    it used to raise ``IndexError`` on any filename with no dot in it — from
+    inside testmon, after the whole suite had run, as ``INTERNALERROR``. Nothing
+    in that traceback names the declaration that caused it.
+
+    So the question is asked of the real reader, over the real declarations, in
+    a ring-0 test that costs milliseconds: whatever a new entry does to testmon,
+    it does it to this test first, with the offending path in the message.
+    """
+
+    source_tree = _source_tree()
+    unkeyable = []
+    for test_file, declared in testmon_policy.OUT_OF_PROCESS_DEPENDENCIES.items():
+        for entry_point in declared:
+            try:
+                module = source_tree.get_file(entry_point)
+            except Exception as error:  # the whole point: name it, do not raise it
+                unkeyable.append((test_file, entry_point, f"{type(error).__name__}: {error}"))
+                continue
+            if module is None or not module.blocks:
+                unkeyable.append((test_file, entry_point, "no fingerprint"))
+    assert not unkeyable, (
+        "these declared child-process entry points cannot be fingerprinted by "
+        "testmon, so a run that records one dies inside testmon rather than "
+        f"failing here: {unkeyable}"
+    )
+
+
+def test_a_non_python_entry_point_is_fingerprinted_as_its_whole_content():
+    """Whole file, one block — so any byte of it selects the declaring test.
+
+    The three ``.githooks/*`` entries and ``tools/load_fragility`` are shell,
+    and shell is what the declaration mechanism has to be able to hold: nothing
+    parses it into functions, so the honest fingerprint is the file itself. This
+    pins that, because the failure would be quiet — a script whose fingerprint
+    covered less than the file would stop selecting its test for edits outside
+    the covered part.
+    """
+
+    source_tree = _source_tree()
+    script = source_tree.get_file("tools/load_fragility")
+
+    assert script.ext != "py"
+    assert len(script.blocks) == 1
+    block = script.blocks[0]
+    assert block.start == 1
+    assert block.end == len((REPO_ROOT / "tools" / "load_fragility").read_bytes().splitlines())
+
+    edited = script.blocks[0].checksum
+    from testmon.process_code import Module
+
+    changed = Module(source_code=script.source_code + "\n# one more line\n", ext="")
+    assert changed.blocks[0].checksum != edited
+
+
+def _testmon_extension(path: str) -> str | None:
+    """testmon's own unpatched derivation, or ``None`` where it raises."""
+
+    parts = path.rsplit(".", 1)
+    return parts[1] if len(parts) > 1 else None
+
+
+def test_deriving_the_extension_from_the_basename_changes_no_existing_answer():
+    """The patch may only stop the raise — never move a file in or out of Python.
+
+    ``Module`` compares ``ext`` against ``"py"`` and nothing else reads it, so
+    that comparison is the entire observable behaviour. Checked over every real
+    path in this tree rather than argued: wherever testmon answers at all, the
+    basename derivation agrees on ``== "py"``.
+    """
+
+    roots = ("arrayscope", "tests", "tools", ".githooks", "experiments", "packaging", "wrappers")
+    paths = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for root in roots
+        if (REPO_ROOT / root).is_dir()
+        for path in (REPO_ROOT / root).rglob("*")
+        if path.is_file()
+    ]
+    # Shapes this tree does not happen to contain, where the two derivations
+    # look at different dots.
+    paths += ["pkg.d/run", "a.py/b", "x.y/mod.py", ".hidden", "plain"]
+    assert len(paths) > 500, "the census is meant to be the tree, not a sample"
+
+    disagreements = [
+        path
+        for path in paths
+        if (theirs := _testmon_extension(path)) is not None
+        and (theirs == "py") != (os.path.basename(path).rpartition(".")[2] == "py")
+    ]
+    assert not disagreements, (
+        f"the basename derivation disagrees with testmon on these paths: {disagreements}"
+    )
 
 
 def test_declarations_name_real_test_files():

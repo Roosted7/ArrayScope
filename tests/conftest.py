@@ -1310,6 +1310,11 @@ def pytest_configure(config):
         # Before testmon's own configure, which is where it resolves the
         # affected set through the module global this patches.
         testmon_policy.install_forgiveness(config.rootdir)
+        # Same window, different reason: without this a declared child-process
+        # entry point with no filename extension takes the run down from inside
+        # testmon at fingerprint time. ``_map_peek`` above has usually installed
+        # it already; a run with no map yet has not, and that run still records.
+        testmon_policy.install_extensionless_dependency_support()
         # Also before it: this hands testmon the map reading the gates above
         # already took, instead of letting it build and stability-check a second
         # copy of the same thing.

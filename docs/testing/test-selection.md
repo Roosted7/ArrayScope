@@ -183,7 +183,9 @@ therefore invisible, and none of them are fixed by running `pytest` again:
    test's recorded dependencies, so those tests are selected exactly when it
    changes. What the entry point *imports* is still out of reach.
    `tests/app/test_test_selection.py` fails if a new spawning test appears
-   undeclared, or if a declared path moves.
+   undeclared, if a declared path moves, or if a declared path is one testmon
+   cannot fingerprint — see [declaring a child's entry
+   point](#declaring-a-childs-entry-point).
 2. **Non-Python inputs.** Icons, fixture arrays and JSONL traces have no
    fingerprint.
 3. **Real rendering.** Rings 3–4 prove things about pixels a compositor drew.
@@ -210,6 +212,47 @@ therefore invisible, and none of them are fixed by running `pytest` again:
 Item 3 has no local escape hatch at all: even a forced untraced sweep runs the
 whole *offscreen* suite, and rings 3–4 are not in it either way, so nothing on
 this page substitutes for running them — see [the ring rules](README.md).
+
+### Declaring a child's entry point
+
+Add the test file and the path the child runs to `OUT_OF_PROCESS_DEPENDENCIES`
+in `tests/testmon_policy.py`, with a comment giving the command. An empty tuple
+is a real declaration and the right one when the child only runs code the test
+file already contains. The entry point is recorded at **whole-file**
+granularity, so any byte of it selects the declaring test — which is the honest
+answer for a file nothing traced.
+
+Entry points are often not Python. `.githooks/pre-commit` and
+`tools/load_fragility` are shell scripts, and nothing parses shell into blocks,
+so a non-Python declaration is fingerprinted as one block spanning the file.
+That works, and until 2026-08-01 it worked by accident: testmon derives a
+file's type by splitting the whole path on its last `.`, and indexes the result
+without checking, so `.githooks/pre-commit` survived only because the leading
+dot of `.githooks` made the split return two elements. `tools/load_fragility`
+has no dot anywhere and took the run down with
+`IndexError` inside testmon's `get_file` — an `INTERNALERROR` after the suite
+had already run, naming nothing that would lead you back to the declaration.
+
+`testmon_policy.install_extensionless_dependency_support` derives the extension
+from the **basename** instead. It changes no existing answer: `ext` is only ever
+compared against `"py"`, and the two derivations agree on that comparison for
+every path in this tree (checked, not argued — the census is in
+`tests/app/test_test_selection.py`, and the three hooks' recorded checksums are
+byte-identical either way). What it changes is that an extensionless path can be
+declared at all.
+
+The other options were worse. `./tools/load_fragility` parses only because `./`
+smuggles a dot in, which is the same accident spelled on purpose. Skipping a
+path the injection cannot key would record no dependency, so editing the script
+selects nothing and it ships unguarded — the exact silent under-selection the
+declaration exists to prevent. And renaming the script fixes one file while
+leaving the mechanism unable to name the next one.
+
+So the failure is now answered where it is caused. A declaration is a static
+fact, so a bad one should fail by reading the declaration, not by running the
+suite: `test_every_declared_entry_point_is_one_testmon_can_key` asks testmon's
+own reader for every declared path in a ring-0 test that costs milliseconds, and
+names the offending path in its message.
 
 ### A record made by a test that skipped
 

@@ -86,7 +86,10 @@ MAP_FILENAME = ".testmondata"
 #: ``test_execution_environments``) runs entirely in-process and is already
 #: traced; adding it would only slow the loop down.
 #: ``tests/app/test_test_selection.py`` fails when a new real spawn appears
-#: without an entry here.
+#: without an entry here, when a declared path has moved, and when a declared
+#: path is one testmon cannot fingerprint — the last of which used to be a
+#: mid-suite ``INTERNALERROR``; see
+#: :func:`install_extensionless_dependency_support`.
 OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     # `python tools/demo_recorder.py --smoke ...`
     "tests/app/test_demo_recorder_smoke.py": ("tools/demo_recorder.py",),
@@ -134,6 +137,11 @@ OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
         ".githooks/post-merge",
         ".githooks/post-checkout",
     ),
+    # `bash tools/load_fragility ...` in throwaway sandboxes. The script is the
+    # subject, it is not Python, and the two tests that read its text read it as
+    # data — which testmon does not record — so only this declaration ties the
+    # co-operation rules to the file that implements them.
+    "tests/tools/test_load_fragility.py": ("tools/load_fragility",),
     # `python -c "import arrayscope.io.numpy_save"` (asserts pyqtgraph stays out
     # of sys.modules).
     "tests/io/test_numpy_save.py": ("arrayscope/io/numpy_save.py",),
@@ -1272,6 +1280,113 @@ def install_forgiveness(rootdir: os.PathLike[str] | str) -> bool:
     return True
 
 
+def install_extensionless_dependency_support() -> bool:
+    """Let testmon key a dependency whose filename has no extension. Idempotent.
+
+    ``SourceTree.get_file`` derives a file's type with
+    ``filename.rsplit(".", 1)[1]`` and indexes that unconditionally, so a path
+    with no dot *anywhere in it* raises ``IndexError`` — inside testmon, at
+    fingerprint time, surfacing as ``INTERNALERROR`` after the tests have
+    already run. This repository spent a session removing exactly that failure
+    shape (``e016db33``), and it is worth being precise about why it is the
+    wrong shape here: the raise is caused by a line in
+    :data:`OUT_OF_PROCESS_DEPENDENCIES`, so the thing that decides whether a run
+    can start at all is a static declaration, and it should be answered by
+    reading the declaration rather than by running the suite. It now is, twice
+    over: this makes the declaration expressible, and
+    ``tests/app/test_test_selection.py`` fails on any declared path testmon
+    cannot key.
+
+    Extensionless entry points are not an edge case to route around.
+    ``tools/load_fragility`` is a bash script with no dot in its path, and it is
+    a real child-process entry point: ``tests/tools/test_load_fragility.py``
+    runs it, and nothing in-process executes it. The alternatives are worse than
+    they look. Declaring ``./tools/load_fragility`` parses only because ``./``
+    smuggles a dot in — the same accident, spelled deliberately. Skipping the
+    entry records no dependency at all, so editing the script selects nothing
+    and it ships unguarded, which is the silent under-selection the declaration
+    exists to prevent. Renaming the script fixes one file and leaves the
+    mechanism unable to name the next one.
+
+    And this is not one script's problem. The three ``.githooks/*`` entries are
+    the same shape and survive by luck: the leading dot of ``.githooks`` makes
+    the split return two elements, so the index succeeds and the "extension" is
+    ``githooks/pre-commit``. That is not ``py`` — the only thing the value is
+    ever compared against — so the hook is fingerprinted as one whole-file
+    block, which is the right answer reached for no reason. This makes it the
+    derivation instead.
+
+    Deriving from the **basename** agrees with testmon everywhere testmon does
+    not crash, on the only question the value decides. ``Module`` tests
+    ``self.ext == "py"`` and nothing else reads it; testmon answers ``py``
+    exactly when the last dot in the whole path is followed by ``py``, and when
+    that dot is in the basename a basename split says the same. When it is not
+    (``pkg.d/run`` → ``d/run``) both answers are non-``py``. So no existing
+    dependency changes its fingerprint and the extensionless ones stop raising.
+
+    A non-Python file becomes one block spanning the file, so its fingerprint is
+    its whole content and *any* byte that changes it selects the declaring test.
+    That is precisely the granularity
+    :func:`inject_out_of_process_dependencies` records, and it is the honest one
+    for a file nothing traced.
+
+    What it does not buy: this is still whole-file fingerprinting of the entry
+    point, so what that script *itself* shells out to stays invisible, exactly
+    as blind spot 1 in this module's docstring says.
+
+    Returns whether the patch is in place. ``False`` only when testmon is not
+    importable, which every caller already treats as "no selection".
+    """
+
+    try:
+        from testmon import testmon_core as core
+    except ImportError:
+        return False
+
+    original = core.SourceTree.get_file
+    # The marker is the function it replaced, matching :func:`install_forgiveness`.
+    if getattr(original, "arrayscope_extensionless", None) is not None:
+        return True
+
+    def get_file(self, filename, _original=original):
+        if filename in self.cache or "." in os.path.basename(filename):
+            return _original(self, filename)
+        self.cache[filename] = _extensionless_module(core, self, filename)
+        return self.cache[filename]
+
+    get_file.arrayscope_extensionless = original
+    core.SourceTree.get_file = get_file
+    return True
+
+
+def _extensionless_module(core, source_tree, filename: str):
+    """``SourceTree.get_file``'s own body for one file, with ``ext=""``.
+
+    Deliberately a copy of those twelve lines rather than a way to reach back
+    into them: the extension is computed inline, halfway down, so there is no
+    seam to hook. Cached by the caller the same way testmon caches, and ``None``
+    for a file that is not there — which is the state
+    :func:`inject_out_of_process_dependencies` already produces (it injects
+    nothing for a path it cannot read) and every reader already handles.
+    """
+
+    code, fsha = core.get_source_sha(directory=source_tree.rootdir, filename=filename)
+    if not fsha:
+        return None
+    try:
+        mtime = os.path.getmtime(os.path.join(source_tree.rootdir, filename))
+    except OSError:
+        return None
+    return core.Module(
+        source_code=code,
+        mtime=mtime,
+        ext="",
+        fs_fsha=fsha,
+        filename=filename,
+        rootdir=source_tree.rootdir,
+    )
+
+
 def peek(
     rootdir: os.PathLike[str] | str,
     environment: str,
@@ -1298,6 +1413,9 @@ def peek(
         return None
 
     install_forgiveness(rootdir)
+    # Before ``determine_stable`` below, which is the first thing to ask the
+    # source tree for a declared entry point.
+    install_extensionless_dependency_support()
     # Before the import below, which binds whatever the name points at now.
     memoise_system_packages()
 
