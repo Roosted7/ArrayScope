@@ -106,9 +106,13 @@ def _adapter_info_from_probe() -> dict | None:
     private one here would silently defeat the display's Vulkan-only pin.
     """
 
-    try:
-        from arrayscope.gpu.wgpu_adapter import shared_wgpu_adapter
+    # Import outside the guard: a broken internal import is a real error the
+    # import-health guard must see, not a silent "this machine has no GPU".
+    # Only the adapter request -- which legitimately fails on a host with no
+    # usable Vulkan adapter -- is allowed to fail.
+    from arrayscope.gpu.wgpu_adapter import shared_wgpu_adapter
 
+    try:
         adapter = shared_wgpu_adapter()
     except Exception:
         return None
