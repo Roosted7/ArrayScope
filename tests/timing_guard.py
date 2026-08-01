@@ -93,9 +93,11 @@ full or ``--since`` run rather than when it was written.
 
 Cost: a file is parsed only once a pause or clock token appears in its text,
 which is 112 of the suite's 313 modules, and every rule reads one pre-collected
-:class:`Module` rather than reaching for ``ast.walk`` itself. 2.5-2.8 s at the
-hook on a box with ten of sixteen cores busy, where the dead-code scan beside it
-is 9-11 s.
+:class:`Module` rather than reaching for ``ast.walk`` itself. Quoted as a ratio
+because the absolute reading is mostly the box -- **0.23-0.26x the dead-code
+scan it runs beside**, interleaved ABAB across loads of 15 to 19 on sixteen
+cores, which was 1.6-2.8 s against its 6-11 s. A single number taken while
+something else was starting would have said 4.2 s and been believed.
 """
 
 from __future__ import annotations

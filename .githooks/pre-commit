@@ -27,10 +27,14 @@
 # one of its own. A fixed pause is added by editing a *test* file, so testmon
 # selects that file and never the guard that reads it; under pytest the pause
 # would be met on some later full or `--since` run instead of when it was
-# written, which is the whole point of having a guard for it. ~2.5 s here on a
-# box with ten of sixteen cores busy, where the dead-code scan above is 9-11 s.
+# written, which is the whole point of having a guard for it.
 # `tests/app/test_timing_guard.py` keeps only the synthetic proof that its rules
 # can fail -- which is what makes it safe to run the scan nowhere else.
+#
+# Cost, stated as a ratio because the absolute reading is mostly the box: 0.23-
+# 0.26x the dead-code scan above, measured interleaved ABAB across loads of 15
+# to 19 on sixteen cores. That was 1.6-2.8 s against its 6-11 s; on a quiet
+# machine both shrink together and the quarter holds.
 #
 # The tools come from this checkout's environment, and the hook finds it
 # itself. `git commit` from a plain shell has no venv on PATH, so this gate
