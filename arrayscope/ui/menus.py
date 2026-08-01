@@ -1149,7 +1149,19 @@ class WindowMenuMixin:
 
     def _apply_theme_choice(self, choice, persist=True):
         result = apply_theme_to_qapplication(QtWidgets.QApplication.instance(), choice)
-        self._retheme_presentation_surfaces()
+        # Only repaint when the appearance actually changed. This runs on every
+        # window construction, where it can never help the window being built --
+        # `__init__` applies the theme long before `_build_window_ui`, so this
+        # window owns no surfaces yet and the walk below reaches only *other*
+        # windows, whose theme did not change. What it costs is not constant:
+        # `refresh_icon_tints` clears the icon cache (so the UI about to be
+        # built re-renders every icon) and then visits every widget and every
+        # action in the process, so it grows with what is already open --
+        # 20 ms at the fifth window, 64 ms at the twentieth. This is the same
+        # shape as the application stylesheet guarded just above, and the same
+        # reason.
+        if result.changed:
+            self._retheme_presentation_surfaces()
         if result.warning:
             show_status_message(self, f"Theme warning: {result.warning}")
             if persist:

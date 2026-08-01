@@ -30,6 +30,14 @@ class ThemeResult:
     applied: ThemeChoice
     backend: str
     warning: str | None = None
+    #: Whether this call actually changed the application's appearance.
+    #: ``False`` means the palette and stylesheet the app already carried are
+    #: the ones this choice asks for, so everything a theme *switch* has to
+    #: repaint is already correct. Callers use it to skip that repaint; see
+    #: :func:`apply_theme_to_qapplication`. Defaults to ``True`` so a result
+    #: built without applying anything (no ``QApplication``) is never read as
+    #: "nothing to do".
+    changed: bool = True
 
 
 @dataclass(frozen=True)
@@ -289,11 +297,17 @@ def apply_theme_to_qapplication(app, choice) -> ThemeResult:
     # QApplication actually carries -- rather than against the tokens stored
     # below -- keeps this correct if anything else has replaced or cleared it.
     stylesheet = build_stylesheet(tokens)
-    if stylesheet != app.styleSheet():
+    changed = stylesheet != app.styleSheet()
+    if changed:
         app.setStyleSheet(stylesheet)
     app.setProperty("_arrayscope_theme_tokens", tokens)
     _apply_pyqtgraph_defaults(tokens)
-    return result
+    # The sheet is derived from the tokens, so "the app already carries this
+    # exact sheet" is also "these are the tokens already in force". Reporting
+    # it as a plain bool derived from a plain string keeps it usable across the
+    # module duplication the suite creates, where comparing ThemeTokens objects
+    # would answer "different" for two identical token sets.
+    return dataclasses_replace(result, changed=changed)
 
 
 def _apply_pyqtgraph_defaults(tokens: ThemeTokens) -> None:

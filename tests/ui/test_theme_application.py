@@ -7,6 +7,15 @@ first window and 567 ms for the fifth). It is therefore skipped when the
 sheet it would install is the one already in force. These tests pin the two
 halves of that bargain: the skip really happens, and nothing that must
 restyle stops restyling.
+
+The same bargain, and the same two halves, apply to the repaint that follows
+it. ``_apply_theme_choice`` calls ``_retheme_presentation_surfaces``, which
+clears the icon cache and then visits every widget and every action in the
+process. That is a *theme switch's* job; on a window construction it can
+never help the window being built, because ``__init__`` applies the theme
+long before ``_build_window_ui`` exists to give it any surfaces. Measured
+over a process building windows back to back, it grew a build from 116 ms to
+180 ms by the fourteenth; guarded, the same builds stay flat at ~100 ms.
 """
 
 import numpy as np
@@ -100,6 +109,98 @@ def test_a_cleared_stylesheet_is_repaired_by_the_next_apply(qt_app):
     _theme().apply_theme_to_qapplication(qt_app, ThemeChoice.DARK)
 
     assert qt_app.styleSheet() == dark_sheet
+
+
+def _icon_named_buttons(app):
+    from pyqtgraph.Qt import QtWidgets
+
+    from arrayscope.ui.icons import _ICON_NAME_PROPERTY
+
+    return [
+        widget
+        for widget in app.allWidgets()
+        if isinstance(widget, QtWidgets.QAbstractButton) and widget.property(_ICON_NAME_PROPERTY)
+    ]
+
+
+def _icon_image(button):
+    return button.icon().pixmap(18, 18).toImage()
+
+
+def test_a_second_window_does_not_retint_every_icon_in_the_process(qt_app, monkeypatch):
+    from arrayscope.ui import icons as icons_module
+    from arrayscope.ui.icons import _ICON_NAME_PROPERTY
+    from arrayscope.window.main import ArrayScopeWindow
+
+    first = ArrayScopeWindow(_data())
+    try:
+        by_name = {
+            button.property(_ICON_NAME_PROPERTY): _icon_image(button)
+            for button in _icon_named_buttons(qt_app)
+        }
+        assert by_name, "the first window should own icon-bearing buttons to compare against"
+
+        retints = []
+        original = icons_module.refresh_icon_tints
+        monkeypatch.setattr(
+            icons_module,
+            "refresh_icon_tints",
+            lambda: (retints.append(1), original())[1],
+        )
+
+        second = ArrayScopeWindow(_data())
+        try:
+            assert retints == [], (
+                "building a window must not re-tint every icon in the process: the "
+                "theme has not changed, and this window's own surfaces do not exist "
+                "yet when the theme is applied"
+            )
+            # Same bargain as the stylesheet above: skipping is only legitimate
+            # if the new window's icons come out right anyway, which they do
+            # because the cache was left holding icons tinted for this palette.
+            second_icons = {
+                button.property(_ICON_NAME_PROPERTY): _icon_image(button)
+                for button in _icon_named_buttons(qt_app)
+                if button.window() is second
+            }
+            assert second_icons, "the second window should own icon-bearing buttons"
+            shared = set(second_icons) & set(by_name)
+            assert shared, "the two windows should share at least one icon name"
+            for name in sorted(shared):
+                assert second_icons[name] == by_name[name], f"icon {name!r} differs from window one"
+        finally:
+            second.close()
+    finally:
+        first.close()
+
+
+def test_a_theme_change_still_retints_the_icons(qt_app):
+    from arrayscope.app.theme import ThemeChoice
+    from arrayscope.window.main import ArrayScopeWindow
+
+    restore = qt_app.styleSheet()
+    win = ArrayScopeWindow(_data())
+    try:
+        win._apply_theme_choice(ThemeChoice.DARK, persist=False)
+        buttons = [button for button in _icon_named_buttons(qt_app) if button.window() is win]
+        assert buttons, "the window should own icon-bearing buttons"
+        dark = [_icon_image(button) for button in buttons]
+
+        win._apply_theme_choice(ThemeChoice.LIGHT, persist=False)
+        light = [_icon_image(button) for button in buttons]
+
+        # Icons are baked pixmaps, so nothing but the re-tint changes them. Every
+        # one of them, not merely some: a guard that let the repaint run for only
+        # part of the process would leave dark glyphs on a light window.
+        assert all(a != b for a, b in zip(dark, light, strict=True))
+
+        # ...and back, so the skip cannot latch the process into the first theme
+        # it happened to see.
+        win._apply_theme_choice(ThemeChoice.DARK, persist=False)
+        assert [_icon_image(button) for button in buttons] == dark
+    finally:
+        win.close()
+        qt_app.setStyleSheet(restore)
 
 
 def test_a_second_window_is_themed_without_reinstalling_the_stylesheet(qt_app, monkeypatch):
