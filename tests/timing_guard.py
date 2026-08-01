@@ -82,13 +82,20 @@ Over-approximation is the safe direction: clock-tainted names are tracked per
 module rather than per scope, which can only make a site reported that need not
 have been, and never the reverse.
 
+This is a lint, not a test, and it is wired the way the dead-code scan is: the
+gate is ``.githooks/pre-commit`` via ``tools/timing_guard.py``, and
+``tests/app/test_timing_guard.py`` keeps only the synthetic proof that these
+rules can fail. Running the tree scan under pytest as well would cost seconds on
+every suite run to re-answer what the hook already refused, and would answer it
+too late besides: a pause arrives in a *test* file, which testmon selects
+instead of the guard reading it, so pytest would meet the pause on some later
+full or ``--since`` run rather than when it was written.
+
 Cost: a file is parsed only once a pause or clock token appears in its text,
 which is 112 of the suite's 313 modules, and every rule reads one pre-collected
-:class:`Module` rather than reaching for ``ast.walk`` itself. 1.9-2.3 s on a box
-with nine of sixteen cores busy, against 4.4 s for the interaction-timeout guard
-that has lived in the suite all along. Both numbers are why this is a pytest
-gate and not a commit hook like ``tools/dead_code.py``, whose whole-tree scan
-costs seconds it would spend again on every run.
+:class:`Module` rather than reaching for ``ast.walk`` itself. 2.5-2.8 s at the
+hook on a box with ten of sixteen cores busy, where the dead-code scan beside it
+is 9-11 s.
 """
 
 from __future__ import annotations
@@ -730,6 +737,53 @@ def scan_source(text: str, path: str = "tests/ui/test_probe.py") -> list[Finding
         clock_backed_assertions(module) + unjustified_pauses(module, primitives),
         key=lambda finding: finding.line,
     )
+
+
+#: Fixed pauses in the tree whose duration was typed rather than read from the
+#: throttle bounding it. Measured 2026-08-02, and **only ever revised
+#: downwards**: a commit that raises it is precisely what this guard exists to
+#: refuse. The equality is exact in both directions, so converting a site
+#: without lowering the number fails too -- otherwise the ratchet goes slack and
+#: the next pause slips into the gap. The whole inventory is printed on either
+#: failure. When it reaches nought, delete it and refuse any pause at all.
+#:
+#: The one thing it cannot do is notice a commit that converts one site and adds
+#: another in the same breath. That is why the refusal prints the inventory and
+#: not the number.
+UNJUSTIFIED_PAUSE_BACKLOG = 55
+
+
+def problems(root: Path = REPO_ROOT) -> list[str]:
+    """Every reason this tree should be refused, most actionable first."""
+
+    collected = findings(root)
+    stopwatches = [finding for finding in collected if finding.kind == "stopwatch"]
+    pauses = [finding for finding in collected if finding.kind == "pause"]
+
+    refusals = []
+    if stopwatches:
+        refusals.append(
+            f"{len(stopwatches)} test(s) decide something from a clock reading, and a "
+            "worker sharing sixteen cores cannot measure a duration:"
+        )
+        refusals.extend(f"  {finding}" for finding in stopwatches)
+        refusals.append("  -> say it on a counter the product already publishes.")
+        refusals.append("     There is no allowance here and the tree has needed none.")
+    if len(pauses) != UNJUSTIFIED_PAUSE_BACKLOG:
+        direction = "more" if len(pauses) > UNJUSTIFIED_PAUSE_BACKLOG else "fewer"
+        refusals.append(
+            f"{len(pauses)} fixed pauses name no throttle, {direction} than the recorded "
+            f"backlog of {UNJUSTIFIED_PAUSE_BACKLOG}:"
+        )
+        refusals.extend(f"  {finding}" for finding in pauses)
+        if len(pauses) > UNJUSTIFIED_PAUSE_BACKLOG:
+            refusals.append("  -> read the duration from the interval that bounds it, or wait")
+            refusals.append("     on the product instead (tests/settle.py). There is no")
+            refusals.append("     allowlist to add it to.")
+        else:
+            refusals.append("  -> you removed some: set UNJUSTIFIED_PAUSE_BACKLOG in")
+            refusals.append(f"     tests/timing_guard.py to {len(pauses)}. It only ever goes down.")
+    return refusals
 
 
 def report(collected: list[Finding]) -> str:

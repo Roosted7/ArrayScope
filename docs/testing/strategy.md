@@ -200,17 +200,28 @@ have failed before deciding where its replacement belongs; "it went red under
 load" is evidence about the box, not evidence that the test was doing work.
 
 None of that survived contact with a hurried commit on its own, so
-`tests/app/test_timing_guard.py` reads the tree for it in ring 0. **A clock
-reading may not reach a verdict**: not an `assert`, and not an `if elapsed >
-...: pytest.fail()` either, since an assert-only rule steps straight over that.
-The tree is at nought and the gate says nought, with no allowance to widen —
+`tools/timing_guard.py` reads the tree for it at commit time, from
+`.githooks/pre-commit` beside ruff and the dead-code scan. **A clock reading may
+not reach a verdict**: not an `assert`, and not an `if elapsed > ...:
+pytest.fail()` either, since an assert-only rule steps straight over that. The
+tree is at nought and the gate says nought, with no allowance to widen —
 recording a duration beside a result stays free, and `tests/conftest.py`,
 `tests/load_report.py` and `tests/seams.py` all still do it. The fixed-pause
 half cannot be at nought yet, so it is a counted backlog that is only ever
-revised downwards, printed in full by path and line on either failure; it is a
+revised downwards, printed in full by path and line on either refusal; it is a
 number rather than a list of paths precisely so that no file is grandfathered.
-Both mutations were forced back to check the gate can fail: a bare
-`qtbot.wait(250)` in `test_toasts.py` and `empty_ms <= working_ms` restored in
+
+The hook rather than pytest, for the dead-code reason and one more. A pause
+arrives by editing a *test* file, which testmon selects instead of the guard
+that reads it, so a pytest gate would meet the pause on some later full or
+`--since` run rather than at the moment somebody wrote it — which is the whole
+point of having it. `tests/app/test_timing_guard.py` keeps only the synthetic
+proof that the rules can fail, and that proof is what makes running the scan
+nowhere else safe: it caught the guard classifying a test whose whole body was a
+pause as a *wrapper* and reporting nothing, green on the real tree and green
+with the mutation in it. Both mutations were then forced back through a real
+`git commit` to check the hook refuses them — a bare `qtbot.wait(250)` in
+`test_toasts.py` and `empty_ms <= working_ms` restored in
 `test_commit_cost_scaling.py` were each named with their line.
 
 Record separately:

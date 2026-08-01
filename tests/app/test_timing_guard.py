@@ -1,86 +1,35 @@
-"""The gate for :mod:`tests.timing_guard`, and the proof its rules can fail.
+"""Proof that the timing rules in :mod:`tests.timing_guard` can actually fail.
 
-Ring 0 -- no Qt, no ``arrayscope`` import, nothing built. Both gates read the
-tree and nothing else, the same shape as
-``test_every_declared_entry_point_is_one_testmon_can_key``: whatever a new pause
-does to a later run, it does it to this test first, with the offending path and
-line in the message. ~2 s on a loaded box, against 4.4 s for the
-interaction-timeout guard that already lives in the suite for the same reason.
+Ring 0 -- no Qt, no ``arrayscope`` import, nothing built, no real tree read but
+one synthetic package. The whole-tree scan is NOT run here: it is a lint, gated
+at commit time by ``.githooks/pre-commit`` through ``tools/timing_guard.py``,
+for the reason ``tests/app/test_dead_code.py`` gives about its own scan and one
+more that is specific to this guard. A pause is added by editing a *test* file,
+and testmon selects that file rather than the guard that reads it -- the gap
+``testmon_policy.forgivable_checksums`` already names for ``test_dead_code`` and
+``test_architecture_guards``. Under pytest the pause would therefore be met on
+some later full or ``--since`` run instead of at the moment somebody wrote it,
+which is the entire point of having the guard. At the hook it is refused as it
+is written, and the ~2.5 s comes off every suite run.
 
-One limit, stated rather than left to be discovered. This guard reads the suite
-as *data*, so testmon does not select it when one of the files it reads changes
--- the same gap ``tests/app/test_dead_code.py`` and ``test_architecture_guards``
-have, and the reason ``testmon_policy.forgivable_checksums`` names those two in
-its docstring. A commit that adds a pause therefore meets this gate on the next full
-or ``--since`` run rather than at the moment it is written. Closing it properly
-means a line in ``.githooks/pre-commit``, which is the gate that actually fires
-here, at ~2 s added to every commit; that is a trade for the repository to make
-and not one to slip in.
+What is left is the part pytest is actually for. A guard nobody can see fail is
+the failure mode this repository keeps meeting -- five times by
+``docs/reviews/2026-07-27``, again in the assertion this week's work deleted
+(green with the defect forced back in), and once more in these very rules: a
+test whose whole body was a pause matched "function that does nothing but
+pause", so the guard classified it as a *wrapper* and reported nothing, green on
+the real tree and green with the mutation in it. Only
+``test_a_bare_pause_is_named_by_path_and_line`` below asked the question.
 
-Half of this file is the falsifiability half, and it is the half that matters.
-A guard nobody can see fail is the failure mode this repository keeps meeting
--- five times by ``docs/reviews/2026-07-27``, and again in the assertion this
-week's work deleted, which was green with the defect forced back in. So every
-rule below has a case that would pass silently without it, and every exemption
-has a case showing what it lets through and a neighbouring case showing what it
-still refuses.
+So every rule has a case that would pass silently without it, and every
+exemption has a case showing what it lets through beside one showing what it
+still refuses. These are all this file has to keep those rules falsifiable, and
+they are instant.
 """
 
 from __future__ import annotations
 
 from tests import timing_guard
-
-#: Fixed pauses in the tree whose duration was typed rather than read from the
-#: throttle bounding it. Measured 2026-08-02, and **only ever revised
-#: downwards**: a commit that raises it is precisely what this guard exists to
-#: refuse. The equality is exact in both directions, so converting a site
-#: without lowering the number fails too -- otherwise the ratchet goes slack and
-#: the next pause slips into the gap. ``tests.timing_guard.report`` prints the
-#: whole inventory on either failure. When it reaches nought, delete it and
-#: assert the empty list.
-#:
-#: The one thing it cannot do is notice a commit that converts one site and adds
-#: another in the same breath. That is why the failure message is the inventory
-#: and not the number.
-UNJUSTIFIED_PAUSE_BACKLOG = 55
-
-
-def test_no_test_adjudicates_a_clock_reading():
-    """A duration may be recorded anywhere and decide nothing, anywhere.
-
-    There is no allowance and no backlog here, because the tree already has
-    none: ``ba53fbc8`` restated the last one on counters. The rule is about the
-    reading rather than what is done with it, because the last survivor was
-    ``empty_ms <= working_ms`` -- threshold-free, ratio-free, and both flaky and
-    vacuous at once (``docs/testing/strategy.md``).
-    """
-
-    stopwatches = [finding for finding in timing_guard.findings() if finding.kind == "stopwatch"]
-    assert stopwatches == [], (
-        "these tests decide something from a clock reading, and a worker sharing "
-        "sixteen cores cannot measure a duration:\n" + timing_guard.report(stopwatches)
-    )
-
-
-def test_fixed_pauses_are_no_more_numerous_than_the_recorded_backlog():
-    """A pause whose duration was typed must not be added to this tree.
-
-    The survivors are a backlog, not an allowlist: they are counted, never
-    named, so nothing here grandfathers a particular file and no entry can rot
-    into permission. The fix for one of them is to read the interval from the
-    throttle it is bounded by -- ``qtbot.wait(2 * PUBLISH_COALESCE_MS)`` -- or
-    to replace it with a wait denominated in the product's own progress
-    (``tests/settle.py``).
-    """
-
-    pauses = [finding for finding in timing_guard.findings() if finding.kind == "pause"]
-    assert len(pauses) == UNJUSTIFIED_PAUSE_BACKLOG, (
-        f"{len(pauses)} fixed pauses name no throttle, against a recorded backlog of "
-        f"{UNJUSTIFIED_PAUSE_BACKLOG}. If you removed some, set "
-        "UNJUSTIFIED_PAUSE_BACKLOG to the new number in this file -- it only ever "
-        "goes down. If you added one, read its duration from the interval that "
-        "bounds it, or wait on the product instead.\n" + timing_guard.report(pauses)
-    )
 
 
 def _kinds(source):
