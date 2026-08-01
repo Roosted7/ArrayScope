@@ -475,6 +475,11 @@ def test_repeated_identical_presentation_confirmation_is_not_a_new_ack(monkeypat
         "emit_trace",
         lambda kind, **fields: events.append((kind, fields)),
     )
+    monkeypatch.setattr(
+        tile_lifecycle,
+        "emit_trace_fields",
+        lambda kind, fields: events.append((kind, fields)),
+    )
     monkeypatch.setattr(tile_lifecycle, "trace_enabled", lambda: True)
 
     assert lc.acknowledge_presented(2, "payload-v1", "exact", 0)
@@ -509,6 +514,11 @@ def test_lifecycle_trace_bounds_rich_page_and_payload_identities(monkeypatch, lc
         tile_lifecycle,
         "emit_trace",
         lambda kind, **fields: events.append((kind, fields)),
+    )
+    monkeypatch.setattr(
+        tile_lifecycle,
+        "emit_trace_fields",
+        lambda kind, fields: events.append((kind, fields)),
     )
     monkeypatch.setattr(tile_lifecycle, "trace_enabled", lambda: True)
 

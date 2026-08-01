@@ -247,6 +247,15 @@ removing the fixed cost (S2) or the recomputation (I1) moves these channels.
 - The trace-guard cleanup (I3) — mechanical, ~1 ms/commit, 74 sites; safe to
   do any time, pointless to do inside this research branch while the commit
   path is under active sibling surgery.
+  **Closed 2026-08-01, and it was not the cleanup this line expected**
+  ([trace-cost-2026-08-01.md](trace-cost-2026-08-01.md)): guarding the sites
+  is a measured no-op because the watchdog arms the bus for every montage
+  session (8.1k–11.3k True, zero False, eight sessions), and the default ring
+  cannot be narrowed — the field stall dumps that produced three regression
+  tests were decoded from the per-tile rows a narrower ring would drop. The
+  ~1 ms/commit is one 107-field record whose cost is argument construction;
+  removing its recomputation and its redundant re-hashing took ~23% off the
+  session trace tax with byte-identical output.
 
 The two fixes that would move the ranked list most, in order of leverage:
 chunk/off-thread the cold-entry stage plan (S1, owns the 1.3 s freeze), and

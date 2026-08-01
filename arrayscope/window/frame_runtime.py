@@ -538,6 +538,16 @@ class FrameRuntimeMixin:
         if not TRACE.enabled:
             # V3 keeps only the bounded in-memory tail when no JSONL sink was
             # requested, so a production stall always has evidence to dump.
+            #
+            # This line is why the whole app traces in ordinary use, and the
+            # cost is real (see docs/redesign/trace-cost-2026-08-01.md): it is
+            # not a lever.  Guarding an emit site on `trace_enabled()` cannot
+            # recover it — measured 8.1k-11.3k True and *zero* False at the
+            # guarded montage sites across eight sessions — and narrowing what
+            # the default ring records is refused by evidence: the three field
+            # stall dumps that produced regression tests were decoded from
+            # per-tile `lifecycle` rows.  The recorder earns its price; make
+            # the emitters cheaper instead.
             TRACE.configure()
         timer = getattr(self, "_montage_watchdog_timer", None)
         if timer is None:

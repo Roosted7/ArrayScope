@@ -155,6 +155,55 @@ def test_trace_bus_without_ring_or_sink_is_disabled(tmp_path):
     assert len(path.read_text().splitlines()) == 1
 
 
+def test_emit_fields_records_exactly_what_keyword_emission_records():
+    """The mapping entry point must be the same event, not a similar one.
+
+    The hot emitters (the per-tile lifecycle edge, the per-step rung probe)
+    assemble their fields as a mapping and hand it over whole; every other
+    site still emits by keyword.  A trace whose content depended on which
+    door an emitter came through would silently split the replay oracles, so
+    pin the two against each other rather than against a literal.
+    """
+
+    from arrayscope.core.trace import TraceBus
+
+    fields = {
+        "edge": "presented",
+        "tile": 4,
+        "presented_level": None,
+        "payload_source": ("montage-tile", 4),
+    }
+
+    keyword = TraceBus()
+    keyword.configure(ring_events=4)
+    keyword.emit("lifecycle", **fields)
+
+    mapping = TraceBus()
+    mapping.configure(ring_events=4)
+    mapping.emit_fields("lifecycle", fields)
+
+    (from_keyword,) = keyword.snapshot()
+    (from_mapping,) = mapping.snapshot()
+    assert list(from_keyword) == list(from_mapping)
+    for event in (from_keyword, from_mapping):
+        event.pop("ts_ns")
+    assert from_keyword == from_mapping
+
+    # The caller keeps its mapping: the ring holds a separate dict, so a hot
+    # emitter reusing or mutating its own buffer cannot rewrite history.
+    fields["tile"] = 99
+    assert from_mapping["tile"] == 4
+
+
+def test_emit_fields_is_disabled_with_the_rest_of_the_bus():
+    from arrayscope.core.trace import TraceBus
+
+    bus = TraceBus()
+    bus.configure(ring_events=0)
+    bus.emit_fields("lifecycle", {"edge": "target_required", "tile": 0})
+    assert bus.snapshot() == ()
+
+
 def test_trace_latency_matches_task_spans(tmp_path):
     from arrayscope.tools.trace_latency import analyze_trace_latency
 

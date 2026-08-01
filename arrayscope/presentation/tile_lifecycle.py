@@ -36,7 +36,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
-from arrayscope.core.trace import emit_trace, trace_enabled
+from arrayscope.core.trace import emit_trace, emit_trace_fields, trace_enabled
 from arrayscope.display.model.tile_identity import TileIdentity
 
 
@@ -1940,24 +1940,34 @@ def _trace_lifecycle(rec: TileRecord, edge: str, *, payload=None, **fields) -> N
     if not trace_enabled():
         return
     target = rec.target
-    trace_fields = {
-        key: _trace_reference(value) if key in _TRACE_REFERENCE_FIELD_NAMES else value
-        for key, value in fields.items()
-    }
-    emit_trace(
-        "lifecycle",
-        edge=str(edge),
-        tile=int(rec.tile_number),
-        source_index=None if target is None else int(target.source_index),
-        target_level=None if target is None else int(target.lod_level),
-        semantic=str(rec.semantic.value),
-        presentation=str(rec.presentation.value),
-        presented_quality=str(rec.presented_quality or ""),
-        presented_level=rec.presented_level,
-        payload_source=None
+    # One mapping, assembled in emission order and handed to the bus whole.
+    # This is the app's highest-rate emitter (5.2k edges in one 272-tile fill
+    # plus scrub, measured), and the ring is armed for all of them because the
+    # stall watchdog arms it.  Building the caller kwargs, then a comprehension
+    # over them, then splatting both back into an emit kwargs dict, hashed
+    # every field four times to record it once.
+    event_fields = {
+        "edge": str(edge),
+        "tile": int(rec.tile_number),
+        "source_index": None if target is None else int(target.source_index),
+        "target_level": None if target is None else int(target.lod_level),
+        "semantic": str(rec.semantic.value),
+        "presentation": str(rec.presentation.value),
+        "presented_quality": str(rec.presented_quality or ""),
+        "presented_level": rec.presented_level,
+        "payload_source": None
         if payload is None
         else _trace_reference(getattr(payload, "source_id", None)),
-        payload_quality=None if payload is None else getattr(payload, "quality", None),
-        payload_level=None if payload is None else getattr(payload, "lod_level", None),
-        **trace_fields,
-    )
+        "payload_quality": None if payload is None else getattr(payload, "quality", None),
+        "payload_level": None if payload is None else getattr(payload, "lod_level", None),
+    }
+    for key, value in fields.items():
+        if key in event_fields:
+            # The splat this replaced raised on a caller that shadowed a fixed
+            # field; keep that, rather than letting an edge silently redefine
+            # its own identity.
+            raise TypeError(f"_trace_lifecycle() got multiple values for {key!r}")
+        event_fields[key] = (
+            _trace_reference(value) if key in _TRACE_REFERENCE_FIELD_NAMES else value
+        )
+    emit_trace_fields("lifecycle", event_fields)

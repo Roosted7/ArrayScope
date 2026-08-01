@@ -113,6 +113,28 @@ class TraceBus:
             handle.close()
 
     def emit(self, kind: str, **fields) -> None:
+        self.emit_fields(kind, fields)
+
+    def emit_fields(self, kind: str, fields: dict[str, object]) -> None:
+        """Record one event from a field mapping the caller already holds.
+
+        ``emit`` has to materialize a kwargs dict anyway, so it routes here.
+        The point of the separate entry is the hot emitters that *build* a
+        mapping — the per-tile lifecycle edge assembles one, and splatting it
+        back apart made the same fields be re-hashed into a fresh dict twice
+        more on the way to the ring.  ``fields`` is consumed, never retained:
+        the event below is a fresh dict, so a caller may reuse or mutate its
+        mapping afterwards.
+
+        Keys must be strings.  Keyword emission guarantees that by
+        construction, and there is deliberately no coercion pass here: it ran
+        over every field of every event of every montage session (the stall
+        watchdog arms a ring-only bus in normal production) to defend against
+        a caller that cannot exist.  A key that is somehow not a string
+        degrades at `_encode`, which is where this module already puts
+        pathological fields.
+        """
+
         if not self._enabled:
             return
         event = {
@@ -120,7 +142,7 @@ class TraceBus:
             "sequence": 0,
             "ts_ns": perf_counter_ns(),
             "kind": str(kind),
-            **{str(key): value for key, value in fields.items()},
+            **fields,
         }
         with self._lock:
             if not self._enabled:
@@ -187,6 +209,12 @@ def emit_trace(kind: str, **fields) -> None:
     TRACE.emit(kind, **fields)
 
 
+def emit_trace_fields(kind: str, fields: dict[str, object]) -> None:
+    """``emit_trace`` for a caller that already assembled its fields."""
+
+    TRACE.emit_fields(kind, fields)
+
+
 __all__ = [
     "DEFAULT_RING_EVENTS",
     "TRACE",
@@ -195,5 +223,6 @@ __all__ = [
     "close_trace",
     "configure_trace",
     "emit_trace",
+    "emit_trace_fields",
     "trace_enabled",
 ]

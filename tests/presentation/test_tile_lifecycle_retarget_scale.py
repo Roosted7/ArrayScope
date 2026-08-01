@@ -102,8 +102,8 @@ def test_release_pass_emits_one_trace_edge_per_real_release(monkeypatch):
     monkeypatch.setattr(tile_lifecycle_module, "trace_enabled", lambda: True)
     monkeypatch.setattr(
         tile_lifecycle_module,
-        "emit_trace",
-        lambda kind, **f: events.append(f) if kind == "lifecycle" else None,
+        "emit_trace_fields",
+        lambda kind, f: events.append(f) if kind == "lifecycle" else None,
     )
 
     lc = TileLifecycle()
@@ -145,8 +145,8 @@ def test_re_entering_and_leaving_again_releases_again(monkeypatch):
     monkeypatch.setattr(tile_lifecycle_module, "trace_enabled", lambda: True)
     monkeypatch.setattr(
         tile_lifecycle_module,
-        "emit_trace",
-        lambda kind, **f: events.append(f) if kind == "lifecycle" else None,
+        "emit_trace_fields",
+        lambda kind, f: events.append(f) if kind == "lifecycle" else None,
     )
 
     def releases() -> list[int]:

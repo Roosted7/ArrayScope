@@ -11,7 +11,7 @@ import pyqtgraph.Qt as Qt
 from arrayscope.app.errors import handle_ui_exception, traceback_text
 from arrayscope.core.compute_policy import ComputeLane
 from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS, GuiCallbackBudget
-from arrayscope.core.trace import emit_trace, trace_enabled
+from arrayscope.core.trace import emit_trace, emit_trace_fields, trace_enabled
 from arrayscope.core.window_levels import WindowLevelController
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.display.geometry import DisplayGeometry, display_geometry_coordinates_equal
@@ -986,15 +986,19 @@ class FramePipelineEffects:
             admitted, reason = admitted
         else:
             reason = "admitted" if admitted else "unknown"
-        emit_trace(
+        # Per rung step, so per tile per pass: the mapping goes to the bus
+        # whole rather than being splatted and rebuilt on the way in.
+        emit_trace_fields(
             "rung_prepare",
-            tile=int(getattr(step, "tile_number", -1)),
-            rung=int(step.rung),
-            level=int(step.level),
-            admitted=bool(admitted),
-            reason=str(reason),
-            session_id=int(getattr(self.session, "session_id", 0) or 0),
-            renderer_id=id(self.renderer),
+            {
+                "tile": int(getattr(step, "tile_number", -1)),
+                "rung": int(step.rung),
+                "level": int(step.level),
+                "admitted": bool(admitted),
+                "reason": str(reason),
+                "session_id": int(getattr(self.session, "session_id", 0) or 0),
+                "renderer_id": id(self.renderer),
+            },
         )
         return bool(admitted)
 
@@ -3491,6 +3495,12 @@ class FramePipelineEffects:
             lod_decision = getattr(session, "lod_policy_decision", None)
             lod_demand = getattr(lod_decision, "demand", None)
             pass_chunk_budget_ms = getattr(renderer, "_last_montage_pass_budget_ms", None)
+            # `required_tile_numbers()` rebuilds two sets and a sorted tuple
+            # over the whole required scope on every call — measured 31-37 us
+            # per call at 272 tiles, in a live session.  This trace record used
+            # to ask for it three times: once here and twice more inside the
+            # emit, on the GUI thread of every commit, for one value that
+            # cannot change between them.
             required_tiles = tuple(int(tile) for tile in session.required_tile_numbers())
             pass_completed_atomically = bool(
                 pass_kind in {"preview", "target"}
@@ -3552,11 +3562,9 @@ class FramePipelineEffects:
                     coverage_phase_before and not session.scheduling_policy.verdict.coverage_open
                 ),
                 scheduling_phase_before=("coverage" if coverage_phase_before else "refine"),
-                required_tile_count=len(session.required_tile_numbers()),
+                required_tile_count=len(required_tiles),
                 preview_missing_tile_count=sum(
-                    1
-                    for tile in session.required_tile_numbers()
-                    if int(tile) not in presented_before_commit
+                    1 for tile in required_tiles if tile not in presented_before_commit
                 ),
                 first_pass_quality=getattr(session, "first_pass_quality", None),
                 first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
