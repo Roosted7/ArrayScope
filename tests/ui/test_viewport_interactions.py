@@ -5,10 +5,10 @@ from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
-from tests.ui.helpers import (
-    process_events as _process_events,
-)
 from tests.ui.helpers import require_wgpu_adapter
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 
 def test_render_preserves_viewport_for_same_display_shape(qtbot):
@@ -18,13 +18,13 @@ def test_render_preserves_viewport_for_same_display_shape(qtbot):
     win = ArrayScopeWindow(np.arange(4 * 5 * 6, dtype=float).reshape(4, 5, 6))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         view = win.img_view.getView()
         view.setRange(xRange=(1, 3), yRange=(1, 3), padding=0)
         before = view.viewRange()
 
         win._on_slice_index_changed(2, 1)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
 
         np.testing.assert_allclose(view.viewRange(), before, atol=1e-9)
     finally:
@@ -48,7 +48,7 @@ def test_single_image_manual_resize_preserves_content_scale(qtbot, span):
         win.resize(1000, 800)
         win.show()
         qtbot.waitExposed(win)
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
         view = win.img_view.getView()
         center = 100.0
         view.setRange(
@@ -56,7 +56,7 @@ def test_single_image_manual_resize_preserves_content_scale(qtbot, span):
             yRange=(center - span / 2, center + span / 2),
             padding=0,
         )
-        _process_events(qtbot, count=8)
+        _settle_idle(win)
         win.img_view.viewport_controller.mode = ViewportMode.USER
 
         def units_per_pixel():
@@ -69,7 +69,7 @@ def test_single_image_manual_resize_preserves_content_scale(qtbot, span):
 
         before = units_per_pixel()
         win.resize(600, 780)
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
         after = units_per_pixel()
 
         assert after[0] == pytest.approx(before[0], rel=0.02)
@@ -86,17 +86,17 @@ def test_toolbar_fit_and_one_to_one_are_viewport_commands(qtbot):
     win = ArrayScopeWindow(np.arange(20 * 30, dtype=float).reshape(20, 30))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
 
         def fail_render(*args, **kwargs):
             raise AssertionError("Fit/1:1 must not render")
 
         win.render = fail_render
         win.display_toolbar.one_to_one_action.trigger()
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert win.img_view.viewport_controller.mode == ViewportMode.USER
         win.display_toolbar.fit_action.trigger()
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert win.img_view.viewport_controller.mode == ViewportMode.FIT
         assert not hasattr(win.display_toolbar, "aspect_combo")
     finally:
@@ -113,9 +113,9 @@ def test_fit_mode_pan_zoom_reminder_is_transient(qtbot):
     win = ArrayScopeWindow(np.arange(20 * 30, dtype=float).reshape(20, 30))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win.display_toolbar.fit_action.trigger()
-        _process_events(qtbot, count=10)
+        _settle_idle(win)
         assert win.img_view.viewport_controller.mode == ViewportMode.FIT
 
         win.img_view._show_fit_mode_interaction_reminder()
@@ -141,9 +141,9 @@ def test_one_to_one_is_one_shot_and_slice_updates_preserve_user_view(qtbot):
     win = ArrayScopeWindow(np.arange(10 * 12 * 5, dtype=float).reshape(10, 12, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win.display_toolbar.one_to_one_action.trigger()
-        _process_events(qtbot, count=10)
+        _settle_idle(win)
         assert win.img_view.viewport_controller.mode == ViewportMode.USER
 
         view = win.img_view.getView()
@@ -151,7 +151,7 @@ def test_one_to_one_is_one_shot_and_slice_updates_preserve_user_view(qtbot):
         before = view.viewRange()
 
         win._on_slice_index_changed(2, 3)
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
 
         np.testing.assert_allclose(view.viewRange(), before, atol=1e-9)
     finally:
@@ -175,7 +175,7 @@ def test_wgpu_axis_direction_changes_sync_camera_orientation(qtbot):
 
         win = ArrayScopeWindow(np.arange(20 * 30, dtype=np.float32).reshape(20, 30))
         qtbot.addWidget(win)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert win.img_view.surface.capabilities.name == "wgpu"
         y_dim, x_dim = win.view_state.image_axes
 
@@ -183,7 +183,7 @@ def test_wgpu_axis_direction_changes_sync_camera_orientation(qtbot):
             win.view_state.with_axis_flipped(y_dim, True).with_axis_flipped(x_dim, True)
         )
         win.apply_axis_flips()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.img_view.getView().state["xInverted"] is True
         assert win.img_view.getView().state["yInverted"] is False
         camera = win.img_view._wgpu_camera_command()
@@ -195,7 +195,7 @@ def test_wgpu_axis_direction_changes_sync_camera_orientation(qtbot):
             win.view_state.with_axis_flipped(y_dim, False).with_axis_flipped(x_dim, False)
         )
         win.apply_axis_flips()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.img_view.getView().state["xInverted"] is False
         assert win.img_view.getView().state["yInverted"] is True
         camera = win.img_view._wgpu_camera_command()
@@ -215,7 +215,7 @@ def test_dimension_axis_flip_is_view_transform_only(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(4 * 5 * 6, dtype=float).reshape(4, 5, 6))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         y_axis = int(win.view_state.image_axes[0])
         monkeypatch.setattr(
             win,

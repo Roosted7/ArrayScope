@@ -76,6 +76,16 @@ class WindowLayoutManager:
         self.window = window
         self._dock_states = {}
         self._dock_visibility_generations = {}
+        #: Per dock, the newest generation that was actually *queued*, and the
+        #: newest that has since reached ``apply_queued_dock_visibility``.
+        #: These cannot be read off ``_dock_visibility_generations``, which
+        #: every immediate ``set_managed_dock_visible`` also bumps in order to
+        #: invalidate queued requests -- so that number runs ahead of the queue
+        #: with nothing outstanding.  Together these two are the only published
+        #: answer to "has the queue drained?"; without them the question can
+        #: only be answered with a stopwatch.
+        self._dock_visibility_queued = {}
+        self._dock_visibility_applied = {}
         # Work area to clamp against, for tests that need a DETERMINISTIC one.
         # The offscreen QPA reports 800x800, which is smaller than several
         # legacy layout fixtures' own windows -- so without this the clamp
@@ -300,6 +310,7 @@ class WindowLayoutManager:
         self._state_for(dock).auto_visible = bool(visible)
         generation = int(self._dock_visibility_generations.get(dock, 0)) + 1
         self._dock_visibility_generations[dock] = generation
+        self._dock_visibility_queued[dock] = generation
         # Timer category: UI cosmetic. Qt event-turn barrier guarded by a per-dock generation so superseded
         # visibility requests cannot apply later.
         Qt.QtCore.QTimer.singleShot(
@@ -315,16 +326,35 @@ class WindowLayoutManager:
             ),
         )
 
+    @property
+    def queued_dock_visibility_requests(self) -> int:
+        """How many queued dock-visibility requests have not been dispatched.
+
+        A caller that has just asked for a deferred show/hide -- directly or
+        through ``sync_progressive_docks`` -- can watch this reach zero instead
+        of guessing at a delay.
+        """
+
+        if not self._window_alive():
+            return 0
+        return sum(
+            1
+            for dock, generation in self._dock_visibility_queued.items()
+            if int(self._dock_visibility_applied.get(dock, 0)) < int(generation)
+        )
+
     def apply_queued_dock_visibility(
         self, dock, visible, *, preserve_canvas=True, generation: int | None = None
     ):
         win = self.window
         if not self._window_alive():
             return
-        if generation is not None and int(self._dock_visibility_generations.get(dock, 0)) != int(
-            generation
-        ):
-            return
+        if generation is not None:
+            self._dock_visibility_applied[dock] = max(
+                int(self._dock_visibility_applied.get(dock, 0)), int(generation)
+            )
+            if int(self._dock_visibility_generations.get(dock, 0)) != int(generation):
+                return
         if not visible:
             # A detached panel is open and must never be auto-hidden: the
             # DETACHED branch of set_managed_dock_visible would tear down its

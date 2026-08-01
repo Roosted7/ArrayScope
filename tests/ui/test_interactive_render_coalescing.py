@@ -1,3 +1,24 @@
+"""Render coalescing: the one place a fixed pause is still the right wait.
+
+Every other ``process_events(qtbot, count=N)`` in this suite was covering a
+hand-off the product publishes, and has been replaced with a wait denominated
+in that -- see ``tests/settle.py`` and ``tests/ui/helpers.py``.  The pauses here
+stay, and it is worth writing down why, so the next sweep does not spend a
+session rediscovering it:
+
+* ``render`` is monkeypatched away in most of these tests, so no frame is ever
+  committed and no session ever settles.  There is nothing to wait for; the
+  product state these tests read is the coalescer's own bookkeeping.
+* The claims are *about a time window*.  ``_on_slice_index_changed`` three times
+  followed by a short pause asserts that only the latest render was requested
+  WITHIN the coalescing interval.  Waiting for the coalesced render to arrive
+  would assert the opposite thing -- by then the burst has been rendered.
+
+A previous attempt at a blanket mechanical replacement broke three tests in
+this file for exactly that reason.  A throttle is not a lost wakeup, and a
+progress-denominated wait cannot express one.
+"""
+
 import numpy as np
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS

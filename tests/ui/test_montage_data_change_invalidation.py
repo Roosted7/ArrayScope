@@ -50,10 +50,10 @@ import pytest
 
 from arrayscope.tools.framebuffer_reference import _qimage_rgba_array
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from tests.settle import settle_window
 from tests.ui.helpers import (
     frame_session_settled,
     make_backend_window,
-    process_events,
     restore_default_backend,
     use_pyqtgraph_backend,
     use_wgpu_backend,
@@ -392,10 +392,12 @@ def _open_atlas(qtbot):
     )
     win.update_image_view()
     layer = win.img_view._montage_tile_layer
-    for _ in range(400):
-        process_events(qtbot, count=2)
-        if layer.preview_atlas_active_tiles:
-            break
+    # The atlas is the precondition this whole file rests on, so wait for the
+    # atlas -- not for eight seconds of event loop and a hope.  It starts empty
+    # and only the preview path fills it, so this cannot pass before it forms;
+    # if it never forms the wait says so, where the loop used to fall out
+    # silently and leave the assertion below to report a set().
+    settle_window(win, lambda: bool(layer.preview_atlas_active_tiles))
     return win
 
 

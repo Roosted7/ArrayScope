@@ -27,7 +27,6 @@ from arrayscope.operations.registry import (
     get_operation_entry,
 )
 from arrayscope.ui.operation_params_popup import OperationParamsPopup
-from tests.ui.helpers import process_events
 
 
 def _crop_popup(qtbot, on_accept):
@@ -51,7 +50,6 @@ def test_editing_start_past_stop_nudges_stop(qtbot):
     popup, form = _crop_popup(qtbot, on_accept=lambda values, bindings: None)
     # Full axis is [0, 10). Drag start up to 10 -> stop is nudged to stay above.
     popup._editors["start"].setValue(10)
-    process_events(qtbot, count=2)
     assert form.field("start").value < form.field("stop").value
     # Widgets re-synced from the interdependence-adjusted model.
     assert popup._editors["stop"].value() == form.field("stop").value
@@ -80,7 +78,6 @@ def test_accept_delivers_values_dict(qtbot):
     popup, _form = _crop_popup(qtbot, on_accept=lambda values, bindings: captured.update(values))
     popup._editors["start"].setValue(2)
     popup._editors["stop"].setValue(7)
-    process_events(qtbot, count=2)
     popup._accept()
     assert captured == {"start": 2, "stop": 7}
 
@@ -141,7 +138,6 @@ def test_float_op_uses_double_spinbox(qtbot):
     qtbot.addWidget(popup)
     assert popup.findChildren(QtWidgets.QDoubleSpinBox)
     popup._editors["threshold"].setValue(0.5)
-    process_events(qtbot, count=2)
     assert form.field("threshold").value == pytest.approx(0.5)
 
 
@@ -180,7 +176,6 @@ def test_each_parameter_kind_renders_its_own_widget(qtbot):
     popup._editors["verbose"].setChecked(True)
     popup._editors["wavelet"].setText("sym8")
     popup._editors["wavelet"].editingFinished.emit()
-    process_events(qtbot, count=2)
 
     assert form.values() == {
         "mode": "edge",
@@ -288,7 +283,6 @@ def test_toggling_an_axis_checkbox_updates_the_form(qtbot):
 
     popup._axis_checks[0].setChecked(True)
     popup._axis_checks[2].setChecked(False)
-    process_events(qtbot, count=2)
 
     assert form.selected_axes() == (0, 1)
 
@@ -298,13 +292,11 @@ def test_clearing_every_axis_disables_confirm(qtbot):
 
     for check in popup._axis_checks.values():
         check.setChecked(False)
-    process_events(qtbot, count=2)
 
     assert popup._confirm.isEnabled() is False
     assert "at least 1" in popup._warning.text()
 
     popup._axis_checks[1].setChecked(True)
-    process_events(qtbot, count=2)
     assert popup._confirm.isEnabled() is True
 
 
@@ -318,7 +310,6 @@ def test_confirming_carries_the_axis_set_into_the_committed_values(qtbot):
 
     popup._axis_checks[0].setChecked(True)
     popup._axis_checks[2].setChecked(False)
-    process_events(qtbot, count=2)
     popup._accept()
 
     # The committed mapping is exactly what ``create_operation`` takes, axis set

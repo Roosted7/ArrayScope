@@ -119,6 +119,12 @@ default_targets=(
   # Seen once each in the 2026-08-01 verification runs, cause not yet pinned.
   "tests/ui/test_lod_demand_freshness.py::test_zoom_in_rederives_lod_demand"
   "tests/ui/test_viewport_convergence_latch.py"
+  # Both share `_halo_montage_window`, which retargeted a session that was
+  # still converging; the render's own viewport retarget then landed on top of
+  # the small window and the halo stopped being a subset, failing the fixture's
+  # regime assertion in whichever of the two called it. Fixed 2026-08-01.
+  "tests/ui/test_prefetch.py::test_idle_prefetch_walks_the_retention_halo_before_the_rest_of_the_montage"
+  "tests/ui/test_prefetch.py::test_a_window_resize_leaves_the_priority_halo_intact"
 )
 
 targets=("$@")

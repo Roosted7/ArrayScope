@@ -8,7 +8,7 @@ from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
 from tests.ui.helpers import (
-    process_events as _process_events,
+    settle_idle as _settle_idle,
 )
 
 
@@ -30,7 +30,7 @@ def test_over_budget_view_skips_tiles_without_clearing_previous_image(qtbot, mon
     qtbot.addWidget(win)
     warnings = []
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         qtbot.waitUntil(
             lambda: getattr(win, "_committed_display_frame", None) is not None,
             timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
@@ -56,7 +56,7 @@ def test_over_budget_view_skips_tiles_without_clearing_previous_image(qtbot, mon
         )
 
         win.update_image_view()
-        _process_events(qtbot, count=10)
+        _settle_idle(win)
 
         np.testing.assert_array_equal(win.img_view.image, previous_image)
         assert win._committed_display_frame is previous_frame
@@ -74,14 +74,14 @@ def test_visible_render_cancels_prefetch_queue(qtbot):
     win = ArrayScopeWindow(np.arange(16 * 16 * 3, dtype=float).reshape(16, 16, 3))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         started = win.prefetch_evaluation_controller.start_prefetch(
             lambda: time.sleep(0.05), key="prefetch"
         )
         assert started.scheduled
         win.operation_evaluator.clear_cache()
         win.update_image_view()
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
 
         assert not win.prefetch_evaluation_controller._prefetch_keys
     finally:
@@ -96,7 +96,7 @@ def test_prefetch_never_runs_during_montage(qtbot):
     win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
@@ -104,7 +104,7 @@ def test_prefetch_never_runs_during_montage(qtbot):
         state = win.view_state.with_montage_axis(2, indices=(0, 1, 2), text=":")
         before = win.operation_evaluator.display_cache_diagnostics()
         win.renderer._prefetch_nearby_slices(state, None)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         after = win.operation_evaluator.display_cache_diagnostics()
 
         assert after.prefetch_scheduled == before.prefetch_scheduled
@@ -121,7 +121,7 @@ def test_compute_policy_configures_stage_and_montage_lanes(qtbot):
     win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         montage_workers = win.montage_tile_evaluation_controller.diagnostics().max_workers
         assert 1 <= montage_workers <= win.compute_policy.workers_for_lane(ComputeLane.MONTAGE_TILE)
         assert (
@@ -192,7 +192,7 @@ def test_stale_tile_result_does_not_clear_updating_overlay(qtbot):
     win = ArrayScopeWindow(np.arange(8 * 9 * 10, dtype=float).reshape(8, 9, 10))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         qtbot.waitUntil(
             lambda: not win.montage_tile_evaluation_controller.is_busy(),
             timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),

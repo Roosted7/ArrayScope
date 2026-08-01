@@ -519,6 +519,11 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             if hasattr(getattr(window, "layout_manager", None), "canvas_preserver")
             else CanvasPreserveRuntimeDiagnostics()
         ),
+        queued_dock_visibility=(
+            window.layout_manager.queued_dock_visibility_requests
+            if getattr(window, "layout_manager", None) is not None
+            else 0
+        ),
         render_timing=RenderTimingDiagnostics(
             last_render_sync_ms=getattr(window.renderer, "_last_render_sync_ms", None),
             last_control_sync_ms=getattr(window.renderer, "_last_control_sync_ms", None),

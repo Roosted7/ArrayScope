@@ -2,7 +2,9 @@ import numpy as np
 
 from tests.settle import settle_window
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
-from tests.ui.helpers import process_events as _process_events
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 
 def _menu(win, text):
@@ -38,7 +40,7 @@ def test_performance_menu_exists(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         assert _menu(win, "Performance") is not None
         assert _submenu_action(win, "Performance", "Memory Profile", "Balanced") is not None
         assert _submenu_action(win, "Performance", "Render Responsiveness", "Balanced") is not None
@@ -57,9 +59,9 @@ def test_selecting_fft_workers_updates_settings(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         _submenu_action(win, "Performance", "FFT Workers", "2").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.fft_workers == FFTWorkersChoice.TWO
         assert win.compute_policy.fft_workers_visible == 2
         assert win.compute_policy.fft_workers_stage == 2
@@ -82,10 +84,10 @@ def test_render_memory_budget_persists_through_settings(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         _submenu_action(win, "Performance", "Render Memory Budget", "1024 MiB").trigger()
         _submenu_action(win, "Performance", "Memory Profile", "Custom").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.render_memory_budget_mb == 1024
         assert win.app_settings.memory_profile == MemoryProfileChoice.CUSTOM
         assert win.renderer._memory_policy().visible_render_budget_bytes == 1024 * 1024 * 1024
@@ -95,7 +97,7 @@ def test_render_memory_budget_persists_through_settings(qtbot):
     second = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(second)
     try:
-        _process_events(qtbot)
+        _settle_idle(second)
         assert second.app_settings.render_memory_budget_mb == 1024
         assert second.app_settings.memory_profile == MemoryProfileChoice.CUSTOM
     finally:
@@ -110,9 +112,9 @@ def test_selecting_pyfftw_backend_does_not_crash(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         _submenu_action(win, "Performance", "FFT Backend", "pyFFTW").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.fft_backend == FFTBackendChoice.PYFFTW
     finally:
         win.close()
@@ -126,9 +128,9 @@ def test_selecting_memory_profile_recomputes_policy(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         _submenu_action(win, "Performance", "Memory Profile", "Conservative").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
 
         assert win.app_settings.memory_profile == MemoryProfileChoice.CONSERVATIVE
         assert win.renderer._memory_policy().profile == MemoryProfileChoice.CONSERVATIVE
@@ -144,9 +146,9 @@ def test_render_responsiveness_preset_updates_the_governor_and_persists(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         _submenu_action(win, "Performance", "Render Responsiveness", "Responsive").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
 
         assert win.app_settings.render_responsiveness == RenderResponsivenessChoice.RESPONSIVE
         assert win.resource_governor.responsiveness_weight == 2.0
@@ -161,7 +163,7 @@ def test_render_responsiveness_preset_updates_the_governor_and_persists(qtbot):
     win2 = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win2)
     try:
-        _process_events(qtbot)
+        _settle_idle(win2)
 
         assert win2.app_settings.render_responsiveness == RenderResponsivenessChoice.RESPONSIVE
         assert win2.app_settings.render_responsiveness_explicit is True
@@ -181,27 +183,27 @@ def test_memory_stress_actions_adjust_profile_budget_and_policy(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.render_memory_budget_mb == 512
 
         _menu_action(win, "Performance", "Use Less Memory").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.memory_profile == MemoryProfileChoice.CONSERVATIVE
         assert win.app_settings.render_memory_budget_mb == 256
         assert win.renderer._memory_policy().profile == MemoryProfileChoice.CONSERVATIVE
 
         _menu_action(win, "Performance", "Decrease Render Budget").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.render_memory_budget_mb == 128
         assert win._visible_render_budget_bytes() == 128 * 1024 * 1024
 
         _menu_action(win, "Performance", "Use More Memory").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.memory_profile == MemoryProfileChoice.AGGRESSIVE
         assert win.app_settings.render_memory_budget_mb == 256
 
         _menu_action(win, "Performance", "Increase Render Budget").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.render_memory_budget_mb == 512
     finally:
         win.close()
@@ -215,7 +217,7 @@ def test_montage_quality_policy_menu_defaults_and_switches(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         resident = _submenu_action(win, "Performance", "Montage LOD", "Resident (multi-resolution)")
         native = _submenu_action(win, "Performance", "Montage LOD", "Native only")
         # ADR 0050: resident is the default and the menu reflects it.
@@ -224,14 +226,14 @@ def test_montage_quality_policy_menu_defaults_and_switches(qtbot):
         assert not native.isChecked()
 
         native.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.montage_quality_policy == MontageQualityPolicyChoice.NATIVE_ONLY
         assert win._settings.value("montage_quality_policy") == "native-only"
         assert native.isChecked()
         assert not resident.isChecked()
 
         resident.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.montage_quality_policy == MontageQualityPolicyChoice.RESIDENT
         assert win._settings.value("montage_quality_policy") == "resident"
     finally:
@@ -247,16 +249,16 @@ def test_montage_quality_policy_change_applies_to_next_montage_session(qtbot):
     win = ArrayScopeWindow(np.zeros((3, 4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_montage_axis(2, indices=(0, 1, 2), text=":"))
-        _process_events(qtbot)
+        _settle_idle(win)
         expected = win.renderer._montage_quality_policy_mode()
         session = getattr(win.renderer, "_frame_session", None)
         if session is not None:
             assert str(session.lod_policy_mode) == expected
 
         _submenu_action(win, "Performance", "Montage LOD", "Native only").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         session = getattr(win.renderer, "_frame_session", None)
         assert win.renderer._montage_quality_policy_mode() == "native-only"
         if session is not None:
@@ -284,7 +286,7 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         auto = _submenu_action(
             win, "Performance", "wgpu Presentation", "Auto (screen on native Wayland)"
         )
@@ -310,27 +312,27 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
             "Image Rendering Backend",
             "wgpu (GPU compute)",
         ).trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win._wgpu_present_method_menu.isEnabled()
 
         # Away from the default first, so every step below is a real
         # transition rather than a rewrite of the choice already in force.
         bitmap.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.BITMAP
         assert win._settings.value("wgpu_present_method") == "bitmap"
         assert bitmap.isChecked()
         assert not auto.isChecked()
 
         auto.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.AUTO
         assert win._settings.value("wgpu_present_method") == "auto"
         assert auto.isChecked()
         assert not bitmap.isChecked()
 
         screen.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.SCREEN
         assert win._settings.value("wgpu_present_method") == "screen"
 
@@ -338,7 +340,7 @@ def test_wgpu_present_method_menu_switches_and_persists(qtbot):
         _submenu_action(
             win, "Performance", "Image Rendering Backend", "PyQtGraph (CPU / remote)"
         ).trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert not win._wgpu_present_method_menu.isEnabled()
         assert win.app_settings.wgpu_present_method == WgpuPresentMethodChoice.SCREEN
         assert win.app_settings.image_rendering_backend == ImageRenderingBackendChoice.PYQTGRAPH
@@ -355,17 +357,17 @@ def test_texture_codec_menu_switches_and_persists(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.texture_codec == TextureCodecChoice.OFF
         off = _submenu_action(win, "Performance", "GPU Texture Compression", "Off (uncompressed)")
         off.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.texture_codec == TextureCodecChoice.OFF
         assert win._settings.value("texture_codec") == "off"
         assert off.isChecked()
         bc = _submenu_action(win, "Performance", "GPU Texture Compression", "BC (force)")
         bc.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.texture_codec == TextureCodecChoice.BC
         assert win._settings.value("texture_codec") == "bc"
     finally:
@@ -381,7 +383,7 @@ def test_host_cache_compression_menu_switches_and_persists(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.chunk_transport_codec == ChunkTransportCodecChoice.RAW
         zfp = _submenu_action(win, "Performance", "Host Cache Compression", "ZFP (lossless)")
         zfp.trigger()
@@ -412,7 +414,7 @@ def test_host_cache_compression_greys_out_unavailable_codec(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         sub = "Host Cache Compression"
         off = _submenu_action(win, "Performance", sub, "Off (uncompressed)")
         auto = _submenu_action(win, "Performance", sub, "Auto (experimental)")
@@ -438,7 +440,7 @@ def test_host_cache_compression_greys_out_auto_when_no_codec(qtbot, monkeypatch)
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         sub = "Host Cache Compression"
         off = _submenu_action(win, "Performance", sub, "Off (uncompressed)")
         auto = _submenu_action(win, "Performance", sub, "Auto (experimental)")
@@ -463,7 +465,7 @@ def test_resident_crop_rebind_menu_defaults_on_and_persists(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         action = _menu_action(win, "Performance", _RESIDENT_CROP_REBIND)
         assert action.isCheckable()
         # Default ON: the rebind settles the same pixels and the same auto
@@ -473,7 +475,7 @@ def test_resident_crop_rebind_menu_defaults_on_and_persists(qtbot):
         assert win.app_settings.resident_crop_rebind is True
 
         action.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.resident_crop_rebind is False
         assert not action.isChecked()
         assert not _to_bool(win._settings.value("resident_crop_rebind"))
@@ -484,7 +486,7 @@ def test_resident_crop_rebind_menu_defaults_on_and_persists(qtbot):
     win2 = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win2)
     try:
-        _process_events(qtbot)
+        _settle_idle(win2)
         assert win2.app_settings.resident_crop_rebind is False
         assert not _menu_action(win2, "Performance", _RESIDENT_CROP_REBIND).isChecked()
     finally:

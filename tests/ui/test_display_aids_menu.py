@@ -1,7 +1,9 @@
 import numpy as np
 
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
-from tests.ui.helpers import process_events as _process_events
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 _GRID = "Pixel Grid (when zoomed in)"
 _CLIP = "Clipping Indicator"
@@ -32,7 +34,7 @@ def test_display_aids_menu_exists_and_defaults_off(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         grid = _submenu_action(win, "View", "Display Aids", _GRID)
         clip = _submenu_action(win, "View", "Display Aids", _CLIP)
         assert grid.isCheckable()
@@ -52,10 +54,10 @@ def test_toggling_display_aids_updates_and_persists_settings(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         _submenu_action(win, "View", "Display Aids", _GRID).trigger()
         _submenu_action(win, "View", "Display Aids", _CLIP).trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.wgpu_pixel_grid is True
         assert win.app_settings.wgpu_clip_indicator is True
         assert _submenu_action(win, "View", "Display Aids", _GRID).isChecked()
@@ -66,7 +68,7 @@ def test_toggling_display_aids_updates_and_persists_settings(qtbot):
     win2 = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win2)
     try:
-        _process_events(qtbot)
+        _settle_idle(win2)
         assert win2.app_settings.wgpu_pixel_grid is True
         assert win2.app_settings.wgpu_clip_indicator is True
         assert _submenu_action(win2, "View", "Display Aids", _GRID).isChecked()

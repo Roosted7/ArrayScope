@@ -1,7 +1,9 @@
 import numpy as np
 
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
-from tests.ui.helpers import process_events as _process_events
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 
 def test_large_fft_pipeline_warning_mentions_estimated_peak_bytes(qtbot, monkeypatch):
@@ -20,7 +22,7 @@ def test_large_fft_pipeline_warning_mentions_estimated_peak_bytes(qtbot, monkeyp
     qtbot.addWidget(win)
     try:
         win.request_operation("centered_fft", 0)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert not win._confirm_expensive_full_array("Materialize", win.data.shape, win.data.dtype)
         assert "estimated peak" in messages[-1]
         assert "CenteredFFT axis 0" in messages[-1]
@@ -66,7 +68,7 @@ def test_large_reduction_pipeline_warning_uses_cost_model(qtbot, monkeypatch):
     qtbot.addWidget(win)
     try:
         win.request_operation("rss", 0)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._confirm_expensive_full_array("Export", win.data.shape, win.data.dtype)
         assert "RootSumSquares axis 0" in messages[-1]
         assert "estimated peak" in messages[-1]

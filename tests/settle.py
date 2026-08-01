@@ -94,6 +94,20 @@ def _pump(*, allow_idle: bool) -> None:
     loop.exec()
 
 
+def deliver_posted_events() -> None:
+    """Run one event-loop slice, so already-posted work is dispatched.
+
+    This is not a wait and must never be used as one.  It exists for the
+    claims of the form "and nothing else was scheduled": those need whatever
+    the last action posted to have been *delivered* before "nothing is armed"
+    means anything, and a predicate evaluated before the loop has turned once
+    cannot see a continuation that has not run yet.  Everything after that
+    first turn is the ordinary progress-denominated wait.
+    """
+
+    _pump(allow_idle=True)
+
+
 def _kernel_diagnostics(win):
     kernel = getattr(win, "kernel", None)
     diagnostics = getattr(kernel, "diagnostics", None)
@@ -142,6 +156,35 @@ def _presentation_counters(win) -> tuple:
     )
 
 
+def _layout_counters(win) -> tuple:
+    """What the panel-transition machinery publishes about its own progress.
+
+    A dock show/hide runs a bounded retry chain in
+    :class:`arrayscope.window.canvas_preserve.CanvasPreserveController` that
+    touches neither the kernel nor the presentation path, so without this a
+    layout wait would be burning budget while the product was demonstrably
+    working.  ``events`` is the strongest of these: the controller appends one
+    per correction attempt, clamp, resize and release.
+    """
+
+    manager = getattr(win, "layout_manager", None)
+    preserver = getattr(manager, "canvas_preserver", None)
+    if preserver is None:
+        return ()
+    diag = preserver.diagnostics()
+    return (
+        int(manager.queued_dock_visibility_requests),
+        int(diag.generation),
+        str(diag.last_result),
+        int(diag.attempts_used),
+        diag.final_canvas_size,
+        diag.final_window_size,
+        diag.last_delta,
+        bool(diag.constraints_active),
+        diag.events,
+    )
+
+
 def window_progress(win) -> tuple:
     """A comparable snapshot of what this window has *done* so far.
 
@@ -150,7 +193,7 @@ def window_progress(win) -> tuple:
     which is the only question the budget is allowed to answer.
     """
 
-    return (_kernel_counters(win), _presentation_counters(win))
+    return (_kernel_counters(win), _presentation_counters(win), _layout_counters(win))
 
 
 def window_work_in_flight(win) -> int:

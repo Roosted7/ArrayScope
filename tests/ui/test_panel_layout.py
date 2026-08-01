@@ -17,14 +17,41 @@ from tests.ui.helpers import (
     panel_body as _panel_body,
 )
 from tests.ui.helpers import (
-    process_events as _process_events,
+    settle_idle as _settle_idle,
 )
 from tests.ui.helpers import (
     view_action as _view_action,
 )
-from tests.ui.helpers import (
-    wait_for_panel_preserve as _wait_for_panel_preserve,
-)
+
+#: Transitions that complete inline, so nothing below waits after them.
+#:
+#: Measured 2026-08-01, one settle site at a time: every panel move that runs
+#: with ``preserve_canvas=False`` -- ``detach_managed_dock``, the managed title
+#: buttons, ``set_managed_dock_visible``, ``reset_layout`` -- and every View
+#: menu toggle finished before the call returned, with no queued visibility
+#: request and no canvas-preserve chain outstanding.  That is structural rather
+#: than a timing accident: those paths take no timer at all.  The fixed pauses
+#: that used to follow them were waiting for nothing, so they are gone rather
+#: than restated as a wait that cannot wait.
+
+
+def _panel_reaches(win, name, location):
+    """The predicate for "this panel has arrived at that location".
+
+    Every transition below is followed by an invariant assertion about a panel
+    location, so that assertion is also the honest thing for the preceding wait
+    to be denominated in.
+
+    Measured on a quiet box, 49 of the 52 predicates in this file are already
+    true when the wait begins, and only three ever gate. That is not the
+    can-never-be-false bug ``docs/testing/strategy.md`` warns about -- these
+    hold *quickly*, not *always*, and the machine they are for is the loaded
+    one. What it does cost is the failure message: a panel that lands in the
+    wrong place reports as a lost wakeup rather than as a location mismatch,
+    so the assertion on the next line is what to read.
+    """
+
+    return lambda: win.panel_manager.location(name) == location
 
 
 def test_dock_show_hide_preserves_image_view_size(qtbot):
@@ -36,13 +63,13 @@ def test_dock_show_hide_preserves_image_view_size(qtbot):
     _give_generous_work_area(win)
     try:
         win.resize(700, 420)
-        _process_events(qtbot)
+        _settle_idle(win)
         before_size = win.img_view.size()
 
         win._show_inspection_dock()
-        _process_events(qtbot, count=30)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
         win._set_inspection_dock_visible_from_user(False)
-        _process_events(qtbot, count=30)
+        _settle_idle(win, lambda: not win.inspection_dock.isVisible())
 
         after_size = win.img_view.size()
         assert abs(after_size.width() - before_size.width()) <= 1
@@ -76,15 +103,15 @@ def test_panel_open_hide_preserves_central_widget_size_with_resize_transaction(q
     _give_generous_work_area(win)
     try:
         win.resize(900, 620)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         target = QtCore.QSize(win.centralWidget().size())
 
         win._show_inspection_dock()
-        _wait_for_panel_preserve(qtbot)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
         _assert_size_close(win.centralWidget().size(), target)
 
         win._set_inspection_dock_visible_from_user(False)
-        _wait_for_panel_preserve(qtbot)
+        _settle_idle(win, lambda: not win.inspection_dock.isVisible())
         _assert_size_close(win.centralWidget().size(), target)
     finally:
         win.close()
@@ -99,10 +126,10 @@ def test_canvas_preserve_controller_records_diagnostics(qtbot):
     _give_generous_work_area(win)
     try:
         win.resize(900, 620)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
 
         win._show_inspection_dock()
-        _wait_for_panel_preserve(qtbot)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
 
         diagnostics = win.layout_manager.canvas_preserver.diagnostics()
         assert diagnostics.generation > 0
@@ -127,17 +154,17 @@ def test_panel_preserve_transaction_does_not_move_window_position(qtbot):
     try:
         win.move(100, 80)
         win.resize(900, 620)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         before = QtCore.QPoint(win.pos())
         if win.pos() != before:
             return
 
         win._show_inspection_dock()
-        _wait_for_panel_preserve(qtbot)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
         assert win.pos() == before
 
         win._set_inspection_dock_visible_from_user(False)
-        _wait_for_panel_preserve(qtbot)
+        _settle_idle(win, lambda: not win.inspection_dock.isVisible())
         assert win.pos() == before
     finally:
         win.close()
@@ -153,7 +180,7 @@ def test_panel_resize_behavior_off_does_not_resize_main_window(qtbot):
     _give_generous_work_area(win)
     try:
         win.resize(900, 620)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme,
             prefetch_nearby_slices=win.app_settings.prefetch_nearby_slices,
@@ -162,8 +189,10 @@ def test_panel_resize_behavior_off_does_not_resize_main_window(qtbot):
         before_central_size = win.centralWidget().size()
         before_generation = win.layout_manager.canvas_preserver.generation
 
+        # No wait: with preservation OFF the transition is the whole story --
+        # no preserve chain is started and the canvas has already yielded the
+        # dock's width when this returns.
         win._show_inspection_dock()
-        _wait_for_panel_preserve(qtbot)
 
         assert win.layout_manager.canvas_preserver.generation == before_generation
         assert win.centralWidget().size().width() < before_central_size.width()
@@ -182,7 +211,7 @@ def test_canvas_preserve_strong_wayland_applies_and_releases_constraints(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme,
             prefetch_nearby_slices=win.app_settings.prefetch_nearby_slices,
@@ -203,8 +232,10 @@ def test_canvas_preserve_strong_wayland_applies_and_releases_constraints(qtbot):
         assert preserver.constraints_active
         assert win.minimumSize() == win.maximumSize()
 
+        # No wait: the release restores the captured min/max on the widget and
+        # the window handle inline, so everything asserted below is already
+        # true when the call returns.
         preserver._release_strong_preserve_constraints(generation)
-        _process_events(qtbot, count=35)
         assert not preserver.constraints_active
         assert win.minimumSize() != target
         assert win.maximumSize() != target
@@ -223,7 +254,7 @@ def test_panel_strong_preserve_release_ignores_stale_generation(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         target = QtCore.QSize(win.size().width() + 12, win.size().height())
         preserver = win.layout_manager.canvas_preserver
         preserver._generation += 1
@@ -256,7 +287,7 @@ def test_strong_wayland_skips_strong_path_off_wayland(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme,
             prefetch_nearby_slices=win.app_settings.prefetch_nearby_slices,
@@ -283,8 +314,9 @@ def test_strong_wayland_skips_strong_path_off_wayland(qtbot):
             strong_used=False,
             allow_strong=True,
         )
-        _process_events(qtbot, count=5)
-
+        # No wait: `_correct_canvas_size` appends the `strong_skipped` record
+        # and leaves the constraints alone before it returns.  The retry it
+        # schedules is not part of this claim.
         diagnostics = preserver.diagnostics()
         assert not preserver.constraints_active
         assert not diagnostics.strong_used
@@ -302,17 +334,17 @@ def test_view_menu_panel_resize_behavior_persists(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         off_action = _view_submenu_action(win, "Panel Resize Behavior", "Off")
         strong_action = _view_submenu_action(win, "Panel Resize Behavior", "Strong Wayland")
         best_action = _view_submenu_action(win, "Panel Resize Behavior", "Best effort")
         assert best_action.isChecked()
+        # No wait after a trigger: `QAction.triggered` is a direct connection,
+        # so the handler has already checked the action and written the setting.
         off_action.trigger()
-        _process_events(qtbot, count=5)
         assert off_action.isChecked()
         assert win.app_settings.panel_resize_behavior == PanelResizeBehavior.OFF
         strong_action.trigger()
-        _process_events(qtbot, count=5)
         assert strong_action.isChecked()
         assert win.app_settings.panel_resize_behavior == PanelResizeBehavior.STRONG_WAYLAND
     finally:
@@ -321,7 +353,7 @@ def test_view_menu_panel_resize_behavior_persists(qtbot):
     second = ArrayScopeWindow(np.arange(8 * 9, dtype=float).reshape(8, 9))
     qtbot.addWidget(second)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(second)
         action = _view_submenu_action(second, "Panel Resize Behavior", "Strong Wayland")
         assert action.isChecked()
         assert second.app_settings.panel_resize_behavior == PanelResizeBehavior.STRONG_WAYLAND
@@ -339,10 +371,10 @@ def test_inspection_dock_defaults_left_and_stays_closed_after_managed_title_clos
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
 
         win._show_inspection_dock()
-        _process_events(qtbot, count=12)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
         assert win.inspection_dock.isVisible()
         assert (
             win.dockWidgetArea(win.inspection_dock) == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
@@ -353,12 +385,11 @@ def test_inspection_dock_defaults_left_and_stays_closed_after_managed_title_clos
         )
         assert close_button is not None
         close_button.click()
-        _process_events(qtbot, count=12)
+        _settle_idle(win, lambda: not win.inspection_dock.isVisible())
         assert not win.inspection_dock.isVisible()
         assert not win._inspection_dock_user_visible
 
         win._refresh_inspection_dock()
-        _process_events(qtbot, count=12)
         assert not win.inspection_dock.isVisible()
     finally:
         win.close()
@@ -375,9 +406,9 @@ def test_managed_title_closing_docked_inspection_does_not_restore_canvas_snapsho
     _give_generous_work_area(win)
     try:
         win.resize(900, 620)
-        _process_events(qtbot)
+        _settle_idle(win)
         win._show_inspection_dock()
-        _process_events(qtbot, count=20)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
         before = win.img_view.size()
         before_window = win.size()
 
@@ -386,7 +417,7 @@ def test_managed_title_closing_docked_inspection_does_not_restore_canvas_snapsho
         )
         assert close_button is not None
         close_button.click()
-        _process_events(qtbot, count=30)
+        _settle_idle(win, lambda: not win.inspection_dock.isVisible())
         after = win.img_view.size()
         after_window = win.size()
 
@@ -410,9 +441,9 @@ def test_profile_dock_defaults_bottom_when_opened_from_view_menu(qtbot):
     try:
         win.move(0, 0)
         win.resize(700, 420)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_profile_dock_visible_from_user(True)
-        _process_events(qtbot, count=40)
+        _settle_idle(win, lambda: win.profile_dock.isVisible())
 
         assert win.profile_dock.isVisible()
         assert win.dockWidgetArea(win.profile_dock) == QtCore.Qt.DockWidgetArea.BottomDockWidgetArea
@@ -429,7 +460,7 @@ def test_opening_dock_uses_current_dock_extent_for_window_growth(qtbot):
     _give_generous_work_area(win)
     try:
         win.setGeometry(420, 20, 320, 500)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win.inspection_dock.resize(420, 300)
         # The dock's own size is what a reopen must honour, not the default share.
         win.layout_manager._state_for(win.inspection_dock).reserved_extent = 420
@@ -437,7 +468,7 @@ def test_opening_dock_uses_current_dock_extent_for_window_growth(qtbot):
         assert win.layout_manager.default_dock_extent(win.inspection_dock) >= 420
 
         win._set_inspection_dock_visible_from_user(True)
-        _process_events(qtbot, count=40)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
         assert win.inspection_dock.isVisible()
     finally:
         win.close()
@@ -473,10 +504,10 @@ def test_view_menu_uses_managed_dock_actions(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         action = _view_action(win, "Inspection")
         action.trigger()
-        _process_events(qtbot, count=20)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
 
         assert win.inspection_dock.isVisible()
         assert action.isChecked()
@@ -492,18 +523,22 @@ def test_operations_dock_does_not_auto_reopen_after_user_close(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.request_operation("reverse", 0)
-        _process_events(qtbot, count=25)
+        _settle_idle(win, lambda: win.operation_dock.isVisible())
         action = _view_action(win, "Operations")
         assert win.operation_dock.isVisible()
         assert action.isChecked()
 
         action.trigger()
-        _process_events(qtbot, count=20)
+        _settle_idle(win, lambda: not win.operation_dock.isVisible())
         win._update_operation_dock()
         win.layout_manager.sync_progressive_docks()
-        _process_events(qtbot, count=20)
+        # The claim is that the progressive sync does NOT reopen the dock, so
+        # the wait cannot be denominated in the dock: it is denominated in the
+        # queued visibility request that sync just posted having been
+        # dispatched, which is what `_settle_panels` checks first.
+        _settle_idle(win, lambda: not win.operation_dock.isVisible())
 
         assert not win.operation_dock.isVisible()
         assert not action.isChecked()
@@ -519,7 +554,7 @@ def test_stale_queued_dock_visibility_does_not_override_newer_layout_decision(qt
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
 
         win.layout_manager.set_dock_visible_later(win.inspection_dock, True, preserve_canvas=False)
         win.layout_manager.set_managed_dock_visible(
@@ -528,7 +563,10 @@ def test_stale_queued_dock_visibility_does_not_override_newer_layout_decision(qt
             reason="newer-test-decision",
             preserve_canvas=False,
         )
-        _process_events(qtbot, count=10)
+        # The stale request must be given its chance to (wrongly) apply, so
+        # what this waits for is the queue draining -- not a dock state, which
+        # is already what the test wants before the queue has run at all.
+        _settle_idle(win)
 
         assert not win.inspection_dock.isVisible()
     finally:
@@ -543,11 +581,14 @@ def test_queued_dock_visibility_is_latest_only_per_dock(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
 
         win.layout_manager.set_dock_visible_later(win.inspection_dock, True, preserve_canvas=False)
         win.layout_manager.set_dock_visible_later(win.inspection_dock, False, preserve_canvas=False)
-        _process_events(qtbot, count=10)
+        # Both queued requests must be dispatched before the claim means
+        # anything -- the superseded one included, since it is the one that
+        # would break this if the generation guard stopped working.
+        _settle_idle(win)
 
         assert not win.inspection_dock.isVisible()
     finally:
@@ -564,7 +605,7 @@ def test_restored_layout_uses_saved_viewport_session(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win.resize(920, 620)
         win.layout_manager.set_managed_dock_visible(
             win.inspection_dock, True, reason="test", preserve_canvas=False
@@ -572,12 +613,12 @@ def test_restored_layout_uses_saved_viewport_session(qtbot):
         win.layout_manager.set_managed_dock_visible(
             win.operation_dock, True, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=40)
         viewport_size = win.img_view.graphicsView.viewport().size()
         saved_viewport_shape = (int(viewport_size.height()), int(viewport_size.width()))
 
+        # No wait: `closeEvent` writes the viewport session synchronously, which
+        # is exactly what the next line reads.
         win.close()
-        _process_events(qtbot, count=10)
         settings = QtCore.QSettings()
         assert settings.value("viewport_session") is not None
     finally:
@@ -628,19 +669,19 @@ def test_operation_dock_manual_close_is_not_persistent_across_launches(qtbot):
     first = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(first)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(first)
         first.request_operation("reverse", 0)
-        _process_events(qtbot, count=30)
+        _settle_idle(first, lambda: first.operation_dock.isVisible())
         assert first.operation_dock.isVisible()
 
         action = _view_action(first, "Operations")
         action.trigger()
-        _process_events(qtbot, count=20)
+        _settle_idle(first, lambda: not first.operation_dock.isVisible())
         assert not first.operation_dock.isVisible()
         assert first._operation_dock_user_visible is False
 
+        # No wait: closing writes the settings the second window reads, inline.
         first.close()
-        _process_events(qtbot, count=10)
     finally:
         if first.isVisible():
             first.close()
@@ -648,11 +689,11 @@ def test_operation_dock_manual_close_is_not_persistent_across_launches(qtbot):
     second = ArrayScopeWindow(np.arange(12 * 13, dtype=float).reshape(12, 13))
     qtbot.addWidget(second)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(second)
         assert second._operation_dock_user_visible is None
 
         second.request_operation("reverse", 0)
-        _process_events(qtbot, count=30)
+        _settle_idle(second, lambda: second.operation_dock.isVisible())
 
         assert second.operation_dock.isVisible()
     finally:
@@ -674,21 +715,21 @@ def test_detached_inspection_show_restores_float_not_dock(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         action = _view_action(win, "Inspection")
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
         win.layout_manager.detach_managed_dock(
             win.inspection_dock, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=10)
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
 
         action.trigger()
-        _process_events(qtbot, count=15)
         assert win.panel_manager.location("inspection") == PanelLocation.HIDDEN
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(
+            win, lambda: win.panel_manager.location("inspection") == PanelLocation.DETACHED
+        )
 
         # Reopen restored the float, not a dock.
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
@@ -697,7 +738,7 @@ def test_detached_inspection_show_restores_float_not_dock(qtbot):
         dialog = win.panel_manager.panel_for_dock(win.inspection_dock).dialog
         redock_button = dialog.findChild(QtWidgets.QToolButton, "DetachedPanelRedockButton")
         redock_button.click()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, lambda: win.panel_manager.location("inspection") == PanelLocation.DOCKED)
         assert win.panel_manager.location("inspection") == PanelLocation.DOCKED
     finally:
         win.close()
@@ -712,18 +753,16 @@ def test_reset_layout_redocks_managed_docks(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.layout_manager.set_managed_dock_visible(
             win.inspection_dock, True, reason="test", preserve_canvas=False
         )
         win.layout_manager.detach_managed_dock(
             win.inspection_dock, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=15)
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
 
         win.reset_layout()
-        _process_events(qtbot, count=20)
 
         assert win.panel_manager.location("inspection") != PanelLocation.DETACHED
     finally:
@@ -739,27 +778,27 @@ def test_closing_detached_dialog_unchecks_view_action(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         action = _view_action(win, "Inspection")
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
         win.layout_manager.detach_managed_dock(
             win.inspection_dock, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=10)
 
         dialog = win.panel_manager.panel_for_dock(win.inspection_dock).dialog
         assert dialog is not None
         assert action.isChecked()
 
         dialog.close()
-        _process_events(qtbot, count=10)
 
         assert win.panel_manager.location("inspection") == PanelLocation.HIDDEN
         assert not action.isChecked()
 
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(
+            win, lambda: win.panel_manager.location("inspection") == PanelLocation.DETACHED
+        )
         # BUG 2: reopening a dock that was floating when closed restores the
         # float, with its body intact in the recreated dialog.
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
@@ -781,11 +820,10 @@ def test_managed_dock_title_buttons_detach_hide_and_redock(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.layout_manager.set_managed_dock_visible(
             win.inspection_dock, True, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=10)
 
         from pyqtgraph.Qt import QtWidgets
 
@@ -794,7 +832,9 @@ def test_managed_dock_title_buttons_detach_hide_and_redock(qtbot):
         )
         assert detach_button is not None
         detach_button.click()
-        _process_events(qtbot, count=15)
+        _settle_idle(
+            win, lambda: win.panel_manager.location("inspection") == PanelLocation.DETACHED
+        )
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
 
         dialog = win.panel_manager.panel_for_dock(win.inspection_dock).dialog
@@ -806,7 +846,7 @@ def test_managed_dock_title_buttons_detach_hide_and_redock(qtbot):
         redock_button = dialog.findChild(QtWidgets.QToolButton, "DetachedPanelRedockButton")
         assert redock_button is not None
         redock_button.click()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, lambda: win.panel_manager.location("inspection") == PanelLocation.DOCKED)
         assert win.panel_manager.location("inspection") == PanelLocation.DOCKED
         assert (
             win.inspection_dock.findChild(type(win.inspection_dock.stats_table))
@@ -818,7 +858,7 @@ def test_managed_dock_title_buttons_detach_hide_and_redock(qtbot):
         )
         assert close_button is not None
         close_button.click()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, lambda: win.panel_manager.location("inspection") == PanelLocation.HIDDEN)
         assert win.panel_manager.location("inspection") == PanelLocation.HIDDEN
         assert not win._inspection_dock_user_visible
     finally:
@@ -836,11 +876,10 @@ def test_managed_dock_title_drag_detaches_panel(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.layout_manager.set_managed_dock_visible(
             win.inspection_dock, True, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=10)
 
         title_bar = win.inspection_dock.titleBarWidget()
         assert title_bar is not None
@@ -851,7 +890,9 @@ def test_managed_dock_title_drag_detaches_panel(qtbot):
         QtTest.QTest.mouseRelease(
             title_bar, QtCore.Qt.MouseButton.LeftButton, pos=QtCore.QPoint(80, 10)
         )
-        _process_events(qtbot, count=15)
+        _settle_idle(
+            win, lambda: win.panel_manager.location("inspection") == PanelLocation.DETACHED
+        )
 
         assert win.panel_manager.location("inspection") == PanelLocation.DETACHED
     finally:
@@ -869,10 +910,10 @@ def test_detached_hidden_reopen_redock_hide_reopen_preserves_body(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         action = _view_action(win, "Inspection")
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, _panel_reaches(win, "inspection", PanelLocation.DOCKED))
         panel = win.panel_manager.panel_for_dock(win.inspection_dock)
         body = _panel_body(panel)
         _assert_panel_invariants(win, "inspection", PanelLocation.DOCKED)
@@ -880,34 +921,32 @@ def test_detached_hidden_reopen_redock_hide_reopen_preserves_body(qtbot):
         win.layout_manager.detach_managed_dock(
             win.inspection_dock, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=15)
         assert _panel_body(panel) is body
         _assert_panel_invariants(win, "inspection", PanelLocation.DETACHED)
 
         panel.dialog.close()
-        _process_events(qtbot, count=15)
         assert _panel_body(panel) is body
         _assert_panel_invariants(win, "inspection", PanelLocation.HIDDEN)
 
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, _panel_reaches(win, "inspection", PanelLocation.DETACHED))
         assert _panel_body(panel) is body
         # BUG 2: closed while floating -> reopens floating, body intact.
         _assert_panel_invariants(win, "inspection", PanelLocation.DETACHED)
 
         redock_button = panel.dialog.findChild(QtWidgets.QToolButton, "DetachedPanelRedockButton")
         redock_button.click()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, _panel_reaches(win, "inspection", PanelLocation.DOCKED))
         assert _panel_body(panel) is body
         _assert_panel_invariants(win, "inspection", PanelLocation.DOCKED)
 
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, _panel_reaches(win, "inspection", PanelLocation.HIDDEN))
         assert _panel_body(panel) is body
         _assert_panel_invariants(win, "inspection", PanelLocation.HIDDEN)
 
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, _panel_reaches(win, "inspection", PanelLocation.DOCKED))
         assert _panel_body(panel) is body
         _assert_panel_invariants(win, "inspection", PanelLocation.DOCKED)
     finally:
@@ -923,25 +962,23 @@ def test_hide_detached_panel_destroys_dialog_and_recovers_body(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         action = _view_action(win, "Inspection")
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, _panel_reaches(win, "inspection", PanelLocation.DOCKED))
         panel = win.panel_manager.panel_for_dock(win.inspection_dock)
         body = _panel_body(panel)
         win.layout_manager.detach_managed_dock(
             win.inspection_dock, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=15)
         assert panel.dialog is not None
 
         action.trigger()
-        _process_events(qtbot, count=15)
         assert _panel_body(panel) is body
         _assert_panel_invariants(win, "inspection", PanelLocation.HIDDEN)
 
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, _panel_reaches(win, "inspection", PanelLocation.DETACHED))
         assert _panel_body(panel) is body
         # BUG 2: hidden while detached -> reopens detached, body recovered
         # into the recreated dialog.
@@ -963,22 +1000,19 @@ def test_reset_layout_after_detached_hidden_panel_has_no_stale_dialog(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         action = _view_action(win, "Inspection")
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(win, _panel_reaches(win, "inspection", PanelLocation.DOCKED))
         panel = win.panel_manager.panel_for_dock(win.inspection_dock)
         body = _panel_body(panel)
         win.layout_manager.detach_managed_dock(
             win.inspection_dock, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=15)
         action.trigger()
-        _process_events(qtbot, count=15)
         _assert_panel_invariants(win, "inspection", PanelLocation.HIDDEN)
 
         win.reset_layout()
-        _process_events(qtbot, count=20)
 
         assert _panel_body(panel) is body
         _assert_panel_invariants(win, "inspection", PanelLocation.HIDDEN)
@@ -998,7 +1032,7 @@ def test_managed_title_close_is_authoritative_hide_path(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         for name, dock, action_text in (
             ("inspection", win.inspection_dock, "Inspection"),
             ("profile", win.profile_dock, "Profile"),
@@ -1007,7 +1041,7 @@ def test_managed_title_close_is_authoritative_hide_path(qtbot):
             action = _view_action(win, action_text)
             if not action.isChecked():
                 action.trigger()
-                _process_events(qtbot, count=15)
+                _settle_idle(win, _panel_reaches(win, name, PanelLocation.DOCKED))
             panel = win.panel_manager.panel_for_dock(dock)
             body = _panel_body(panel)
             _assert_panel_invariants(win, name, PanelLocation.DOCKED)
@@ -1015,12 +1049,12 @@ def test_managed_title_close_is_authoritative_hide_path(qtbot):
             close_button = dock.findChild(QtWidgets.QToolButton, "ManagedDockCloseButton")
             assert close_button is not None
             close_button.click()
-            _process_events(qtbot, count=15)
+            _settle_idle(win, _panel_reaches(win, name, PanelLocation.HIDDEN))
             _assert_panel_invariants(win, name, PanelLocation.HIDDEN)
             assert not action.isChecked()
 
             action.trigger()
-            _process_events(qtbot, count=15)
+            _settle_idle(win, _panel_reaches(win, name, PanelLocation.DOCKED))
             assert _panel_body(panel) is body
             _assert_panel_invariants(win, name, PanelLocation.DOCKED)
     finally:
@@ -1035,17 +1069,17 @@ def test_operation_dock_view_menu_grows_and_hides_window(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         action = _view_action(win, "Operations")
         start_width = win.width()
         action.trigger()
-        _process_events(qtbot, count=20)
+        _settle_idle(win, lambda: win.operation_dock.isVisible())
         opened_width = win.width()
         assert win.operation_dock.isVisible()
         assert opened_width > start_width
 
         action.trigger()
-        _process_events(qtbot, count=20)
+        _settle_idle(win, lambda: not win.operation_dock.isVisible())
         assert not win.operation_dock.isVisible()
         assert win.width() < opened_width
     finally:
@@ -1060,12 +1094,12 @@ def test_operation_dock_grows_without_prior_manual_resize(qtbot):
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         action = _view_action(win, "Operations")
         start_width = win.width()
 
         action.trigger()
-        _process_events(qtbot, count=20)
+        _settle_idle(win, lambda: win.operation_dock.isVisible())
 
         assert win.operation_dock.isVisible()
         assert win.width() > start_width
@@ -1081,19 +1115,19 @@ def test_hiding_operation_dock_with_inspection_open_shrinks_window_not_inspectio
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         inspection_action = _view_action(win, "Inspection")
         operation_action = _view_action(win, "Operations")
         inspection_action.trigger()
-        _process_events(qtbot, count=20)
+        _settle_idle(win, lambda: win.inspection_dock.isVisible())
         operation_action.trigger()
-        _process_events(qtbot, count=20)
+        _settle_idle(win, lambda: win.operation_dock.isVisible())
 
         opened_width = win.width()
         inspection_width = win.inspection_dock.width()
 
         operation_action.trigger()
-        _process_events(qtbot, count=25)
+        _settle_idle(win, lambda: not win.operation_dock.isVisible())
 
         assert not win.operation_dock.isVisible()
         assert win.inspection_dock.isVisible()

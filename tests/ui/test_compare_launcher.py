@@ -27,16 +27,15 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     clear_arrayscope_settings,
-    frame_session_settled,
-    process_events,
+    settle_idle,
 )
 
 pytest.importorskip("pytestqt")
 
-# Every waitUntil in this module is capped by the global interaction-settle
-# hard limit so no local timeout can mask a slow step (architecture guard
-# test_interaction_gates_have_one_bounded_timeout_owner).
-_SETTLE_TIMEOUT_MS = min(4000, INTERACTION_SETTLE_HARD_LIMIT_MS)
+# The remaining waitUntil in this module is capped by the global
+# interaction-settle hard limit so no local timeout can mask a slow step
+# (architecture guard test_interaction_gates_have_one_bounded_timeout_owner).
+# The settle wait itself takes no timeout: it is denominated in progress.
 _DISPOSE_TIMEOUT_MS = min(5000, INTERACTION_SETTLE_HARD_LIMIT_MS)
 
 
@@ -91,14 +90,13 @@ def compare_windows(qtbot):
 
 
 def _settle(qtbot, *windows):
-    process_events(qtbot, count=20)
-    qtbot.waitUntil(
-        lambda: (
-            all(frame_session_settled(win) for win in windows)
-            and all(win.renderer.display_geometry is not None for win in windows)
-        ),
-        timeout=_SETTLE_TIMEOUT_MS,
-    )
+    # One window at a time, denominated in that window's own published
+    # progress. The wall-clock `waitUntil` this replaces was the load-fragile
+    # shape tests/settle.py exists to remove, and the bare delivered turn in
+    # front of it was not doing the job claimed for it either: measured, these
+    # windows are still unsettled after one slice and need three.
+    for win in windows:
+        settle_idle(win, lambda win=win: win.renderer.display_geometry is not None)
 
 
 def _hover(win, view_col, view_row):

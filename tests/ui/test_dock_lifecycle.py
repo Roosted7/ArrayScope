@@ -12,7 +12,7 @@ from tests.ui.helpers import (
     give_generous_work_area as _give_generous_work_area,
 )
 from tests.ui.helpers import (
-    process_events as _process_events,
+    settle_idle as _settle_idle,
 )
 from tests.ui.helpers import (
     view_action as _view_action,
@@ -43,12 +43,12 @@ def test_detached_dock_survives_render_and_progressive_sync(qtbot, name, action_
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
         dock = getattr(win, dock_attr)
         _open_dock(win, dock)
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
         win.layout_manager.detach_managed_dock(dock, reason="test", preserve_canvas=False)
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
 
         assert win.panel_manager.location(name) == PanelLocation.DETACHED
         action = _view_action(win, action_text)
@@ -59,7 +59,7 @@ def test_detached_dock_survives_render_and_progressive_sync(qtbot, name, action_
         for _ in range(4):
             win.render(reason="bug1-detach-survives")
             win.layout_manager.sync_progressive_docks()
-            _process_events(qtbot, count=15)
+            _settle_idle(win)
 
         assert win.panel_manager.location(name) == PanelLocation.DETACHED
         panel = win.panel_manager.panel_for_dock(dock)
@@ -85,28 +85,28 @@ def test_reopen_restores_float_state_and_geometry(qtbot, name, action_text, dock
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
         dock = getattr(win, dock_attr)
         action = _view_action(win, action_text)
         if not action.isChecked():
             action.trigger()
-            _process_events(qtbot, count=15)
+            _settle_idle(win)
 
         win.layout_manager.detach_managed_dock(dock, reason="test", preserve_canvas=False)
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
         panel = win.panel_manager.panel_for_dock(dock)
         assert panel.dialog is not None
 
         panel.dialog.setGeometry(QtCore.QRect(140, 110, 360, 280))
-        _process_events(qtbot, count=10)
+        _settle_idle(win)
         target = QtCore.QRect(panel.dialog.geometry())
 
         panel.dialog.close()
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
         assert win.panel_manager.location(name) == PanelLocation.HIDDEN
 
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
 
         assert win.panel_manager.location(name) == PanelLocation.DETACHED
         restored = win.panel_manager.panel_for_dock(dock).dialog
@@ -133,21 +133,23 @@ def test_float_state_is_not_persisted_across_sessions(qtbot):
     qtbot.addWidget(first)
     _give_generous_work_area(first)
     try:
-        _process_events(qtbot, count=15)
+        _settle_idle(first)
         action = _view_action(first, "Inspection")
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(first)
         first.layout_manager.detach_managed_dock(
             first.inspection_dock, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=15)
+        _settle_idle(first)
         panel = first.panel_manager.panel_for_dock(first.inspection_dock)
         panel.dialog.setGeometry(QtCore.QRect(140, 110, 360, 280))
-        _process_events(qtbot, count=10)
+        _settle_idle(first)
         panel.dialog.close()
-        _process_events(qtbot, count=15)
+        _settle_idle(first)
+        # No wait after closing: `closeEvent` writes the settings the second
+        # window below reads, inline. A settle on `first` here would be waiting
+        # on a window that has already cancelled everything it could wait for.
         first.close()
-        _process_events(qtbot, count=10)
     finally:
         if first.isVisible():
             first.close()
@@ -162,14 +164,14 @@ def test_float_state_is_not_persisted_across_sessions(qtbot):
     qtbot.addWidget(second)
     _give_generous_work_area(second)
     try:
-        _process_events(qtbot, count=15)
+        _settle_idle(second)
         assert (
             second.panel_manager._panels_by_name["inspection"].last_open_location
             == PanelLocation.DOCKED
         )
         action = _view_action(second, "Inspection")
         action.trigger()
-        _process_events(qtbot, count=15)
+        _settle_idle(second)
         assert second.panel_manager.location("inspection") == PanelLocation.DOCKED
     finally:
         second.close()
@@ -201,30 +203,30 @@ def test_closing_floating_dock_survives_progressive_sync(qtbot, name, action_tex
     qtbot.addWidget(win)
     _give_generous_work_area(win)
     try:
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
         dock = getattr(win, dock_attr)
 
         # Put the panel in a state a progressive sync would WANT open: the
         # profile via the user's explicit choice, operations via a step.
         if name == "operations":
             win.request_operation("reverse", 0)
-            _process_events(qtbot, count=25)
+            _settle_idle(win)
         else:
             action = _view_action(win, action_text)
             if not action.isChecked():
                 action.trigger()
-                _process_events(qtbot, count=15)
+                _settle_idle(win)
         assert dock.isVisible()
 
         win.layout_manager.detach_managed_dock(dock, reason="test", preserve_canvas=False)
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
         panel = win.panel_manager.panel_for_dock(dock)
         assert panel.dialog is not None
         assert win.panel_manager.location(name) == PanelLocation.DETACHED
 
         # The user closes the floating dialog.
         panel.dialog.close()
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
         assert win.panel_manager.location(name) == PanelLocation.HIDDEN
 
         # The renderer and the progressive-sync policy run constantly; a
@@ -232,7 +234,7 @@ def test_closing_floating_dock_survives_progressive_sync(qtbot, name, action_tex
         for _ in range(4):
             win.render(reason="floating-close-survives")
             win.layout_manager.sync_progressive_docks()
-            _process_events(qtbot, count=15)
+            _settle_idle(win)
 
         assert win.panel_manager.location(name) == PanelLocation.HIDDEN
         assert not dock.isVisible()
@@ -276,18 +278,18 @@ def test_closing_inspection_dock_bounds_and_quiesces_roi_refresh(qtbot):
     win._roi_inspection_key = _churning_key
 
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win.layout_manager.set_managed_dock_visible(
             win.inspection_dock, True, reason="test", preserve_canvas=False
         )
-        _process_events(qtbot, count=10)
+        _settle_idle(win)
         win.img_view.createRoi("rectangle", rect=(2, 2, 6, 6))
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert any(selection.enabled for selection in win.img_view.roiSelections())
 
         cleared.clear()
         win.layout_manager.set_inspection_dock_visible_from_user(False)
-        _process_events(qtbot, count=15)
+        _settle_idle(win)
 
         # Closing the dock cancels the ROI evaluation group.
         assert "roi-inspection" in cleared
@@ -300,7 +302,7 @@ def test_closing_inspection_dock_bounds_and_quiesces_roi_refresh(qtbot):
         for _ in range(12):
             win._refresh_hidden_roi_overlay_from_committed_frame()
             qtbot.wait(5)
-        _process_events(qtbot, count=25)
+        _settle_idle(win)
 
         assert len(submissions) <= 1
     finally:

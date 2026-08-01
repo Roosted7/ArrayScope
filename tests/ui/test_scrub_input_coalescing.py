@@ -27,7 +27,7 @@ from tests.ui.helpers import (
     use_pyqtgraph_backend,
 )
 from tests.ui.helpers import (
-    process_events as _process_events,
+    settle_idle as _settle_idle,
 )
 
 
@@ -89,7 +89,7 @@ def test_crop_window_scrub_backlog_coalesces_to_latest(qtbot):
     win = ArrayScopeWindow(np.random.default_rng(0).standard_normal((60, 48, 6)).astype("float32"))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         # Seed the crop so the burst below is a continuation window scrub.
         win._on_slice_text_changed(0, "10:40")
         qtbot.waitUntil(
@@ -144,7 +144,7 @@ def test_montage_index_window_scrub_backlog_coalesces_to_latest(qtbot):
     win = ArrayScopeWindow(np.random.default_rng(1).standard_normal((40, 40, 32)).astype("float32"))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         # Promote axis 2 to a montage window, then scrub that window.
         win._on_slice_text_changed(2, "4:16")
         qtbot.waitUntil(

@@ -5,7 +5,10 @@ import numpy as np
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tests.ui.helpers import clear_arrayscope_settings, process_events
+from tests.ui.helpers import clear_arrayscope_settings
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 
 def _window(qtbot, data=None):
@@ -18,7 +21,7 @@ def _window(qtbot, data=None):
     qtbot.addWidget(win)
     win.resize(900, 640)
     win.show()
-    process_events(qtbot)
+    _settle_idle(win)
     return win
 
 
@@ -27,7 +30,7 @@ def test_roi_at_image_point_finds_topmost_roi(qtbot):
 
     win = _window(qtbot)
     selection = win.img_view.createRoi(RoiKind.RECTANGLE, rect=(4, 4, 10, 8))
-    process_events(qtbot)
+    _settle_idle(win)
 
     hit = win._roi_at_image_point((8.0, 8.0))
     assert hit is not None
@@ -41,10 +44,10 @@ def test_update_roi_selection_renames_and_recolors(qtbot):
 
     win = _window(qtbot)
     selection = win.img_view.createRoi(RoiKind.RECTANGLE, rect=(4, 4, 10, 8))
-    process_events(qtbot)
+    _settle_idle(win)
 
     win._update_roi_selection(selection.id, label="Lesion", color=(10, 200, 30))
-    process_events(qtbot)
+    _settle_idle(win)
 
     updated = win.roi_store.get(str(selection.id))
     assert updated is not None
@@ -61,7 +64,7 @@ def test_hud_context_rows_describe_hovered_roi(qtbot):
 
     win = _window(qtbot)
     selection = win.img_view.createRoi(RoiKind.RECTANGLE, rect=(4, 4, 10, 8))
-    process_events(qtbot)
+    _settle_idle(win)
 
     controller = win.img_view.interaction_controller
     win.img_view.sync_interaction_state(
@@ -151,19 +154,19 @@ def test_profile_badges_track_dock_visibility(qtbot):
     live = win.widgets["buttons"]["display"]["live_profile"]
 
     live.setChecked(True)
-    process_events(qtbot, count=12)
+    _settle_idle(win)
     assert win.profile_dock.isVisible()
     assert badge.isChecked(), "profile axis badge should highlight while the dock is visible"
 
     win.layout_manager.set_profile_dock_visible_from_user(False)
-    process_events(qtbot, count=12)
+    _settle_idle(win)
     assert not badge.isChecked(), "badges must un-highlight when the profile dock closes"
     # Live profile state and the crosshair survive the dock closing.
     assert live.isChecked()
     assert win.img_view.profileMarkerPosition() is not None
 
     win.layout_manager.set_profile_dock_visible_from_user(True)
-    process_events(qtbot, count=12)
+    _settle_idle(win)
     assert badge.isChecked(), "reopening the dock restores the badge highlight"
 
 
@@ -171,15 +174,15 @@ def test_live_profile_context_click_recovers_from_stale_checked_state(qtbot):
     win = _window(qtbot, data=np.random.default_rng(0).normal(size=(24, 24, 4)))
     live = win.widgets["buttons"]["display"]["live_profile"]
     live.setChecked(True)
-    process_events(qtbot, count=12)
+    _settle_idle(win)
 
     # Simulate the stale state: button checked but the marker was cleared.
     win.renderer._clear_live_profile_marker()
-    process_events(qtbot, count=4)
+    _settle_idle(win)
     assert live.isChecked()
     assert win.img_view.profileMarkerPosition() is None
 
     # One context-menu activation must fully re-enable live profile.
     win._set_live_profile_from_context(True, (5.0, 5.0))
-    process_events(qtbot, count=12)
+    _settle_idle(win)
     assert win.img_view.profileMarkerPosition() == (5.0, 5.0)

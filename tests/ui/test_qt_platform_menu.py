@@ -6,7 +6,7 @@ from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
 from tests.ui.helpers import (
-    process_events as _process_events,
+    settle_idle as _settle_idle,
 )
 
 
@@ -38,7 +38,7 @@ def test_display_server_menu_present_on_wayland_sessions(qtbot, monkeypatch):
     win = _make_window(monkeypatch, wayland_session=True)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         menu = _view_submenu(win, "Display Server")
         assert menu is not None
         labels = [a.text() for a in menu.actions() if a.text()]
@@ -55,7 +55,7 @@ def test_display_server_menu_absent_off_wayland(qtbot, monkeypatch):
     win = _make_window(monkeypatch, wayland_session=False)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         assert _view_submenu(win, "Display Server") is None
     finally:
         win.close()
@@ -68,11 +68,11 @@ def test_selecting_platform_persists_setting(qtbot, monkeypatch):
     win = _make_window(monkeypatch, wayland_session=True)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         menu = _view_submenu(win, "Display Server")
         action = next(a for a in menu.actions() if a.text() == "Force X11 (XWayland)")
         action.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.qt_platform == QtPlatformChoice.XCB
         assert win._settings.value("qt_platform") == "xcb"
         # Round-trips through a fresh settings load.

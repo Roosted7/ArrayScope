@@ -6,7 +6,7 @@ from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
 from tests.ui.helpers import (
-    process_events as _process_events,
+    settle_idle as _settle_idle,
 )
 
 
@@ -34,7 +34,7 @@ def test_menu_offers_choices_on_free_threaded_builds(qtbot, monkeypatch):
     win = _make_window(monkeypatch, free_threaded_build=True)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         menu = _performance_submenu(win, "Python Free-Threading")
         assert menu is not None
         labels = [a.text() for a in menu.actions() if a.text()]
@@ -59,7 +59,7 @@ def test_menu_explains_requirement_on_regular_builds(qtbot, monkeypatch):
     win = _make_window(monkeypatch, free_threaded_build=False)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         menu = _performance_submenu(win, "Python Free-Threading")
         assert menu is not None
         labels = [a.text() for a in menu.actions() if a.text()]
@@ -76,11 +76,11 @@ def test_force_disable_persists_setting(qtbot, monkeypatch):
     win = _make_window(monkeypatch, free_threaded_build=True)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         menu = _performance_submenu(win, "Python Free-Threading")
         action = next(a for a in menu.actions() if a.text() == "Force-disabled (GIL on)")
         action.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.python_free_threading is FreeThreadingChoice.FORCE_DISABLED
         assert win._settings.value("python_free_threading") == "force_disabled"
         # Round-trips through a fresh settings load.
@@ -103,7 +103,7 @@ def test_supervisor_written_auto_disable_shows_checked(qtbot, monkeypatch):
     win = _make_window(monkeypatch, free_threaded_build=True)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.python_free_threading is FreeThreadingChoice.AUTO_DISABLED
         menu = _performance_submenu(win, "Python Free-Threading")
         auto = next(
@@ -113,7 +113,7 @@ def test_supervisor_written_auto_disable_shows_checked(qtbot, monkeypatch):
         # Selecting Enabled re-arms free threading for the next launch.
         enabled = next(a for a in menu.actions() if a.text() == "Enabled (GIL off)")
         enabled.trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win._settings.value("python_free_threading") == "enabled"
     finally:
         _clear_arrayscope_settings()

@@ -20,7 +20,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from tests.ui.helpers import (
     auto_confirm_message_boxes,
     clear_arrayscope_settings,
-    process_events,
+)
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
 )
 
 _ICON_NAME_PROPERTY = "arrayscope_icon_name"
@@ -57,7 +59,7 @@ def _window(qtbot):
     win = ArrayScopeWindow(np.arange(4 * 5 * 6, dtype=float).reshape(4, 5, 6))
     qtbot.addWidget(win)
     win.show()
-    process_events(qtbot)
+    _settle_idle(win)
     return win
 
 
@@ -71,7 +73,7 @@ def _managers(qtbot, win):
         qtbot.addWidget(dialog)
         dialog.show()
         dialogs.append(dialog)
-    process_events(qtbot)
+    _settle_idle(win)
     return dialogs
 
 
@@ -164,7 +166,7 @@ def test_search_narrows_both_trees_and_hides_emptied_groups(qtbot):
             (operations, "mean", "mean"),
         ):
             dialog.filter_edit.setText(needle)
-            process_events(qtbot)
+            _settle_idle(win)
             visible = _visible_keys(dialog)
             assert expected in visible
             assert len(visible) < len(_all_keys(dialog))
@@ -179,7 +181,7 @@ def test_search_narrows_both_trees_and_hides_emptied_groups(qtbot):
                 for index in range(dialog.tree.topLevelItemCount())
             )
             dialog.filter_edit.setText("")
-            process_events(qtbot)
+            _settle_idle(win)
             assert len(_visible_keys(dialog)) == len(_all_keys(dialog))
     finally:
         for dialog in (colormaps, operations):
@@ -202,7 +204,7 @@ def test_a_group_renames_in_place_on_both_sides(qtbot):
             assert item is not None
             assert item.flags() & item.flags().__class__.ItemIsEditable
             item.setText(0, "Mine")
-            process_events(qtbot)
+            _settle_idle(win)
             groups = [
                 group
                 for group, _members in (
@@ -238,7 +240,7 @@ def test_removing_a_definition_asks_first_on_both_sides(qtbot, monkeypatch):
         colormaps.remove_button.click()
         assert operations.select_key(operation_id)
         operations.remove_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert colormap_library.find_colormap("mine") is not None
         assert operation_library.user_operation_wrapper(operation_id) is not None
 
@@ -247,7 +249,7 @@ def test_removing_a_definition_asks_first_on_both_sides(qtbot, monkeypatch):
         colormaps.remove_button.click()
         assert operations.select_key(operation_id)
         operations.remove_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert colormap_library.find_colormap("mine") is None
         assert operation_library.user_operation_wrapper(operation_id) is None
     finally:
@@ -271,14 +273,14 @@ def test_revert_undoes_the_last_destructive_change_on_both_sides(qtbot, monkeypa
     try:
         for dialog, key in ((colormaps, "mine"), (operations, operation_id)):
             assert dialog.select_key(key)
-            process_events(qtbot)
+            _settle_idle(win)
             # The button only exists when it leads somewhere.
             assert not dialog.revert_button.isVisible()
             dialog.remove_button.click()
-            process_events(qtbot)
+            _settle_idle(win)
             assert dialog.revert_button.isVisible()
             dialog.revert_button.click()
-            process_events(qtbot)
+            _settle_idle(win)
             assert dialog.select_key(key)
             assert not dialog.revert_button.isVisible()
         assert colormap_library.find_colormap("mine") is not None
@@ -306,7 +308,7 @@ def test_reset_all_restores_the_arrangement_and_everything_hidden(qtbot, monkeyp
     try:
         colormaps.reset_all_button.click()
         operations.reset_all_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert colormap_library.hidden_builtins() == frozenset()
         assert operation_library.hidden_operations() == frozenset()
         assert colormap_library.effective_group(colormap_library.find_colormap("viridis")) != "User"
@@ -337,9 +339,9 @@ def test_hiding_a_system_definition_marks_it_and_restore_brings_it_back(qtbot, m
             ),
         ):
             assert dialog.select_key(key)
-            process_events(qtbot)
+            _settle_idle(win)
             dialog.remove_button.click()
-            process_events(qtbot)
+            _settle_idle(win)
             assert key not in listed()
             # Still listed *here* -- greyed and marked -- which is what makes
             # the removal reversible rather than a disappearance.
@@ -348,7 +350,7 @@ def test_hiding_a_system_definition_marks_it_and_restore_brings_it_back(qtbot, m
             assert dialog.tree.currentItem().font(0).italic()
 
             dialog.unhide_button.click()
-            process_events(qtbot)
+            _settle_idle(win)
             assert key in listed()
     finally:
         for dialog in (colormaps, operations):
@@ -380,7 +382,7 @@ def test_a_drop_persists_the_arrangement_on_both_sides(qtbot):
             assert destination is not None
             destination.insertChild(0, moved)
             dialog.persist_layout()
-            process_events(qtbot)
+            _settle_idle(win)
 
         assert colormap_library.grouped_colormaps()[0][1][0].name == "turbo"
         assert "mean" in {
@@ -407,19 +409,19 @@ def test_apply_hands_the_selection_to_the_window_and_closes(qtbot, monkeypatch):
     )
     try:
         assert colormaps.select_key("viridis")
-        process_events(qtbot)
+        _settle_idle(win)
         assert colormaps.apply_button.isEnabled()
         colormaps.apply_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert applied[-1] == ("viridis",)
         assert not colormaps.isVisible()
 
         # The operation manager was a dead end you had to leave before you could
         # use what you had just written.
         assert operations.select_key(operation_id)
-        process_events(qtbot)
+        _settle_idle(win)
         operations.apply_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert applied[-1][0] == operation_id
         assert not operations.isVisible()
     finally:
@@ -440,7 +442,7 @@ def test_open_folder_reaches_each_library_directory(qtbot, monkeypatch):
     try:
         for dialog in (colormaps, operations):
             dialog.open_folder_button.click()
-            process_events(qtbot)
+            _settle_idle(win)
         assert len(opened) == 2
         assert all(os.path.isdir(path) for path in opened)
         assert opened[0] != opened[1]
@@ -460,9 +462,11 @@ def test_a_manager_unregisters_its_listener_when_it_closes(qtbot):
     colormaps, operations = _managers(qtbot, win)
     assert colormaps.refresh_tree in colormap_library._listeners._callbacks
     assert operations.refresh_tree in operation_library._listeners._callbacks
+    # Both `closeEvent`s call `library_remove_listener` inline, and a
+    # process-global listener list is not something the window publishes
+    # progress about -- so there is nothing here for a settle wait to watch.
     colormaps.close()
     operations.close()
-    process_events(qtbot)
     assert colormaps.refresh_tree not in colormap_library._listeners._callbacks
     assert operations.refresh_tree not in operation_library._listeners._callbacks
     win.close()
@@ -513,13 +517,13 @@ def test_new_and_duplicate_produce_an_editable_definition_on_both_sides(qtbot):
         for dialog in (colormaps, operations):
             before = set(_all_keys(dialog))
             dialog.new_button.click()
-            process_events(qtbot)
+            _settle_idle(win)
             created = dialog.selected_key()
             assert created is not None
             assert created not in before
 
             dialog.duplicate_button.click()
-            process_events(qtbot)
+            _settle_idle(win)
             duplicated = dialog.selected_key()
             assert duplicated is not None
             assert duplicated != created
@@ -553,14 +557,14 @@ def test_export_then_import_round_trips_on_both_sides(qtbot, tmp_path, monkeypat
                 assert dialog.select_key("mine")
             else:
                 dialog.new_button.click()
-                process_events(qtbot)
+                _settle_idle(win)
             exported_from = dialog.selected_key()
             dialog.export_button.click()
-            process_events(qtbot)
+            _settle_idle(win)
             assert os.path.exists(target)
 
             dialog.import_button.click()
-            process_events(qtbot)
+            _settle_idle(win)
             imported = dialog.selected_key()
             assert imported is not None
             # A fresh identity, never an overwrite of what it came from.
@@ -587,10 +591,10 @@ def test_open_file_reaches_the_stored_definition_on_both_sides(qtbot, monkeypatc
         for dialog, key in ((colormaps, "mine"), (operations, operation_id)):
             monkeypatch.setattr(type(dialog), "open_path", lambda _self, path: opened.append(path))
             assert dialog.select_key(key)
-            process_events(qtbot)
+            _settle_idle(win)
             assert dialog.open_file_button.isEnabled()
             dialog.open_file_button.click()
-            process_events(qtbot)
+            _settle_idle(win)
         assert len(opened) == 2
         assert all(os.path.exists(path) for path in opened)
         # A colormap opens its stored JSON; an operation opens its code file --
@@ -617,17 +621,17 @@ def test_the_pinned_section_is_one_checkbox_on_both_sides(qtbot):
         assert "pinned" in operations.common_check.text()
 
         assert colormaps.select_key("turbo")
-        process_events(qtbot)
+        _settle_idle(win)
         assert not colormaps.common_check.isChecked()
         colormaps.common_check.setChecked(True)
-        process_events(qtbot)
+        _settle_idle(win)
         info = colormap_library.find_colormap("turbo")
         assert colormap_library.effective_group(info) == colormap_library.FAVORITES_GROUP
 
         assert operations.select_key("crop")
-        process_events(qtbot)
+        _settle_idle(win)
         operations.common_check.setChecked(True)
-        process_events(qtbot)
+        _settle_idle(win)
         assert "crop" in operation_library.effective_common_ids()
     finally:
         for dialog in (colormaps, operations):

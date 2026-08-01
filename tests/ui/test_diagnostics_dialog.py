@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import numpy as np
 
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
-from tests.ui.helpers import process_events as _process_events
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 
 def _menu(win, text):
@@ -64,7 +66,7 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         developer = _menu(win, "Developer")
         assert _action(developer, "Verify icons") is not None
         truth_overlay = _action(developer, "Tile truth overlay")
@@ -74,7 +76,7 @@ def test_developer_menu_opens_diagnostics_dialog(qtbot):
         truth_overlay.trigger()
         assert win.renderer._tile_truth_overlay_enabled is False
         _action(developer, "Diagnostics").trigger()
-        _process_events(qtbot)
+        _settle_idle(win)
 
         dialog = getattr(win, "_diagnostics_dialog", None)
         assert isinstance(dialog, DiagnosticsDialog)
@@ -137,7 +139,7 @@ def test_opening_diagnostics_twice_reuses_dialog(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.open_diagnostics_dialog()
         first = win._diagnostics_dialog
         win.open_diagnostics_dialog()
@@ -155,7 +157,7 @@ def test_diagnostics_refresh_updates_cache_text(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.open_diagnostics_dialog()
         dialog = win._diagnostics_dialog
         dialog.tabs.setCurrentWidget(dialog._section_edits["All"])
@@ -223,7 +225,7 @@ def test_diagnostics_reports_actual_image_backend_separately_from_auto_setting(q
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = replace(
             win.app_settings, image_rendering_backend=ImageRenderingBackendChoice.AUTO
         )
@@ -244,7 +246,7 @@ def test_diagnostics_operations_tab_shows_region_planner_details(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5, 6), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
         win._set_document(win.operation_coordinator.document)
         win.operation_evaluator.image(win.view_state.with_slice(2, 2))
@@ -275,7 +277,7 @@ def test_diagnostics_operations_tab_shows_optimizer_summaries(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5, 6), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.operation_coordinator.load_operations((CenteredFFT(axis=2), CenteredIFFT(axis=2)))
         win._set_document(win.operation_coordinator.document)
         win.operation_evaluator.image(win.view_state.with_slice(2, 2))
@@ -301,7 +303,7 @@ def test_diagnostics_stage_cache_bar_and_cache_text_update(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5, 6), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
         win._set_document(win.operation_coordinator.document)
         win.operation_evaluator.image(win.view_state.with_slice(2, 0))
@@ -325,7 +327,7 @@ def test_diagnostics_auto_text_toggle_pauses_text_but_not_bars(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.open_diagnostics_dialog()
         dialog = win._diagnostics_dialog
         dialog.tabs.setCurrentWidget(dialog._section_edits["All"])
@@ -352,12 +354,14 @@ def test_diagnostics_timer_stops_after_close(qtbot):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.open_diagnostics_dialog()
         dialog = win._diagnostics_dialog
         assert dialog._timer.isActive()
+        # No wait: `closeEvent` stops the timer inline, and the window's own
+        # counters never knew about this dialog's QTimer anyway -- a pause here
+        # could only ever have been an unconditional sleep.
         dialog.close()
-        _process_events(qtbot)
 
         assert not dialog._timer.isActive()
     finally:
@@ -380,7 +384,7 @@ def test_diagnostics_jsonl_logging_writes_start_and_snapshots(qtbot, tmp_path, m
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.open_diagnostics_dialog()
         dialog = win._diagnostics_dialog
 
@@ -420,7 +424,7 @@ def test_diagnostics_jsonl_logging_cancel_keeps_logging_inactive(qtbot, tmp_path
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.open_diagnostics_dialog()
         dialog = win._diagnostics_dialog
 
@@ -447,14 +451,16 @@ def test_diagnostics_jsonl_logging_stops_on_close(qtbot, tmp_path, monkeypatch):
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.open_diagnostics_dialog()
         dialog = win._diagnostics_dialog
         dialog.log_button.click()
         assert dialog._logger is not None
 
+        # `closeEvent` stops the timer AND `_stop_logging()` inline, so the
+        # records below are already flushed when `close()` returns; nothing here
+        # is deferred for a wait to cover.
         dialog.close()
-        _process_events(qtbot)
 
         assert not dialog._timer.isActive()
         assert dialog._logger is None

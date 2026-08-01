@@ -13,7 +13,9 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 from tests.ui.helpers import (
     auto_confirm_message_boxes,
     clear_arrayscope_settings,
-    process_events,
+)
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
 )
 
 _AXIS_AND_PLAIN_SRC = '''
@@ -62,7 +64,7 @@ def _window(qtbot):
     win = ArrayScopeWindow(np.arange(4 * 5 * 6, dtype=float).reshape(4, 5, 6))
     qtbot.addWidget(win)
     win.show()
-    process_events(qtbot)
+    _settle_idle(win)
     return win
 
 
@@ -72,7 +74,7 @@ def _manager(qtbot, win):
     dialog = OperationManagerDialog(win)
     qtbot.addWidget(dialog)
     dialog.show()
-    process_events(qtbot)
+    _settle_idle(win)
     return dialog
 
 
@@ -95,14 +97,14 @@ def test_new_and_source_picker_stay_in_manager(qtbot, tmp_path, monkeypatch):
     try:
         assert not hasattr(operation_manager, "_OperationImportDialog")
         dialog.new_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         new_id = dialog.selected_operation_id()
         assert new_id == "user:new_operation"
         assert dialog.label_edit.text() == "New operation"
         assert dialog.source_box.isVisible()
 
         dialog.source_browse_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
 
         # AST inference fills ordinary editable fields in this same manager.
         assert dialog.callable_combo.currentText() == "shift"
@@ -125,7 +127,7 @@ def test_new_and_source_picker_stay_in_manager(qtbot, tmp_path, monkeypatch):
         # Inferred values remain ordinary editable values.
         dialog.label_edit.setText("Rolled")
         dialog.label_edit.editingFinished.emit()
-        process_events(qtbot)
+        _settle_idle(win)
         assert get_operation_entry(new_id).label == "Rolled"
     finally:
         dialog.close()
@@ -144,11 +146,11 @@ def test_link_mode_stores_absolute_path(qtbot, tmp_path, monkeypatch):
     dialog = _manager(qtbot, win)
     try:
         dialog.new_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         operation_id = dialog.selected_operation_id()
         dialog.link_radio.setChecked(True)
         dialog.source_browse_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         stored = library.user_operation_source_path(operation_id)
         assert stored == os.path.abspath(src)
         wrapper = library.user_operation_wrapper(operation_id)
@@ -168,7 +170,7 @@ def test_duplicate_system_selection_transitions_to_editable_user_copy(qtbot):
         assert "Duplicate" in dialog.status_label.text()
 
         dialog.duplicate_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
 
         operation_id = dialog.selected_operation_id()
         assert operation_id.startswith("user:")
@@ -234,7 +236,7 @@ def test_parameter_and_input_slot_tables_preserve_editable_schema(qtbot, tmp_pat
         # display text. Reconstructing either editor must preserve and write
         # back the full schema rather than only its happy-path name/default.
         assert dialog.select_operation(bounded_id)
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.params_table.columnCount() == 8
         assert dialog.params_table.item(0, 3).text() == "0.0"
         assert dialog.params_table.item(0, 4).text() == "1.0"
@@ -244,19 +246,19 @@ def test_parameter_and_input_slot_tables_preserve_editable_schema(qtbot, tmp_pat
         assert dialog.params_table.horizontalScrollBar().maximum() == 0
 
         dialog.params_table.item(0, 7).setText("Editable help.")
-        process_events(qtbot)
+        _settle_idle(win)
         assert (
             registry.get_operation_entry(bounded_id).parameters[0].description == "Editable help."
         )
 
         assert dialog.select_operation(blend_id)
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.slots_table.rowCount() == 1
         assert dialog.slots_table.item(0, 0).text() == "reference"
         assert "open-document" in dialog.slots_table.item(0, 2).text()
 
         dialog.slots_table.item(0, 1).setText("Reference data")
-        process_events(qtbot)
+        _settle_idle(win)
         assert registry.get_operation_entry(blend_id).input_slots[0].label == "Reference data"
     finally:
         dialog.close()
@@ -281,13 +283,13 @@ def test_menu_entries_open_dialogs(qtbot):
         assert operation_action is not None
 
         operation_action.trigger()
-        process_events(qtbot)
+        _settle_idle(win)
         assert win._operation_manager_dialog is not None
         assert win._operation_manager_dialog.isVisible()
         win._operation_manager_dialog.close()
 
         colormap_action.trigger()
-        process_events(qtbot)
+        _settle_idle(win)
         assert win._colormap_manager_dialog is not None
         win._colormap_manager_dialog.close()
     finally:
@@ -354,7 +356,7 @@ def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path, monkeypatch)
         # the raw payload instead of blanking the editor.
         path = _select_problem_row(dialog, "broken.json")
         assert path is not None
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.selected_operation_id() is None
         assert dialog.selected_problem_path() == path
         assert dialog.repair_box.isVisible()
@@ -377,12 +379,12 @@ def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path, monkeypatch)
         # An edit made here saves to the file by path.
         dialog.label_edit.setText("Broken but editable")
         dialog.label_edit.editingFinished.emit()
-        process_events(qtbot)
+        _settle_idle(win)
         assert json.loads((ops_dir / "broken.json").read_text())["label"] == "Broken but editable"
 
         # Editing a stored parameter is an ordinary edit here too.
         dialog.params_table.item(0, 0).setText("gain")
-        process_events(qtbot)
+        _settle_idle(win)
         stored = json.loads((ops_dir / "broken.json").read_text())
         assert [parameter["name"] for parameter in stored["parameters"]] == ["gain"]
 
@@ -392,7 +394,7 @@ def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path, monkeypatch)
         assert dialog._editing_definition() is True
         dialog.add_param_button.click()
         dialog.add_slot_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.selected_problem_path() == path
 
         # Open-file reaches the wrapper -- the file that actually needs editing
@@ -402,7 +404,7 @@ def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path, monkeypatch)
             QtGui.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile())
         )
         dialog.open_file_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert opened == [path]
 
         # And a Problems row survives an unrelated drag: it has no operation id,
@@ -415,7 +417,7 @@ def test_problems_group_appears_for_broken_wrapper(qtbot, tmp_path, monkeypatch)
         # Problems and lands the selection on the now-registered operation.
         (ops_dir / "broken.py").write_text("def oops(data):\n    return data\n")
         library.refresh_user_operations()
-        process_events(qtbot)
+        _settle_idle(win)
         groups = [
             dialog.tree.topLevelItem(i).data(0, 0x0101)
             for i in range(dialog.tree.topLevelItemCount())
@@ -457,14 +459,14 @@ def test_repair_editor_retargets_a_missing_source_file(qtbot, tmp_path, monkeypa
     dialog = _manager(qtbot, win)
     try:
         assert _select_problem_row(dialog, "moved.json") is not None
-        process_events(qtbot)
+        _settle_idle(win)
         assert "source file not found" in dialog.problem_message_label.text()
         assert dialog.source_box.isVisible()
         assert dialog.source_browse_button.isEnabled() is True
 
         dialog.copy_radio.setChecked(True)
         dialog.source_browse_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
 
         assert not library.user_operation_problems()
         assert dialog.selected_operation_id() == "user:moved"
@@ -495,7 +497,7 @@ def test_unparseable_wrapper_gets_a_raw_json_editor_and_a_path_keyed_delete(
     try:
         path = _select_problem_row(dialog, "garbled.json")
         assert path is not None
-        process_events(qtbot)
+        _settle_idle(win)
         # No dict to fill a form from, so the text of the file is the editor.
         assert dialog.repair_box.isVisible()
         assert dialog.raw_json_edit.isVisible()
@@ -505,7 +507,7 @@ def test_unparseable_wrapper_gets_a_raw_json_editor_and_a_path_keyed_delete(
         # Saving something that is still not JSON reports it and writes nothing.
         dialog.raw_json_edit.setPlainText("{oops")
         dialog.raw_json_save_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert "Not valid JSON" in dialog.problem_message_label.text()
         assert (ops_dir / "garbled.json").read_text().startswith('{"format"')
 
@@ -522,23 +524,23 @@ def test_unparseable_wrapper_gets_a_raw_json_editor_and_a_path_keyed_delete(
             )
         )
         dialog.raw_json_save_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert not library.user_operation_problems()
         assert dialog.selected_operation_id() == "user:garbled"
 
         # And a broken definition is deletable from the manager, by path.
         (ops_dir / "again.json").write_text("{not json at all")
         library.refresh_user_operations()
-        process_events(qtbot)
+        _settle_idle(win)
         assert _select_problem_row(dialog, "again.json") is not None
-        process_events(qtbot)
+        _settle_idle(win)
         monkeypatch.setattr(
             QtWidgets.QMessageBox,
             "question",
             lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes,
         )
         dialog.remove_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert not (ops_dir / "again.json").exists()
         assert not library.user_operation_problems()
     finally:
@@ -558,21 +560,21 @@ def test_command_copy_toggled_to_python_stays_in_the_tree(qtbot, tmp_path):
         # `source` block, so switching to Python produced a wrapper the loader
         # refuses and the operation vanished into Problems.
         dialog.new_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         command_id = dialog.selected_operation_id()
         dialog.runtime_combo.setCurrentIndex(dialog.runtime_combo.findData("command"))
         dialog.command_template_edit.setText("tool {in} {out}")
         dialog.command_template_edit.editingFinished.emit()
-        process_events(qtbot)
+        _settle_idle(win)
 
         dialog.duplicate_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         copy_id = dialog.selected_operation_id()
         assert copy_id != command_id
         assert library.user_operation_wrapper(copy_id)["runtime"] == "command"
 
         dialog.runtime_combo.setCurrentIndex(dialog.runtime_combo.findData("python"))
-        process_events(qtbot)
+        _settle_idle(win)
 
         assert not library.user_operation_problems()
         assert dialog.select_operation(copy_id)
@@ -634,7 +636,7 @@ def test_shell_plus_environment_prefix_does_not_take_down_the_manager(qtbot, tmp
     dialog = _manager(qtbot, win)
     try:
         assert dialog.select_operation("user:shelled")
-        process_events(qtbot)
+        _settle_idle(win)
         assert "Unavailable" in dialog.status_label.text()
         assert "shell execution" in dialog.status_label.text()
         # The whole listing still builds, which is the actual regression.
@@ -654,25 +656,25 @@ def test_unresolvable_environment_reference_is_not_silently_cleared(qtbot, tmp_p
     dialog = _manager(qtbot, win)
     try:
         dialog.new_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         operation_id = dialog.selected_operation_id()
         dialog.runtime_combo.setCurrentIndex(dialog.runtime_combo.findData("command"))
         dialog.command_template_edit.setText("tool {in} {out}")
         dialog.command_template_edit.editingFinished.emit()
-        process_events(qtbot)
+        _settle_idle(win)
         # A reference to an environment that has no record: deleted, renamed,
         # or arrived with an imported definition.
         library.update_user_operation(operation_id, environment="ghost")
-        process_events(qtbot)
+        _settle_idle(win)
 
         assert dialog.select_operation(operation_id)
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.environment_combo.currentData() == "ghost"
         assert "missing" in dialog.environment_combo.currentText()
 
         # The next unrelated runtime autosave must not persist it away.
         dialog.handoff_combo.setCurrentText("cfl")
-        process_events(qtbot)
+        _settle_idle(win)
         assert library.user_operation_wrapper(operation_id)["environment"] == "ghost"
     finally:
         dialog.close()
@@ -692,13 +694,13 @@ def test_command_runtime_and_advanced_environment_editor_share_the_manager(qtbot
     dialog = _manager(qtbot, win)
     try:
         dialog.new_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         operation_id = dialog.selected_operation_id()
 
         dialog.runtime_combo.setCurrentIndex(dialog.runtime_combo.findData("command"))
         dialog.command_template_edit.setText(f'"{executable}" {{in}} {{out}}')
         dialog.command_template_edit.editingFinished.emit()
-        process_events(qtbot)
+        _settle_idle(win)
 
         wrapper = library.user_operation_wrapper(operation_id)
         assert wrapper["runtime"] == "command"
@@ -709,7 +711,7 @@ def test_command_runtime_and_advanced_environment_editor_share_the_manager(qtbot
 
         assert not dialog.advanced_panel.isVisible()
         dialog.advanced_button.setChecked(True)
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.advanced_panel.isVisible()
         dialog.environment_id_edit.setText("recon")
         dialog.environment_name_edit.setText("Recon")
@@ -721,7 +723,7 @@ def test_command_runtime_and_advanced_environment_editor_share_the_manager(qtbot
             "BART_TOOLBOX_PATH=/opt/bart\nRECON_MODE=test"
         )
         dialog.environment_save_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
 
         records = library.execution_environments()
         assert len(records) == 1
@@ -737,10 +739,13 @@ def test_command_runtime_and_advanced_environment_editor_share_the_manager(qtbot
 # ---------------------------------------------------------------------------
 
 
-def _cell(dialog, qtbot, row, column):
-    """Re-read a cell: this editor saves per edit and rebuilds its own table."""
+def _cell(dialog, row, column):
+    """Re-read a cell: this editor saves per edit and rebuilds its own table.
 
-    process_events(qtbot)
+    No wait: `cellChanged` is a direct connection, so the save-and-rebuild has
+    already happened inside the `setText` that triggered it.
+    """
+
     return dialog.params_table.item(row, column)
 
 
@@ -752,17 +757,17 @@ def test_add_parameter_and_add_slot_actually_add_a_row(qtbot):
     dialog = _manager(qtbot, win)
     try:
         assert dialog.select_operation(operation_id)
-        process_events(qtbot)
+        _settle_idle(win)
         # Both buttons used to append a blank row, persist nothing (an unnamed
         # row is skipped), and then have the library refresh wipe the row the
         # click had just created: measured rowCount 0 -> 0.
         dialog.add_param_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.params_table.rowCount() == 1
         assert registry.get_operation_entry(operation_id).parameters[0].name == "parameter_1"
 
         dialog.add_slot_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.slots_table.rowCount() == 1
         assert registry.get_operation_entry(operation_id).input_slots[0].name == "input_1"
     finally:
@@ -779,11 +784,11 @@ def test_an_enum_parameter_is_authored_and_round_trips(qtbot):
     try:
         assert dialog.select_operation(operation_id)
         dialog.add_param_button.click()
-        process_events(qtbot)
-        _cell(dialog, qtbot, 0, 0).setText("mode")
-        process_events(qtbot)
+        _settle_idle(win)
+        _cell(dialog, 0, 0).setText("mode")
+        _settle_idle(win)
         dialog.params_table.cellWidget(0, 1).setCurrentText("enum")
-        process_events(qtbot)
+        _settle_idle(win)
 
         # An enum with no choices is refused by the loader, so it is never
         # written: the row stays on screen, uncommitted, and says why. Saving it
@@ -791,10 +796,10 @@ def test_an_enum_parameter_is_authored_and_round_trips(qtbot):
         assert "Not saved yet" in dialog.status_label.text()
         assert not library.user_operation_problems()
 
-        _cell(dialog, qtbot, 0, 6).setText("reflect, nearest , wrap")
-        _cell(dialog, qtbot, 0, 2).setText("reflect")
-        _cell(dialog, qtbot, 0, 3).setText("999")  # a range is meaningless here
-        process_events(qtbot)
+        _cell(dialog, 0, 6).setText("reflect, nearest , wrap")
+        _cell(dialog, 0, 2).setText("reflect")
+        _cell(dialog, 0, 3).setText("999")  # a range is meaningless here
+        _settle_idle(win)
 
         parameter = registry.get_operation_entry(operation_id).parameters[0]
         assert parameter.kind == "enum"
@@ -806,7 +811,7 @@ def test_an_enum_parameter_is_authored_and_round_trips(qtbot):
         # And the editor reads back what it wrote.
         assert dialog.select_operation("mean")
         assert dialog.select_operation(operation_id)
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.params_table.cellWidget(0, 1).currentText() == "enum"
         assert dialog.params_table.item(0, 2).text() == "reflect"
         assert dialog.params_table.item(0, 6).text() == "reflect, nearest, wrap"
@@ -824,20 +829,20 @@ def test_a_bool_parameter_round_trips_as_a_bool(qtbot):
     try:
         assert dialog.select_operation(operation_id)
         dialog.add_param_button.click()
-        process_events(qtbot)
-        _cell(dialog, qtbot, 0, 0).setText("normalize")
-        process_events(qtbot)
+        _settle_idle(win)
+        _cell(dialog, 0, 0).setText("normalize")
+        _settle_idle(win)
         dialog.params_table.cellWidget(0, 1).setCurrentText("bool")
-        process_events(qtbot)
-        _cell(dialog, qtbot, 0, 2).setText("true")
-        process_events(qtbot)
+        _settle_idle(win)
+        _cell(dialog, 0, 2).setText("true")
+        _settle_idle(win)
 
         parameter = registry.get_operation_entry(operation_id).parameters[0]
         assert parameter.kind == "bool"
         assert parameter.default is True  # not 1.0, and not the string "true"
         assert dialog.select_operation("mean")
         assert dialog.select_operation(operation_id)
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.params_table.item(0, 2).text() == "true"
     finally:
         dialog.close()
@@ -853,7 +858,7 @@ def test_range_and_choice_cells_are_disabled_for_the_kinds_that_reject_them(qtbo
     try:
         assert dialog.select_operation(operation_id)
         dialog.add_param_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         editable = QtCore.Qt.ItemFlag.ItemIsEditable
 
         # float: a range applies, choices do not.
@@ -861,14 +866,14 @@ def test_range_and_choice_cells_are_disabled_for_the_kinds_that_reject_them(qtbo
         assert not dialog.params_table.item(0, 6).flags() & editable
 
         dialog.params_table.cellWidget(0, 1).setCurrentText("string")
-        process_events(qtbot)
+        _settle_idle(win)
         for column in (3, 4, 5, 6):
             item = dialog.params_table.item(0, column)
             assert not item.flags() & editable
             assert item.toolTip()
 
         dialog.params_table.cellWidget(0, 1).setCurrentText("enum")
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.params_table.item(0, 6).flags() & editable
         assert not dialog.params_table.item(0, 3).flags() & editable
     finally:
@@ -897,11 +902,11 @@ def test_export_and_import_round_trip_a_definition(qtbot, tmp_path, monkeypatch)
     try:
         assert dialog.select_operation(operation_id)
         dialog.export_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert json.loads(exported.read_text())["label"] == "Gain"
 
         dialog.import_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         imported = dialog.selected_operation_id()
         assert imported is not None
         # A fresh id, never an overwrite of the definition it was exported from.

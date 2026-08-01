@@ -5,6 +5,10 @@ import time
 import numpy as np
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
+from tests.settle import deliver_posted_events, settle_window
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 
 def _cached_display_tile(evaluator, view_state, colormap_lut=None):
@@ -40,13 +44,17 @@ def test_nearby_slice_prefetch_uses_prefetch_state_keys(qtbot):
     win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
         win._active_slice_axis = 2
         win.renderer._schedule_prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
-        _process_events(qtbot, count=40)
+        # As above: prefetch is work the visible frame does not wait for, so the
+        # store is the thing to wait for, not a settled frame.
+        settle_window(
+            win, lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_stored > 0
+        )
 
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > 0
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_stored > 0
@@ -65,11 +73,11 @@ def test_nearby_slice_prefetch_skips_when_setting_disabled(qtbot):
     win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._active_slice_axis = 2
         before = win.operation_evaluator.display_cache_diagnostics()
         win.renderer._prefetch_nearby_slices(win.view_state.with_slice(2, 1), None)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         after = win.operation_evaluator.display_cache_diagnostics()
 
         assert after.prefetch_scheduled == before.prefetch_scheduled
@@ -86,14 +94,14 @@ def test_prefetch_dispatch_is_queued_but_not_timer_admitted(qtbot):
     win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
         win._active_slice_axis = 2
         win.renderer._schedule_prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
         assert not hasattr(win, "_prefetch_idle_timer")
-        _process_events(qtbot, count=10)
+        _settle_idle(win)
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > 0
     finally:
         win.close()
@@ -108,7 +116,7 @@ def test_prefetch_limits_to_two_neighbors(qtbot):
     win = ArrayScopeWindow(np.arange(3 * 4 * 8, dtype=float).reshape(3, 4, 8))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
@@ -117,7 +125,7 @@ def test_prefetch_limits_to_two_neighbors(qtbot):
         momentum.observe(2, now=0.0)
         win.renderer._prefetch_momentum = momentum
         win.renderer._prefetch_nearby_slices(win.view_state.with_slice(2, 4), None)
-        _process_events(qtbot, count=40)
+        _settle_idle(win)
 
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled <= 2
     finally:
@@ -133,7 +141,7 @@ def test_prefetch_deepens_with_sustained_directional_scrub(qtbot):
     win = ArrayScopeWindow(np.arange(3 * 4 * 16, dtype=float).reshape(3, 4, 16))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
@@ -144,7 +152,7 @@ def test_prefetch_deepens_with_sustained_directional_scrub(qtbot):
             momentum.observe(index, now=base + 0.1 * step)
         win.renderer._prefetch_momentum = momentum
         win.renderer._prefetch_nearby_slices(win.view_state.with_slice(2, 6), None)
-        _process_events(qtbot, count=40)
+        _settle_idle(win)
 
         scheduled = win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled
         assert scheduled > 2, (
@@ -163,7 +171,7 @@ def test_montage_prefetch_denial_does_not_cap_slice_prefetch(qtbot):
     win = ArrayScopeWindow(np.arange(3 * 4 * 16, dtype=float).reshape(3, 4, 16))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
@@ -182,7 +190,7 @@ def test_montage_prefetch_denial_does_not_cap_slice_prefetch(qtbot):
             momentum.observe(index, now=base + 0.1 * step)
         win.renderer._prefetch_momentum = momentum
         win.renderer._prefetch_nearby_slices(win.view_state.with_slice(2, 6), None)
-        _process_events(qtbot, count=40)
+        _settle_idle(win)
 
         assert win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled > 2
     finally:
@@ -200,7 +208,7 @@ def test_montage_prefetch_completion_uses_real_orchestrator_staleness_guard(
     win = ArrayScopeWindow(np.arange(3 * 4 * 8, dtype=float).reshape(3, 4, 8))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.request_operation("reverse", 0)
         state = win.view_state.with_montage_axis(
             2,
@@ -298,7 +306,7 @@ def test_montage_prefetch_completion_warms_gpu_atlas_residency(qtbot, monkeypatc
     win = ArrayScopeWindow(np.arange(3 * 4 * 8, dtype=float).reshape(3, 4, 8))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.request_operation("reverse", 0)
         state = win.view_state.with_montage_axis(
             2,
@@ -497,7 +505,7 @@ def test_future_index_prefetch_key_matches_the_later_in_window_demand(qtbot):
     win = ArrayScopeWindow(np.arange(3 * 4 * 12, dtype=np.float32).reshape(3, 4, 12))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.request_operation("reverse", 0)
         state = win.view_state.with_montage_axis(2, columns=3, indices=tuple(range(6)), text="0:6")
         win._set_view_state(state)
@@ -567,7 +575,7 @@ def test_busy_visible_permits_a_speculative_share_toward_the_prediction(qtbot, m
     win = ArrayScopeWindow(np.arange(3 * 4 * 16, dtype=np.float32).reshape(3, 4, 16))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.request_operation("reverse", 0)
         state = win.view_state.with_montage_axis(2, columns=3, indices=tuple(range(6)), text="0:6")
         win._set_view_state(state)
@@ -628,7 +636,7 @@ def _raw_montage_window(qtbot, shape=(3, 4, 16), *, indices=6):
 
     win = ArrayScopeWindow(np.arange(int(np.prod(shape)), dtype=np.float32).reshape(shape))
     qtbot.addWidget(win)
-    _process_events(qtbot)
+    _settle_idle(win)
     # Deliberately no request_operation(): this is the raw-viewing workflow.
     assert not win.document.enabled_operations
     state = win.view_state.with_montage_axis(
@@ -908,7 +916,7 @@ def test_prefetch_skips_while_visible_controller_busy(qtbot):
     qtbot.addWidget(win)
     release_busy = None
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
@@ -951,7 +959,7 @@ def test_prefetch_gated_by_busy_visible_runs_after_drain(qtbot):
     qtbot.addWidget(win)
     release_busy = None
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
@@ -1012,7 +1020,7 @@ def test_prefetch_burst_coalesces_and_momentum_observes_despite_gating(qtbot):
     qtbot.addWidget(win)
     release_busy = None
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
@@ -1026,6 +1034,12 @@ def test_prefetch_burst_coalesces_and_momentum_observes_despite_gating(qtbot):
 
         for index in (2, 3, 4, 5):
             win.renderer._schedule_prefetch_nearby_slices(win.view_state.with_slice(2, index), None)
+        # A bounded pause, deliberately, and one of the few left: the claim is
+        # that a burst arriving while the visible lane is busy schedules NOTHING
+        # within the gate's own retry interval.  That is a throttle -- a real
+        # time-based product behaviour -- so there is no state to wait for, and
+        # waiting for quiescence measures the opposite thing: it runs until the
+        # gate does fire, and then the burst has been scheduled (measured: 4).
         _process_events(qtbot, count=10)
 
         momentum = getattr(win.renderer, "_prefetch_momentum", None)
@@ -1039,7 +1053,7 @@ def test_prefetch_burst_coalesces_and_momentum_observes_despite_gating(qtbot):
             lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_scheduled >= 1,
             timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
         )
-        _process_events(qtbot, count=40)
+        _settle_idle(win)
         diagnostics = win.operation_evaluator.display_cache_diagnostics()
         # Latest-wins coalescing: one retained request, one momentum-planned
         # fan-out (max_depth=4) — not one prefetch per gated step.
@@ -1059,15 +1073,20 @@ def test_cost_aware_prefetch_allows_cheap_operation_backed_stack(qtbot):
     win = ArrayScopeWindow(np.arange(3 * 4 * 5, dtype=float).reshape(3, 4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
         win.request_operation("reverse", 0)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._active_slice_axis = 2
         win.renderer._prefetch_nearby_slices(win.view_state.with_slice(2, 2), None)
-        _process_events(qtbot, count=40)
+        # Prefetch is by definition work the visible frame does not wait for, so
+        # a settled frame is not evidence it has landed -- wait for the store
+        # itself, which is what the assertion below reads.
+        settle_window(
+            win, lambda: win.operation_evaluator.display_cache_diagnostics().prefetch_stored > 0
+        )
         after = win.operation_evaluator.display_cache_diagnostics()
 
         assert after.prefetch_scheduled > 0
@@ -1084,17 +1103,17 @@ def test_cost_aware_prefetch_blocks_expensive_fft_stack(qtbot):
     win = ArrayScopeWindow(np.zeros((96, 96, 96), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True, render_memory_budget_mb=128
         )
         win.request_operation("centered_fft", 2)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._active_slice_axis = 2
         before = win.operation_evaluator.display_cache_diagnostics()
         before_blocked = win.prefetch_evaluation_controller.diagnostics().prefetch_cost_blocked
         win.renderer._prefetch_nearby_slices(win.view_state.with_slice(2, 1), None)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         after = win.operation_evaluator.display_cache_diagnostics()
 
         assert after.prefetch_scheduled == before.prefetch_scheduled
@@ -1119,7 +1138,7 @@ def test_slice_change_schedules_nearby_prefetch_when_enabled(qtbot):
     win = ArrayScopeWindow(np.arange(4 * 4 * 6, dtype=np.float32).reshape(4, 4, 6))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.app_settings = AppSettingsState(
             theme=win.app_settings.theme, prefetch_nearby_slices=True
         )
@@ -1146,7 +1165,7 @@ def test_slice_change_without_setting_skips_prefetch(qtbot):
     win = ArrayScopeWindow(np.arange(4 * 4 * 6, dtype=np.float32).reshape(4, 4, 6))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         before = win.operation_evaluator.display_cache_diagnostics().prefetch_skipped
         win._apply_slice_state(
             2,
@@ -1176,17 +1195,17 @@ def test_prefetch_menu_action_exists_and_toggles_setting(qtbot):
     win = ArrayScopeWindow(np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         action = getattr(win, "_prefetch_nearby_slices_action", None)
         assert action is not None, "Performance menu lost the prefetch toggle"
         assert action.isCheckable()
         assert not action.isChecked()
         assert not win.app_settings.prefetch_nearby_slices
         action.setChecked(True)
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.app_settings.prefetch_nearby_slices
         action.setChecked(False)
-        _process_events(qtbot)
+        _settle_idle(win)
         assert not win.app_settings.prefetch_nearby_slices
     finally:
         win.close()
@@ -1209,16 +1228,24 @@ def _halo_montage_window(qtbot, *, indices=64, tile=16, columns=8):
         np.arange(tile * tile * indices, dtype=np.float32).reshape(tile, tile, indices)
     )
     qtbot.addWidget(win)
-    _process_events(qtbot)
+    _settle_idle(win)
     state = win.view_state.with_montage_axis(
         2, columns=columns, indices=tuple(range(indices)), text=f"0:{indices}"
     )
     win._set_view_state(state)
     win.render(reason="test-halo-prefetch")
-    qtbot.waitUntil(
-        lambda: win.renderer._frame_session is not None,
-        timeout=INTERACTION_SETTLE_HARD_LIMIT_MS,
-    )
+
+    # Let the montage finish arriving BEFORE retargeting into it.  Waiting only
+    # for `_frame_session is not None` -- which is already true of the
+    # pre-montage session -- left this fixture retargeting a session that was
+    # still converging, and a viewport retarget still in flight from the render
+    # then landed on top of the small window set below and put the full montage
+    # back.  `viewport_tiles` over the full range returns every tile, so the
+    # halo stops being a subset and the regime assertion fails, in whichever
+    # sibling test happened to call this.  Observed failing under load ~13 and
+    # passing 3/3 at load ~2 in both orders, so it is a race, not an ordering
+    # dependency.
+    _settle_idle(win)
     session = win.renderer._frame_session
 
     anchor = session.plan.tiles[len(session.plan.tiles) // 2]
@@ -1229,10 +1256,25 @@ def _halo_montage_window(qtbot, *, indices=64, tile=16, columns=8):
         view_range=((cx - half, cx + half), (cy - half, cy + half)),
         viewport_shape=(200, 200),
     )
-    # Retargeting a live session posts a deferred walk invitation. Let it fire
-    # here, while this window is still the current one: left pending, it fires
-    # inside whatever test runs next and reports as a failure there.
-    _process_events(qtbot)
+    # Deliver what the retarget posted, while this window is still the current
+    # one: left pending it fires inside whatever test runs next and reports as
+    # a failure there.
+    #
+    # A settle wait genuinely cannot express this, and the stronger form was
+    # tried and REFUTED: `settle_quiescent(win)` here turns
+    # `test_a_window_resize_leaves_the_priority_halo_intact` red with montage
+    # stall probes, because the fixture deliberately leaves an idle prefetch
+    # walk running -- so this window never reaches quiescence by construction.
+    #
+    # Known weakness, deliberately left: the walk invitation hangs off a
+    # speculative kernel batch's `on_done`, so if one is ever genuinely in
+    # flight it crosses a worker thread and a bridge whose fallback backs off
+    # to 100 ms, and one slice would not bound it. Measured at this call it is
+    # never in flight (`_montage_walk_invite_pending` False either side,
+    # `window_work_in_flight` 0), so today the turn is enough. What is missing
+    # is a published counter for "this window owns no prefetch walk", which
+    # would let this become a real wait.
+    deliver_posted_events()
     halo = {
         int(t.montage_index)
         for t in viewport_tiles(

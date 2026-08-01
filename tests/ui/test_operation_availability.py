@@ -14,7 +14,10 @@ from arrayscope.operations import library
 from arrayscope.ui.command_palette import CommandPaletteDialog, PaletteCommand
 from arrayscope.ui.operation_add_popup import OperationAddPopup
 from arrayscope.ui.operation_listing import build_operation_listing
-from tests.ui.helpers import clear_arrayscope_settings, process_events
+from tests.ui.helpers import clear_arrayscope_settings
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +60,7 @@ def test_unavailable_reason_disables_add_popup_chip_menu_and_palette(qtbot):
     win = ArrayScopeWindow(np.ones((3, 4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     win.show()
-    process_events(qtbot)
+    _settle_idle(win)
     menu = win._build_operation_context_menu(0, QtCore.QPoint(0, 0))
     actions = [
         action

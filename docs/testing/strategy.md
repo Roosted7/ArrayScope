@@ -48,6 +48,73 @@ armed timer with the goal still unmet — a lost wakeup (ADR 0051), which looks
 the same on a saturated machine as on an idle one. There is no parameter for
 the budget, deliberately.
 
+**Never pause for a fixed number of event-loop turns.** `process_events(qtbot,
+count=N)` is `N x qtbot.wait(10)` — a sleep that asks the product nothing, so
+it is simultaneously too long on an idle box and too short on a busy one. It
+had 672 call sites, ~90 s of static sleep per pass over the suite, and eleven
+of the fourteen tests that failed under three concurrent suites on 2026-08-01
+were waits of that shape.
+
+`tests/ui/helpers.py` has the replacements, in increasing strength:
+
+- `settle_layout(win, predicate=None)` — the queued dock-visibility requests
+  have been dispatched and the canvas-preserve retry chain has finished. Says
+  nothing about the frame, for tests that hide a dock in a state where the
+  frame session is deliberately never going to settle.
+- `settle_idle(win, predicate=None)` — the above plus a settled frame session.
+  This is the default: it is what a pause after building a window, rendering,
+  applying an operation or opening a dock was covering.
+- `settle_quiescent(win, predicate=None)` — the above plus nothing armed to do
+  any more work, via `window_work_in_flight`. **The exception, not the
+  default**: only for claims of the shape "and that scheduled nothing further"
+  — a coalesced resize that must not emit a second range change, a retarget
+  that must stay one transaction. Reaching for it by reflex is a hazard rather
+  than merely wasteful: `settle_until` re-arms its budget whenever work is in
+  flight and has no absolute cap, so on a lane that keeps producing work an
+  over-strong quiescent wait cannot time out at all — the run ends in a
+  `faulthandler` abort naming some arbitrary later test. It was measured at 249
+  call sites and entered a state stronger than `settle_idle` in ~3% of them, so
+  it is down to 25. The three families that kept it are the ones whose claim
+  needs it: an interactive render held on the coordinator's quiet timer, a
+  resize or retarget that must stay one transaction, and
+  `test_viewport_convergence_latch.py`, an A/B that samples both arms' committed
+  frames and would otherwise compare them at different points. Demoting the rest
+  was not free either — two sites needed something stronger still and now wait
+  for the fact itself, since a prefetch *store* is not covered by a settled
+  frame: prefetch is by definition work the visible frame does not wait for.
+
+All three run one event-loop slice when the state already looks settled, so a
+wait placed immediately after an action whose continuation is still sitting in
+the event queue cannot answer before that continuation has been delivered.
+`tests.settle.deliver_posted_events()` is that one slice on its own, for the
+few sites where delivery is the entire requirement.
+
+**A converted wait must be shown to actually wait.** The cheap proof is to
+break the wakeup it depends on and check it goes red rather than green:
+monkeypatch `CanvasPreserveController._single_shot` to a no-op, or
+`set_dock_visible_later` to bump its generation without scheduling, or
+`FrameSession.visible_plan_complete` to `False`, and the sites that depend on
+each raise `SettleTimeout` naming the line.
+
+The thing to rule out is a predicate that **cannot be false** — `tx is None or
+tx.released` before the transaction exists is true of every possible product,
+so that wait can never wait, on any machine, and is worse than the pause it
+replaced. That is not the same as a predicate that is *usually* already true:
+the panel-location predicates in `test_panel_layout.py` hold at the call in 49
+of 52 measured cases on a quiet box, and they earn their place on the other
+kind of box, which is the one this whole section is about. Keep them, and note
+the cost: when such a predicate does not come true, the report says "lost
+wakeup (ADR 0051)" for what is really "the panel went somewhere else", so read
+the label — it names the waiting line — before believing the diagnosis.
+
+The one legitimate remaining use of a fixed pause is a claim *about a time
+window*, where the behaviour under test is itself a throttle:
+`tests/ui/test_interactive_render_coalescing.py` asserts that a burst of slice
+changes produces one render *within the coalescing interval*, and waiting for
+the coalesced render to arrive would assert the opposite thing. Its module
+docstring records the reasoning; a new fixed pause should say which throttle
+bounds it.
+
 The alternative it replaced was `qtbot.waitUntil(pred,
 timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)`, which asks two questions and
 reports one answer: "did the product get there?" and "within five seconds of

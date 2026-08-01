@@ -458,6 +458,11 @@ class WindowRuntimeDiagnostics:
     montage_prefetch: tuple[object, ...] = ()
     resource_governor: ResourceGovernorDiagnostics | None = None
     image_rendering_backend: str = "stable"
+    #: Deferred dock show/hide requests that have not reached
+    #: ``apply_queued_dock_visibility`` yet.  A value that stays non-zero with
+    #: an idle event loop is a lost wakeup (ADR 0051) in the layout path, which
+    #: otherwise shows up only as a dock that silently never opens.
+    queued_dock_visibility: int = 0
     image_rendering_backend_selected: str = "stable"
     image_rendering_backend_actual: str = "stable"
 

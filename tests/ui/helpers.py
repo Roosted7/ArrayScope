@@ -5,6 +5,25 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 def process_events(qtbot, count=8):
+    """``count`` x 10 ms of event loop, unconditionally.  Almost never right.
+
+    This is a sleep, not a wait: it does not ask the product anything, so it is
+    simultaneously too long on an idle machine and too short on a busy one.
+    Six hundred and seventy-two call sites of it were ~90 s of static sleep per
+    pass over the suite, and eleven of the fourteen tests that failed under
+    three concurrent suites on 2026-08-01 were waits of this shape.
+
+    Use :func:`settle_idle` or :func:`settle_quiescent` instead -- they wait on
+    what the product publishes about its own progress, so they cost what the
+    machine needs and fail only on a lost wakeup.
+
+    What is left here is the one case those cannot express: a claim *about a
+    time window*, where the product behaviour under test is itself a throttle.
+    ``tests/ui/test_interactive_render_coalescing.py`` is the honest example and
+    its module docstring gives the reasoning.  If a new site wants this, say in
+    a comment which throttle it is bounded by.
+    """
+
     for _ in range(count):
         qtbot.wait(10)
 
@@ -72,8 +91,143 @@ def assert_panel_invariants(win, name, expected_location):
         assert QtWidgets.QDockWidget.widget(panel.dock) is panel.body
 
 
-def wait_for_panel_preserve(qtbot):
-    process_events(qtbot, count=50)
+def _caller_label(depth=2):
+    """Name the waiting line for a report, from inside a wrapper."""
+
+    import inspect
+
+    frame = inspect.currentframe()
+    for _ in range(depth):
+        if frame is None:
+            return "settle"
+        frame = frame.f_back
+    return "settle" if frame is None else f"{frame.f_code.co_name}:{frame.f_lineno}"
+
+
+def _refuse_closed_window(win) -> None:
+    """A closed window settles instantly, so waiting on one is never a wait.
+
+    ``closeEvent`` cancels the canvas-preserve chain, drops the dock-visibility
+    queue and shuts the kernel down, so all three of the machines below answer
+    "nothing outstanding" and every wait on that window returns at once. Four
+    sites had this and none of them could fail: each closed its window, opened a
+    *second* one to prove a setting survives a restart, and then settled the
+    first -- so the window the test existed for was never waited on at all.
+
+    That is a test bug rather than a product state, and it is invisible from the
+    outside (the run is green and 141 ms faster), so it fails loudly here rather
+    than being fixed one call site at a time.
+    """
+
+    if getattr(win, "_closing", False):
+        raise AssertionError(
+            "settle called on a closed window: it cannot wait, because closing "
+            "cancels the preserve chain, empties the dock queue and shuts the "
+            "kernel down. Settle the window the assertion is about -- usually "
+            "the one opened after this one closed."
+        )
+
+
+def _window_settled(win) -> bool:
+    """Everything the window was asked to do has been done.
+
+    Three machines have to agree, because the fixed pauses this replaces sat
+    after actions that drive any of them: the frame session (the render and its
+    tiles), the queued dock-visibility requests, and the canvas-preserve retry
+    chain.  Each publishes its own answer already; none of them is a clock.
+    """
+
+    manager = getattr(win, "layout_manager", None)
+    if manager is not None:
+        if manager.queued_dock_visibility_requests:
+            return False
+        if manager.canvas_preserver.diagnostics().active:
+            return False
+    return frame_session_settled(win)
+
+
+def settle_layout(win, predicate=None, *, label=None):
+    """Wait for the dock/panel machinery only, saying nothing about the frame.
+
+    The weakest of the three: queued dock-visibility requests dispatched and
+    the canvas-preserve retry chain finished.  It exists because a test may
+    legitimately hide a dock in a state where the frame session is *not* going
+    to settle -- the hidden-inspection ROI tests blank the committed frame on
+    purpose -- and there ``settle_idle`` would be asking for something the test
+    has arranged never to happen.
+    """
+
+    from tests.settle import deliver_posted_events, settle_window
+
+    _refuse_closed_window(win)
+    label = label or _caller_label()
+    manager = win.layout_manager
+
+    def settled():
+        if manager.queued_dock_visibility_requests:
+            return False
+        if manager.canvas_preserver.diagnostics().active:
+            return False
+        return predicate is None or predicate()
+
+    if settled():
+        deliver_posted_events()
+    settle_window(win, settled, label=label)
+
+
+def settle_idle(win, predicate=None, *, label=None):
+    """Wait until the window has finished what the last action asked of it.
+
+    This is the replacement for ``process_events(qtbot, count=N)`` wherever the
+    pause was covering a real hand-off: building the window, a render, an
+    operation, a dock transition.  It waits on what the product publishes about
+    its own progress, so it takes as long as the box needs and fails only on a
+    lost wakeup.
+
+    When the state already looks settled, one event-loop slice runs and the
+    question is asked again.  That is not a pause -- it is the difference
+    between "done" and "not started yet", and without it a wait placed
+    immediately after an action whose continuation is still sitting in the
+    event queue could only ever say yes.
+    """
+
+    from tests.settle import deliver_posted_events, settle_window
+
+    _refuse_closed_window(win)
+    label = label or _caller_label()
+
+    def settled():
+        return _window_settled(win) and (predicate is None or predicate())
+
+    if settled():
+        deliver_posted_events()
+    settle_window(win, settled, label=label)
+
+
+def settle_quiescent(win, predicate=None, *, label=None):
+    """:func:`settle_idle`, and nothing is armed to do any more work.
+
+    For claims of the shape "and that scheduled nothing further" -- a coalesced
+    resize that must not emit a second range change, a retarget that must stay
+    one transaction.  The fixed pause was giving a deferred continuation its
+    chance to fire before the assertion looked; ``window_work_in_flight``
+    answers the same question from the product, counting a pending render only
+    while a timer is armed to flush it.
+    """
+
+    from tests.settle import deliver_posted_events, settle_window, window_work_in_flight
+
+    _refuse_closed_window(win)
+    label = label or _caller_label()
+
+    def quiet():
+        if window_work_in_flight(win):
+            return False
+        return _window_settled(win) and (predicate is None or predicate())
+
+    if quiet():
+        deliver_posted_events()
+    settle_window(win, quiet, label=label)
 
 
 def assert_size_close(actual, expected, tolerance=1):

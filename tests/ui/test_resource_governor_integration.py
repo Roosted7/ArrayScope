@@ -3,7 +3,10 @@ from types import SimpleNamespace
 import numpy as np
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-from tests.ui.helpers import clear_arrayscope_settings, process_events
+from tests.ui.helpers import clear_arrayscope_settings
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 
 def test_resource_governor_applies_worker_and_callback_limits(qtbot):
@@ -13,7 +16,7 @@ def test_resource_governor_applies_worker_and_callback_limits(qtbot):
     win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        process_events(qtbot)
+        _settle_idle(win)
         win.resource_governor.min_worker_update_interval_ms = 0
 
         win.resource_governor.record_ui_observation("montage_tile_result", 80.0, item_count=1)
@@ -40,7 +43,7 @@ def test_histogram_preview_interval_is_governor_controlled(qtbot):
     win = ArrayScopeWindow(np.zeros((8, 8), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        process_events(qtbot)
+        _settle_idle(win)
         win.resource_governor.record_ui_observation("histogram_preview", 40.0, item_count=1)
         win._apply_resource_governor_decisions()
 
@@ -58,7 +61,7 @@ def test_interaction_edge_applies_budget_and_lane_quotas_immediately(qtbot):
     win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        process_events(qtbot)
+        _settle_idle(win)
         qtbot.waitUntil(
             lambda: not win._interaction_active_now(), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS
         )
@@ -87,7 +90,7 @@ def test_interaction_stop_edge_restores_idle_budget_and_preparation_lane(qtbot):
     win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        process_events(qtbot)
+        _settle_idle(win)
         qtbot.waitUntil(
             lambda: not win._interaction_active_now(), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS
         )
@@ -118,7 +121,7 @@ def test_interaction_stop_edge_replans_deferred_native_montage_quality(qtbot, mo
     qtbot.addWidget(win)
     calls = []
     try:
-        process_events(qtbot)
+        _settle_idle(win)
         qtbot.waitUntil(
             lambda: not win._interaction_active_now(), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS
         )
@@ -213,7 +216,7 @@ def test_roi_lane_stays_parked_until_visible_first_pixels_are_physical(qtbot):
     win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        process_events(qtbot)
+        _settle_idle(win)
         session = win.renderer._frame_session
         session.scheduling_policy.retarget(
             ("test-required-scope",),
@@ -243,7 +246,7 @@ def test_runtime_diagnostics_lists_kernel_bridge_drain_channel(qtbot):
     win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        process_events(qtbot)
+        _settle_idle(win)
         channels = {
             channel.channel
             for channel in win.collect_runtime_diagnostics().resource_governor.feedback_channels

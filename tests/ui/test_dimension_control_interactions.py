@@ -5,10 +5,13 @@ from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
-from tests.ui.helpers import (
-    process_events as _process_events,
-)
 from tests.ui.helpers import require_wgpu_adapter
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
+from tests.ui.helpers import (
+    settle_quiescent as _settle_quiet,
+)
 from tests.ui.test_montage_interactions import _committed_tile_payload
 
 
@@ -26,7 +29,7 @@ def _committed_montage_tile_images(win):
 
 def _wait_for_committed_montage_tiles(win, qtbot, count, *, expected_shape=None):
     def _ready():
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
         images = _committed_montage_tile_images(win)
         return len(images) >= count and (
             expected_shape is None
@@ -84,10 +87,10 @@ def test_tiled_dimension_x_y_buttons_promote_range_to_image_crop(qtbot):
     win = ArrayScopeWindow(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_montage_axis(2, indices=(0, 1), text=":"))
         win.render(reason="test")
-        _process_events(qtbot)
+        _settle_idle(win)
 
         chip = win.dimension_strip.chip(2)
         assert chip.x_button.isEnabled()
@@ -114,7 +117,7 @@ def test_middle_horizontal_drag_steps_highlighted_dimension(qtbot):
     try:
         win.resize(900, 700)
         win.show()
-        _process_events(qtbot)
+        _settle_idle(win)
         strip = win.dimension_strip
         target = strip.scroll_target_axis()
         assert target == 2
@@ -134,7 +137,7 @@ def test_middle_horizontal_drag_steps_highlighted_dimension(qtbot):
                 QtCore.Qt.KeyboardModifier.NoModifier,
             )
             assert view.eventFilter(viewport, event) is True
-            _process_events(qtbot)
+            _settle_idle(win)
 
         before = win.view_state.slice_indices[target]
         send(QtCore.QEvent.Type.MouseButtonPress, start, middle, middle)
@@ -165,7 +168,7 @@ def test_demoting_cropped_image_axis_preserves_it_as_montage(qtbot):
     win = ArrayScopeWindow(np.arange(2 * 5 * 4, dtype=float).reshape(2, 5, 4))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_axis_range(1, indices=(0, 2, 4), text="0:5:2"))
 
         win.set_dimension_role("x", 2)
@@ -186,7 +189,7 @@ def test_demoting_full_image_axis_centers_scalar_slice(qtbot):
     win = ArrayScopeWindow(np.arange(6 * 5 * 4, dtype=float).reshape(6, 5, 4))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_slice(0, 0))
 
         win.set_dimension_role("y", 2)
@@ -204,7 +207,7 @@ def test_swapping_cropped_x_axis_to_y_keeps_existing_montage_axis(qtbot):
     win = ArrayScopeWindow(np.arange(6 * 5 * 4, dtype=float).reshape(6, 5, 4))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         state = (
             win.view_state.with_image_axes(1, 2)
             .with_montage_axis(0, indices=(0, 2, 4), text="0:6:2")
@@ -229,10 +232,10 @@ def test_empty_tiled_slice_text_clears_to_midpoint_scalar(qtbot):
     win = ArrayScopeWindow(np.arange(2 * 3 * 5, dtype=float).reshape(2, 3, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_montage_axis(2, indices=(0, 1, 2), text=":"))
         win._on_slice_text_changed(2, "")
-        _process_events(qtbot)
+        _settle_idle(win)
 
         assert win.view_state.montage_axis is None
         assert win.view_state.axis_range_indices[2] is None
@@ -256,11 +259,11 @@ def test_invalid_slice_text_restores_state_and_shows_status(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(2 * 3 * 5, dtype=float).reshape(2, 3, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         before = win.view_state
 
         win._on_slice_text_changed(2, "abc")
-        _process_events(qtbot)
+        _settle_idle(win)
 
         assert win.view_state == before
         assert messages
@@ -277,10 +280,10 @@ def test_raw_index_list_text_creates_montage_selection(qtbot):
     win = ArrayScopeWindow(np.arange(2 * 3 * 5, dtype=float).reshape(2, 3, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
 
         win._on_slice_text_changed(2, "0,2;4")
-        _process_events(qtbot)
+        _settle_idle(win)
 
         assert win.view_state.montage_axis == 2
         assert win.view_state.montage_indices == (0, 2, 4)
@@ -300,14 +303,21 @@ def test_raw_index_list_montage_renders_each_selected_source(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
 
         win._on_slice_text_changed(2, "7 8 9 11 14 56")
-        for _ in range(120):
-            _process_events(qtbot, count=2)
+
+        def _every_selected_tile_rendered():
             session = getattr(win.renderer, "_frame_session", None)
-            if session is not None and len(getattr(session, "rendered_tiles", {})) == len(selected):
-                break
+            return session is not None and len(getattr(session, "rendered_tiles", {})) == len(
+                selected
+            )
+
+        # The bounded retry loop this replaces went quiescent on its first pass
+        # and then bought 119 more event-loop slices for nothing; a shortfall
+        # fell through to a confusing KeyError below rather than saying which
+        # tiles never arrived.
+        _settle_idle(win, _every_selected_tile_rendered)
 
         session = win.renderer._frame_session
         rendered = [session.rendered_tiles[tile] for tile in sorted(session.rendered_tiles)]
@@ -328,14 +338,14 @@ def test_profile_badge_toggle_adds_axis_and_shows_dock(qtbot):
     win = ArrayScopeWindow(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.set_profile_axes_exactly((0,))
-        _process_events(qtbot)
+        _settle_idle(win)
 
         # Toggling the "p" role on axis 2 adds it to the profile set, points the
         # line axis at the first profile axis, and keeps the dock visible.
         win.set_dimension_role("p", 2)
-        _process_events(qtbot)
+        _settle_idle(win)
         assert 2 in win.profile_axes
         assert win.view_state.line_axis == win.profile_axes[0]
         assert win.profile_dock.isVisible()
@@ -359,7 +369,7 @@ def test_add_operation_leaves_dimension_strip_columns_consistent(qtbot):
     try:
         win.resize(1000, 900)
         win.show()
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
         # The user closed the operation dock earlier in the session, so adding
         # an operation must not reopen it — and must not leave the strip laid
         # out for a width it no longer has.
@@ -368,7 +378,7 @@ def test_add_operation_leaves_dimension_strip_columns_consistent(qtbot):
         assert strip._columns == strip._column_count()
 
         win.request_operation("centered_fft", 0)
-        _process_events(qtbot, count=40)
+        _settle_idle(win)
 
         assert not win.operation_dock.isVisible()
         assert strip._columns == strip._column_count()
@@ -394,9 +404,9 @@ def test_add_operation_does_not_resize_viewport_with_dock_open(qtbot):
         win.resize(1000, 800)
         win.show()
         qtbot.waitExposed(win)
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
         win.layout_manager.set_operation_dock_visible_from_user(True)
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
         assert win.operation_dock.isVisible()
 
         viewport = win.img_view.graphicsView.viewport()
@@ -414,7 +424,7 @@ def test_add_operation_does_not_resize_viewport_with_dock_open(qtbot):
         ]
 
         win.request_operation("centered_fft", 1)
-        _process_events(qtbot, count=40)
+        _settle_idle(win)
 
         # No height applied during the op-add may exceed the pre-add height:
         # that grow is exactly what briefly shrank the viewport.
@@ -453,7 +463,7 @@ def test_montage_x_y_swap_is_an_instant_display_transform(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, indices=tuple(range(n_tiles)), text=":")
         )
@@ -469,7 +479,7 @@ def test_montage_x_y_swap_is_an_instant_display_transform(qtbot):
         tile0 = win.renderer._frame_session.plan.tiles[0]
 
         def _hover_value():
-            _process_events(qtbot, count=5)
+            _settle_idle(win)
             context = win.display_geometry.context_for_view_point(tile0.x0 + 1, tile0.y0 + 0)
             if context is None:
                 return None
@@ -541,7 +551,7 @@ def test_wgpu_montage_x_y_swap_reuses_gpu_residency(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         if type(win.img_view).__name__ != "WgpuSurface":
             pytest.skip("wgpu backend unavailable in this environment")
         win._set_view_state(
@@ -555,7 +565,7 @@ def test_wgpu_montage_x_y_swap_reuses_gpu_residency(qtbot):
         tile0 = win.renderer._frame_session.plan.tiles[0]
 
         def _hover_value():
-            _process_events(qtbot, count=5)
+            _settle_idle(win)
             context = win.display_geometry.context_for_view_point(tile0.x0 + 1, tile0.y0 + 0)
             if context is None:
                 return None
@@ -638,7 +648,7 @@ def test_wgpu_transposed_nonsquare_montage_floor_admission_survives(qtbot):
     handler = _Capture()
     logging.getLogger().addHandler(handler)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         if type(win.img_view).__name__ != "WgpuSurface":
             pytest.skip("wgpu backend unavailable in this environment")
         win._set_view_state(
@@ -647,13 +657,13 @@ def test_wgpu_transposed_nonsquare_montage_floor_admission_survives(qtbot):
             )
         )
         win.render(reason="test-montage")
-        _process_events(qtbot, count=60)
+        _settle_idle(win)
         # Transpose back and forth: builds floors in one orientation and reuses
         # the canonical pages in the other.
         for _ in range(4):
             win._set_view_state(win.view_state.transposed_image_axes())
             win.update_image_view()
-            _process_events(qtbot, count=40)
+            _settle_idle(win)
         # Precondition: floor admission actually ran.  A montage that fits at
         # level 0 builds no page-backed floors, and then "no page-LOD shape
         # mismatch was logged" is true of every product.
@@ -735,7 +745,11 @@ def _issue_settle_tail_renders(win, qtbot, *, count=3):
 
     for _ in range(count):
         win.renderer.request_render(reason="settle-tail", interactive=True)
-        _process_events(qtbot, count=10)
+        # Quiescence, not merely a settled frame: an INTERACTIVE render is held
+        # on the coordinator's quiet timer, and a settled session says nothing
+        # about a request still armed to flush. The generation stamp this test
+        # is about only advances once that flush has happened.
+        _settle_quiet(win)
 
 
 def test_x_y_swap_settle_leaves_committed_frame_current(qtbot):
@@ -761,7 +775,7 @@ def test_x_y_swap_settle_leaves_committed_frame_current(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, indices=tuple(range(n_tiles)), text=":")
         )
@@ -800,7 +814,7 @@ def test_indexed_dim_scroll_settle_leaves_committed_frame_current(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         montage_indices = tuple(range(0, depth, 2))
         state = (
             win.view_state.with_image_axes(1, 0)

@@ -16,7 +16,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from tests.ui.helpers import (
     auto_confirm_message_boxes,
     clear_arrayscope_settings,
-    process_events,
+)
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
 )
 
 
@@ -37,7 +39,7 @@ def _window(qtbot):
     win = ArrayScopeWindow(np.arange(16 * 16, dtype=float).reshape(16, 16))
     qtbot.addWidget(win)
     win.show()
-    process_events(qtbot)
+    _settle_idle(win)
     return win
 
 
@@ -47,7 +49,7 @@ def _manager(qtbot, win):
     dialog = ColormapManagerDialog(win)
     qtbot.addWidget(dialog)
     dialog.show()
-    process_events(qtbot)
+    _settle_idle(win)
     return dialog
 
 
@@ -64,7 +66,7 @@ def test_rename_moves_instead_of_duplicating(qtbot):
         dialog.name_edit.setText("renamed")
         # Switching away triggers the dirty-snapshot autosave, with rename.
         assert dialog.select_key("gray")
-        process_events(qtbot)
+        _settle_idle(win)
         names = {info.name for info in library.user_colormaps()}
         assert "renamed" in names
         assert "imported" not in names
@@ -80,7 +82,7 @@ def test_a_builtin_is_read_only_until_the_user_says_override(qtbot):
     dialog = _manager(qtbot, win)
     try:
         assert dialog.select_key("viridis")
-        process_events(qtbot)
+        _settle_idle(win)
         # It used to be silently editable: the first keystroke stored an
         # override the user never asked for. Now the editor is read-only and
         # the affordance is explicit.
@@ -91,12 +93,12 @@ def test_a_builtin_is_read_only_until_the_user_says_override(qtbot):
 
         dialog.kind_combo.setCurrentIndex(dialog.kind_combo.findData(library.DIVERGING))
         assert dialog.select_key("gray")
-        process_events(qtbot)
+        _settle_idle(win)
         assert not library.overrides_builtin("viridis")
 
         assert dialog.select_key("viridis")
         dialog.override_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert library.overrides_builtin("viridis")
         assert dialog.name_edit.isEnabled()
         assert not dialog.override_button.isVisible()
@@ -104,7 +106,7 @@ def test_a_builtin_is_read_only_until_the_user_says_override(qtbot):
         assert "(modified)" in dialog.tree.currentItem().text(0)
 
         dialog.unhide_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert not library.overrides_builtin("viridis")
     finally:
         dialog.close()
@@ -118,12 +120,12 @@ def test_apply_disabled_for_incompatible_kind(qtbot):
     dialog = _manager(qtbot, win)
     try:
         assert dialog.select_key("RomaO") or dialog.select_key("PAL-relaxed")
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.kind_combo.currentData() == library.CYCLIC
         assert not dialog.apply_button.isEnabled()
         assert dialog.conflict_label.text()
         assert dialog.select_key("viridis")
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.apply_button.isEnabled()
         assert not dialog.conflict_label.text()
     finally:
@@ -139,7 +141,7 @@ def test_kind_filter_hides_non_matching(qtbot):
     dialog = _manager(qtbot, win)
     try:
         dialog.filter_combo.setCurrentIndex(dialog.filter_combo.findData(library.CYCLIC))
-        process_events(qtbot)
+        _settle_idle(win)
         visible = []
         tree = dialog.tree
         for gi in range(tree.topLevelItemCount()):
@@ -171,7 +173,7 @@ def test_an_unreadable_map_is_repaired_where_it_is_listed(qtbot, tmp_path, monke
     try:
         path = str(directory / "garbled.json")
         assert dialog.select_problem_path(path)
-        process_events(qtbot)
+        _settle_idle(win)
         assert dialog.repair_box.isVisible()
         assert "Unreadable colormap file" in dialog.problem_message_label.text()
         assert dialog.raw_json_edit.toPlainText().startswith('{"name"')
@@ -180,7 +182,7 @@ def test_an_unreadable_map_is_repaired_where_it_is_listed(qtbot, tmp_path, monke
         # a knowingly-broken file.
         dialog.raw_json_edit.setPlainText("[1, 2, 3]")
         dialog.raw_json_save_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert "JSON object" in dialog.problem_message_label.text()
         assert library.user_colormap_problems()
 
@@ -189,7 +191,7 @@ def test_an_unreadable_map_is_repaired_where_it_is_listed(qtbot, tmp_path, monke
             '"stops": [[0.0, [0, 0, 0]], [1.0, [255, 255, 255]]]}'
         )
         dialog.raw_json_save_button.click()
-        process_events(qtbot)
+        _settle_idle(win)
         assert library.user_colormap_problems() == []
         # The selection follows the definition to where it now lives.
         assert dialog.selected_key() == "garbled"
@@ -208,7 +210,7 @@ def test_an_unavailable_builtin_is_listed_greyed_and_explains_itself(qtbot, monk
     dialog = _manager(qtbot, win)
     try:
         assert dialog.select_key("Batlow")
-        process_events(qtbot)
+        _settle_idle(win)
         assert "(unavailable)" in dialog.tree.currentItem().text(0)
         assert "cmcrameri" in dialog.source_label.text()
         # Nothing that would produce a map it cannot draw.

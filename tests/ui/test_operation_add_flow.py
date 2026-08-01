@@ -22,7 +22,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from arrayscope.operations import registry
 from arrayscope.operations.registry import operation_id_for
 from tests import seams
-from tests.ui.helpers import clear_arrayscope_settings, process_events
+from tests.ui.helpers import clear_arrayscope_settings
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 
 def _append(coordinator, operation_id, axis=None, parameters=None, *, axes=None):
@@ -41,7 +44,7 @@ def _window(qtbot, shape=(4, 8, 6)):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     win.show()
-    process_events(qtbot)
+    _settle_idle(win)
     return win
 
 
@@ -63,9 +66,9 @@ def test_crop_opens_params_popup_and_commits_on_accept(qtbot):
     assert popup is not None
     popup._editors["start"].setValue(2)
     popup._editors["stop"].setValue(6)
-    process_events(qtbot, count=2)
+    _settle_idle(win)
     popup._accept()
-    process_events(qtbot)
+    _settle_idle(win)
     assert _op_ids(win) == ["crop"]
     crop = win.document.steps[0].operation
     assert (int(crop.start), int(crop.stop)) == (2, 6)
@@ -77,7 +80,7 @@ def test_add_popup_parameterless_op_lands(qtbot):
     add_popup = win._operation_add_popup
     assert add_popup.select_operation("mean")
     add_popup.activate_current()
-    process_events(qtbot)
+    _settle_idle(win)
     assert _op_ids(win) == ["mean"]
 
 
@@ -87,13 +90,13 @@ def test_add_popup_parameterized_op_chains_to_params_popup(qtbot):
     add_popup = win._operation_add_popup
     assert add_popup.select_operation("crop")
     add_popup.activate_current()
-    process_events(qtbot)
+    _settle_idle(win)
     params_popup = win._operation_params_popup
     assert params_popup is not None
     params_popup._editors["stop"].setValue(3)
-    process_events(qtbot, count=2)
+    _settle_idle(win)
     params_popup._accept()
-    process_events(qtbot)
+    _settle_idle(win)
     assert _op_ids(win) == ["crop"]
 
 
@@ -109,9 +112,9 @@ def test_edit_operation_seeds_and_replaces_generic_op(qtbot):
     assert popup._editors["start"].value() == 1
     assert popup._editors["stop"].value() == 5
     popup._editors["stop"].setValue(4)
-    process_events(qtbot, count=2)
+    _settle_idle(win)
     popup._accept()
-    process_events(qtbot)
+    _settle_idle(win)
     crop = win.document.steps[0].operation
     assert (int(crop.start), int(crop.stop)) == (1, 4)
 
@@ -134,9 +137,9 @@ def test_edit_operation_reopens_a_parameterless_axis_set_op(qtbot):
     assert sorted(a for a, check in popup._axis_checks.items() if check.isChecked()) == [1, 2]
     popup._axis_checks[2].setChecked(False)
     popup._axis_checks[0].setChecked(True)
-    process_events(qtbot, count=2)
+    _settle_idle(win)
     popup._accept()
-    process_events(qtbot)
+    _settle_idle(win)
     assert _op_ids(win) == ["centered_fftn"]
     assert tuple(win.document.steps[0].operation.axes) == (0, 1)
 
@@ -149,9 +152,9 @@ def test_native_soft_threshold_parameter_flow(qtbot):
     popup = win._operation_params_popup
     assert popup is not None
     popup._editors["threshold"].setValue(0.5)
-    process_events(qtbot, count=2)
+    _settle_idle(win)
     popup._accept()
-    process_events(qtbot)
+    _settle_idle(win)
     assert _op_ids(win) == ["soft_threshold"]
     op = win.document.steps[0].operation
     assert op.threshold == pytest.approx(0.5)
@@ -183,7 +186,7 @@ def test_bart_pics_lands_from_ui_with_a_bound_second_array(qtbot, tmp_path, monk
     popup._editors["iterations"].setValue(7)
     popup._slot_combos["sensitivities"].setCurrentIndex(1)
     popup._accept()
-    process_events(qtbot)
+    _settle_idle(win)
 
     step = win.document.steps[0]
     assert step.operation.plugin_id == "bart:pics"

@@ -10,10 +10,13 @@ from tests.settle import SettleTimeout, settle_window
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
-from tests.ui.helpers import (
-    process_events as _process_events,
-)
 from tests.ui.helpers import require_wgpu_adapter
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
+from tests.ui.helpers import (
+    settle_quiescent as _settle_quiet,
+)
 
 
 def _tile_result(tile, value):
@@ -150,8 +153,7 @@ def _reset_warm_tile_state(win):
 def _use_slice_zero(win, qtbot):
     win._set_view_state(win.view_state.with_slice(2, 0))
     win.render(reason="test-initial-slice")
-    _process_events(qtbot, count=20)
-    settle_window(win, lambda: not win.montage_tile_evaluation_controller.is_busy())
+    _settle_idle(win)
     _reset_warm_tile_state(win)
 
 
@@ -174,10 +176,10 @@ def test_montage_status_does_not_remain_computing(qtbot):
     win = ArrayScopeWindow(np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_montage_axis(2, indices=(0, 1), text=":"))
         win.render(reason="test-montage")
-        _process_events(qtbot, count=50)
+        _settle_idle(win)
         assert win.operation_evaluator.last_status.status != CacheStatus.COMPUTING
     finally:
         win.close()
@@ -193,12 +195,12 @@ def test_montage_visible_subset_hover_uses_source_index_not_local_tile_zero(qtbo
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":")
         )
         win.render(reason="test-montage")
-        _process_events(qtbot, count=50)
+        _settle_idle(win)
         win.img_view.getView().setRange(xRange=(0, 2), yRange=(7, 8), padding=0)
         win.update_image_view()
         _wait_for_committed_session_geometry(win, qtbot)
@@ -231,12 +233,12 @@ def test_panned_montage_hover_reads_committed_display_coordinates(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":")
         )
         win.render(reason="test-montage")
-        _process_events(qtbot, count=50)
+        _settle_idle(win)
         win.img_view.getView().setRange(xRange=(0, 2), yRange=(7, 8), padding=0)
         win.update_image_view()
 
@@ -269,12 +271,12 @@ def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":")
         )
         win.render(reason="test-montage")
-        _process_events(qtbot, count=50)
+        _settle_idle(win)
 
         win.img_view.getView().setRange(xRange=(0, 2), yRange=(6, 8), padding=0)
         win.update_image_view()
@@ -282,7 +284,7 @@ def test_montage_update_after_shifted_origin_preserves_world_view_range(qtbot):
         before = win.img_view.getView().viewRange()
 
         win.update_image_view()
-        _process_events(qtbot, count=20)
+        _settle_quiet(win)
 
         after = win.img_view.getView().viewRange()
         tile_10 = win.renderer._frame_session.plan.tiles[10]
@@ -367,14 +369,14 @@ def test_switching_to_larger_montage_auto_fits_when_tiles_would_be_hidden(qtbot)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win.img_view.getView().setRange(xRange=(0, 3), yRange=(0, 2), padding=0)
 
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":")
         )
         win.render(reason="test-switch-to-montage")
-        _process_events(qtbot, count=80)
+        _settle_idle(win)
 
         _assert_view_contains_applied_montage_plan(win)
         assert (
@@ -691,21 +693,21 @@ def test_montage_tile_count_increase_auto_adjusts_when_near_auto(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(10)), text=":")
         )
         win.render(reason="test-montage")
-        _process_events(qtbot, count=50)
+        _settle_idle(win)
         action = win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel")
         if action is not None:
             action.linkActivated.emit("action")
-            _process_events(qtbot, count=5)
+            _settle_quiet(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(12)), text=":")
         )
         win.render(reason="test-montage-few-more-tiles")
-        _process_events(qtbot, count=80)
+        _settle_idle(win)
 
         _assert_view_contains_applied_montage_plan(win)
     finally:
@@ -722,15 +724,15 @@ def test_montage_manual_resize_is_single_camera_transaction(qtbot):
     try:
         win.resize(900, 700)
         win.show()
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=None, indices=tuple(range(30)), text=":")
         )
         win.render(reason="test-montage-resize")
-        _process_events(qtbot, count=80)
+        _settle_idle(win)
         view = win.img_view.getView()
         view.setRange(xRange=(-100.0, 300.0), yRange=(-100.0, 300.0), padding=0)
-        _process_events(qtbot, count=5)
+        _settle_quiet(win)
         win.img_view.viewport_controller.mode = ViewportMode.USER
         before_size = win.img_view.graphicsView.viewport().size()
         before = view.viewRange()
@@ -738,7 +740,7 @@ def test_montage_manual_resize_is_single_camera_transaction(qtbot):
         view.sigRangeChanged.connect(lambda *_args: range_changes.append(view.viewRange()))
 
         win.resize(500, 700)
-        _process_events(qtbot, count=20)
+        _settle_quiet(win)
 
         after_size = win.img_view.graphicsView.viewport().size()
         after = view.viewRange()
@@ -758,12 +760,12 @@ def _committed_montage(qtbot, win):
 
     win.resize(900, 700)
     win.show()
-    _process_events(qtbot, count=20)
+    _settle_idle(win)
     win._set_view_state(
         win.view_state.with_montage_axis(2, columns=None, indices=tuple(range(30)), text=":")
     )
     win.render(reason="test-montage-resize")
-    _process_events(qtbot, count=80)
+    _settle_idle(win)
     win.img_view.viewport_controller.mode = ViewportMode.USER
     return win.renderer._frame_session.plan
 
@@ -792,11 +794,11 @@ def test_montage_manual_middle_zoom_holds_column_layout(qtbot):
             yRange=(cy - 1.5 * tile_h, cy + 1.5 * tile_h),
             padding=0,
         )
-        _process_events(qtbot, count=5)
+        _settle_quiet(win)
         before_columns = int(win.renderer._frame_session.plan.columns)
 
         win.resize(500, 700)
-        _process_events(qtbot, count=30)
+        _settle_quiet(win)
 
         assert int(win.renderer._frame_session.plan.columns) == before_columns
     finally:
@@ -820,11 +822,11 @@ def test_montage_manual_zoomed_out_reflows_column_layout(qtbot):
             yRange=(-gh, 2 * gh),
             padding=0,
         )
-        _process_events(qtbot, count=5)
+        _settle_quiet(win)
         before_columns = int(win.renderer._frame_session.plan.columns)
 
         win.resize(500, 700)
-        _process_events(qtbot, count=30)
+        _settle_quiet(win)
 
         # Narrower window -> re-flow to fewer columns.
         assert int(win.renderer._frame_session.plan.columns) != before_columns
@@ -843,25 +845,25 @@ def test_montage_auto_fit_skips_when_fit_mode_is_enabled(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(5)), text=":")
         )
         win.render(reason="test-montage")
-        _process_events(qtbot, count=50)
+        _settle_idle(win)
         action = win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel")
         if action is not None:
             action.linkActivated.emit("action")
-            _process_events(qtbot, count=5)
+            _settle_quiet(win)
         win.display_toolbar.fit_action.trigger()
-        _process_events(qtbot, count=10)
+        _settle_quiet(win)
         assert win.img_view.viewport_controller.mode == ViewportMode.FIT
 
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":")
         )
         win.render(reason="test-montage-fit-mode")
-        _process_events(qtbot, count=80)
+        _settle_idle(win)
 
         assert win.img_view.viewport_controller.mode == ViewportMode.FIT
         assert win.statusBar().findChild(QtWidgets.QLabel, "ArrayScopeStatusActionLabel") is None
@@ -876,7 +878,7 @@ def test_montage_interactive_render_commits_tiled_frame(qtbot):
     win = ArrayScopeWindow(np.arange(2 * 3 * 8, dtype=float).reshape(2, 3, 8))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":")
         )
@@ -904,7 +906,7 @@ def test_montage_commits_cached_tiles_immediately_with_loading_placeholders(qtbo
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         _settle_initial_render(win, qtbot)
         state = win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
         win._set_view_state(state)
@@ -931,7 +933,7 @@ def test_montage_loading_overlay_clears_after_final_delayed_commit(qtbot, monkey
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
         win._set_view_state(
@@ -976,7 +978,7 @@ def test_montage_ready_display_payloads_commit_immediately(qtbot, monkeypatch):
     )
     calls = []
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         _settle_initial_render(win, qtbot)
         monkeypatch.setattr(
             win.renderer,
@@ -1013,7 +1015,7 @@ def test_montage_active_tiles_are_all_accounted_for(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(2 * 2 * 12, dtype=np.float32).reshape(2, 2, 12))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(12)), text=":")
         )
@@ -1050,7 +1052,7 @@ def test_montage_pan_schedules_viewport_update(qtbot, monkeypatch):
     qtbot.addWidget(win)
     calls = []
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(12)), text=":")
         )
@@ -1079,7 +1081,7 @@ def test_cached_montage_tile_rebinds_to_current_layout(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         old_state = win.view_state.with_montage_axis(2, columns=1, indices=(0, 1, 2), text=":")
         old_plan = make_montage_plan(
             old_state, axis=2, indices=(0, 1, 2), tile_shape=(2, 2), columns=1
@@ -1115,7 +1117,7 @@ def test_montage_skipped_tiles_show_detailed_warning(qtbot, monkeypatch):
         lambda _parent, _title, message: messages.append(message),
     )
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.renderer._warn_montage_tiles_skipped(
             skipped_count=2,
             tile_bytes=2048,
@@ -1138,12 +1140,12 @@ def test_montage_auto_window_button_applies_current_semantic_bounds_immediately(
     win = ArrayScopeWindow(np.arange(2 * 2 * 3, dtype=np.float32).reshape(2, 2, 3))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
         )
         win.render(reason="test-montage")
-        _process_events(qtbot, count=80)
+        _settle_idle(win)
         expected = (0.0, 11.0)
         original_session = win.renderer._frame_session
 
@@ -1155,7 +1157,7 @@ def test_montage_auto_window_button_applies_current_semantic_bounds_immediately(
         assert win.renderer._frame_session is original_session
         assert win.renderer._explicit_user_level_source is None
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == expected
-        _process_events(qtbot, count=20)
+        _settle_quiet(win)
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == expected
     finally:
         win.close()
@@ -1179,7 +1181,7 @@ def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatc
         lambda _fn, **kwargs: calls.append(kwargs) or len(calls),
     )
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(
                 2, columns=6, indices=tuple(range(tile_count)), text=":"
@@ -1192,7 +1194,7 @@ def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatc
         for index, tile in enumerate(session.plan.tiles):
             effects._admit_evaluation_result(tile, _tile_result(tile, 100 * (index + 1)))
         win.renderer.apply_montage_presentation(session)
-        _process_events(qtbot)
+        _settle_idle(win)
 
         before_levels = tuple(round(float(value), 6) for value in win.img_view.getLevels())
         before_histogram = tuple(
@@ -1203,7 +1205,7 @@ def test_montage_zoom_in_does_not_shrink_level_source_coverage(qtbot, monkeypatc
 
         win.img_view.getView().setRange(xRange=(0.0, 2.0), yRange=(0.0, 2.0), padding=0)
         win.renderer.apply_montage_viewport_retarget()
-        _process_events(qtbot)
+        _settle_quiet(win)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == before_levels
         assert (
@@ -1229,7 +1231,7 @@ def test_enabling_montage_with_cached_tile_preserves_relative_window_fractions(q
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         _use_slice_zero(win, qtbot)
         win.img_view.setHistogramDataBounds((0.0, 19.0))
         win.img_view.setLevels(5.0, 15.0)
@@ -1272,7 +1274,7 @@ def test_shifting_montage_range_preserves_relative_window_fractions(qtbot, monke
         )
 
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         _use_slice_zero(win, qtbot)
         win.img_view.setHistogramDataBounds((0.0, 19.0))
         win.img_view.setLevels(5.0, 15.0)
@@ -1338,7 +1340,7 @@ def test_cached_montage_commit_uses_all_loaded_tiles_for_initial_histogram(qtbot
     win = ArrayScopeWindow(np.zeros((2, 2, tile_count), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         state = win.view_state.with_montage_axis(
             2, columns=tile_count, indices=tuple(range(tile_count)), text=":"
         )
@@ -1380,7 +1382,7 @@ def test_fft_montage_stage_cache_hit_keeps_per_tile_slab_plans(qtbot, monkeypatc
         win.montage_tile_evaluation_controller, "start_latest", lambda _fn, **_kwargs: 1
     )
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.operation_coordinator.load_operations((CenteredFFT(axis=2),))
         win._set_document(win.operation_coordinator.document)
         win._set_view_state(
@@ -1431,7 +1433,7 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win.operation_coordinator.load_operations((CenteredFFT(axis=0),))
         win._set_document(win.operation_coordinator.document)
         win._coerce_channel_for_current_dtype()
@@ -1524,7 +1526,7 @@ def test_semantic_montage_transition_never_leaves_old_tiles_visible(
     try:
         if image_view_backend_capabilities(win.img_view).name != backend:
             pytest.skip(f"{backend} backend unavailable in this Qt environment")
-        _process_events(qtbot)
+        _settle_idle(win)
         if transition != "operation":
             win.operation_coordinator.load_operations(
                 (CenteredFFT(axis=2), FFTShift(axis=2), CenteredIFFT(axis=2))
@@ -1670,7 +1672,7 @@ def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend
     try:
         if image_view_backend_capabilities(win.img_view).name != backend:
             pytest.skip(f"{backend} backend unavailable in this Qt environment")
-        _process_events(qtbot)
+        _settle_idle(win)
         initial = win.view_state.with_montage_axis(
             2, columns=3, indices=tuple(range(6)), text="0:6"
         )
@@ -1933,7 +1935,7 @@ def test_large_complex_montage_auto_uses_tile_layer(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
         )
@@ -1965,7 +1967,7 @@ def test_large_complex_montage_tile_layer_histogram_drag_does_not_update_base_im
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=3, indices=(0, 1, 2), text=":")
         )

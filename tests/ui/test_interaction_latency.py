@@ -5,7 +5,10 @@ from pytestqt.exceptions import TimeoutError as QtBotTimeoutError
 from arrayscope.display.slice_engine import DisplayImage
 from arrayscope.operations.evaluator import EvaluationResult
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
-from tests.ui.helpers import clear_arrayscope_settings, process_events, require_wgpu_adapter
+from tests.ui.helpers import clear_arrayscope_settings, require_wgpu_adapter
+from tests.ui.helpers import (
+    settle_idle as _settle_idle,
+)
 
 
 def _tile_result(tile, value):
@@ -174,7 +177,7 @@ def test_hot_cached_montage_schedules_no_tile_evaluation(qtbot, backend):
     win = ArrayScopeWindow(np.arange(2 * 2 * 2, dtype=np.float32).reshape(2, 2, 2))
     qtbot.addWidget(win)
     try:
-        process_events(qtbot)
+        _settle_idle(win)
         _settle_initial_tile_state(win, qtbot)
         state = win.view_state.with_montage_axis(2, columns=2, indices=(0, 1), text=":")
         plan = make_montage_plan(state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
@@ -212,7 +215,7 @@ def test_hot_cached_tile_layer_clean_flush_updates_zero_items(qtbot, backend):
     win = ArrayScopeWindow(np.arange(2 * 2 * 2, dtype=np.float32).reshape(2, 2, 2))
     qtbot.addWidget(win)
     try:
-        process_events(qtbot)
+        _settle_idle(win)
         _settle_initial_tile_state(win, qtbot)
         state = win.view_state.with_montage_axis(2, columns=2, indices=(0, 1), text=":")
         plan = make_montage_plan(state, axis=2, indices=(0, 1), tile_shape=(2, 2), columns=2)
@@ -285,7 +288,7 @@ def test_wgpu_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtbo
 
         win = ArrayScopeWindow(np.arange(2 * 2 * 8, dtype=np.float32).reshape(2, 2, 8))
         qtbot.addWidget(win)
-        process_events(qtbot)
+        _settle_idle(win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=4, indices=tuple(range(8)), text=":")
         )
@@ -304,7 +307,7 @@ def test_wgpu_montage_pyqtgraph_range_change_schedules_viewport_tile_update(qtbo
             QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents
         )
         win.img_view.getView().setRange(xRange=(0.0, 4.0), yRange=(0.0, 2.0), padding=0)
-        process_events(qtbot)
+        _settle_idle(win)
 
         assert win.img_view.surface.capabilities.name == "wgpu"
         assert scheduled
@@ -367,7 +370,7 @@ def test_wgpu_montage_view_range_change_expands_visible_tile_set(qtbot, monkeypa
         qtbot.addWidget(win)
         win.resize(360, 240)
         win.show()
-        process_events(qtbot)
+        _settle_idle(win)
         monkeypatch.setattr(
             win.montage_tile_evaluation_controller,
             "start_latest",
@@ -396,7 +399,7 @@ def test_wgpu_montage_view_range_change_expands_visible_tile_set(qtbot, monkeypa
         initial_visible = len(win.renderer._frame_session.visible_tiles)
 
         win.fit_image_to_view(True)
-        process_events(qtbot, count=20)
+        _settle_idle(win)
         win.fit_image_to_view(False)
         win.renderer.apply_montage_viewport_retarget()
         expanded_visible = len(win.renderer._frame_session.visible_tiles)

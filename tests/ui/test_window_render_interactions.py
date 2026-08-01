@@ -7,7 +7,7 @@ from tests.ui.helpers import (
     clear_arrayscope_settings,
 )
 from tests.ui.helpers import (
-    process_events as _process_events,
+    settle_idle as _settle_idle,
 )
 
 
@@ -30,31 +30,31 @@ def test_channel_auto_manual_coercion_matrix(qtbot):
     win = ArrayScopeWindow(np.arange(4 * 5 * 2, dtype=float).reshape(4, 5, 2))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot)
+        _settle_idle(win)
         assert win.view_state.channel == ChannelMode.REAL
         win.request_operation("combine_real_imag", 2)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert win.view_state.channel == ChannelMode.COMPLEX
 
         win.clear_operations()
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._on_channel_clicked("real")
         assert win._channel_user_selected
         win.request_operation("combine_real_imag", 2)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert win.view_state.channel == ChannelMode.REAL
 
         win._on_channel_clicked("imag")
         assert win.view_state.channel == ChannelMode.IMAG
         win.clear_operations()
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert win.view_state.channel == ChannelMode.REAL
 
         win.request_operation("combine_real_imag", 2)
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._on_channel_clicked("abs")
         win.clear_operations()
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert win.view_state.channel == ChannelMode.ABS
     finally:
         win.close()
@@ -68,7 +68,7 @@ def test_automatic_colormap_remains_automatic_across_display_restore(qtbot):
     win = ArrayScopeWindow(np.ones((6, 7), dtype=np.complex64))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert win.current_colormap == "PAL-relaxed"
         assert not win._colormap_user_selected
         assert win._current_display_settings().colormap is None
@@ -113,7 +113,7 @@ def test_relative_display_restore_does_not_queue_absolute_levels(qtbot):
     win = ArrayScopeWindow(np.ones((6, 7), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._queue_display_levels((0.0, 1.0))
 
         win._apply_display_settings(
@@ -139,7 +139,7 @@ def test_absolute_display_restore_queues_exact_levels(qtbot):
     win = ArrayScopeWindow(np.ones((6, 7), dtype=np.float32))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
 
         win._apply_display_settings(
             DisplaySettings(
@@ -168,7 +168,7 @@ def test_reload_button_uses_standard_tool_button_chrome(qtbot, tmp_path):
     win = ArrayScopeWindow(np.load(data_path), filepath=data_path)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert isinstance(win._reload_btn, QtWidgets.QToolButton)
         assert win._reload_btn.styleSheet() == TOOL_BUTTON_STYLE
         assert win._reload_btn.isVisible()
@@ -186,15 +186,15 @@ def test_reload_preserves_montage_camera_and_levels(qtbot, monkeypatch):
     qtbot.addWidget(win)
     render_calls = []
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(
             ViewState.from_shape(data.shape).with_montage_axis(2, indices=tuple(range(6)), text=":")
         )
         win.render(reason="test-montage", force_autolevel=False)
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
         requested_range = ((3.0, 11.0), (4.0, 12.0))
         win.renderer._set_montage_view_range(requested_range)
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
         accepted_range = win.img_view.getView().viewRange()
         preserved_range = (
             tuple(round(float(value), 6) for value in accepted_range[0]),
@@ -215,7 +215,7 @@ def test_reload_preserves_montage_camera_and_levels(qtbot, monkeypatch):
         tx = win._viewport_continuity_transaction()
         assert tx is not None
         assert tx.reason == "reload"
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
         current_range = win.img_view.getView().viewRange()
         current_x = tuple(round(float(value), 6) for value in current_range[0])
         current_y = tuple(round(float(value), 6) for value in current_range[1])
@@ -235,7 +235,7 @@ def test_live_frame_session_has_presentation_gate_before_level_work(qtbot, monke
     qtbot.addWidget(win)
     observed = []
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         original = win.renderer._ensure_montage_level_stats
 
         def observe_gate(level_key, *, expected_indices):
@@ -275,7 +275,7 @@ def test_main_canvas_remains_embedded_in_window(qtbot):
     win = ArrayScopeWindow(np.arange(6 * 7, dtype=float).reshape(6, 7))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         assert win.layouts["topDown"].indexOf(win.tab_widget) >= 0
         assert win.tab_widget.parent() is not None
         assert win.img_view.parent() is win.image_tab
@@ -296,7 +296,7 @@ def test_hover_reads_display_without_scalar_evaluation(qtbot, monkeypatch):
     win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         monkeypatch.setattr(
             win.pixel_evaluation_controller,
             "start",
@@ -304,7 +304,7 @@ def test_hover_reads_display_without_scalar_evaluation(qtbot, monkeypatch):
         )
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(2.1, 1.1))
         win.getPixel(scene_pos)
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
         text = win.widgets["labels"]["pixelValue"].text().lower()
         assert "updating" not in text
         assert "7" in text
@@ -321,9 +321,9 @@ def test_hover_reads_op_backed_display_without_scalar_evaluation(qtbot, monkeypa
     win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win.request_operation("reverse", 0)
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
         monkeypatch.setattr(
             win.pixel_evaluation_controller,
             "start",
@@ -331,7 +331,7 @@ def test_hover_reads_op_backed_display_without_scalar_evaluation(qtbot, monkeypa
         )
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(2.1, 1.1))
         win.getPixel(scene_pos)
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
         text = win.widgets["labels"]["pixelValue"].text().lower()
         assert "updating" not in text
         assert "12" in text
@@ -349,7 +349,7 @@ def test_stationary_hover_refreshes_after_slice_change(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
@@ -361,12 +361,12 @@ def test_stationary_hover_refreshes_after_slice_change(qtbot):
         )
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(1.1, 1.1))
         win._on_image_mouse_moved(scene_pos)
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
         assert "6" in win.widgets["labels"]["pixelValue"].text()
 
         win._set_view_state(win.view_state.with_slice(2, 1))
         win.render(reason="test-stationary-hover")
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
 
         text = win.widgets["labels"]["pixelValue"].text()
         assert "7" in text
@@ -383,17 +383,17 @@ def test_image_viewport_leave_clears_hover_status(qtbot):
     win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         scene_pos = win.img_view.getView().mapViewToScene(QtCore.QPointF(2.1, 1.1))
         win._on_image_mouse_moved(scene_pos)
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
         assert win.renderer._last_image_mouse_scene_pos is not None
         assert win.renderer._last_image_hover_focus is not None
         assert win.widgets["labels"]["pixelValue"].text()
 
         event = QtCore.QEvent(QtCore.QEvent.Type.Leave)
         QtGui.QGuiApplication.sendEvent(win.img_view.graphicsView.viewport(), event)
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
 
         assert win.renderer._last_image_mouse_scene_pos is None
         assert win.renderer._last_image_hover_focus is None
@@ -428,7 +428,7 @@ def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
@@ -440,11 +440,11 @@ def test_relative_window_levels_preserve_fractions_across_2d_slice_scroll(qtbot)
         )
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
 
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (105.0, 115.0)
         assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (
@@ -465,7 +465,7 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot)
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
@@ -481,7 +481,7 @@ def test_relative_window_levels_survive_fast_scroll_with_render_in_flight(qtbot)
         )
         win.operation_evaluator.clear_cache()
         win.img_view.setLevels(5.0, 15.0)
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
 
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
@@ -511,10 +511,10 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         qtbot.waitUntil(
             lambda: not win.montage_tile_evaluation_controller.is_busy(),
             timeout=min(3000, INTERACTION_SETTLE_HARD_LIMIT_MS),
@@ -528,7 +528,7 @@ def test_relative_window_levels_match_for_cached_and_uncached_display_tiles(qtbo
         if isinstance(payloads, dict):
             payloads.clear()
         win.img_view.setLevels(5.0, 15.0)
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
 
         # Uncached path: the tile result arrives through the evaluation lane.
         win._on_slice_index_changed(2, 1)
@@ -583,7 +583,7 @@ def test_absolute_window_levels_preserve_numbers_across_2d_slice_scroll(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
@@ -596,11 +596,11 @@ def test_absolute_window_levels_preserve_numbers_across_2d_slice_scroll(qtbot):
         win.widgets["buttons"]["display"]["window_absolute"].setChecked(True)
         win.widgets["buttons"]["display"]["window_relative"].setChecked(False)
         win.img_view.setLevels(5.0, 15.0)
-        _process_events(qtbot, count=5)
+        _settle_idle(win)
 
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (5.0, 15.0)
         assert tuple(round(float(value), 6) for value in win.img_view.getHistogramDataBounds()) == (
@@ -621,7 +621,7 @@ def test_auto_window_resets_absolute_levels_once(qtbot):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
@@ -636,10 +636,10 @@ def test_auto_window_resets_absolute_levels_once(qtbot):
         win.img_view.setLevels(5.0, 15.0)
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
 
         win.auto_window_levels()
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (100.0, 119.0)
         widget = getattr(win, "_arrayscope_status_action_widget", None)
@@ -647,7 +647,7 @@ def test_auto_window_resets_absolute_levels_once(qtbot):
         assert "Revert" in widget.text()
 
         widget.linkActivated.emit("action")
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
 
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (5.0, 15.0)
     finally:
@@ -664,7 +664,7 @@ def test_auto_window_clears_pending_preview_without_rerender_and_reverts(qtbot, 
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(win.view_state.with_slice(2, 0))
         win.render(reason="test-initial-slice")
         qtbot.waitUntil(
@@ -679,7 +679,7 @@ def test_auto_window_clears_pending_preview_without_rerender_and_reverts(qtbot, 
         win.img_view.setLevels(5.0, 15.0)
         win._on_slice_index_changed(2, 1)
         win.render_coordinator.flush_now()
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
 
         preview = win.img_view._histogram_preview_controller
         preview.pending_levels = (6.0, 14.0)
@@ -695,7 +695,7 @@ def test_auto_window_clears_pending_preview_without_rerender_and_reverts(qtbot, 
         )
 
         win.auto_window_levels()
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
 
         assert render_calls == []
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (100.0, 119.0)
@@ -705,7 +705,7 @@ def test_auto_window_clears_pending_preview_without_rerender_and_reverts(qtbot, 
         widget = getattr(win, "_arrayscope_status_action_widget", None)
         assert widget is not None
         widget.linkActivated.emit("action")
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
 
         assert render_calls == []
         assert tuple(round(float(value), 6) for value in win.img_view.getLevels()) == (5.0, 15.0)
@@ -735,12 +735,12 @@ def test_reload_clears_stale_hover_focus(qtbot, monkeypatch):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         win._set_view_state(
             ViewState.from_shape(data.shape).with_montage_axis(2, indices=tuple(range(6)), text=":")
         )
         win.render(reason="test-montage", force_autolevel=False)
-        _process_events(qtbot, count=30)
+        _settle_idle(win)
 
         win.renderer._last_image_hover_focus = (1.0, 2.0)
         win.renderer._last_image_hover_focus_frame_key = getattr(
@@ -766,7 +766,7 @@ def test_render_entry_reports_gui_callback_observation(qtbot):
     win = ArrayScopeWindow(np.arange(4 * 5, dtype=float).reshape(4, 5))
     qtbot.addWidget(win)
     try:
-        _process_events(qtbot, count=20)
+        _settle_idle(win)
         governor = win.resource_governor
         governor._recent_ui_work_observations.clear()
 

@@ -40,14 +40,17 @@ import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
-from tests.ui.helpers import clear_arrayscope_settings, process_events
+from tests.ui.helpers import clear_arrayscope_settings
+from tests.ui.helpers import (
+    settle_quiescent as _settle_quiet,
+)
 
-# Build-time cold-fill budget: a fill is not a gesture, and the per-step wait
-# below keeps the capped owner. A step that outlives that cap is not widened
-# into green -- it is recorded as unsettled and excluded from the differential,
-# and the one-sided settle assertion still fails if the LATCH is what made it
-# outlive the cap.
-FILL_BUDGET_S = 60.0
+# The per-step wait keeps a capped owner ON PURPOSE, which is why it is a
+# stopwatch and the build-time fill is not. A step that outlives the cap is not
+# widened into green -- it is recorded as unsettled and excluded from the
+# differential, and the one-sided settle assertion still fails if the LATCH is
+# what made it outlive the cap. `_drain` therefore must return a verdict rather
+# than raise, so it cannot be denominated in progress the way `_build` is.
 STEP_SETTLE_BUDGET_S = INTERACTION_SETTLE_HARD_LIMIT_S
 
 
@@ -91,16 +94,22 @@ def _round_settled(win):
     )
 
 
+# Every wait in this file is `settle_quiescent`, and it is the clearest case in
+# the suite for it: this is an A/B that compares two arms' committed frames, so
+# a gesture that leaves a retarget still armed when the frame is sampled makes
+# the arms differ for a reason that has nothing to do with the latch. A settled
+# session is not enough -- it says the work that HAS run is done, not that none
+# is queued behind it.
 def _drain(win, qtbot):
     """Let the round finish. False when it never does."""
 
     deadline = monotonic() + STEP_SETTLE_BUDGET_S
     while monotonic() < deadline:
         if _round_settled(win):
-            process_events(qtbot, count=1)
+            _settle_quiet(win)
             if _round_settled(win):
                 return True
-        process_events(qtbot, count=5)
+        _settle_quiet(win)
     return _round_settled(win)
 
 
@@ -116,16 +125,17 @@ def _build(qtbot, depth, columns):
     qtbot.addWidget(win)
     win.resize(520, 420)
     win.show()
-    process_events(qtbot)
+    _settle_quiet(win)
     win._set_view_state(
         win.view_state.with_montage_axis(2, columns=columns, indices=tuple(range(depth)), text=":")
     )
     win.update_image_view()
-    deadline = monotonic() + FILL_BUDGET_S
-    while monotonic() < deadline and not win.renderer._frame_session.required_target_settled():
-        process_events(qtbot, count=10)
-    assert win.renderer._frame_session.required_target_settled(), "fixture never filled"
-    process_events(qtbot, count=25)
+    # The cold fill is not a gesture, so it gets no stopwatch: `_settle_quiet`
+    # already requires `required_target_settled()` (via `frame_session_settled`),
+    # so the loop that used to sit here re-asked a question its own body had
+    # just answered, and the assertion after it could only ever pass. A fill
+    # that never completes now fails as a SettleTimeout naming this line.
+    _settle_quiet(win)
     return win
 
 
@@ -137,26 +147,26 @@ def _nudge(win, qtbot):
     dx = (x1 - x0) * 0.003
     view.setRange(xRange=(x0 + dx, x1 + dx), yRange=(y0, y1), padding=0)
     win.renderer.apply_montage_viewport_retarget()
-    process_events(qtbot, count=6)
+    _settle_quiet(win)
 
 
 def _set_levels(win, qtbot, scale):
     low, high = tuple(win.img_view._displayLevels or (0.0, 1.0))
     win.img_view.setLevels(float(low), float(low) + (float(high) - float(low)) * scale)
     win.renderer.apply_montage_viewport_retarget()
-    process_events(qtbot, count=25)
+    _settle_quiet(win)
 
 
 def _set_colormap(win, qtbot, name):
     win.renderer._set_display_colormap(name, user_selected=True, request_render=True)
     win.renderer.apply_montage_viewport_retarget()
-    process_events(qtbot, count=25)
+    _settle_quiet(win)
 
 
 def _auto_window(win, qtbot):
     win.auto_window_levels()
     win.renderer.apply_montage_viewport_retarget()
-    process_events(qtbot, count=25)
+    _settle_quiet(win)
 
 
 def _zoom_in(win, qtbot):
@@ -166,7 +176,7 @@ def _zoom_in(win, qtbot):
     sx, sy = (x1 - x0) * 0.16, (y1 - y0) * 0.16
     view.setRange(xRange=(cx - sx / 2, cx + sx / 2), yRange=(cy - sy / 2, cy + sy / 2), padding=0)
     win.renderer.apply_montage_viewport_retarget()
-    process_events(qtbot, count=30)
+    _settle_quiet(win)
 
 
 def _pan_a_whole_tile(win, qtbot):
@@ -177,7 +187,7 @@ def _pan_a_whole_tile(win, qtbot):
     dx = x1 - x0
     view.setRange(xRange=(x0 + dx, x1 + dx), yRange=(y0, y1), padding=0)
     win.renderer.apply_montage_viewport_retarget()
-    process_events(qtbot, count=30)
+    _settle_quiet(win)
 
 
 # Every entry that is not a nudge changes something the invariant key does not
