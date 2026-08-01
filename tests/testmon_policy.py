@@ -125,6 +125,15 @@ OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "tests/gpu_interaction/test_wgpu_native_x11_pin.py": (
         "experiments/wgpu_gate_b/probe_native_x11.py",
     ),
+    # `git commit` / `git merge` / `git worktree add` in throwaway repos, which
+    # run the hooks as shell scripts. They are the subject, they are not Python,
+    # and nothing in-process executes them — so editing a hook has to select
+    # this file or the hook ships unguarded.
+    "tests/app/test_git_hooks.py": (
+        ".githooks/pre-commit",
+        ".githooks/post-merge",
+        ".githooks/post-checkout",
+    ),
     # `python -c "import arrayscope.io.numpy_save"` (asserts pyqtgraph stays out
     # of sys.modules).
     "tests/io/test_numpy_save.py": ("arrayscope/io/numpy_save.py",),
