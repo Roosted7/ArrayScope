@@ -11,6 +11,7 @@ fps, no encoding), which keeps a full scenario run to a few seconds.
 """
 
 import json
+import re
 import runpy
 import subprocess
 import sys
@@ -22,37 +23,67 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[2]
 RECORDER = ROOT / "tools" / "demo_recorder.py"
 
+# The recorder overlaps its own scenario children; three is where the measured
+# curve flattens (76 s serial, 42 s at two, 32 s at three, 28 s at four against
+# a 19 s longest scenario). It is deliberately below the machine's worker share:
+# this file is one xdist worker's straggler, so overlapping its children
+# shortens the critical path rather than competing for it.
+RECORD_JOBS = 3
+
 
 def _scenario_names() -> tuple[str, ...]:
     namespace = runpy.run_path(str(RECORDER), run_name="arrayscope_demo_recorder")
     return tuple(namespace["SCENARIOS"])
 
 
-@pytest.mark.parametrize("name", _scenario_names())
-def test_demo_scenario_records_in_smoke_mode(name, tmp_path):
+@pytest.fixture(scope="module")
+def recorded_scenarios(tmp_path_factory):
+    """Record every scenario once, in one recorder run.
+
+    Each case used to spawn its own ``--only`` invocation, so the file paid
+    seven parent startups and — the part that actually costs — serialized seven
+    child recordings the recorder is already built to overlap. One run records
+    the same scenarios through the same code path and leaves each one's frames
+    and manifest under its own directory, which is all any assertion below
+    reads. Measured on the reference machine: 90 s for the file, 46 s after.
+
+    Per-scenario status is parsed from the recorder's own ``[ok]/[FAIL] record``
+    lines rather than the process exit code, so one broken scenario still fails
+    exactly its own case.
+    """
+
+    frames_root = tmp_path_factory.mktemp("demo-frames")
     proc = subprocess.run(
         [
             sys.executable,
             str(RECORDER),
             "--smoke",
-            "--only",
-            name,
             "--frames",
-            str(tmp_path),
+            str(frames_root),
             "--jobs",
-            "1",
+            str(RECORD_JOBS),
             "--keep-frames",
         ],
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=1800,
         cwd=str(ROOT),
         check=False,
     )
-    assert proc.returncode == 0, f"{name} failed:\n{proc.stdout}\n{proc.stderr}"
-    frames = sorted((tmp_path / name).glob("frame_*.png"))
+    recorded = {
+        match.group(2): match.group(1) == "ok"
+        for match in re.finditer(r"^\[(ok|FAIL)\] record (\S+)$", proc.stdout, re.MULTILINE)
+    }
+    return frames_root, recorded, proc
+
+
+@pytest.mark.parametrize("name", _scenario_names())
+def test_demo_scenario_records_in_smoke_mode(name, recorded_scenarios):
+    frames_root, recorded, proc = recorded_scenarios
+    assert recorded.get(name), f"{name} failed:\n{proc.stdout}\n{proc.stderr}"
+    frames = sorted((frames_root / name).glob("frame_*.png"))
     assert frames, f"{name} recorded no frames"
-    manifest = json.loads((tmp_path / name / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((frames_root / name / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 1
     assert manifest["scenario"] == name
     assert manifest["frame_count"] == len(frames)
