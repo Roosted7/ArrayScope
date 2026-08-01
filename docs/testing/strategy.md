@@ -145,6 +145,67 @@ a quiet machine, with per-step settlement recorded. Never widen a timeout to
 make slow settlement pass; a longer process-deadlock guard may terminate a
 whole child but is not evidence of successful settlement.
 
+### Building a window per test, and why they are not shared
+
+`ArrayScopeWindow(...)` is constructed at 322 sites across 57 files, so
+"share one window per module and turn N builds into one" comes up regularly.
+Measured 2026-08-02, it is refused: the cost it targets is now small, and the
+correctness it spends is large.
+
+**What a build costs.** Once per worker *process*, the first one is ~0.9 s —
+imports, the colormap library, the first Qt widget tree. Every later one is
+~110 ms and, since `8550b4b2`, stays there. It used to grow (116 ms at the
+second build, 180 ms at the fourteenth) because two application-wide passes ran
+on every construction: `QApplication.setStyleSheet`, guarded in `fbb67a0f`, and
+the icon re-tint behind `_retheme_presentation_surfaces`, guarded in
+`8550b4b2`. Both scaled with everything already open. **Check for a third
+before believing a per-build number**: a build that gets more expensive as a
+process ages is that shape, and it inflates whichever file happens to run last.
+
+At 110 ms the 322 sites are ~35 s of the 745 s the map records — 4.7%, and at
+most ~22% of any one file. The files on the critical path under
+`--dist loadfile` are not the build-heavy ones: `test_resident_crop_rebind.py`
+(58 s) and `test_montage_interactions.py` (56 s) are 4% and 7% construction,
+because what they cost is rendering. Sharing therefore cannot move the number
+that sets the suite's wall time, only total CPU.
+
+**What sharing spends.** A probe that transparently returned one cached window
+per (module, shape, dtype) — the most favourable possible version, with no test
+edited — reports how many tests a shared window *breaks outright*:
+`test_panel_layout.py` 11 of 32, `test_performance_settings.py` 3 of 15,
+`test_dimension_control_interactions.py` 1 of 19,
+`test_window_render_interactions.py` and `test_diagnostics_dialog.py` 0.
+
+The zeroes are the reason to stop, not the reason to continue. They are not
+evidence of safety, because **passing under a shared window is an ordering
+accident until someone proves otherwise**. Running
+`test_performance_settings.py` shared but in reverse declaration order changes
+which tests fail — three become two, and not a subset: a test asserting the
+512 MiB default fails only when a sibling that sets 1024 MiB happens to run
+first. `test_diagnostics_dialog.py` sweeps clean only because every sharer
+evaluates the same view state, so the display cache stays at one entry and
+`assert "entries=1" in text` still holds; it is a substring, so at ten entries
+it would pass vacuously rather than fail.
+
+Three shapes genuinely cannot share, and they are worth recognising anywhere:
+
+- **The constructor is the behaviour under test.** Every "restored file
+  session" test in `test_file_view_session.py` writes QSettings and then builds
+  a window to prove the restore path read them.
+- **A monkeypatch the constructor reads.** `test_host_cache_compression_greys_out_*`
+  patch `available_codec_names` and then build; the menu is built once, at
+  construction, so a shared window was built before the patch existed. These
+  fail under sharing in *every* order — the honest signal in the probe.
+- **An assertion denominated in accumulated state.** Defaults before a test
+  changes them, resource-governor feedback, level state, dock layout, camera
+  continuity. `test_montage_interactions.py` is all camera continuity, which is
+  exactly the state a sibling would have moved.
+
+So the conversion would have to be argued per test, not per file, and each one
+carries the failure mode this document keeps returning to: a green result on a
+test that can no longer fail. That is a poor trade for ~2 s of wall time. Spend
+the effort on what a build actually costs instead — that lever paid twice.
+
 ## Stress and benchmark tests
 
 Locations: `tests/app/test_memory_stress.py`, `tests/app/test_operation_benchmarks.py`, `tests/display/test_rendering_benchmarks.py`, diagnostics/trace tools.
