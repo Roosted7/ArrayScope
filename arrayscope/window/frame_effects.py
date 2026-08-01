@@ -4828,6 +4828,11 @@ def shader_commit_level_source(renderer, session, *, rehydrate_max_count: int | 
             LevelEvidenceQuality.ROUGH_TARGET
         ):
             current_level_source = None
+    # The tracker's own offer, kept apart from the accepted-source fallback
+    # below: it is the only live statement of what the refined window *is*,
+    # and the clamp release edge has to be judged against that rather than
+    # against the snapshot taken when the clamp armed.
+    tracked_bounds = normalize_bounds(getattr(current_level_source, "levels", None))
     if current_level_source is None:
         # Withhold an immature *candidate*, not the already accepted source.
         # The histogram callback can advance the generation just before the
@@ -4844,6 +4849,18 @@ def shader_commit_level_source(renderer, session, *, rehydrate_max_count: int | 
         and clamp.get("semantic_key") == getattr(current_level_source, "semantic_key", None)
     ):
         presented_bounds, _observations = _shader_presented_payload_bounds(session)
+        # ``true_bounds`` was a snapshot of the refined window at arm time, and
+        # the refined window *moves* under an unchanged semantic key — a crop
+        # scrub advances it every step. Judging fresh presented bounds against
+        # that snapshot latches the clamp permanently: the scrub's current
+        # upper bound sits outside a stale snapshot no matter how completely
+        # the tracker has refined, so the release edge never fires and the
+        # display stays pinned at the union of an old low and a new high.
+        # Re-read the truth from the tracker whenever this commit has it, and
+        # keep the record current for the commits that do not (an immature
+        # candidate leaves the freshest bounds we ever saw, not the first).
+        if tracked_bounds is not None:
+            clamp["true_bounds"] = tracked_bounds
         true_bounds = normalize_bounds(clamp.get("true_bounds"))
         clamp_still_required = bool(
             presented_bounds is not None
@@ -4851,11 +4868,25 @@ def shader_commit_level_source(renderer, session, *, rehydrate_max_count: int | 
             and (presented_bounds[0] < true_bounds[0] or presented_bounds[1] > true_bounds[1])
         )
         if clamp_still_required:
+            # ``published_bounds`` means "the window the clamp requires right
+            # now", so it is re-derived from the same live truth rather than
+            # kept from arm time — holding a source against an old union could
+            # publish a window that no longer covers what is presented. A held
+            # source that does not match is refused here and re-widened by
+            # ``_shader_level_source_covering_presented_payloads`` on this same
+            # commit, which is also what re-arms the clamp. Widening this in
+            # place instead would be the monotonic freeze the release edge
+            # exists to prevent.
+            published_bounds = (
+                min(true_bounds[0], presented_bounds[0]),
+                max(true_bounds[1], presented_bounds[1]),
+            )
+            clamp["published_bounds"] = published_bounds
             applied_source = getattr(session, "applied_level_source", None)
-            if getattr(applied_source, "semantic_key", None) == getattr(
-                current_level_source, "semantic_key", None
-            ) and normalize_bounds(getattr(applied_source, "levels", None)) == normalize_bounds(
-                clamp.get("published_bounds")
+            if (
+                getattr(applied_source, "semantic_key", None)
+                == getattr(current_level_source, "semantic_key", None)
+                and normalize_bounds(getattr(applied_source, "levels", None)) == published_bounds
             ):
                 return applied_source
         else:

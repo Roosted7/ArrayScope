@@ -2289,6 +2289,169 @@ def test_shader_commit_holds_the_presented_clamp_then_releases_it():
     assert session._shader_presented_bounds_clamp is None
 
 
+def test_shader_commit_clamp_releases_against_a_refined_window_that_moved():
+    """The release edge is judged against live truth, not the arm-time snapshot.
+
+    A crop scrub moves the refined window under an *unchanged* semantic key —
+    every step advances it — so ``true_bounds`` captured when the clamp armed
+    describes a window that no longer exists.  Comparing fresh presented bounds
+    against that snapshot latched the clamp forever: the scrub's current upper
+    bound is outside a stale snapshot however completely the tracker refines,
+    so ``shader_commit_level_source`` kept handing back the stale applied
+    source and the display stayed pinned at the union of an old low and a new
+    high.  The numbers below are the measured wedge — snapshot ``(112, 605)``,
+    which matches no single scrub step because it was taken mid-transition,
+    against a complete REFINED tracker at ``(132, 610)``.
+
+    This is not a slow-machine failure.  Once entered, no budget releases it.
+    """
+
+    from arrayscope.core.window_levels import LevelSource, LevelSourceRank
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        TileLevelStats,
+    )
+    from arrayscope.window import frame_effects
+
+    level_key = ("levels", "crop-scrub")
+    presented = SimpleNamespace(
+        source_index=7,
+        quality="exact",
+        lod=SimpleNamespace(level=0),
+        level_evidence_window_stale=False,
+        level_stats=TileLevelStats(
+            source_index=7,
+            bounds=(132.0, 610.0),
+            sample=np.asarray([132.0, 610.0], dtype=np.float32),
+            refined=True,
+            evidence_quality=LevelEvidenceQuality.REFINED,
+        ),
+    )
+    refined_source = LevelSource(
+        levels=(132.0, 610.0),
+        histogram_range=(132.0, 610.0),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        source_count=50,
+        expected_count=50,
+        semantic_key=level_key,
+        evidence_quality=LevelEvidenceQuality.REFINED,
+    )
+    stale_applied = LevelSource(
+        levels=(112.0, 610.0),
+        histogram_range=(112.0, 610.0),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        source_count=50,
+        expected_count=50,
+        semantic_key=level_key,
+        evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+    )
+    session = SimpleNamespace(
+        shader_display=True,
+        session_id=3,
+        level_key=level_key,
+        first_pass_histogram_published=False,
+        lifecycle=SimpleNamespace(presented_tiles={4}, backend_presented_identities={}),
+        tile_presentation_state=SimpleNamespace(payloads={4: presented}),
+        display_tile_payloads={4: presented},
+        applied_level_source=stale_applied,
+        _shader_presented_bounds_clamp={
+            "semantic_key": level_key,
+            "true_bounds": (112.0, 605.0),
+            "published_bounds": (112.0, 610.0),
+        },
+    )
+    renderer = SimpleNamespace(
+        _montage_level_source_for_session=lambda session, **kwargs: refined_source
+    )
+
+    assert frame_effects.shader_commit_level_source(renderer, session) is refined_source
+    assert session._shader_presented_bounds_clamp is None
+
+
+def test_shader_commit_clamp_held_against_a_moved_window_records_live_bounds():
+    """Holding is re-derived too: both halves of the record follow the truth.
+
+    When the refined window moves and a presented payload is *still* outside
+    it, the clamp stays required — but the window it requires is the union of
+    the payload with the window that exists now, not with the one that existed
+    at arm time.  A held source matching the stale union is refused, so the
+    covering helper re-widens and re-arms on the same commit rather than the
+    commit publishing a window that no longer covers what is on screen.
+    """
+
+    from arrayscope.core.window_levels import LevelSource, LevelSourceRank
+    from arrayscope.display.model.montage_levels import (
+        LevelEvidenceQuality,
+        TileLevelStats,
+    )
+    from arrayscope.window import frame_effects
+
+    level_key = ("levels", "crop-scrub")
+    outlying = SimpleNamespace(
+        source_index=7,
+        quality="preview",
+        lod=SimpleNamespace(level=5),
+        level_evidence_window_stale=False,
+        level_stats=TileLevelStats(
+            source_index=7,
+            bounds=(100.0, 620.0),
+            sample=np.asarray([100.0, 620.0], dtype=np.float32),
+            evidence_quality=LevelEvidenceQuality.ROUGH_PREVIEW,
+        ),
+    )
+    refined_source = LevelSource(
+        levels=(132.0, 610.0),
+        histogram_range=(132.0, 610.0),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        source_count=50,
+        expected_count=50,
+        semantic_key=level_key,
+        evidence_quality=LevelEvidenceQuality.REFINED,
+    )
+    stale_applied = LevelSource(
+        levels=(112.0, 610.0),
+        histogram_range=(112.0, 610.0),
+        rank=LevelSourceRank.MONTAGE_SAMPLED_FULL,
+        source_count=50,
+        expected_count=50,
+        semantic_key=level_key,
+        evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+    )
+    session = SimpleNamespace(
+        shader_display=True,
+        session_id=3,
+        level_key=level_key,
+        first_pass_histogram_published=False,
+        lifecycle=SimpleNamespace(presented_tiles={4}, backend_presented_identities={}),
+        tile_presentation_state=SimpleNamespace(payloads={4: outlying}),
+        display_tile_payloads={4: outlying},
+        applied_level_source=stale_applied,
+        _shader_presented_bounds_clamp={
+            "semantic_key": level_key,
+            "true_bounds": (112.0, 605.0),
+            "published_bounds": (112.0, 610.0),
+        },
+    )
+    renderer = SimpleNamespace(
+        _montage_level_source_for_session=lambda session, **kwargs: refined_source
+    )
+
+    assert frame_effects.shader_commit_level_source(renderer, session) is refined_source
+    clamp = session._shader_presented_bounds_clamp
+    assert clamp["true_bounds"] == (132.0, 610.0)
+    assert clamp["published_bounds"] == (100.0, 620.0)
+
+    # The covering helper is what re-arms, and it must reach the same window
+    # from the same live truth -- this is the seam that keeps R3 whole while
+    # the release edge above refuses the stale held source.
+    republished = frame_effects._shader_level_source_covering_presented_payloads(
+        session,
+        refined_source,
+    )
+    assert republished.levels == (100.0, 620.0)
+    assert session._shader_presented_bounds_clamp["true_bounds"] == (132.0, 610.0)
+
+
 def test_shader_first_pixels_wait_for_rough_source_but_not_complete_source():
     from arrayscope.core.window_levels import LevelSourceRank
     from arrayscope.display.model.montage_levels import LevelEvidenceQuality, MontageLevelStats
