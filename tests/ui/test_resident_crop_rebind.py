@@ -48,7 +48,23 @@ from tests.ui.helpers import (
     use_wgpu_backend,
 )
 
-_MONTAGE_INDICES = tuple(range(30, 230, 2))
+# The scrub montage: 40 tiles of a 168x168 plane, cropped to a 100-wide window.
+#
+# It used to be the field shape (336x336x272, 100 tiles), which is what
+# ``test_born_cropped_montage_warms_canonical_planes_and_rebinds`` still uses
+# below.  Measured, that shape costs 4.79 s per fill + cropped fill + scrub
+# against 1.25 s here, and the rebind these tests are about is identical at
+# both: zero display-preparation producers, every visible tile rebound,
+# canonical source-plane pages warmed.  What is NOT identical is the page
+# pool's pressure -- 100 planes of 336x336 sit over the residency byte share
+# and tiles legitimately decline there (measured 900 ``pages_not_resident``
+# against 0 here), so the one test whose claim is about the field REGIME keeps
+# the field shape rather than sharing this one.
+_MONTAGE_INDICES = tuple(range(30, 110, 2))
+_MONTAGE_TEXT = "30:2:110"
+_PLANE = 168
+_CROP = 100
+_CROSS_CROP = (33, 133)
 
 
 def _preparation_completed(win) -> int:
@@ -81,16 +97,17 @@ def _uniform_source() -> np.ndarray:
     # stable and a level-reusing rebind stays pixel-exact.  A per-tile constant
     # gradient would shift the window and is deliberately out of scope for the
     # gated rebind.
-    return np.random.default_rng(20260724).standard_normal((336, 336, 272), dtype=np.float32)
+    return np.random.default_rng(20260724).standard_normal((_PLANE, _PLANE, 120), dtype=np.float32)
 
 
 def _cropped_state(win, start: int):
     state = win.view_state
     state = state.with_axis_range(
-        0, indices=tuple(range(start, start + 200)), text=f"{start}:{start + 200}"
+        0, indices=tuple(range(start, start + _CROP)), text=f"{start}:{start + _CROP}"
     )
-    state = state.with_axis_range(1, indices=tuple(range(66, 266)), text="66:266")
-    return state.with_montage_axis(2, columns=10, indices=_MONTAGE_INDICES, text="30:2:230")
+    low, high = _CROSS_CROP
+    state = state.with_axis_range(1, indices=tuple(range(low, high)), text=f"{low}:{high}")
+    return state.with_montage_axis(2, columns=10, indices=_MONTAGE_INDICES, text=_MONTAGE_TEXT)
 
 
 def _crop_settled(win, start: int) -> bool:
@@ -106,7 +123,7 @@ def _crop_settled(win, start: int) -> bool:
 
 def _fill_full_plane_then_crop(win, start: int) -> None:
     full = win.view_state.with_montage_axis(
-        2, columns=10, indices=_MONTAGE_INDICES, text="30:2:230"
+        2, columns=10, indices=_MONTAGE_INDICES, text=_MONTAGE_TEXT
     )
     win._set_view_state(full)
     win.update_image_view()
@@ -137,13 +154,13 @@ def test_resident_crop_scrub_schedules_no_producers(qtbot):
     win.resize(780, 760)
     try:
         win.show()
-        _fill_full_plane_then_crop(win, 94)
+        _fill_full_plane_then_crop(win, 47)
 
         # Every scrub step shifts a fully-resident window: zero producers.
         for step in range(4):
-            start = 96 + step
+            start = 48 + step
             before = _preparation_completed(win)
-            win._on_slice_text_changed(0, f"{start}:{start + 200}")
+            win._on_slice_text_changed(0, f"{start}:{start + _CROP}")
             _busy_pump_until(
                 lambda start=start: _crop_settled(win, start),
                 INTERACTION_SETTLE_HARD_LIMIT_MS / 1000.0,
@@ -181,18 +198,18 @@ def test_crop_scrub_without_the_capability_still_evaluates(qtbot):
     try:
         win.show()
         assert bool(getattr(win.app_settings, "resident_crop_rebind", False)) is False
-        win._set_view_state(_cropped_state(win, 94))
+        win._set_view_state(_cropped_state(win, 47))
         win.update_image_view()
         _busy_pump_until(
-            lambda: _crop_settled(win, 94),
+            lambda: _crop_settled(win, 47),
             INTERACTION_SETTLE_HARD_LIMIT_MS * 4 / 1000.0,
             "cold cropped fill",
         )
         session = win.renderer._frame_session
         payload = session.display_tile_payloads[0]
-        assert payload.source_anchor.plane_shape == (336, 336)
+        assert payload.source_anchor.plane_shape == (_PLANE, _PLANE)
         native = payload.native_residency_data
-        assert native is None or tuple(np.shape(native)[:2]) != (336, 336), (
+        assert native is None or tuple(np.shape(native)[:2]) != (_PLANE, _PLANE), (
             "the capability is off, so no evaluation may be widened to the plane"
         )
         assert not any(
@@ -201,9 +218,9 @@ def test_crop_scrub_without_the_capability_still_evaluates(qtbot):
         ), "a crop-local commit must not warm canonical source-plane pages when off"
 
         before = _display_producers_completed(win)
-        win._on_slice_text_changed(0, "96:296")
+        win._on_slice_text_changed(0, "48:148")
         _busy_pump_until(
-            lambda: _crop_settled(win, 96),
+            lambda: _crop_settled(win, 48),
             INTERACTION_SETTLE_HARD_LIMIT_MS * 2 / 1000.0,
             "cold scrub",
         )
@@ -235,12 +252,12 @@ def test_slice_change_does_not_reuse_residency(qtbot):
     win.resize(780, 760)
     try:
         win.show()
-        _fill_full_plane_then_crop(win, 94)
+        _fill_full_plane_then_crop(win, 47)
         # Re-slice the montage-adjacent axis via a fresh montage window (new
         # source indices): a genuine content change, not a window shift.
         before = _preparation_completed(win)
         shifted = tuple(index + 1 for index in _MONTAGE_INDICES)
-        state = win.view_state.with_montage_axis(2, columns=10, indices=shifted, text="31:2:231")
+        state = win.view_state.with_montage_axis(2, columns=10, indices=shifted, text="31:2:111")
         win._set_view_state(state)
         win.update_image_view()
 
@@ -267,6 +284,15 @@ def test_slice_change_does_not_reuse_residency(qtbot):
 # is crop-local exactly like a cropped montage tile's, and its source anchor
 # resolves through the same ``source_anchoring_for_view`` content key.  A
 # resident crop scrub there must short-circuit identically.
+
+
+def _single_slice_source() -> np.ndarray:
+    # The displayed PLANE is what these tests are about, so it keeps the field
+    # plane shape; the depth is only wide enough for the +5 index step below.
+    # ``_uniform_source``'s 272 planes are the montage fixture's business — a
+    # single-slice view presents one of them and warms one canonical plane, so
+    # carrying the other 271 (123 MB per test) buys no coverage here.
+    return np.random.default_rng(20260724).standard_normal((336, 336, 16), dtype=np.float32)
 
 
 def _single_slice_cropped_state(win, start: int):
@@ -319,7 +345,7 @@ def test_single_slice_resident_crop_scrub_schedules_no_producers(qtbot):
     settings = use_wgpu_backend(
         extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
     )
-    win = make_backend_window(qtbot, _uniform_source(), backend="wgpu", require_gpu_atlas=True)
+    win = make_backend_window(qtbot, _single_slice_source(), backend="wgpu", require_gpu_atlas=True)
     win.resize(780, 760)
     try:
         win.show()
@@ -360,7 +386,7 @@ def test_single_slice_rebind_carries_the_new_window_semantics(qtbot):
     settings = use_wgpu_backend(
         extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
     )
-    data = _uniform_source()
+    data = _single_slice_source()
     win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     win.resize(780, 760)
     try:
@@ -426,7 +452,7 @@ def test_single_slice_rebind_hover_reads_the_new_window_value(qtbot):
     settings = use_wgpu_backend(
         extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
     )
-    data = _uniform_source()
+    data = _single_slice_source()
     win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     win.resize(780, 760)
     try:
@@ -503,7 +529,7 @@ def test_born_cropped_single_slice_warms_its_plane_and_rebinds(qtbot):
     settings = use_wgpu_backend(
         extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
     )
-    data = _uniform_source()
+    data = _single_slice_source()
     win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
     win.resize(780, 760)
     try:
@@ -555,7 +581,7 @@ def test_single_slice_slice_change_does_not_reuse_residency(qtbot):
     settings = use_wgpu_backend(
         extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
     )
-    win = make_backend_window(qtbot, _uniform_source(), backend="wgpu", require_gpu_atlas=True)
+    win = make_backend_window(qtbot, _single_slice_source(), backend="wgpu", require_gpu_atlas=True)
     win.resize(780, 760)
     try:
         win.show()
@@ -1184,6 +1210,26 @@ def test_disabling_the_capability_releases_the_pinned_canonical_planes(qtbot):
         restore_default_backend(settings)
 
 
+_FIELD_INDICES = tuple(range(30, 230, 2))
+
+
+def _field_source() -> np.ndarray:
+    # The 2026-07-25 field shape, kept whole: 100 planes of 336x336 sit OVER the
+    # tile-residency byte share, which is the regime the test below is about.
+    # The cheaper scrub montage at the top of this file cannot stand in for it --
+    # everything fits there, so no tile ever declines.
+    return np.random.default_rng(20260724).standard_normal((336, 336, 272), dtype=np.float32)
+
+
+def _field_cropped_state(win, start: int):
+    state = win.view_state
+    state = state.with_axis_range(
+        0, indices=tuple(range(start, start + 200)), text=f"{start}:{start + 200}"
+    )
+    state = state.with_axis_range(1, indices=tuple(range(66, 266)), text="66:266")
+    return state.with_montage_axis(2, columns=10, indices=_FIELD_INDICES, text="30:2:230")
+
+
 def test_born_cropped_montage_warms_canonical_planes_and_rebinds(qtbot):
     """A montage that is NEVER uncropped still rebinds: it warms its own planes.
 
@@ -1216,11 +1262,11 @@ def test_born_cropped_montage_warms_canonical_planes_and_rebinds(qtbot):
     settings = use_wgpu_backend(
         extra_settings={"montage_quality_policy": "resident", "resident_crop_rebind": True}
     )
-    win = make_backend_window(qtbot, _uniform_source(), backend="wgpu", require_gpu_atlas=True)
+    win = make_backend_window(qtbot, _field_source(), backend="wgpu", require_gpu_atlas=True)
     win.resize(780, 760)
     try:
         win.show()
-        win._set_view_state(_cropped_state(win, 38))
+        win._set_view_state(_field_cropped_state(win, 38))
         win.update_image_view()
         _busy_pump_until(
             lambda: _crop_settled(win, 38),
@@ -1281,6 +1327,12 @@ def test_born_cropped_montage_warms_canonical_planes_and_rebinds(qtbot):
 # has a different range, so a reused predecessor window is visible in the levels
 # while statistically uniform data would hide it.
 
+# Fifty tiles is load-bearing, and not for the population size: shrunk to twenty
+# (measured 28 s -> 16 s across the four level tests here), the
+# ``CenteredFFT(axis=2)`` pipeline stops producing distinguishable bounds
+# between consecutive crop windows and
+# ``test_operation_pipeline_montage_reanchors_its_own_auto_levels`` can no
+# longer tell a re-anchor from a hold. Keep the population.
 _GRADIENT_TILE_INDICES = tuple(range(50))
 
 
