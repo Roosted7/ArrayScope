@@ -42,6 +42,7 @@ from arrayscope.display.tile_layout import tile_layout_map
 from arrayscope.gpu.keys import REDUCER_PHASE_VECTOR, DataChunkKey
 from arrayscope.gpu.page_table import PageResolution
 from arrayscope.presentation.prepared_uploads import (
+    DEFAULT_ASSEMBLY_RETENTION_BUDGET_BYTES,
     AssemblyRetention,
     cpu_mapping_preparation_variant,
     page_binding_token,
@@ -83,6 +84,22 @@ def _assembly_retention_enabled() -> bool:
     """
 
     return os.environ.get("ARRAYSCOPE_PYQTGRAPH_ASSEMBLY_RETENTION", "1") != "0"
+
+
+def _assembly_retention_budget_bytes() -> int:
+    """Retention budget in MiB, overridable for sizing it against a workload.
+
+    Read once per layer rather than per commit: the bound is a property of the
+    store, and a mid-run change would only invalidate its own accounting.
+    """
+
+    override = os.environ.get("ARRAYSCOPE_PYQTGRAPH_ASSEMBLY_RETENTION_MB")
+    if not override:
+        return DEFAULT_ASSEMBLY_RETENTION_BUDGET_BYTES
+    try:
+        return max(0, int(float(override) * 1024 * 1024))
+    except ValueError:
+        return DEFAULT_ASSEMBLY_RETENTION_BUDGET_BYTES
 
 
 def _log_tile_commit_sections(record: dict[str, object]) -> None:
@@ -908,7 +925,9 @@ class MontageTileLayer:
         self._payload_prepare_ms = 0.0
         self._prepared_uploads = prepared_uploads
         self._prepared_assembly_hits = 0
-        self._assembly_retention = AssemblyRetention()
+        self._assembly_retention = AssemblyRetention(
+            budget_bytes=_assembly_retention_budget_bytes()
+        )
 
     # ------------------------------------------- presented-visibility index
 
@@ -1000,24 +1019,26 @@ class MontageTileLayer:
         """Assemble one payload, taking a worker's result when one is waiting.
 
         Page assembly is pure array work on an immutable payload — the part of
-        a PyQtGraph commit that does not need the GUI thread. A worker may have
-        done it already; the mailbox hands the result over only under the exact
-        identity and levels this commit is submitting, so a miss or a stale
-        entry falls through to assembling here, exactly as before.
+        a PyQtGraph commit that does not need the GUI thread.  Two stores can
+        answer before it runs, both keyed on exactly the identity and mapping
+        this commit is submitting, and a miss in either falls through to
+        assembling here as it always did:
 
-        A previously built assembly is retained under the same identity, so an
-        index scroll — where slot *i* now shows what slot *i+1* showed — gets
-        the *same array object* back rather than re-deriving it.  That matters
-        twice: the assembly is skipped, and because item residency is keyed on
-        that array's identity, the item the pixels are already on is found and
-        the upload is skipped too.
+        * the retention index, if this process has *ever* built these pixels;
+        * the mailbox, if a worker built them ahead of this commit.
+
+        Retention is what makes an index scroll cheap.  Slot *i* now shows what
+        slot *i+1* showed, so it gets the *same array object* back rather than
+        re-deriving it, and that matters twice: the assembly is skipped, and
+        because item residency is keyed on that array's identity, the item the
+        pixels are already on is found and the upload is skipped too.
 
         ``defer_if_unprepared`` returns ``None`` instead of assembling when the
-        payload is page-backed and nothing is waiting for it: the caller's
+        payload is page-backed and neither store can answer: the caller's
         resolve budget is spent, and assembling anyway is exactly the work the
-        budget exists to bound.  A retained or prepared assembly is still
-        returned — it costs microseconds, and a prepared buffer left behind
-        only goes stale.
+        budget exists to bound.  The mailbox is asked with ``holds`` rather than
+        ``take`` on that path — a commit that defers packs nothing, so consuming
+        its entry and recording a fallback would both be lies.
         """
 
         page_backed = payload.page_backing is not None

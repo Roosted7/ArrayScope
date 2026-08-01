@@ -1,5 +1,14 @@
 # PyQtGraph commit cost: attribution of the ~8 ms/tile, and the one cut it authorizes (2026-07-31)
 
+> **Successor, 2026-08-01:** the two terms left standing here — the `atomic_fast`
+> handoff of §2 shape 2 and the starved mailbox of §4 — are closed in
+> [pyqtgraph-atomic-scroll-handoff-2026-08-01.md](pyqtgraph-atomic-scroll-handoff-2026-08-01.md).
+> Two conclusions below are corrected there: page assembly is **not** structural
+> on a scroll (59 of 60 payloads per step are pixels the process already holds
+> and is still drawing), and `atomic_reuse` was never the lever for it — it
+> caches the transaction, not the pixels, and that build is ~6 ms of the
+> callback. §7's ~10× FFT/complex allowance is retired by measurement.
+
 Answers finding **S3** of `gui-callback-owners-2026-07-31.md` (branch
 `claude/blissful-chebyshev-a047a5`): during a 60-tile scroll build the
 pyqtgraph `montage_commit` callback cost med 499 ms at items = 60 (~8 ms/tile
