@@ -153,6 +153,24 @@ def test_render_responsiveness_preset_updates_the_governor_and_persists(qtbot):
     finally:
         win.close()
 
+    # Reaching QSettings is not the same as surviving a restart: the loader
+    # used to omit this key entirely, so a newly opened window re-detected the
+    # preset and the next save dropped the user's choice.  Only a second window
+    # can tell those apart.
+    win2 = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
+    qtbot.addWidget(win2)
+    try:
+        _process_events(qtbot)
+
+        assert win2.app_settings.render_responsiveness == RenderResponsivenessChoice.RESPONSIVE
+        assert win2.app_settings.render_responsiveness_explicit is True
+        assert win2.resource_governor.responsiveness_weight == 2.0
+        assert _submenu_action(
+            win2, "Performance", "Render Responsiveness", "Responsive"
+        ).isChecked()
+    finally:
+        win2.close()
+
 
 def test_memory_stress_actions_adjust_profile_budget_and_policy(qtbot):
     _clear_arrayscope_settings()

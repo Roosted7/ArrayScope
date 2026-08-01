@@ -463,8 +463,11 @@ def test_explicit_render_responsiveness_is_restored_across_a_restart():
     # unrelated settings save.
     assert settings_state.settings_to_mapping(chosen)["render_responsiveness"] == "responsive"
 
+    # The backend pin only keeps this arm off the GPU: with no preset key at
+    # all the choice is detected, and AUTO detection requests a wgpu adapter on
+    # a run that has a real display (ring 3/4).  Presence is what is under test.
     never_set = menus.WindowMenuMixin._load_app_settings(
-        SimpleNamespace(_settings=_RecordedQSettings())
+        SimpleNamespace(_settings=_RecordedQSettings({"image_rendering_backend": "pyqtgraph"}))
     )
 
     assert never_set.render_responsiveness_explicit is False
