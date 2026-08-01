@@ -97,7 +97,7 @@ def _drain(win, qtbot):
     deadline = monotonic() + STEP_SETTLE_BUDGET_S
     while monotonic() < deadline:
         if _round_settled(win):
-            process_events(qtbot, count=5)
+            process_events(qtbot, count=1)
             if _round_settled(win):
                 return True
         process_events(qtbot, count=5)
