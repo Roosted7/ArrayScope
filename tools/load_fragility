@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+#
+# Re-check the known load-fragile tests, under load, without running the suite.
+#
+#     tools/load_fragility                 # the known set, 3 repeats
+#     tools/load_fragility -r 5            # 5 repeats
+#     tools/load_fragility tests/ui/x.py::test_y   # something specific
+#
+# Why this exists: the reproduction recipe used to be "three concurrent full
+# suites in three worktrees", which is 15 minutes per observation and re-runs
+# 4400 tests to learn something about a dozen. The suites are not the point —
+# CPU oversubscription is. This puts the box under the same pressure and runs
+# only the tests that have ever been observed to care.
+#
+# The full three-suite run still has one job the cheap version cannot do: find
+# *new* members of the set. Run it when the question is "what else is fragile?",
+# not when the question is "is this one fixed?".
+#
+# THE LOAD MUST NEVER OUTLIVE THIS SCRIPT. It is started in its own process
+# group and the trap kills that group on every exit path, including Ctrl-C and
+# SIGTERM. A background load left behind poisons every measurement anyone takes
+# afterwards, including in other checkouts, and it is not obvious from a prompt
+# that it is there. If you edit this file, keep the trap first.
+
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+repeats=3
+loaders=$(( $(nproc) * 3 / 2 ))
+
+while getopts "r:l:h" opt; do
+  case "$opt" in
+    r) repeats="$OPTARG" ;;
+    l) loaders="$OPTARG" ;;
+    h) sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+# Every test observed to fail under the 2026-08-01 three-suite experiment, plus
+# the ones the fixes to those touched. Add a row when a new one is found; do not
+# remove a row because it now passes — that is what this script is for.
+default_targets=(
+  # Still red under load, and each is understood; see docs/queue.md.
+  "tests/ui/test_montage_out_of_view_retention.py::test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope"
+  "tests/ui/test_panel_layout.py::test_restored_layout_uses_saved_viewport_session"
+  "tests/ui/test_file_view_session.py::test_settings_viewport_session_uses_viewport_continuity_transaction"
+  "tests/ui/test_montage_settled_quiescence.py::test_settled_montage_after_a_data_change_owes_no_bookkeeping[wgpu]"
+  # Fixed 2026-08-01; kept so a regression is caught here rather than in a suite.
+  "tests/ui/test_window_sync.py::test_camera_pan_zoom_syncs_between_windows"
+  "tests/ui/test_pyqtgraph_preview_transition.py::test_single_slice_to_full_montage_presents_around_retained_exact_tile[scalar]"
+  "tests/app/test_memory_stress.py::test_montage_tile_residency_reuses_its_working_set_on_a_second_walk"
+  "tests/ui/test_resident_crop_rebind.py::test_single_slice_rebind_hover_reads_the_new_window_value"
+  "tests/ui/test_resident_crop_rebind.py::test_resident_crop_scrub_schedules_no_producers"
+  "tests/ui/test_resident_crop_rebind.py::test_crop_scrub_without_the_capability_still_evaluates"
+  "tests/ui/test_performance_settings.py::test_host_cache_compression_menu_switches_and_persists"
+  "tests/ui/test_montage_interactions.py::test_wgpu_expanded_montage_never_hides_retained_sixty"
+  "tests/ui/test_montage_interactions.py::test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto[pyqtgraph]"
+  "tests/app/test_open_flow.py::test_streaming_rec_updates_viewer_before_completion"
+  # Seen once each in the 2026-08-01 verification runs, cause not yet pinned.
+  "tests/ui/test_lod_demand_freshness.py::test_zoom_in_rederives_lod_demand"
+  "tests/ui/test_viewport_convergence_latch.py"
+)
+
+targets=("$@")
+if [ ${#targets[@]} -eq 0 ]; then
+  targets=("${default_targets[@]}")
+fi
+
+load_pgid=""
+
+cleanup() {
+  local status=$?
+  if [ -n "$load_pgid" ]; then
+    kill -- "-$load_pgid" 2>/dev/null || true
+    sleep 0.2
+    kill -9 -- "-$load_pgid" 2>/dev/null || true
+  fi
+  # Belt and braces: this script's own loaders are the only processes running
+  # this exact loop body, so a stragging one is ours and is not wanted.
+  pkill -9 -f 'arrayscope-load-fragility-loop' 2>/dev/null || true
+  return $status
+}
+trap cleanup EXIT INT TERM HUP
+
+start_load() {
+  setsid bash -c '
+    for _ in $(seq '"$loaders"'); do
+      bash -c "while :; do :; done # arrayscope-load-fragility-loop" &
+    done
+    wait
+  ' &
+  load_pgid=$!
+  # setsid makes the child its own group leader, so its pid is its pgid.
+  sleep 1
+}
+
+printf 'load: %s busy loops on %s cores; %s repeat(s) over %s target(s)\n' \
+  "$loaders" "$(nproc)" "$repeats" "${#targets[@]}"
+
+start_load
+trap 'echo; echo "interrupted — stopping load"; exit 130' INT
+
+declare -a results
+status=0
+for ((run = 1; run <= repeats; run++)); do
+  printf '\n--- run %s/%s (load average %s)\n' "$run" "$repeats" "$(cut -d' ' -f1 /proc/loadavg)"
+  if "$root/tools/env" pytest "${targets[@]}" -q --testmon-noselect 2>&1 | tail -25; then
+    results+=("run $run: PASS")
+  else
+    results+=("run $run: FAIL")
+    status=1
+  fi
+done
+
+printf '\n=== load-fragility summary (%s loaders)\n' "$loaders"
+printf '%s\n' "${results[@]}"
+exit $status

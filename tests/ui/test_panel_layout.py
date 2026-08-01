@@ -589,13 +589,29 @@ def test_restored_layout_uses_saved_viewport_session(qtbot):
     try:
         # Forty event-loop turns is four hundred milliseconds, and the restore
         # takes longer than that on a busy box -- the measurement below then
-        # reads a half-applied layout.  The continuity transaction is the
-        # product's own "this restore is finished" edge: it settles its shape
-        # and is released, after which the viewport size is the restored one.
-        settle_window(
-            restored,
-            lambda: (tx := restored._viewport_continuity_transaction()) is None or tx.released,
-        )
+        # reads a half-applied layout.
+        #
+        # Waiting on the continuity transaction instead does not work, and the
+        # way it fails is worth recording: `tx is None or tx.released` is true
+        # at t=0, before the transaction has been created at all, so that wait
+        # returns immediately and is no wait whatsoever. It made this test fail
+        # 3/3 under three concurrent suites where the original failed 2/3 --
+        # a wait that cannot wait is worse than a fixed pause, not better.
+        # A predicate over a state that starts absent must distinguish "not yet"
+        # from "already done".
+        #
+        # So wait for the restored shape itself. That is the assertion below,
+        # which would be circular if the wait could pass silently -- it cannot:
+        # a restore that never converges leaves the pipeline idle and the wait
+        # raises, naming this line.
+        def _viewport_restored() -> bool:
+            size = restored.img_view.graphicsView.viewport().size()
+            return (
+                abs(int(size.height()) - saved_viewport_shape[0]) <= 2
+                and abs(int(size.width()) - saved_viewport_shape[1]) <= 2
+            )
+
+        settle_window(restored, _viewport_restored, label="saved viewport shape is restored")
         restored_viewport = restored.img_view.graphicsView.viewport().size()
 
         assert abs(int(restored_viewport.height()) - saved_viewport_shape[0]) <= 2
