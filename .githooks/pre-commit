@@ -115,10 +115,11 @@ if ! python "$root/tools/dead_code.py"; then
 fi
 
 if ! python "$root/tools/timing_guard.py"; then
-	echo "pre-commit: timing guard failed — a test asked the wall clock a question." >&2
+	echo "pre-commit: timing guard failed — the refusal above names which rule." >&2
 	echo "  A pause reads its duration from the throttle bounding it, or waits on" >&2
 	echo "  the product's own progress (tests/settle.py). A duration is recorded," >&2
-	echo "  never adjudicated. There is no allowlist to add it to." >&2
+	echo "  never adjudicated. There is no allowlist to add it to — and if you" >&2
+	echo "  converted a pause, the backlog number goes down with it." >&2
 	status=1
 fi
 
