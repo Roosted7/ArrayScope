@@ -438,6 +438,11 @@ class WindowRuntimeDiagnostics:
     derived_shape: tuple[int, ...]
     derived_dtype: str
     pipeline_peak_bytes: int | None
+    # Execution-environment truth a trace cannot be interpreted without: a
+    # callback-inflation number means something different under a live GIL
+    # than a free-threaded build, and with worker processes than without.
+    compute_backend: str = ""
+    python_gil_enabled: bool | None = None
     compute_worker_summaries: tuple[str, ...] = ()
     compute_fft_worker_summaries: tuple[str, ...] = ()
     pipeline_warnings: tuple[str, ...] = ()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from time import perf_counter
 
 from arrayscope.core.compute_policy import ComputeLane
@@ -751,6 +752,10 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             deferred_side_panel_refreshes=0
             if coalescer is None
             else int(coalescer.deferred_side_panel_refreshes),
+        ),
+        compute_backend=type(getattr(window.kernel, "_backend", None)).__name__,
+        python_gil_enabled=(
+            bool(sys._is_gil_enabled()) if hasattr(sys, "_is_gil_enabled") else True
         ),
         fft_backend_choice=backend_choice.value,
         fft_backend_resolved=resolved.name,

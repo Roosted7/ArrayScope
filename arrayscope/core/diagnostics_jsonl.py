@@ -77,6 +77,8 @@ def diagnostics_start_record(
             },
             "image_rendering_backend_selected": snapshot.image_rendering_backend_selected,
             "image_rendering_backend_actual": snapshot.image_rendering_backend_actual,
+            "compute_backend": snapshot.compute_backend,
+            "python_gil_enabled": snapshot.python_gil_enabled,
         },
     }
 
