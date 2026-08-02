@@ -434,23 +434,27 @@ class ProcessWorkerBackend:
             record = kernel._take_next(stop=self._stop)
             if record is None:
                 continue
-            if isinstance(record.spec.fn, RemoteCall):
-                token = record.token
-                pass_token = bool(record.spec.pass_token)
-                with remote_dispatch(
-                    lambda call, call_token, token=token, pass_token=pass_token: self._dispatch(
-                        call, call_token, token, pass_token
-                    )
-                ):
-                    kernel._execute(record)
-            else:
+            # Installed for every record, not only ``spec.fn is RemoteCall``:
+            # a task family migrates by building a ``RemoteCall`` wherever its
+            # body is pure, and that is routinely *inside* a closure the rest
+            # of the family still needs (ADR 0064 family 2). The caller's own
+            # token argument tells the child's arity; the record token backs
+            # cancellation when the caller passed none.
+            token = record.token
+            with remote_dispatch(
+                lambda call, call_token, token=token: self._dispatch(call, call_token, token)
+            ):
                 kernel._execute(record)
 
-    def _dispatch(self, call: RemoteCall, call_token, token, pass_token: bool):
+    def _dispatch(self, call: RemoteCall, call_token, record_token):
         pool = self._pool
         if pool is None or pool.closed:
             return call.invoke(call_token)
-        return pool.run(call, token, pass_token=pass_token)
+        return pool.run(
+            call,
+            call_token if call_token is not None else record_token,
+            pass_token=call_token is not None,
+        )
 
 
 __all__ = [

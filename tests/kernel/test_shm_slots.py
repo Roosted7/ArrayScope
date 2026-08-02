@@ -167,3 +167,9 @@ def test_a_payload_over_the_slot_size_stays_pickled(pool):
 
     assert wrapped is payload
     assert leases == ()
+    # And it is a counted fallback, not a silent one: a family whose planes
+    # outgrow the slot class must show up in the same diagnostic the
+    # exhaustion path feeds, or the pool reads as keeping up while every
+    # payload pickles.
+    assert pool.fallbacks == 1
+    assert all(state == 0 for state in pool._states)

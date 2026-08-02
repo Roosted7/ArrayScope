@@ -167,9 +167,14 @@ class SlotPool:
                     self._owners[index] = int(owner)
                     self._cursor = (index + 1) % self.slots
                     return SlotLease(self, index)
+        self.count_fallback()
+        return None
+
+    def count_fallback(self) -> None:
+        """Record a payload that pickled instead of taking a slot."""
+
         with self._fallbacks.get_lock():
             self._fallbacks.value += 1
-        return None
 
     def take(self, descriptor: SlotDescriptor) -> np.ndarray:
         """Move a READY slot to HELD and return the consumer's read-only view."""
@@ -275,9 +280,14 @@ def unwrap_payload(value, pool: SlotPool | None, *, copy: bool = False):
 def _wrap(value, pool: SlotPool, owner: int, depth: int, leases: list[SlotLease]):
     if slottable(value):
         lease = pool.lease(owner)
-        if lease is None or value.nbytes > lease.capacity:
-            if lease is not None:
-                lease.release()
+        if lease is None:
+            return value
+        if value.nbytes > lease.capacity:
+            # An oversize payload is a fallback too — without the count, a
+            # family whose planes outgrow the slot class pickles every one of
+            # them while the diagnostics read as if the pool were keeping up.
+            lease.release()
+            pool.count_fallback()
             return value
         leases.append(lease)
         target = lease.view(value.shape, value.dtype)

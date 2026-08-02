@@ -167,6 +167,30 @@ def test_the_kernel_splits_remote_calls_from_closures(pool):
     assert seen["closure"] == os.getpid()
 
 
+def test_a_remote_call_nested_in_a_closure_routes_to_a_child(pool):
+    """A family migrates body-first: the pure core becomes a ``RemoteCall``
+    while the closure around it still holds unpicklable state (ADR 0064
+    family 2). The dispatcher therefore covers every record, not only tasks
+    whose ``fn`` is itself a ``RemoteCall``."""
+
+    kernel = Kernel(ProcessWorkerBackend(workers=2, pool=pool))
+    seen = {}
+    kernel.submit(
+        TaskSpec(
+            key="nested",
+            fn=lambda: (os.getpid(), RemoteCall(OWN_PID, None)()),
+            lane=Lane.HISTOGRAM_REFINEMENT,
+        ),
+        on_done=lambda value: seen.__setitem__("nested", value),
+    )
+    assert await_completion(kernel)[1] == TaskOutcome.COMPLETED
+    kernel.shutdown()
+
+    closure_pid, nested_pid = seen["nested"]
+    assert closure_pid == os.getpid()
+    assert nested_pid != os.getpid()
+
+
 def test_the_child_observes_the_kernels_cancellation(pool):
     kernel = Kernel(ProcessWorkerBackend(workers=1, pool=pool))
     handle = kernel.submit(
