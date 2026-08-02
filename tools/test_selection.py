@@ -274,7 +274,7 @@ def command_status(args) -> int:
         print("    Selection under-scopes and --since refuses until one re-record:")
         print("    pytest --testmon-noselect")
 
-    from tests import red_ledger
+    from tests import red_ledger, skip_ledger
 
     broken_here = red_ledger.read_new_reds(testmon_policy.map_path(REPO_ROOT), environment)
     inherited = peek.forced_tests - broken_here
@@ -312,6 +312,24 @@ def command_status(args) -> int:
         print("dependencies change. The conditions below are recorded evidence for a")
         print("diagnosis, and are never used to discount an observation:")
         for name, mark in sorted(flakes.items()):
+            seen = mark.get("last_seen") or "?"
+            print(f"    {mark.get('count', 1)}x  last {seen}  {name}")
+            conditions = red_ledger.context_summary(mark)
+            if conditions:
+                print(f"        {conditions}")
+        print()
+
+    intermittent = skip_ledger.read_intermittent(testmon_policy.map_path(REPO_ROOT), environment)
+    if intermittent:
+        print(
+            f"intermittent skips ({len(intermittent)}) — skipped on one run and ran on "
+            "the next, in this"
+        )
+        print("same environment. A gate is meant to be a property of the environment, so")
+        print("one that answered differently twice is describing something else. These")
+        print("change no selection; they exist because nothing else records that it")
+        print("happened. Same conditions, same reading, as the flakes above:")
+        for name, mark in sorted(intermittent.items()):
             seen = mark.get("last_seen") or "?"
             print(f"    {mark.get('count', 1)}x  last {seen}  {name}")
             conditions = red_ledger.context_summary(mark)

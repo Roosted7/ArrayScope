@@ -164,6 +164,53 @@ def test_auto_wgpu_construction_failure_falls_back_to_pyqtgraph(qt_app, monkeypa
         view.close()
 
 
+def test_wgpu_construction_failure_records_its_traceback_on_the_fallback(qt_app, monkeypatch):
+    """The degraded surface carries why, after the toast is gone.
+
+    ``notify`` is the user's channel: one sentence, cleared by the status bar's
+    own timeout, and never delivered at all when nobody passed a callback. That
+    made it the *only* record of a failed device build, so every later reader --
+    a profiler, a test, a person -- could see that wgpu had been asked for and
+    not got, and could not see why. A traceback on the object outlives all of
+    that and is what the backend guard quotes back.
+    """
+
+    from arrayscope.display.backend_contract import image_view_backend_fallback_reason
+    from arrayscope.display.backends import wgpu as wgpu_backend
+
+    class BrokenWgpuSurface:
+        def __init__(self, **_kwargs):
+            raise RuntimeError("injected device loss")
+
+    monkeypatch.setattr(wgpu_backend, "WgpuSurface", BrokenWgpuSurface)
+    # No ``notify``: the recording must not depend on anyone listening.
+    view = fac.create_image_view(_settings(ImageRenderingBackendChoice.WGPU))
+    try:
+        reason = image_view_backend_fallback_reason(view)
+        assert "RuntimeError: injected device loss" in reason
+        # The traceback, not just the repr -- the open question this exists to
+        # answer is *where* the build died, which ``str(exc)`` cannot say. So
+        # assert on the frame, which is the part that locates it.
+        assert "Traceback" in reason
+        assert "test_image_view_factory_warm.py" in reason
+        assert "in __init__" in reason
+    finally:
+        view.close()
+
+
+def test_a_backend_that_builds_records_no_fallback_reason(qt_app):
+    """An honest surface has nothing to explain, and must say so as an empty
+    string rather than a stale or invented one."""
+
+    from arrayscope.display.backend_contract import image_view_backend_fallback_reason
+
+    view = fac.create_image_view(_settings(ImageRenderingBackendChoice.PYQTGRAPH))
+    try:
+        assert image_view_backend_fallback_reason(view) == ""
+    finally:
+        view.close()
+
+
 def test_bc_bulk_warm_requires_wgpu_and_enabled_texture_codec():
     assert fac.wgpu_texture_compression_likely(
         _settings(ImageRenderingBackendChoice.WGPU, TextureCodecChoice.AUTO)

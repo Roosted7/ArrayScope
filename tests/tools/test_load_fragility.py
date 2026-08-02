@@ -185,3 +185,102 @@ def test_cleanup_is_scoped_to_this_instance():
     assert "${load_tag}" in reap.group(1), (
         "cleanup must reap only THIS instance's loops, or exiting kills a concurrent session's load"
     )
+
+
+def _verdict_block() -> str:
+    """The script's own verdict chain, lifted out of the script.
+
+    Read rather than restated, for the reason :func:`_any_loop_pattern` gives:
+    a second copy of this logic would keep passing after the real one changed,
+    and this particular logic has already been wrong three different ways.
+    """
+
+    text = _script_text()
+    start = text.index("  rc=0\n")
+    end = text.index("\ndone\n", start)
+    return text[start:end]
+
+
+def _verdict(output: str, returncode: int) -> subprocess.CompletedProcess:
+    """Run that chain against a canned pytest result.
+
+    No supervisor, no pytest, no spinning core -- this file's opening rule. The
+    only edit to the lifted text is the invocation itself, which is replaced by
+    the canned pair; if that substitution stops matching, the test says so
+    rather than silently asserting against an unedited block that would run a
+    real suite.
+    """
+
+    block = _verdict_block()
+    canned = 'out="$CANNED_OUT"\n  rc="$CANNED_RC"'
+    patched, count = re.subn(r'out="\$\(.*?\)" \|\| rc=\$\?', canned, block)
+    assert count == 1, "the pytest invocation in the verdict block moved; update this test"
+    script = (
+        "set -euo pipefail\n"
+        "declare -a results\n"
+        "status=0\n"
+        "run=1\n"
+        f"{patched}\n"
+        'printf "%s\\n" "${results[@]}"\n'
+        "exit $status\n"
+    )
+    return subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "CANNED_OUT": output, "CANNED_RC": str(returncode)},
+        timeout=60,
+    )
+
+
+def test_a_clean_run_is_verdicted_and_does_not_kill_the_script():
+    """The good case must reach a verdict, and it used not to.
+
+    ``skipped=$(... | grep -oE '[0-9]+ skipped' | ...)`` finds nothing when
+    nothing skipped, and under the script's own ``set -euo pipefail`` that
+    ended the run right there -- at repeat 1, with no summary and a non-zero
+    exit. So the tool for re-checking fragile tests under load reported failure
+    on precisely the runs where every target survived.
+    """
+
+    result = _verdict("22 passed in 32.16s", 0)
+    assert result.returncode == 0
+    assert "run 1: PASS" in result.stdout
+    assert "SKIPPED" not in result.stdout
+
+
+def test_a_failing_run_is_verdicted_rather_than_aborting_the_script():
+    """A red is the observation, not an error in the observer.
+
+    ``out="$(pytest ...)"`` under ``set -e`` aborted on a failing pytest before
+    ``rc=$?`` was ever read, taking the remaining repeats and the summary with
+    it -- the one outcome this script exists to catch was the one it could not
+    report.
+    """
+
+    result = _verdict("1 failed, 21 passed in 34.02s", 1)
+    assert result.returncode == 1
+    assert "run 1: FAIL" in result.stdout
+
+
+def test_a_skipped_target_is_not_read_as_a_survival():
+    """A target that skipped did not face the load. Fixed in 57471d26; kept."""
+
+    result = _verdict("20 passed, 2 skipped in 30.11s", 0)
+    assert result.returncode == 1
+    assert "2 SKIPPED" in result.stdout
+    assert "did not face the load" in result.stdout
+
+
+def test_a_target_that_matches_nothing_is_not_read_as_a_survival():
+    """The quietest member of the family: pytest exits 0 for a missing nodeid.
+
+    So a target renamed out from under the default list verdicts PASS forever,
+    with no test having run at all -- the same false survival as the skip, and
+    harder to notice because the count it would have shown is simply absent.
+    """
+
+    result = _verdict("no tests ran in 4.39s", 0)
+    assert result.returncode == 1
+    assert "NO TESTS RAN" in result.stdout

@@ -2201,6 +2201,64 @@ def test_a_mark_clears_the_moment_the_test_actually_runs(tmp_path):
     assert skip_ledger.read_skips(tmp_path / ".testmondata", "e") == set()
 
 
+def test_clearing_a_mark_leaves_a_durable_record_that_it_was_ever_set(tmp_path):
+    """The self-healing above is right, and it used to destroy the evidence.
+
+    Within one environment a gate should answer the same way every time, so a
+    test that skips on one run and runs on the next is describing something the
+    environment does not explain. That is worth knowing and nothing recorded it:
+    the mark cleared on the very run that proved it had been intermittent, which
+    is how ``make_backend_window`` skipped three different tests across eleven
+    passes and left nothing behind to find.
+    """
+
+    from tests import skip_ledger
+
+    _gated_project(tmp_path)
+    _run_child_pytest(tmp_path, GATE_OPEN="0")
+    _run_child_pytest(tmp_path, "test_gated.py::test_gated", GATE_OPEN="1")
+
+    intermittent = skip_ledger.read_intermittent(tmp_path / ".testmondata", "e")
+    name = next(key for key in _recorded_dependencies(tmp_path) if key.endswith("test_gated"))
+    assert name in intermittent, "the transition that cleared the mark was not written down"
+    assert intermittent[name]["count"] == 1
+
+
+def test_an_intermittent_skip_record_widens_no_selection(tmp_path):
+    """It is a thing a person reads, never a thing the gate reads.
+
+    A test that ran recorded real dependencies, and those are evidence whatever
+    its previous run did -- so this record must not put a single node back into
+    the ``--since`` set. The mark above is what selection consults; this is
+    strictly commentary, and the two live in different keys so that staying true
+    does not depend on anyone remembering the distinction.
+    """
+
+    from tests import skip_ledger
+
+    _gated_project(tmp_path)
+    _run_child_pytest(tmp_path, GATE_OPEN="0")
+    _run_child_pytest(tmp_path, "test_gated.py::test_gated", GATE_OPEN="1")
+
+    assert skip_ledger.read_intermittent(tmp_path / ".testmondata", "e")
+    assert skip_ledger.read_skips(tmp_path / ".testmondata", "e") == set(), (
+        "the durable record leaked into the set that widens the merge gate"
+    )
+
+
+def test_a_test_that_simply_runs_is_never_called_intermittent(tmp_path):
+    """No transition, no record. The obvious half, and the expensive one to get
+    wrong: a mark on every green would bury the handful that mean something."""
+
+    from tests import skip_ledger
+
+    _gated_project(tmp_path)
+    _run_child_pytest(tmp_path, GATE_OPEN="1")
+    _run_child_pytest(tmp_path, "test_gated.py::test_gated", GATE_OPEN="1")
+
+    assert skip_ledger.read_intermittent(tmp_path / ".testmondata", "e") == {}
+
+
 def test_an_xfail_is_not_a_skip_however_it_is_reported(tmp_path):
     """xfail arrives as ``skipped`` with ``wasxfail``, and its body ran.
 

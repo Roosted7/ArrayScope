@@ -6,6 +6,7 @@ import contextlib
 import os
 import platform
 import threading
+import traceback
 
 from arrayscope.app.settings_state import (
     ImageRenderingBackendChoice,
@@ -177,10 +178,21 @@ def create_image_view(settings=None, *, notify=None):
                 )
             return view
         except Exception as exc:
+            # Two channels, because they answer different questions and only one
+            # of them survives. ``notify`` is the user's: one sentence, gone with
+            # the status bar's timeout, and never delivered at all to a headless
+            # or programmatic caller. The attribute is the diagnostic one and
+            # keeps the traceback, so whoever later finds a PyQtGraph surface
+            # where wgpu was pinned can read *why* instead of inferring that the
+            # machine must lack a GPU. That inference was wrong for a whole class
+            # of test skips (queue: "the silent wgpu skip"), and it was wrong
+            # because this was the only record and it evaporated.
+            fallback_reason = traceback.format_exc()
             if callable(notify):
                 notify(f"wgpu renderer unavailable; using PyQtGraph ({exc})")
         view = PyQtGraphSurface()
         view._notify_status = notify
+        view._image_backend_fallback_reason = fallback_reason
         return view
     view = PyQtGraphSurface()
     view._notify_status = notify

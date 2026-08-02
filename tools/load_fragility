@@ -296,12 +296,32 @@ for ((run = 1; run <= repeats; run++)); do
   # spot of the tool built to re-check fragile tests under load, and a false
   # skip is exactly what queue row "the silent wgpu skip" describes: a call
   # -phase skip carrying a reason that is not true.
-  out="$("$root/tools/env" pytest "${targets[@]}" -q --testmon-noselect 2>&1)"
-  rc=$?
+  # Neither of the next two lines may be adjudicated by `set -e`, and both were.
+  # A failing pytest is the outcome this script exists to observe, not an error
+  # in the script: errexit on the assignment killed the run before `rc` was ever
+  # read, taking the remaining repeats and the whole summary with it, so the tool
+  # for finding load failures could not report one. The grep is the mirror image
+  # -- it matches nothing on the *good* case, and under `pipefail` that ended a
+  # clean run at run 1 with no summary either. Both verdicts are data here.
+  rc=0
+  out="$("$root/tools/env" pytest "${targets[@]}" -q --testmon-noselect 2>&1)" || rc=$?
   printf '%s\n' "$out" | tail -25
-  skipped="$(printf '%s' "$out" | grep -oE '[0-9]+ skipped' | tail -1 | cut -d' ' -f1)"
+  skipped="$(printf '%s' "$out" | grep -oE '[0-9]+ skipped' | tail -1 | cut -d' ' -f1 || true)"
+  # The third member of the same family, and the quietest. pytest exits 0 when a
+  # named nodeid matches nothing, so a target renamed or deleted out from under
+  # the list above verdicts PASS -- forever, and with no test having run at all.
+  # Same failure as the skip: a target that did not face the load, read as one
+  # that survived it. An `if` condition, because a `grep && var=1` here would be
+  # adjudicated by `set -e` on the no-match case, which is the normal one.
+  collected_nothing=""
+  if printf '%s' "$out" | grep -qE 'no tests ran'; then
+    collected_nothing=1
+  fi
   if [ "$rc" -ne 0 ]; then
     results+=("run $run: FAIL")
+    status=1
+  elif [ -n "$collected_nothing" ]; then
+    results+=("run $run: NO TESTS RAN — a target names nothing that exists")
     status=1
   elif [ -n "$skipped" ] && [ "$skipped" -gt 0 ]; then
     results+=("run $run: PASS but $skipped SKIPPED — a skipped target did not face the load")

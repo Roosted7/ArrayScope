@@ -67,7 +67,7 @@ contract).
 Safe to pick up alongside the numbered queue; each is self-contained.
 
 - **An explicit-wgpu window that comes up on PyQtGraph skips instead of failing
-  — OPEN, found 2026-08-02.** Opened by the report that one collected test
+  — DONE 2026-08-02.** Opened by the report that one collected test
   produces no outcome in about half of full-suite passes. **That premise is
   refuted**: eleven instrumented passes (a `pytest_runtest_protocol` /
   `pytest_runtest_logreport` recorder writing every node id to a per-worker
@@ -101,6 +101,45 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   as a target that survived the load; and `tests/skip_ledger.py` self-heals on
   the next run where the test does run, so an intermittent skip leaves no
   durable trace.
+
+  **Landed, all three channels.** The factory keeps degrading — that is right
+  for an interactive session — but it now records `traceback.format_exc()` on
+  the surface it hands back, so the reason outlives a toast nobody receives;
+  `require_image_view_backend` quotes it into its refusal, which serves the
+  release-diagnostics caller as well as the tests; and `make_backend_window`
+  routes through that guard and fails. The helper's own guard
+  (`tests/ui/test_backend_window_helper.py`) deliberately does **not** use
+  `pytest.raises`: a skip escaping a `raises` block skips the guard too, so the
+  one test watching for the disease would have exhibited it. Three mutations —
+  revert to skip, drop the reason, drop the adapter gate — each redden it.
+
+  **The `load_fragility` half was worse than recorded, and its fix was itself
+  broken.** `57471d26` added skip detection under the script's own
+  `set -euo pipefail`, where `grep -oE '[0-9]+ skipped'` matching nothing —
+  the *good* case — ended the run at repeat 1 with no summary and a non-zero
+  exit. The same errexit killed `out="$(pytest ...)"` before `rc=$?` was read,
+  so a genuine red aborted the script instead of being verdicted. Both fixed.
+  A **third** blind spot of the same family was found while fixing them and
+  fixed with them: pytest exits 0 for a nodeid that matches nothing, so a
+  target renamed out of the default list verdicted PASS forever with no test
+  having run. All four verdict paths are pinned in
+  `tests/tools/test_load_fragility.py` by lifting the block out of the script
+  and driving it with canned output — no supervisor, no spinning core, per that
+  file's own rule.
+
+  **`skip_ledger` keeps the transition, and changes no selection.** The mark
+  still clears the moment the test really runs; that clearing is now also
+  written to an `intermittent` key with the flake ledger's mark shape and
+  conditions, cleared only when the test stops existing, printed by
+  `tools/test_selection.py status`, and read by nothing that selects. Within one
+  environment a gate should answer the same way every time, so one that answered
+  twice is describing something else.
+
+  **Verified** `tools/load_fragility -t 15 -r 2`: 2/2 PASS, 22 targets, zero
+  skipped, under a held 15 runnable. What that does *not* show is a real
+  occurrence — the underlying surface-build failure is still unreproduced and
+  its exception text still uncaptured, which is the whole reason the message
+  now carries it. The next real one explains itself.
 
 - **Settle waits no longer fail on a busy machine — DONE 2026-08-01.** Three
   concurrent full suites on `ea9c5ec4` reddened fourteen tests that all pass in

@@ -112,6 +112,28 @@ def image_view_backend_capabilities(view) -> ImageViewBackendCapabilities:
     return ImageViewBackendCapabilities(name="pyqtgraph")
 
 
+def image_view_backend_fallback_reason(view) -> str:
+    """What the factory recorded when it degraded this surface, or ``""``.
+
+    ``create_image_view`` catches a failing explicit-GPU surface build and hands
+    back PyQtGraph instead, which is the right thing for an interactive session
+    and a silent one for everybody else: the reason goes out as a status-bar
+    toast and nothing keeps it. The factory now also writes it on the surface it
+    returns, and this reads it back, so refusing the degraded surface can say
+    *what failed* rather than only that something did.
+
+    An empty string means no fallback was recorded — either this surface is the
+    one that was asked for, or it was built somewhere that does not go through
+    the factory at all. Neither is a reason to speculate in the caller's message.
+    """
+
+    for candidate in (view, getattr(view, "surface", None)):
+        reason = getattr(candidate, "_image_backend_fallback_reason", None)
+        if reason:
+            return str(reason)
+    return ""
+
+
 def require_image_view_backend(
     view,
     expected: str,
@@ -124,13 +146,22 @@ def require_image_view_backend(
     PyQtGraph. Profilers and release tools cannot inherit that convenience:
     an artifact labelled for one backend is invalid when another backend
     actually rendered it.
+
+    The refusal carries the factory's own recorded reason when there is one.
+    Without it the message names a symptom every reader then has to guess the
+    cause of, and the two candidate guesses — "this machine has no GPU" and
+    "the device build failed" — call for opposite responses.
     """
 
     expected = str(expected).strip().lower()
     actual = str(image_view_backend_capabilities(view).name).strip().lower()
     if actual != expected:
-        raise RuntimeError(
+        message = (
             f"{context} requested backend {expected!r}, but the active "
             f"image surface is {actual!r}; refusing mislabeled evidence"
         )
+        reason = image_view_backend_fallback_reason(view)
+        if reason:
+            message += f"\n\nthe {expected} surface build failed with:\n{reason}"
+        raise RuntimeError(message)
     return actual

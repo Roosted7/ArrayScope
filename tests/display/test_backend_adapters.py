@@ -103,6 +103,41 @@ def test_evidence_backend_guard_rejects_a_factory_fallback():
         require_image_view_backend(view, "wgpu", context="test evidence")
 
 
+def test_evidence_backend_guard_quotes_the_recorded_fallback_reason():
+    """The refusal must name the cause, not just the symptom.
+
+    "the surface is pyqtgraph" has two candidate explanations that call for
+    opposite responses -- this machine has no GPU, or the device build failed --
+    and the message used to leave the reader to pick. The factory is the only
+    party that saw which, so the guard repeats what it recorded.
+    """
+
+    view = SimpleNamespace(
+        rendering_capabilities=PYQTGRAPH_CAPABILITIES,
+        _image_backend_fallback_reason="RuntimeError: injected device loss",
+    )
+
+    with pytest.raises(RuntimeError, match="injected device loss") as excinfo:
+        require_image_view_backend(view, "wgpu", context="test evidence")
+
+    assert "the wgpu surface build failed with:" in str(excinfo.value)
+
+
+def test_evidence_backend_guard_stays_silent_when_nothing_was_recorded():
+    """No record is not a licence to speculate about one.
+
+    A surface built outside the factory carries no reason, and a message that
+    invented a cause there would be worse than the bare symptom.
+    """
+
+    view = SimpleNamespace(rendering_capabilities=PYQTGRAPH_CAPABILITIES)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        require_image_view_backend(view, "wgpu", context="test evidence")
+
+    assert "surface build failed" not in str(excinfo.value)
+
+
 def _geometry(*, montage=False):
     state = ViewState.from_shape((2, 3, 1)).with_image_axes(0, 1)
     geometry = DisplayGeometry(state, (2, 3))

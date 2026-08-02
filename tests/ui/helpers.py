@@ -279,23 +279,46 @@ def restore_default_backend(settings):
 
 
 def make_backend_window(qtbot, data, *, backend, require_gpu_atlas=False):
-    """Build an ArrayScopeWindow on the given backend, skipping if unavailable."""
+    """Build an ArrayScopeWindow on the given backend, refusing a fallback one.
+
+    The environment question is already settled above this line:
+    ``require_wgpu_adapter`` skips when the machine has no adapter, so *past*
+    that gate the machine demonstrably has one. A window that then comes back
+    on PyQtGraph is not an environment without a GPU — it is the factory having
+    caught a failing surface build and degraded, which is a defect in whatever
+    made the build fail.
+
+    This used to skip, with the message ``wgpu backend unavailable in this Qt
+    environment``, which is a sentence the run had just disproved. Being a
+    call-phase skip it read as one more ``s`` among seventy and nothing
+    surfaced it; it was observed on three different tests across eleven full
+    passes, always under foreign load, and the cause was never once written
+    down because the only record of it was a status-bar toast. So it fails now,
+    and it fails carrying the traceback the factory recorded, because the run
+    where it happens is the only run that can see why.
+    """
 
     import pytest
 
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
+    from arrayscope.display.backend_contract import (
+        image_view_backend_capabilities,
+        require_image_view_backend,
+    )
     from arrayscope.window import ArrayScopeWindow
 
     if backend == "wgpu":
         require_wgpu_adapter()
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
-    capabilities = image_view_backend_capabilities(win.img_view)
-    if capabilities.name != backend:
+    try:
+        require_image_view_backend(win.img_view, backend, context="this test")
+    except RuntimeError as exc:
         win.close()
-        pytest.skip(f"{backend} backend unavailable in this Qt environment")
+        # ``pytrace=False``: the message already carries the traceback that
+        # explains this, and pytest's own would only show these three lines.
+        pytest.fail(str(exc), pytrace=False)
     if require_gpu_atlas:
-        assert capabilities.tile_residency_kind == "gpu_atlas"
+        assert image_view_backend_capabilities(win.img_view).tile_residency_kind == "gpu_atlas"
     return win
 
 

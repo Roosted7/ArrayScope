@@ -484,6 +484,19 @@ and no worker to survive a segfault; see
 - Do not silently change a stale test to match output. First establish whether it varied a real semantic input.
 - Keep fixture data deterministic and small; generate large patterns when possible.
 - Mark optional-backend/platform skips with a concrete reason.
+- A skip must state something the run has not already disproved. Past a gate
+  that answered yes, the condition the gate owns is settled, and a second check
+  further down is asking a *different* question — one whose answer is a defect,
+  not an absence, and which therefore fails. `make_backend_window` skipped with
+  "wgpu backend unavailable" three lines after `require_wgpu_adapter()` had
+  found an adapter; because a call-phase skip reads as one more `s` among
+  seventy, the same swallowed surface-build failure hit three tests across
+  eleven passes and was never once diagnosed.
+- A failure that replaces a skip has to carry the cause with it, or it only
+  moves the mystery. Where the cause is caught and degraded away — as
+  `create_image_view` does for a failed GPU surface — record it on the object,
+  not only in a toast that a headless caller never receives and a status bar
+  clears in five seconds.
 
 ## Coverage reporting
 

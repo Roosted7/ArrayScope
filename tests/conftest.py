@@ -1535,7 +1535,12 @@ def pytest_runtest_logreport(report):
         # ledger's own, not this hook's: it is the whole subtlety of that file,
         # and a second copy here drifted from it inside one session (an xfail
         # marked unmeasured, which its own guard test caught). One owner.
-        _skip_ledger.observe(report)
+        #
+        # The conditions are this hook's, and they are deliberately the flake
+        # ledger's own sampler: a test that skipped last run and ran this one is
+        # the same kind of observation as a red that goes green, so "under
+        # what?" is the same question and deserves the same answer shape.
+        _skip_ledger.observe(report, when=_now_iso(), context=_flake_observation_context())
     yield
 
 
