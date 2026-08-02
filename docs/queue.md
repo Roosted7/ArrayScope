@@ -66,6 +66,42 @@ contract).
 
 Safe to pick up alongside the numbered queue; each is self-contained.
 
+- **An explicit-wgpu window that comes up on PyQtGraph skips instead of failing
+  — OPEN, found 2026-08-02.** Opened by the report that one collected test
+  produces no outcome in about half of full-suite passes. **That premise is
+  refuted**: eleven instrumented passes (a `pytest_runtest_protocol` /
+  `pytest_runtest_logreport` recorder writing every node id to a per-worker
+  file, on `ba53fbc8` ×6 and `7627b207` ×5) account for **every** collected
+  test — 4520/4520 and 4521/4521, with 32 clean `testnodedown`s and no crashed
+  worker. The recorder is not vacuous: injecting a `pytest_runtest_protocol`
+  that returns `True` for one item makes `tests/presentation` print a
+  contented `82 passed` against 84 collected, and the diff names both
+  swallowed ids. The arithmetic in the report is a **dropped `failed` term** —
+  `7627b207` prints `4449 passed, 70 skipped, 2 xfailed` in 2 of 5 runs and
+  `1 failed, 4448 passed, 70 skipped, 2 xfailed` in 3 of 5, the same 2/5–3/5
+  split, and the second row sums to 4521 only if its failure is counted.
+  **What the sweep did find is the real version of the same worry.**
+  `tests/ui/helpers.py:296` skips with `wgpu backend unavailable in this Qt
+  environment` when the built window reports the PyQtGraph backend — but
+  `require_wgpu_adapter()` ran three lines earlier and *passed*, so the
+  environment demonstrably can do wgpu and the message is false. What actually
+  happened is `image_view_factory.py:179`: the explicit-wgpu surface build
+  raised, the `except Exception` swallowed it into a PyQtGraph fallback with
+  only a `notify()` string, and the test turned that into a skip. Observed on
+  three distinct tests across the eleven passes (`test_montage_scroll_settling`
+  `::test_wgpu_cropped_scrub_bounds_preview_producer_work` and
+  `::test_wgpu_cold_both_axes_crop_churn_keeps_every_tile_physically_current`),
+  always under foreign load, always `when="call"`. **43 collected tests in 8
+  files** build an explicit-wgpu window and are exposed to it. **Decision: make
+  it loud, not unconditional** — the machine-has-no-Vulkan case is already
+  owned by `require_wgpu_adapter()`, so past that gate a non-wgpu surface is a
+  defect and must `fail` carrying the factory's own fallback reason, not skip.
+  Two secondary channels are blind to it as well: `tools/load_fragility`
+  verdicts a run PASS on pytest's exit status, so a target that skipped reads
+  as a target that survived the load; and `tests/skip_ledger.py` self-heals on
+  the next run where the test does run, so an intermittent skip leaves no
+  durable trace.
+
 - **Settle waits no longer fail on a busy machine — DONE 2026-08-01.** Three
   concurrent full suites on `ea9c5ec4` reddened fourteen tests that all pass in
   41 s quiet, and **eleven of those failures were the single sentence
