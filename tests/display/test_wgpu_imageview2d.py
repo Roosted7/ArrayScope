@@ -3932,3 +3932,58 @@ def test_coarse_payload_falls_back_then_native_payload_refines_same_plane(qt_app
         assert np.allclose(_center_pixel(view)[:3], 204, atol=2)
     finally:
         view.close()
+
+
+def test_a_rebound_slot_keeps_its_declared_lod_depth_and_patches_the_plane_set(qt_app):
+    """A one-tile delta must not re-derive the whole montage's plane table.
+
+    ``max_lod`` fixes a plane's span in the executor's flat lookup table, and
+    therefore every later plane's base, so the executor can only patch a bound
+    plane set in place while every changed slot keeps its footprint. Refinement
+    rebinds a slot from the preview's reduced content plane to the exact one,
+    whose own resident set is shallower -- and a slot that gets *shallower*
+    used to take the whole-montage rebuild with it. Counting, not timing: the
+    rebuild is the thing to forbid, and the executor already publishes how it
+    resolved each bind.
+    """
+
+    source_shape = (512, 512)
+    geometry = _montage_geometry((128, 128), 2, 2, loaded=4)
+    coarse = {
+        tile: _lod_payload(
+            tile,
+            np.full((128, 128), float(tile + 1), np.float32),
+            base_source_id=("depth-coarse", tile),
+            level=2,
+            source_shape=source_shape,
+        )
+        for tile in range(4)
+    }
+    view = _shown_view(qt_app, texture_codec="off")
+    try:
+        _commit(view, geometry, coarse, levels=(0.0, 5.0))
+        planes = view._wgpu_committed["planes"]
+        assert {plane.max_lod for plane in planes} == {2}
+        slot = int(view._wgpu_committed["tiles"][0]["plane_index"])
+        rebuilds_before = view.wgpuPresentationDiagnostics()["wgpu_plane_bind_rebuilds_total"]
+        patches_before = view.wgpuPresentationDiagnostics()["wgpu_plane_bind_patches_total"]
+
+        # Tile 0 alone refines onto a different physical plane, whose resident
+        # pages are level 0 only. The successor slot therefore *offers* depth 0.
+        exact = _lod_payload(
+            0,
+            np.full(source_shape, 9.0, np.float32),
+            base_source_id=("depth-exact", 0),
+            level=0,
+            source_shape=source_shape,
+        )
+        _commit(view, geometry, {**coarse, 0: exact}, levels=(0.0, 5.0))
+
+        successor = view._wgpu_committed["planes"][slot]
+        assert successor.document_generation != planes[slot].document_generation
+        assert successor.max_lod == 2
+        diagnostics = view.wgpuPresentationDiagnostics()
+        assert diagnostics["wgpu_plane_bind_rebuilds_total"] == rebuilds_before
+        assert diagnostics["wgpu_plane_bind_patches_total"] == patches_before + 1
+    finally:
+        view.close()

@@ -1141,6 +1141,32 @@ def test_a_frame_a_fixed_cost_cannot_fit_is_not_for_sale():
     ) == _render_pass_optimal_point(**common)
 
 
+def test_the_frame_a_60hz_pass_can_buy_costs_half_of_it():
+    """Where the refusal turns over, in the terms the commit is measured in.
+
+    The rule above is stated as an inequality; this is the number it puts on
+    the render pass, so a change to the commit's fixed cost can be read against
+    it without re-deriving the arithmetic. At 60 Hz the pass gets a frame-sized
+    price exactly while its fixed term is under **half a frame, 8.33 ms**.
+
+    The two arguments below are measured, not chosen (272-tile scalar WGPU
+    montage, `render_pass_governor_probe`, 2026-08-02): the backend commit's
+    own share of the callback is 4.8 ms and would be paced, while the whole
+    render-pass callback fits at 10.5 ms and is not. What stands between them
+    is the presentation work the callback does around the commit -- the payload
+    build, the presentation decision and the state publish -- and until that
+    comes down the knee stays refused however cheap the commit gets.
+    """
+
+    frame_ms = 1000.0 / 60.0
+
+    assert _render_pass_frame_aware_knees(frame_ms, 0.5 * frame_ms, 1.0) is not None
+    assert _render_pass_frame_aware_knees(frame_ms, 0.5 * frame_ms + 1e-9, 1.0) is None
+
+    assert _render_pass_frame_aware_knees(frame_ms, 10.5, 12.0) is None
+    assert _render_pass_frame_aware_knees(frame_ms, 4.8, 6.0) == (0.5 * frame_ms, frame_ms)
+
+
 def test_frame_aware_knee_moves_the_enclosing_charge_instead_of_adding_one():
     """The two prices share one curve, so the same milliseconds pay once.
 

@@ -1985,6 +1985,30 @@ class WgpuImageView2D(ImageViewShell):
                 )
                 resident_lods = (int(key.lod.level) for key in resident_plane_keys)
                 max_lod = max((physical_lod_level, *resident_lods))
+                previous_info = committed_tiles.get(tile) if incremental_delta else None
+                plane_index = (
+                    len(planes) if previous_info is None else int(previous_info["plane_index"])
+                )
+                if previous_info is not None:
+                    # A slot's declared LOD depth is a FLOOR, not a report of
+                    # current residency. ``max_lod`` fixes this plane's span in
+                    # the executor's flat lookup table and therefore every
+                    # LATER plane's base, so a slot whose depth changes cannot
+                    # be patched in place: the whole montage's table is
+                    # re-derived. Refinement rebinds a slot from the preview's
+                    # reduced content plane to the exact one, and the successor
+                    # legitimately declares a shallower ladder — measured on
+                    # the 272-tile scalar montage, 24 of 28 whole-plane-set
+                    # rebuilds were a `5 -> 0` slot on a ONE-tile delta, 3.57 ms
+                    # of GUI thread each. Declaring the deeper ladder for the
+                    # successor costs one flat-table entry per coarse level (a
+                    # level-5 grid of a 336x336 plane is 1x1) and reserves
+                    # nothing physical: those entries stay empty unless pages of
+                    # that very plane arrive at those levels, in which case they
+                    # are its own ancestors and sampling them is correct.
+                    slot_plane = planes[plane_index]
+                    if tuple(slot_plane.plane_shape) == (source_height, source_width):
+                        max_lod = max(max_lod, int(slot_plane.max_lod))
                 content_plane = ContentPlane(
                     plane_identity,
                     "live",
@@ -1993,12 +2017,9 @@ class WgpuImageView2D(ImageViewShell):
                     representation=representation,
                     lod_reducer=lod_reducer,
                 )
-                previous_info = committed_tiles.get(tile) if incremental_delta else None
                 if previous_info is None:
-                    plane_index = len(planes)
                     planes.append(content_plane)
                 else:
-                    plane_index = int(previous_info["plane_index"])
                     planes[plane_index] = content_plane
                 page_keys = []
                 will_upload = False
@@ -2169,16 +2190,24 @@ class WgpuImageView2D(ImageViewShell):
 
             start = perf_counter()
             camera = self._wgpu_camera_command()
-            previous_page_keys = tuple(
-                key
-                for info in (previous_commit.get("tiles", {}) or {}).values()
-                for key in tuple(info.get("page_keys", ()) or ())
-            )
+            # The predecessor published exactly this tuple as its own committed
+            # set, so re-deriving it walks every page of every tile in the
+            # montage to arrive at a value already in hand. Reusing the object
+            # also makes the executor's pin memo compare pointers rather than
+            # re-hash the montage.
+            previous_page_keys = previous_commit.get("page_keys")
+            if previous_page_keys is None:
+                previous_page_keys = tuple(
+                    key
+                    for info in (previous_commit.get("tiles", {}) or {}).values()
+                    for key in tuple(info.get("page_keys", ()) or ())
+                )
             committed_page_keys = tuple(
                 key
                 for info in committed_tiles.values()
                 for key in tuple(info.get("page_keys", ()) or ())
             )
+            self._wgpu_committed["page_keys"] = committed_page_keys
             atomic_handoff = bool(getattr(tile_delta, "atomic_handoff", False))
             predecessor_transaction_keys = (
                 previous_page_keys if incremental_delta or atomic_handoff else ()
