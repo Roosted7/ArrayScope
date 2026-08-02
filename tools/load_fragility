@@ -129,6 +129,11 @@ default_targets=(
   # the regression handle, not a to-do. The stopwatch it replaced could not
   # fail for the reason it named on this backend at all.
   "tests/render/test_commit_cost_scaling.py::test_an_empty_delta_stays_on_the_incremental_path[pyqtgraph]"
+  # Seen 2026-08-02 in a full run only: passes serially and at -t 15, so it
+  # needs the whole suite's contention rather than a held target. Its claim was
+  # rewritten in 8d95e05c onto a monotone counter after the old form could not
+  # fail, so a red here is worth reading rather than assuming.
+  "tests/ui/test_montage_data_change_invalidation.py::test_data_change_serves_the_visible_set_before_any_out_of_view_removal[wgpu]"
   # Seen once each in the 2026-08-01 verification runs, cause not yet pinned.
   "tests/ui/test_lod_demand_freshness.py::test_zoom_in_rederives_lod_demand"
   "tests/ui/test_viewport_convergence_latch.py"
