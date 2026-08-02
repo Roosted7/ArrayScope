@@ -1210,7 +1210,7 @@ def test_wheel_range_change_uses_interactive_viewport_cadence(qt_app, monkeypatc
     scheduled = []
     image_view = SimpleNamespace(
         _viewport_applying=False,
-        _viewport_wheel_range_pending=True,
+        in_camera_gesture=True,
     )
     owner = SimpleNamespace(
         img_view=image_view,
@@ -1235,7 +1235,42 @@ def test_wheel_range_change_uses_interactive_viewport_cadence(qt_app, monkeypatc
     ViewportBridge(owner).on_view_range_changed()
 
     assert scheduled == [16]
-    assert not image_view._viewport_wheel_range_pending
+
+
+def test_drag_pan_range_change_uses_interactive_viewport_cadence(qt_app, monkeypatch):
+    """A held mouse button classifies on its own, with no gesture scope."""
+
+    from pyqtgraph.Qt import QtCore
+
+    import arrayscope.window.viewport_bridge as viewport_bridge
+    from arrayscope.window.viewport_bridge import ViewportBridge
+
+    scheduled = []
+    retargeted = []
+    owner = SimpleNamespace(
+        img_view=SimpleNamespace(_viewport_applying=False, in_camera_gesture=False),
+        _release_viewport_continuity=lambda: None,
+        _note_viewport_interaction=lambda _reason: None,
+        _committed_display_frame=SimpleNamespace(
+            scene=object(),
+            value_source=SimpleNamespace(payloads={}),
+        ),
+        _frame_session=SimpleNamespace(display_committed=True),
+        _schedule_interactive_montage_viewport_update=lambda: scheduled.append(16),
+        retarget_montage_viewport=lambda: retargeted.append(True),
+        view_state=SimpleNamespace(montage_axis=2),
+    )
+    owner.win = owner
+    monkeypatch.setattr(
+        viewport_bridge.Qt.QtWidgets.QApplication,
+        "mouseButtons",
+        lambda: QtCore.Qt.MouseButton.LeftButton,
+    )
+
+    ViewportBridge(owner).on_view_range_changed()
+
+    assert scheduled == [16]
+    assert retargeted == []
 
 
 def test_montage_range_change_during_commit_joins_post_commit_retarget(qt_app, monkeypatch):

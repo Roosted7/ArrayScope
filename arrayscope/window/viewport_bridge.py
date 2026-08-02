@@ -15,10 +15,11 @@ class ViewportBridge:
         started = perf_counter()
         image_view = getattr(self.owner.win, "img_view", None)
         applying = bool(getattr(image_view, "_viewport_applying", False))
-        wheel_gesture = bool(getattr(image_view, "_viewport_wheel_range_pending", False))
-        if wheel_gesture:
-            image_view._viewport_wheel_range_pending = False
-        pointer_gesture = bool(_range_change_has_pointer_gesture() or wheel_gesture)
+        # The gesture scope spans the whole input dispatch, so a range change
+        # the viewport constraint re-emits from inside the first emission is
+        # still attributed to the wheel or touchpad gesture that caused it.
+        camera_gesture = bool(getattr(image_view, "in_camera_gesture", False))
+        pointer_gesture = bool(_range_change_has_pointer_gesture() or camera_gesture)
         release_continuity = getattr(self.owner.win, "_release_viewport_continuity", None)
         if callable(release_continuity) and not applying and pointer_gesture:
             release_continuity()

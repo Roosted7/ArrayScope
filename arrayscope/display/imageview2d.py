@@ -101,6 +101,18 @@ class ArrayScopeGraphicsView(pg.GraphicsView):
         if owner is not None:
             owner._mark_presentation_drawn()
 
+    def wheelEvent(self, event):
+        # On this backend the wheel zoom belongs to pyqtgraph's own ViewBox,
+        # which runs here — after the shell's event filter has declined the
+        # event. The gesture scope has to cover that handling too, or every
+        # range change a wheel causes is classified as programmatic replay.
+        owner = getattr(self, "_arrayscope_owner", None)
+        if owner is None:
+            super().wheelEvent(event)
+            return
+        with owner.camera_gesture_scope():
+            super().wheelEvent(event)
+
     def resizeEvent(self, event):
         owner = getattr(self, "_arrayscope_owner", None)
         if owner is None:
@@ -263,6 +275,7 @@ class ImageViewShell(QtWidgets.QWidget):
         self.viewport_controller = ViewportController()
         self._viewport_applying = False
         self._viewport_constraining = False
+        self._camera_gesture_depth = 0
         self._last_accepted_view_range = None
         self._fit_mode_reminder_last_ms = 0.0
         self._display_colormap = None
@@ -2417,15 +2430,12 @@ class ImageViewShell(QtWidgets.QWidget):
             if not self._viewport_constraining:
                 self._remember_accepted_view_range()
             return
-        content_rect = self.viewport_controller.last_display_rect
-        if content_rect is None:
-            return
         try:
             current = self.view.viewRange()
-            previous = self._last_accepted_view_range
-            constrained = constrain_view_range(current, content_rect, previous_view_range=previous)
-            constrained = self._aspect_safe_view_range(current, constrained, content_rect)
         except Exception:
+            return
+        constrained = self.constrained_view_range(current)
+        if constrained is None:
             return
         if _view_ranges_close(current, constrained):
             self._remember_accepted_view_range(current)
@@ -2438,6 +2448,28 @@ class ImageViewShell(QtWidgets.QWidget):
         finally:
             self._viewport_applying = False
             self._viewport_constraining = False
+
+    def constrained_view_range(self, view_range):
+        """Return ``view_range`` clamped to the content constraint, or None.
+
+        Pure with respect to viewport state, so a navigation driver can apply
+        the clamp to its candidate range *before* ``setRange`` and leave
+        ``_enforce_viewport_constraints`` nothing to correct — the correction
+        is a second, nested ``sigRangeChanged`` emitted from inside the first.
+        """
+
+        content_rect = self.viewport_controller.last_display_rect
+        if content_rect is None:
+            return None
+        try:
+            constrained = constrain_view_range(
+                view_range,
+                content_rect,
+                previous_view_range=self._last_accepted_view_range,
+            )
+            return self._aspect_safe_view_range(view_range, constrained, content_rect)
+        except Exception:
+            return None
 
     def _remember_accepted_view_range(self, view_range=None) -> None:
         try:
@@ -2508,17 +2540,40 @@ class ImageViewShell(QtWidgets.QWidget):
             }
         )
         is_camera_input = event.type() == QtCore.QEvent.Type.Wheel or is_native_camera_gesture
-        if is_camera_input and not self.viewport_controller.is_fit_locked():
-            # QApplication.mouseButtons() is empty for wheel input by the time
-            # sigRangeChanged runs. Carry this one synchronous input identity
-            # across the ViewBox range signal so only real gesture bursts—not
-            # programmatic camera replay—receive the 16 ms LOD-plan cadence.
-            self._viewport_wheel_range_pending = True
-            QtCore.QTimer.singleShot(0, self, self._clear_viewport_wheel_range_pending)
         if is_camera_input and self.viewport_controller.is_fit_locked():
             self._show_fit_mode_interaction_reminder()
             event.accept()
             return True
+        if not is_camera_input:
+            return self._dispatch_viewport_event(obj, event)
+        with self.camera_gesture_scope():
+            return self._dispatch_viewport_event(obj, event)
+
+    @contextlib.contextmanager
+    def camera_gesture_scope(self):
+        """Attribute every range change made during this dispatch to a gesture.
+
+        QApplication.mouseButtons() is empty for wheel and native gesture
+        input, so the cause has to be carried across the ViewBox range signal.
+        The scope spans the whole dispatch rather than the first emission
+        because the constraint clamp re-emits sigRangeChanged synchronously
+        from inside it; a one-shot flag was consumed by the first emission and
+        left the nested one classified as programmatic replay, which takes the
+        synchronous whole-plan retarget instead of the 16 ms interactive
+        cadence.
+        """
+
+        self._camera_gesture_depth += 1
+        try:
+            yield
+        finally:
+            self._camera_gesture_depth -= 1
+
+    @property
+    def in_camera_gesture(self) -> bool:
+        return self._camera_gesture_depth > 0
+
+    def _dispatch_viewport_event(self, obj, event):
         if self._handle_context_menu_event(event):
             return True
         if self._handle_roi_drawing_event(event):
@@ -2534,9 +2589,6 @@ class ImageViewShell(QtWidgets.QWidget):
         if self.viewport_controller.is_fit_locked() and self._is_fit_locked_pan_attempt(event):
             self._show_fit_mode_interaction_reminder()
         return super().eventFilter(obj, event)
-
-    def _clear_viewport_wheel_range_pending(self) -> None:
-        self._viewport_wheel_range_pending = False
 
     def _notify_viewport_content_resized(self, **kwargs) -> None:
         # This runs inside a C++ resizeEvent override; an escaping exception

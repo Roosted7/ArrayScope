@@ -645,3 +645,195 @@ def test_pan_move_reemits_hover_at_moved_position(qt_app):
         assert emitted[-1] != pytest.approx((start_scene.x(), start_scene.y()))
     finally:
         view.close()
+
+
+def _send_wheel(qt_app, view, angle_y: float) -> bool:
+    """Deliver a classic mouse-wheel notch burst the way the platform does.
+
+    Through ``sendEvent``, not the shell's filter directly: on this backend the
+    filter declines a plain wheel and pyqtgraph's ViewBox does the zoom, so a
+    direct ``eventFilter`` call would move no camera at all.
+    """
+
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    local = _viewport_center(view)
+    event = QtGui.QWheelEvent(
+        local,
+        view.mapToGlobal(local.toPoint()),
+        QtCore.QPoint(0, 0),  # no pixelDelta -> a classic wheel, not a touchpad
+        QtCore.QPoint(0, int(angle_y)),
+        QtCore.Qt.MouseButton.NoButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+        QtCore.Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    return bool(qt_app.sendEvent(view.graphicsView.viewport(), event))
+
+
+def _connect_montage_viewport_bridge(view):
+    """Wire the production bridge to the real range signal over a montage owner.
+
+    Returns the call record: how many range signals arrived, how many took the
+    synchronous whole-plan retarget, how many took the coalesced interactive
+    path, and how each was classified.
+    """
+
+    from types import SimpleNamespace
+
+    from arrayscope.window.viewport_bridge import ViewportBridge
+
+    calls = {"emitted": 0, "retarget": 0, "scheduled": 0, "reasons": []}
+    owner = SimpleNamespace(
+        img_view=view,
+        _release_viewport_continuity=lambda: None,
+        _note_viewport_interaction=calls["reasons"].append,
+        _committed_display_frame=SimpleNamespace(
+            value_source=SimpleNamespace(payloads={}),
+        ),
+        _frame_session=SimpleNamespace(display_committed=True),
+        _schedule_interactive_montage_viewport_update=lambda: calls.__setitem__(
+            "scheduled", calls["scheduled"] + 1
+        ),
+        retarget_montage_viewport=lambda: calls.__setitem__("retarget", calls["retarget"] + 1),
+        view_state=SimpleNamespace(montage_axis=2),
+    )
+    owner.win = owner
+    bridge = ViewportBridge(owner)
+
+    def on_range_changed(*_args):
+        calls["emitted"] += 1
+        bridge.on_view_range_changed()
+
+    view.getView().sigRangeChanged.connect(on_range_changed)
+    calls["disconnect"] = lambda: view.getView().sigRangeChanged.disconnect(on_range_changed)
+    return calls
+
+
+# A zoom-out far past the constraint's maximum span, so the viewport clamp has
+# something to correct within the one wheel event.
+_UNCONSTRAINABLE_ZOOM_OUT_ANGLE = -3600
+
+
+def test_wheel_range_changes_never_retarget_synchronously(qt_app):
+    """Every range change a wheel causes is classified as the gesture it is.
+
+    A wheel produces more than one sigRangeChanged: the camera move, plus the
+    viewport constraint correcting it from inside that first emission. The
+    one-shot wheel flag was consumed by the first, and
+    QApplication.mouseButtons() is empty for wheel input, so the rest read as
+    programmatic replay and took the synchronous whole-plan retarget — 92 ms
+    median, up to 542 ms, inside wheel dispatch.
+    """
+
+    view = _make_seeded_view(qt_app)
+    calls = _connect_montage_viewport_bridge(view)
+    try:
+        assert _send_wheel(qt_app, view, _UNCONSTRAINABLE_ZOOM_OUT_ANGLE) is True
+
+        # More than one range signal really arrived (otherwise this test proves
+        # nothing about the nested ones) ...
+        assert calls["emitted"] >= 2
+        # ... and none of them entered the synchronous path.
+        assert calls["retarget"] == 0
+        assert calls["scheduled"] == calls["emitted"]
+        assert set(calls["reasons"]) == {"range-pointer"}
+    finally:
+        calls["disconnect"]()
+        view.close()
+
+
+def test_wheel_zoom_driver_clamps_before_it_sets_the_range():
+    """One gesture step is one setRange: the clamp folds into the driver.
+
+    The shell's constraint enforcement corrects an out-of-bounds range from
+    inside the resulting sigRangeChanged, which is a second range signal for
+    one gesture step. Pre-applying the same clamp leaves it nothing to correct.
+    """
+
+    from types import SimpleNamespace
+
+    from arrayscope.display.view_navigation_driver import QtViewNavigationDriver
+
+    clamped = ((-10.0, 10.0), (-10.0, 10.0))
+    applied = []
+    owner = SimpleNamespace(
+        image=object(),
+        viewport_controller=SimpleNamespace(is_fit_locked=lambda: False),
+        view=SimpleNamespace(
+            viewRange=lambda: ((0.0, 64.0), (0.0, 64.0)),
+            setRange=lambda **kwargs: applied.append(kwargs),
+        ),
+        constrained_view_range=lambda _view_range: clamped,
+        window=lambda: None,
+        _event_display_point=lambda _event: (32.0, 32.0),
+    )
+    event = SimpleNamespace(
+        angleDelta=lambda: SimpleNamespace(y=lambda: -3600, isNull=lambda: False)
+    )
+
+    assert QtViewNavigationDriver(owner)._apply_wheel_zoom(event) is True
+
+    assert applied == [{"xRange": clamped[0], "yRange": clamped[1], "padding": 0}]
+
+
+def test_programmatic_range_change_still_retargets_synchronously(qt_app):
+    """No gesture scope, no buttons: the synchronous obligation is unchanged.
+
+    Deferring the genuinely programmatic branch is refuted — it costs a whole
+    montage republication per return-leg pan
+    (docs/redesign/programmatic-viewport-replay-2026-07-31.md).
+    """
+
+    view = _make_seeded_view(qt_app)
+    calls = _connect_montage_viewport_bridge(view)
+    try:
+        assert view.in_camera_gesture is False
+        current = view.getView().viewRange()
+        view.getView().setRange(
+            xRange=(current[0][0] - 3.0, current[0][1] - 3.0),
+            yRange=current[1],
+            padding=0,
+        )
+
+        assert calls["emitted"] >= 1
+        assert calls["retarget"] >= 1
+        assert calls["scheduled"] == 0
+        assert set(calls["reasons"]) == {"range-programmatic"}
+    finally:
+        calls["disconnect"]()
+        view.close()
+
+
+def test_camera_gesture_scope_is_balanced_when_a_handler_raises(qt_app):
+    """A raising handler must not leave every later range change a "gesture"."""
+
+    from pyqtgraph.Qt import QtCore, QtGui
+
+    def boom(_event):
+        raise RuntimeError("handler failure")
+
+    view = _make_seeded_view(qt_app)
+    try:
+        local = _viewport_center(view)
+        event = QtGui.QNativeGestureEvent(
+            QtCore.Qt.NativeGestureType.ZoomNativeGesture,
+            QtGui.QPointingDevice.primaryPointingDevice(),
+            2,
+            local,
+            local,
+            view.mapToGlobal(local.toPoint()),
+            0.25,
+            QtCore.QPointF(0.0, 0.0),
+        )
+        view._handle_context_menu_event = boom
+        try:
+            with pytest.raises(RuntimeError):
+                view.eventFilter(view.graphicsView.viewport(), event)
+        finally:
+            # Qt keeps sending this widget events while it closes.
+            del view._handle_context_menu_event
+
+        assert view.in_camera_gesture is False
+    finally:
+        view.close()

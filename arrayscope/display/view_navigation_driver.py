@@ -122,6 +122,7 @@ class QtViewNavigationDriver:
         if focus is None:
             return False
         view_range = wheel_zoom_view_range(self._owner.view.viewRange(), focus, delta / 120.0)
+        view_range = _constrained_view_range(self._owner, view_range)
         _release_viewport_continuity(self._owner)
         self._owner.view.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
         return True
@@ -324,6 +325,7 @@ class QtGestureNavigationDriver:
 
     def _commit_range(self, view_range) -> None:
         owner = self._owner
+        view_range = _constrained_view_range(owner, view_range)
         _release_viewport_continuity(owner)
         owner.view.setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
         owner._notify_stationary_pointer()
@@ -380,6 +382,21 @@ def _scroll_steps(event) -> float:
     pixel_delta = event.pixelDelta()
     pixels = pixel_delta.y() if pixel_delta.y() else pixel_delta.x()
     return float(pixels) / _ANGLE_SCROLL_PIXELS_PER_STEP
+
+
+def _constrained_view_range(owner, view_range):
+    """Clamp a gesture's candidate range before it reaches the ViewBox.
+
+    Otherwise the shell's constraint enforcement corrects the range from
+    inside the resulting sigRangeChanged, emitting a second, nested range
+    signal for one gesture step.
+    """
+
+    clamp = getattr(owner, "constrained_view_range", None)
+    if not callable(clamp):
+        return view_range
+    constrained = clamp(view_range)
+    return view_range if constrained is None else constrained
 
 
 def _release_viewport_continuity(owner) -> None:

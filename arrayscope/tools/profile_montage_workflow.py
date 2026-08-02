@@ -2639,30 +2639,26 @@ def _apply_view_range(win, x_range, y_range) -> None:
         # saved camera authoritative and make demand measurements meaningless.
         note_interaction("range-pointer")
     # QApplication.mouseButtons() is empty for this deterministic transport.
-    # Carry the same synchronous wheel identity that ImageViewShell.eventFilter
-    # publishes for a real wheel event so ViewportBridge admits the production
+    # Enter the same camera-gesture scope that ImageViewShell.eventFilter holds
+    # open for a real wheel event so ViewportBridge admits the production
     # interactive retarget path instead of classifying the gesture as restore
     # or fit replay.
-    image_view._viewport_wheel_range_pending = True
-    try:
+    with image_view.camera_gesture_scope():
         view = image_view.getView()
         view.setRange(
             xRange=(float(x_range[0]), float(x_range[1])),
             yRange=(float(y_range[0]), float(y_range[1])),
             padding=0,
         )
-        # The benchmark transport has no real QWheelEvent. If the production
-        # bridge cannot identify an extant committed tiled frame, its ordinary
-        # signal path deliberately does not schedule. Deliver the synthetic
-        # gesture through the same canonical retarget owner rather than
-        # deriving or mutating LOD state in the harness.
-        retarget = getattr(win, "retarget_montage_viewport", None)
-        if callable(retarget):
-            retarget()
-    finally:
-        # The bridge normally consumes the flag synchronously. Clear it here
-        # as well for a constrained/no-op range which emits no signal.
-        image_view._viewport_wheel_range_pending = False
+    # The benchmark transport has no real QWheelEvent. If the production bridge
+    # cannot identify an extant committed tiled frame, its ordinary signal path
+    # deliberately does not schedule. Deliver the synthetic gesture through the
+    # same canonical retarget owner rather than deriving or mutating LOD state
+    # in the harness. It runs outside the gesture scope, as it does for a real
+    # wheel event, so any range change it makes stays programmatic.
+    retarget = getattr(win, "retarget_montage_viewport", None)
+    if callable(retarget):
+        retarget()
 
 
 def _scaled_view_range(view_range, span_scale, center_frac=(0.5, 0.5)):

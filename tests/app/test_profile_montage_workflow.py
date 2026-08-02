@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import shlex
@@ -347,15 +348,20 @@ def test_profile_view_range_uses_canonical_pointer_interaction_reason():
     reasons = []
     ranges = []
     retargets = []
-    image_view = SimpleNamespace()
+    depth = {"value": 0}
+
+    @contextlib.contextmanager
+    def camera_gesture_scope():
+        depth["value"] += 1
+        try:
+            yield
+        finally:
+            depth["value"] -= 1
+
+    image_view = SimpleNamespace(camera_gesture_scope=camera_gesture_scope)
 
     def set_range(**kwargs):
-        ranges.append(
-            {
-                **kwargs,
-                "wheel_identity": image_view._viewport_wheel_range_pending,
-            }
-        )
+        ranges.append({**kwargs, "wheel_identity": depth["value"] > 0})
 
     view = SimpleNamespace(setRange=set_range)
     image_view.getView = lambda: view
@@ -376,7 +382,7 @@ def test_profile_view_range_uses_canonical_pointer_interaction_reason():
             "wheel_identity": True,
         }
     ]
-    assert image_view._viewport_wheel_range_pending is False
+    assert depth["value"] == 0
     assert retargets == [True]
 
 
