@@ -215,12 +215,19 @@ class OperationStackDock(StandardDockWidget):
         self.materialize_button.setToolTip("Evaluate the full derived array and keep it resident")
 
         # Rare actions stay as real buttons (stable API, signal wiring) but are
-        # presented as menu entries rather than a wall of buttons.
-        self.save_button = QtWidgets.QPushButton("Save Recipe")
-        self.load_button = QtWidgets.QPushButton("Load Recipe")
-        self.export_button = QtWidgets.QPushButton("Export Derived")
-        self.save_view_button = QtWidgets.QPushButton("Save View")
-        self.load_view_button = QtWidgets.QPushButton("Load View")
+        # presented as menu entries rather than a wall of buttons.  They are the
+        # only buttons here that never enter a layout, so they need ``body`` as
+        # an explicit parent: a parentless widget is a top-level window that
+        # outlives the window that made it, and three of the five connect
+        # ``clicked`` to a lambda.  Qt drops a connection when a QObject
+        # receiver dies, but a lambda has no receiver -- the sender holds it,
+        # from C++, where the garbage collector cannot see it.  Orphaned, they
+        # kept the whole window graph resident for the life of the process.
+        self.save_button = QtWidgets.QPushButton("Save Recipe", body)
+        self.load_button = QtWidgets.QPushButton("Load Recipe", body)
+        self.export_button = QtWidgets.QPushButton("Export Derived", body)
+        self.save_view_button = QtWidgets.QPushButton("Save View", body)
+        self.load_view_button = QtWidgets.QPushButton("Load View", body)
         for button in (
             self.save_button,
             self.load_button,
