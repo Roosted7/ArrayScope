@@ -170,6 +170,7 @@ def intent(
     preview_level=4,
     target_level=1,
     round_id=None,
+    shed_target_pass=False,
 ):
     return RenderIntent(
         semantic_key=semantic,
@@ -181,6 +182,7 @@ def intent(
         render_round_id=str(round_id or f"{semantic}:{viewport}"),
         round_preview_level=int(preview_level),
         round_target_level=int(target_level),
+        round_shed_target_pass=bool(shed_target_pass),
         tile_source_ids=() if source_id is None else ((0, source_id),),
         tile_source_indices=() if source_id is None else ((0, int(source_id[-1])),),
     )
@@ -254,6 +256,41 @@ def test_any_missing_preview_blocks_every_target_rung_until_coverage_closes():
 
     assert submitted == 2
     assert [(tile, rung) for tile, rung, _level in effects.evaluated[1:]] == [
+        (0, int(Rung.DESIRED)),
+        (1, int(Rung.DESIRED)),
+    ]
+
+
+def test_shed_round_submits_no_target_rung_after_coverage_closes():
+    """R6 step 1 reaches the kernel: a shed round admits preview work only."""
+
+    kernel, effects, pipeline = make_pipeline(tiles=2)
+    for tile in (0, 1):
+        effects.states[tile] = TileLodState(
+            tile_number=tile,
+            presented_level=4,
+            presented_quality="preview",
+            resident_levels=(4,),
+        )
+    effects.phase = SchedulingPhase.REFINE
+
+    shed = pipeline.retarget(
+        intent(viewport="shed", target_level=1, shed_target_pass=True),
+        demand(1),
+        scope(0, 1),
+    )
+    drain(kernel)
+
+    assert shed == 0
+    assert effects.evaluated == []
+
+    caught_up = pipeline.retarget(
+        intent(viewport="caught-up", target_level=1), demand(1), scope(0, 1)
+    )
+    drain(kernel)
+
+    assert caught_up == 2
+    assert [(tile, rung) for tile, rung, _level in effects.evaluated] == [
         (0, int(Rung.DESIRED)),
         (1, int(Rung.DESIRED)),
     ]

@@ -5884,7 +5884,18 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         # them through the cold item cohort tears the retained frame and can
         # leave the ready ledger with no completion to arm its successor.
         # Cold uploads remain governed by both caps below.
-        "pace_resident_retargets": False,
+        #
+        # Unless the remap on offer is not one transaction. A
+        # ``partial_remap_presentation`` index-window remap -- R6 shed its
+        # handoff, or the predecessor it would hand off from is itself
+        # incomplete because an earlier shed round presented partially -- is
+        # presented as it stands and arms no successor, so neither objection
+        # survives. What is left is the whole retained set in one unchunked
+        # transaction, which is what R5 forbids: measured 2026-08-02 on the
+        # 60-tile scalar scroll, the shed arm's worst render entry paid 35-54 ms
+        # of commit against the unshed arm's 3.5 ms, and that gap was the entire
+        # difference between the two arms' worst GUI callback.
+        "pace_resident_retargets": bool(getattr(session, "partial_remap_presentation", False)),
         "governor_details": tuple(getattr(decision, "details", ()) or ()),
     }
     resident = getattr(getattr(window.win, "img_view", None), "tiledPayloadResident", None)
@@ -5954,6 +5965,7 @@ def _commit_batch_decision(
             pass_kind=pass_kind,
             remaining_items=remaining_items,
             retained_fallback_refinement=retained_refinement,
+            callback_elapsed_ms=_enclosing_callback_elapsed_ms(window, session),
         )
         if retained_refinement:
             evidence = session.resident_crop_governor_stats
@@ -5969,6 +5981,26 @@ def _commit_batch_decision(
     if callable(provider):
         return provider("presentation_commit", interactive=interactive)
     return None
+
+
+def _enclosing_callback_elapsed_ms(window, session) -> float:
+    """R5 blocking this pass inherits from the callback it commits inside.
+
+    Scoped to a partial index-window remap on purpose.  Every montage commit
+    reached from ``render()`` shares that entry's callback, and charging all of
+    them would reprice the cold fill -- which R5 warns is exactly how a cohort
+    collapses without shortening anything (the 2026-07 "shrink toward one tile"
+    failure).  The partial remap is the case the charge was measured on: it
+    presents the whole retained set from inside the retarget that produced it,
+    and that stacking is what put the scrub's worst GUI callback at 102-116 ms
+    against the unshed arm's 62-64 (2026-08-02, 60-tile scalar scroll).
+    Widening it to every nested pass is owed, behind its own fill measurement.
+    """
+
+    if not bool(getattr(session, "partial_remap_presentation", False)):
+        return 0.0
+    elapsed = getattr(window, "render_entry_elapsed_ms", None)
+    return max(0.0, float(elapsed())) if callable(elapsed) else 0.0
 
 
 def _render_pass_cost_context(window, session) -> tuple[object, object]:

@@ -946,3 +946,55 @@ def test_tile_worker_product_guard_still_holds():
 
     assert policy.fft_workers_tile == 1
     assert policy.montage_tile_workers * policy.fft_workers_tile <= 14
+
+
+def test_enclosing_callback_charge_shrinks_the_cohort_and_is_free_when_absent():
+    """R5's ceiling is per GUI callback, so a nested pass starts part-spent.
+
+    Counting form, no clock: the same measured cost model is asked for its
+    optimum twice, and the only difference is how much of the enclosing
+    callback has already been spent. The zero case must be arithmetically
+    identical to not passing the argument at all -- every commit outside an R6
+    partial remap takes that branch, and repricing them is exactly the cohort
+    collapse R5 warns about.
+    """
+
+    model = _RenderPassCostModel(
+        fixed_ms=6.0,
+        item_ms=0.6,
+        residual_rms_ms=0.0,
+        samples=8,
+        design_points=8,
+        observed_item_min=1,
+        observed_item_max=60,
+        mean_elapsed_ms=24.0,
+    )
+    common = {
+        "fixed_ms": 6.0,
+        "marginal_ms": 0.6,
+        "remaining_items": 60,
+        "observed_item_max": 60,
+        "observed_byte_max": 0,
+        "bytes_per_item": 0.0,
+        "model": model,
+    }
+
+    unenclosed = _render_pass_optimal_point(**common)[0]
+    declared_zero = _render_pass_optimal_point(**common, callback_elapsed_ms=0.0)[0]
+    enclosed = _render_pass_optimal_point(**common, callback_elapsed_ms=38.0)[0]
+
+    assert declared_zero == unenclosed
+    assert enclosed < unenclosed
+
+
+def test_render_pass_decision_reports_the_callback_it_is_nested_in():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+
+    decision = governor.decide_render_pass(
+        interactive=True,
+        pass_kind="preview",
+        remaining_items=60,
+        callback_elapsed_ms=38.0,
+    )
+
+    assert sum("enclosing-callback=38.00ms" in detail for detail in decision.details) == 1

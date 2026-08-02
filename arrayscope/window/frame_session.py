@@ -83,7 +83,10 @@ from arrayscope.render.lod import (  # noqa: F401  (re-exports; canonical home i
 from arrayscope.render.lod import (
     viewport_identity as _viewport_identity,
 )
-from arrayscope.render.progressive_scheduling import ProgressiveSchedulingPolicy
+from arrayscope.render.progressive_scheduling import (
+    ProgressiveSchedulingPolicy,
+    RoundLoadShedding,
+)
 from arrayscope.window.montage_payload_cache import payload_compatible_with_tile
 
 #: Share of ``tile_residency_budget_bytes`` an out-of-view display-payload
@@ -278,20 +281,24 @@ def forget_admission_verdict(session) -> None:
     session._last_admission_candidates = -1
 
 
-def _free_retarget_tiles(
+def _zero_byte_retarget_tiles(
     payloads: dict[int, DisplayTilePayload],
     *,
     logical_resident_tiles,
     physical_resident_fn,
-    pace_resident_retargets: bool,
 ) -> frozenset[int]:
-    """Return retargets proven to bypass every backend admission cap.
+    """Return retargets that upload nothing: a mapping rebind, not a batch.
 
     A backend physical-residency seam is authoritative when present.  The
     scheduler's acknowledged source identities are intentionally not used as
     a substitute: an acknowledged atlas page may since have been evicted.
-    Backends without physical residency truth retain the existing policy in
-    which only explicitly unpaced logical remaps are free.
+    Backends without physical residency truth fall back to the logical remap
+    set.
+
+    This is a *byte* statement only.  Whether a zero-byte rebind also bypasses
+    the item cap is a separate question, owned by ``pace_resident_retargets``
+    at the limits owner — the two were one predicate until a shed R6 remap
+    needed the byte truth without the cap bypass.
     """
 
     if callable(physical_resident_fn):
@@ -301,8 +308,6 @@ def _free_retarget_tiles(
             for tile, payload in payloads.items()
             if int(tile) in logical and bool(physical_resident_fn(payload))
         )
-    if pace_resident_retargets:
-        return frozenset()
     return frozenset(int(tile) for tile in logical_resident_tiles)
 
 
@@ -760,6 +765,9 @@ class FrameSession:
     render_round_demand: object = None
     round_preview_level: int = 0
     round_target_level: int = 0
+    # Backend commits this round has landed.  The R6 owner reads it when the
+    # next round opens: zero means the round never reached the screen.
+    render_round_commits: int = 0
     first_pass_quality: str | None = None
     first_pass_histogram_published: bool = False
     pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)
@@ -885,6 +893,13 @@ class FrameSession:
     # armed by the transition decision and cleared only by a complete backend
     # acknowledgement; lifecycle settlement is not a second completion owner.
     atomic_successor_pending: bool = False
+    # The other half of the same transition decision: this index-window remap is
+    # being presented as it stands rather than handed off whole, so its retained
+    # rebinds are NOT one visibility transaction and lose the licence to bypass
+    # the commit item cap that being one is what buys them.  Set by every
+    # index-window retarget and cleared by a viewport retarget, so it always
+    # describes the latest remap.
+    partial_remap_presentation: bool = False
     lod_policy_decision: LodPolicyDecision = field(
         default_factory=lambda: native_lod_policy(None, (1, 1), (1, 1))
     )
@@ -917,6 +932,7 @@ class FrameSession:
     scheduling_policy: ProgressiveSchedulingPolicy = field(
         default_factory=ProgressiveSchedulingPolicy
     )
+    round_load_shedding: RoundLoadShedding = field(default_factory=RoundLoadShedding)
     # Window-agnostic texel identity base for pyramid floors/previews
     # (montage_tile_semantic_key); falls back to session key when unset.
     semantic_key: object = None
@@ -1704,6 +1720,11 @@ class FrameSession:
 
         self.viewport_shape = (max(1, int(viewport_shape[0])), max(1, int(viewport_shape[1])))
         self.view_range = view_range
+        # A camera move is not a partial remap: its tiles move with the camera
+        # for free and nothing is republished per tile.  Clearing here keeps the
+        # latch describing the latest retarget rather than leaking a past
+        # scrub's pacing into the gesture that follows it.
+        self.partial_remap_presentation = False
         layout_changed = False
         if plan is not None:
             previous_geometry = getattr(self.plan, "geometry", None)
@@ -2062,11 +2083,38 @@ class FrameSession:
             # Same-topology source-window swaps hand off the frame-plan's
             # required on-screen scope atomically. Broader coverage slots are
             # not part of that completeness barrier.
+            # R6 step 2: an all-or-nothing handoff is what freezes the montage
+            # under a scrub the scheduler cannot keep up with — every commit
+            # bails ``atomic-successor-wait`` until the input stops.  While the
+            # round is shed, the remap above is presented as it stands: tiles
+            # that carried over move to their new slots and the slots with no
+            # retained source expose background until they fill.
+            #
+            # Shader backends only.  The comment above is not a preference on a
+            # CPU-windowed backend: its levels are baked into pixels, and the
+            # partial commit that shedding admits collapsed the montage to zero
+            # physical tiles mid-burst rather than moving what existed
+            # (``test_cropped_display_axis_scroll_keeps_complete_montage``).
+            shed_atomic_handoff = bool(
+                self.shader_display and self.round_load_shedding.verdict.drops_atomic_handoff
+            )
             self.atomic_successor_pending = bool(
                 had_complete_predecessor
+                and not shed_atomic_handoff
                 and old_plan_topology == _montage_plan_topology(plan)
                 and bool(self.atomic_successor_required_scope())
             )
+            # Latched beside the handoff decision, from the decision itself
+            # rather than from the shed verdict.  Reading the verdict would be
+            # both too late (``release()``, R6 step 3, may relax it before this
+            # remap finishes presenting) and too narrow: once a shed round has
+            # presented partially, the rounds after it find no complete
+            # predecessor to hand off FROM, so they also present as they stand
+            # -- measured as the worst callbacks of the whole scrub, 51 and 52
+            # retained rebinds in one unbounded transaction.  Those are shed
+            # consequences, and the licence being withdrawn here is bought by
+            # atomicity, which none of them has.
+            self.partial_remap_presentation = not self.atomic_successor_pending
             retained_state = {
                 int(tile): payload
                 for tile, payload in old_state_payloads.items()
@@ -3670,15 +3718,15 @@ class FrameSession:
             for tile, payload in payloads.items()
             if payload.source_id in self.acknowledged_source_ids
         }
-        free_retarget_tiles = _free_retarget_tiles(
+        zero_byte_retarget_tiles = _zero_byte_retarget_tiles(
             payloads,
             logical_resident_tiles=resident_retargets,
             physical_resident_fn=physical_resident_fn,
-            pace_resident_retargets=pace_resident_retargets,
         )
+        free_retarget_tiles = frozenset() if pace_resident_retargets else zero_byte_retarget_tiles
         payloads = _physical_rebind_transaction(
             payloads,
-            free_retarget_tiles=free_retarget_tiles,
+            free_retarget_tiles=zero_byte_retarget_tiles,
             physical_resident_fn=physical_resident_fn,
         )
         plan_tiles_by_number = {
@@ -3696,7 +3744,7 @@ class FrameSession:
             cost_fn=(
                 lambda tile: (
                     0
-                    if int(tile) in free_retarget_tiles
+                    if int(tile) in zero_byte_retarget_tiles
                     else int(
                         upsert_cost_fn(payloads[int(tile)])
                         if upsert_cost_fn is not None
@@ -4762,21 +4810,20 @@ class FrameSession:
                 if int(tile) in coverage_upserts
             }
             resident_retarget_tiles.intersection_update(coverage_upserts)
-        free_retarget_tiles = _free_retarget_tiles(
+        zero_byte_retarget_tiles = _zero_byte_retarget_tiles(
             all_candidate_upserts,
             logical_resident_tiles=resident_retarget_tiles,
             physical_resident_fn=physical_resident_fn,
-            pace_resident_retargets=pace_resident_retargets,
         )
+        # Uploading nothing is what makes a rebind free of BYTES; being one
+        # atomic visibility transaction is what let it also skip the item cap.
+        # A shed R6 remap has given up the second claim by construction, so the
+        # limits owner paces it and only the byte truth above survives.
+        free_retarget_tiles = frozenset() if pace_resident_retargets else zero_byte_retarget_tiles
         all_candidate_upserts = _physical_rebind_transaction(
             all_candidate_upserts,
-            free_retarget_tiles=free_retarget_tiles,
+            free_retarget_tiles=zero_byte_retarget_tiles,
             physical_resident_fn=physical_resident_fn,
-        )
-        zero_byte_retarget_tiles = (
-            free_retarget_tiles
-            if physical_resident_fn is not None
-            else frozenset(resident_retarget_tiles)
         )
         cold_upserts = {
             int(tile): payload
@@ -5617,6 +5664,7 @@ class FrameSession:
     def note_committed(self) -> None:
         self.last_commit_monotonic = monotonic()
         self.commit_batches += 1
+        self.render_round_commits += 1
         # Upserts under identity-rejected backoff are not commit debt: the
         # backend just proved it rejects exactly these payloads against
         # exactly these targets, so re-arming the flush from them replays a

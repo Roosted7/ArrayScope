@@ -1,11 +1,14 @@
-"""Qt-free contract tests for the COVERAGE -> REFINE policy owner."""
+"""Qt-free contract tests for the COVERAGE -> REFINE and R6 policy owners."""
 
 from arrayscope.kernel.task import Lane
 from arrayscope.presentation import TileLifecycle, TileTarget
 from arrayscope.render.progressive_scheduling import (
     ProgressiveSchedulingPolicy,
+    RoundLoadShedding,
     SchedulingPhase,
     SchedulingWork,
+    ShedLevel,
+    is_refinement_lane,
 )
 
 
@@ -136,3 +139,55 @@ def test_quality_retarget_does_not_create_a_new_required_scope_generation():
     assert policy.retarget(scope, (0, 1), progressive=True) is False
     assert policy.verdict.generation == generation
     assert policy.verdict.phase is SchedulingPhase.COVERAGE
+
+
+def test_shedding_escalates_only_while_rounds_deliver_nothing():
+    shedding = RoundLoadShedding()
+
+    first = shedding.open_round(predecessor_delivered=True)
+    behind = shedding.open_round(predecessor_delivered=False)
+    further_behind = shedding.open_round(predecessor_delivered=False)
+
+    assert first.level is ShedLevel.NONE
+    assert behind.level is ShedLevel.TARGET_PASS
+    assert behind.drops_target_pass is True
+    # R6 orders the two steps: the target pass goes before the montage is
+    # allowed to show a partially replaced window.
+    assert behind.drops_atomic_handoff is False
+    assert further_behind.level is ShedLevel.RETAIN_ONLY
+    assert further_behind.drops_atomic_handoff is True
+    assert shedding.rounds_shed == 2
+
+
+def test_a_round_that_reached_the_backend_clears_the_shedding_streak():
+    shedding = RoundLoadShedding()
+
+    shedding.open_round(predecessor_delivered=False)
+    shedding.open_round(predecessor_delivered=False)
+    recovered = shedding.open_round(predecessor_delivered=True)
+
+    assert recovered.level is ShedLevel.NONE
+    assert recovered.streak == 0
+
+
+def test_release_hands_the_live_round_its_target_pass_back():
+    """R6 step 3: shedding postpones the target pass, it never cancels it."""
+
+    shedding = RoundLoadShedding()
+    shedding.open_round(predecessor_delivered=False)
+    shedding.open_round(predecessor_delivered=False)
+
+    assert shedding.verdict.drops_atomic_handoff is True
+    assert shedding.release() is True
+    assert shedding.verdict.level is ShedLevel.NONE
+    # Idempotent: nothing to relax means no replan is owed.
+    assert shedding.release() is False
+    # Releasing does not forget that the scheduler was behind: the next round
+    # is still opening on a predecessor that reached the backend not once.
+    assert shedding.open_round(predecessor_delivered=False).level is ShedLevel.RETAIN_ONLY
+
+
+def test_refinement_lane_classification_has_one_owner():
+    assert is_refinement_lane(Lane.DISPLAY_PREPARATION) is True
+    assert is_refinement_lane(Lane.VISIBLE_MATERIALIZATION) is True
+    assert is_refinement_lane(Lane.DISPLAY_PREVIEW) is False

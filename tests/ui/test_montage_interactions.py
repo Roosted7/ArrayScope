@@ -1475,7 +1475,7 @@ def test_operation_backed_complex_montage_tile_layer_rewindows_rgb_from_histogra
 # ADR 0061 follow-up — WGPU channel-transition stall (tracked work, not noise).
 # A COMPLEX_RG32F payload retargeted to display mode 'scalar' makes
 # ``WgpuImageView2D.tiledPayloadResident`` raise ``NotImplementedError`` out of
-# ``_wgpu_commit_plan``.  ``frame_session._free_retarget_tiles`` calls that as a
+# ``_wgpu_commit_plan``.  ``frame_session._zero_byte_retarget_tiles`` calls that as a
 # PREDICATE, so the throw aborts the whole commit, ``handle_ui_exception``
 # swallows it, and the session is then left with every tile dirty, zero active
 # requests, and no event that can resume it (verified stuck for 30 s) — a stall

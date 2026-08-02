@@ -1254,6 +1254,7 @@ class RenderOrchestrator(
         defer_side_panels: bool = False,
     ):
         render_start = perf_counter()
+        self._render_entry_started = render_start
         try:
             self._render_synchronous(
                 reason=reason,
@@ -1262,10 +1263,25 @@ class RenderOrchestrator(
                 render_start=render_start,
             )
         finally:
+            self._render_entry_started = None
             self._record_render_entry_observation(
                 reason=reason,
                 elapsed_ms=(perf_counter() - render_start) * 1000.0,
             )
+
+    def render_entry_elapsed_ms(self) -> float:
+        """Milliseconds the live render entry has already blocked the GUI thread.
+
+        A pass that commits from inside ``render()`` shares that callback's R5
+        ceiling rather than getting a fresh one; this is how the governor is
+        told so. Zero outside a render entry, which is every timer-driven
+        continuation.
+        """
+
+        started = getattr(self, "_render_entry_started", None)
+        if started is None:
+            return 0.0
+        return max(0.0, (perf_counter() - float(started)) * 1000.0)
 
     def _render_synchronous(
         self,
@@ -1330,9 +1346,18 @@ class RenderOrchestrator(
         if not callable(record):
             return
         details = [f"reason={reason}"]
+        # The frame-update split below is the render entry's own bill of
+        # materials.  Without it a render entry over the R5 ceiling named only
+        # its total, and the nested commit observation is a separate record
+        # that has to be correlated by hand to see what the rest of the entry
+        # was doing (2026-08-02: 46 of 89 ms sat outside every nested record).
         for label, attribute in (
             ("stage_plan_ms", "_last_montage_stage_plan_ms"),
             ("frame_update_ms", "_last_frame_update_ms"),
+            ("viewport_plan_ms", "_last_montage_viewport_plan_ms"),
+            ("cache_resolve_ms", "_last_montage_cache_resolve_ms"),
+            ("session_setup_ms", "_last_frame_session_setup_ms"),
+            ("commit_ms", "_last_montage_initial_commit_ms"),
             ("side_panel_ms", "_last_side_panel_sync_ms"),
         ):
             value = getattr(self, attribute, None)

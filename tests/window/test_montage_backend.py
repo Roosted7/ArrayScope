@@ -135,12 +135,14 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     """A demand recomputed at pipeline ownership cannot lose its draw wakeup."""
 
     from arrayscope.render import lod as render_lod
+    from arrayscope.render.progressive_scheduling import RoundLoadShedding
     from arrayscope.window import frame_effects as montage_commit
     from arrayscope.window.frame_runtime import FrameRuntimeMixin
 
     calls = []
     session = SimpleNamespace(
         scheduling_policy=_refine_scheduling_policy(),
+        round_load_shedding=RoundLoadShedding(),
         lod_policy_decision=SimpleNamespace(demand=object()),
         pending_level_tiles=(),
         level_scan_remaining_tiles=0,
@@ -2835,7 +2837,10 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
 
     from arrayscope.display.backend_contract import WGPU_CAPABILITIES
     from arrayscope.render.level_stats import LevelStatsService
-    from arrayscope.render.progressive_scheduling import ProgressiveSchedulingPolicy
+    from arrayscope.render.progressive_scheduling import (
+        ProgressiveSchedulingPolicy,
+        RoundLoadShedding,
+    )
     from arrayscope.window.frame_effects import FramePipelineEffects
     from arrayscope.window.frame_runtime import FrameRuntimeMixin
 
@@ -2894,6 +2899,7 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
         level_expected_indices=(7,),
         plan=SimpleNamespace(tiles=(SimpleNamespace(source_index=7),)),
         scheduling_policy=policy,
+        round_load_shedding=RoundLoadShedding(),
         level_evidence_inflight=False,
         level_evidence_generation=None,
         first_pass_histogram_published=False,
@@ -5181,6 +5187,120 @@ def test_tile_presentation_limits_cap_resident_retarget_upserts():
     )
 
     assert tuple(delta.upserts) == (1, 2)
+
+
+def test_zero_byte_rebind_classification_survives_pacing():
+    """The byte claim and the item-cap claim are separate, and only one is paced.
+
+    A WGPU rebind uploads nothing; that is a physical fact about the backend and
+    it does not change because R6 decided to present the remap in pieces. Being
+    ONE visibility transaction is the separate claim that bought the item-cap
+    bypass, and a partial remap does not have it. Counting form: the same four
+    physically resident payloads under both pacing verdicts.
+    """
+
+    from arrayscope.window.frame_session import _zero_byte_retarget_tiles
+
+    payloads = dict.fromkeys(range(4), object())
+    logical = frozenset(range(4))
+
+    unpaced = _zero_byte_retarget_tiles(
+        payloads,
+        logical_resident_tiles=logical,
+        physical_resident_fn=lambda _payload: True,
+    )
+    partially_resident = _zero_byte_retarget_tiles(
+        payloads,
+        logical_resident_tiles=frozenset({0, 2}),
+        physical_resident_fn=lambda _payload: True,
+    )
+    no_backend_truth = _zero_byte_retarget_tiles(
+        payloads,
+        logical_resident_tiles=logical,
+        physical_resident_fn=None,
+    )
+
+    assert unpaced == logical
+    # Physical residency narrows the logical set; it never widens it.
+    assert partially_resident == frozenset({0, 2})
+    assert no_backend_truth == logical
+
+
+def test_partial_remap_withdraws_the_resident_rebind_cap_bypass():
+    """R5 bound on an R6 partial remap, at the limits owner.
+
+    ``pace_resident_retargets`` is the one knob that decides whether a resident
+    rebind streams through the governor's item cap. It is False for an atomic
+    handoff -- pacing one tears the retained frame and leaves no completion to
+    arm the successor -- and True exactly when the session says this remap is
+    being presented as it stands.
+    """
+
+    from arrayscope.window import frame_effects as montage_commit
+
+    window = SimpleNamespace(
+        img_view=SimpleNamespace(
+            rendering_capabilities=ImageViewBackendCapabilities(
+                name="wgpu",
+                persistent_tile_residency=True,
+                shader_windowing=True,
+            ),
+            tiledPayloadResident=lambda _payload: True,
+        ),
+        _viewport_interaction_active=False,
+        resource_governor=SimpleNamespace(
+            decide_commit_batch=lambda *, interactive: SimpleNamespace(
+                batch_limit=12, byte_cap=8 * 1024 * 1024, budget_ms=2.0
+            )
+        ),
+    )
+    window.win = window
+
+    atomic = montage_commit._persistent_tile_upsert_limits(
+        window, SimpleNamespace(partial_remap_presentation=False)
+    )
+    partial = montage_commit._persistent_tile_upsert_limits(
+        window, SimpleNamespace(partial_remap_presentation=True)
+    )
+
+    assert atomic["pace_resident_retargets"] is False
+    assert partial["pace_resident_retargets"] is True
+    # The cap the pacing then applies is the governor's, unchanged by either arm.
+    assert atomic["max_upserts"] == partial["max_upserts"] == 12
+
+
+def test_nested_pass_charges_its_enclosing_callback_only_when_partial():
+    """The R5 blocking a commit inherits is scoped to the partial remap.
+
+    Charging every montage commit reached from ``render()`` would reprice the
+    cold fill, which is the cohort collapse R5 documents. Counting form: the
+    same live render entry, read through two sessions.
+    """
+
+    from arrayscope.window import frame_effects as montage_commit
+
+    window = SimpleNamespace(render_entry_elapsed_ms=lambda: 41.0)
+
+    assert (
+        montage_commit._enclosing_callback_elapsed_ms(
+            window, SimpleNamespace(partial_remap_presentation=True)
+        )
+        == 41.0
+    )
+    assert (
+        montage_commit._enclosing_callback_elapsed_ms(
+            window, SimpleNamespace(partial_remap_presentation=False)
+        )
+        == 0.0
+    )
+    # Outside a render entry there is no enclosing callback to charge.
+    assert (
+        montage_commit._enclosing_callback_elapsed_ms(
+            SimpleNamespace(render_entry_elapsed_ms=lambda: 0.0),
+            SimpleNamespace(partial_remap_presentation=True),
+        )
+        == 0.0
+    )
 
 
 def test_interactive_viewport_prunes_stale_montage_tile_work(qt_app):

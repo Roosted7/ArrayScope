@@ -140,6 +140,7 @@ def test_interaction_stop_edge_replans_deferred_native_montage_quality(qtbot, mo
 
 
 def test_interaction_stop_native_replan_watermark_is_scoped_to_frame_session():
+    from arrayscope.render.progressive_scheduling import RoundLoadShedding
     from arrayscope.window.frame_runtime import FrameRuntimeMixin
 
     first_pipeline = SimpleNamespace(
@@ -151,11 +152,13 @@ def test_interaction_stop_native_replan_watermark_is_scoped_to_frame_session():
     first_session = SimpleNamespace(
         session_id=1,
         pipeline=first_pipeline,
+        round_load_shedding=RoundLoadShedding(),
         _interactive_residency_deferred=False,
     )
     second_session = SimpleNamespace(
         session_id=2,
         pipeline=second_pipeline,
+        round_load_shedding=RoundLoadShedding(),
         _interactive_residency_deferred=False,
     )
     replanned = []
@@ -174,6 +177,7 @@ def test_interaction_stop_native_replan_watermark_is_scoped_to_frame_session():
 
 
 def test_interaction_stop_rearms_deferred_wgpu_histogram_evidence():
+    from arrayscope.render.progressive_scheduling import RoundLoadShedding
     from arrayscope.window.frame_runtime import FrameRuntimeMixin
 
     pipeline = SimpleNamespace(
@@ -183,6 +187,7 @@ def test_interaction_stop_rearms_deferred_wgpu_histogram_evidence():
     session = SimpleNamespace(
         session_id=1,
         pipeline=pipeline,
+        round_load_shedding=RoundLoadShedding(),
         _interactive_residency_deferred=False,
         _wgpu_histogram_evidence_deferred=True,
         tile_presentation_state=SimpleNamespace(payloads=acknowledged),

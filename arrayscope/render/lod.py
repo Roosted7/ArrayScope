@@ -682,8 +682,22 @@ def selected_lod_factor(session) -> int:
             if base_preview > 0
             else 0
         )
+        round_id = progressive_render_round_id(round_key)
+        # R6's "cannot keep up" question, asked of the round that is ending:
+        # did it reach the backend at all?  Presentation predicates cannot
+        # answer it here — a retarget swaps ``session.plan`` before this runs,
+        # so every payload reads as belonging to the wrong window.
+        predecessor_delivered = bool(
+            session.render_round_key is None or session.render_round_commits > 0
+        )
+        session.round_load_shedding.open_round(
+            round_id=round_id,
+            predecessor_delivered=predecessor_delivered,
+            session_id=int(getattr(session, "session_id", 0) or 0),
+        )
+        session.render_round_commits = 0
         session.render_round_key = round_key
-        session.render_round_id = progressive_render_round_id(round_key)
+        session.render_round_id = round_id
         session.render_round_demand = decision.demand
         session.round_preview_level = int(preview_level)
         session.round_target_level = int(decision.demand.desired_level)

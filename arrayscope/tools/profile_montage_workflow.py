@@ -7388,6 +7388,15 @@ def _phase_record(
         if phase_ui_work_epoch is not None and callable(epoch_evidence)
         else (0, 0.0, False)
     )
+    # The tail above keeps 64 observations; a flooded phase drops its own
+    # maximum out of that window, which is how R5's over-50 ms reports went
+    # unattributed.  The governor retains the record that set the maximum.
+    epoch_max = getattr(getattr(win, "resource_governor", None), "ui_observation_epoch_max", None)
+    epoch_max_observation = (
+        epoch_max(phase_ui_work_epoch)
+        if phase_ui_work_epoch is not None and callable(epoch_max)
+        else None
+    )
     feedback_channels = () if resource is None else tuple(resource.feedback_channels)
     lane_decisions = () if resource is None else tuple(resource.lane_decisions)
     presentation = _backend_presentation_diagnostics(win)
@@ -7704,6 +7713,9 @@ def _phase_record(
         "phase_recent_ui_work_observations_truncated": bool(phase_recent_ui_work_truncated),
         "phase_ui_work_observation_count": int(epoch_count),
         "phase_ui_work_observation_max_ms": float(epoch_max_ms),
+        "phase_ui_work_observation_max": (
+            None if epoch_max_observation is None else asdict(epoch_max_observation)
+        ),
         "phase_ui_work_observation_evidence_complete": bool(epoch_complete),
         "recent_over_warning_callbacks": [asdict(callback) for callback in recent_callbacks],
     }

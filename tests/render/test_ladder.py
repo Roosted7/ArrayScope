@@ -55,6 +55,7 @@ def plan_tile(
     *,
     preview_level=4,
     target_level=None,
+    shed_target_pass=False,
 ):
     """Spell the required round floors at every direct ladder unit call."""
 
@@ -66,6 +67,7 @@ def plan_tile(
         target_level=(
             int(current_demand.desired_level) if target_level is None else int(target_level)
         ),
+        shed_target_pass=shed_target_pass,
     )
 
 
@@ -528,3 +530,59 @@ def test_fallback_at_the_desired_level_still_plans_a_desired_step():
         current_presentation_quality="exact",
     )
     assert [step.rung for step in plan_tile(ladder, settled, demand(2))] == []
+
+
+def test_shed_round_draws_its_preview_pass_and_nothing_finer():
+    """R6 step 1: the round the scheduler fell behind on previews only."""
+
+    ladder = LodLadder(LadderPolicy())
+    state = TileLodState(tile_number=3, exact_requested=True)
+
+    steps = plan_tile(ladder, state, demand(1), preview_level=5, shed_target_pass=True)
+
+    assert rungs(steps) == [(Rung.FLOOR, 5)]
+    assert steps[0].lane == Lane.DISPLAY_PREVIEW
+    # The same tile without the shed verdict is what makes that a subtraction.
+    assert rungs(plan_tile(ladder, state, demand(1), preview_level=5)) == [
+        (Rung.FLOOR, 5),
+        (Rung.DESIRED, 1),
+        (Rung.EXACT, 0),
+    ]
+
+
+def test_shedding_never_takes_a_tile_its_only_first_pixels():
+    """R4 survives R6: a pipeline with no coarse producer keeps its one rung."""
+
+    ladder = LodLadder(LadderPolicy())
+
+    steps = plan_tile(
+        ladder,
+        TileLodState(tile_number=3, allow_preview=False),
+        demand(1),
+        shed_target_pass=True,
+    )
+
+    assert rungs(steps) == [(Rung.DESIRED, 1)]
+    assert steps[0].lane == Lane.DISPLAY_PREVIEW
+
+
+def test_shed_plan_produces_no_level_outside_the_round_floors():
+    """R1 under shedding: fewer rungs, never a rung at a new level."""
+
+    ladder = LodLadder(LadderPolicy())
+    states = [
+        TileLodState(tile_number=0),
+        TileLodState(tile_number=1, resident_levels=(5,)),
+        TileLodState(tile_number=2, presented_level=5, presented_quality="preview"),
+    ]
+
+    steps = ladder.plan(
+        states,
+        demand(1),
+        preview_level=5,
+        target_level=1,
+        shed_target_pass=True,
+    )
+
+    assert {step.level for step in steps} <= {5}
+    assert {step.rung for step in steps} == {Rung.FLOOR}

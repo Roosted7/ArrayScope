@@ -227,6 +227,7 @@ class FrameRuntimeMixin:
             render_round_id=str(getattr(session, "render_round_id", "") or ""),
             round_preview_level=int(getattr(session, "round_preview_level", 0) or 0),
             round_target_level=int(getattr(session, "round_target_level", 0) or 0),
+            round_shed_target_pass=bool(session.round_load_shedding.verdict.drops_target_pass),
             tile_source_ids=tuple(
                 (
                     int(tile.montage_index),
@@ -448,6 +449,14 @@ class FrameRuntimeMixin:
             # pacing; this only guarantees an owner exists.
             self.apply_ready_montage_display(session)
         if not submitted:
+            if session.round_load_shedding.release():
+                # R6 step 3.  A shed plan that admits nothing has no shed-able
+                # work left, so shedding is now the only reason the round is
+                # short of target quality — and nothing else is guaranteed to
+                # come back for it.  The interaction-stop edge below is the
+                # other release, and it does not cover a round the user never
+                # touched (a reload or a data change plans exactly like this).
+                self.request_montage_replan(session)
             self._finish_frame_session_if_complete(session)
         if not session.is_complete():
             self._ensure_montage_watchdog()
@@ -459,6 +468,12 @@ class FrameRuntimeMixin:
         session = getattr(self, "_frame_session", None)
         if session is None or not self._frame_session_is_current(session):
             return False
+        if session.round_load_shedding.release():
+            # R6 step 3, the interaction-stop half: the gesture that was
+            # outrunning the scheduler is over, so the round on screen is
+            # entitled to its target pass whether or not it still has preview
+            # work queued.
+            self.request_montage_replan(session)
         pipeline = getattr(session, "pipeline", None)
         counters = getattr(pipeline, "counters", None)
         deferred = int(getattr(counters, "interactive_native_deferred", 0) or 0)

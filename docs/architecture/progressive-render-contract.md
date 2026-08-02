@@ -515,8 +515,8 @@ whoever picks this up next; update it in place rather than appending.
 | R2b one floor pair per round | Enforced. Round identity is explicit and both floors latch to it. |
 | R3 levels never clip | Enforced, with one named red. Round preview levels use the complete cohort's analytic envelope. The R3 newly reported beside `cac3fa6c` is **not merely newly reachable**: exact crop-rebound payloads can be judged from the CPU planes `_rebind_reslice_planes` cut to the current window, but a page-backed rebound payload has no current CPU plane while WGPU rebinds current-window resident pages under predecessor levels. An exact rebind now records its current-plane bounds once at that seam and WGPU includes them in the same temporary presentation clamp used for refinement. The probe independently rejects only stale `level_stats`/`level_data`, reports exact-plane evidence as `stale-stats-rejected-plane-used`, and keeps the page-backed case red as `page-backed-rebind-no-current-plane`; the open physical-proof/fail-safe work is queue row 2. Separately, a completing scalar zoom/pan control recorded the refinement mechanism: source 82/tile 36 was presented at L2 with bounds `(0.1296716332, 1.0)` when refined evidence proposed `(0.1321790963, 1.0)`. WGPU now clamps that publication to acknowledged payload bounds without mutating the refined tracker; the clamp is target-quality/provisional, so replacement of the outlying payload lets the refined source re-anchor to the true range. PyQtGraph needs no clamp because a level change re-bakes its payload. The same control now has zero R3 failures. **Correction 2026-08-01:** "replacement of the outlying payload releases it" held only while the refined window stood still. The release edge compared fresh presented bounds against a `true_bounds` *snapshot* taken when the clamp armed, and the refined window moves under an unchanged semantic key — a crop scrub advances it every step — so the clamp latched permanently and pinned the display at the union of an old low and a new high (measured: snapshot `(112, 605)`, matching no single scrub step because it was taken mid-transition, against a complete REFINED tracker at `(132, 610)`; `610 > 605` forever). Both halves of the clamp record are now re-derived from the tracker's live offer on every commit, and a held source that no longer matches the window the clamp currently requires is refused rather than re-published — `_shader_level_source_covering_presented_payloads` re-widens and re-arms on that same commit, so R3 is never the thing that relaxes. This was pre-existing in `7d50f5b0` and surfaced as `test_rebind_and_evaluation_paths_settle_identical_levels` timing out, which is **not** a load flake: once entered, no budget releases it (3/3 fail unmodified, 7/7 pass fixed). |
 | R4 preview for every backend/dtype | Green on both backends, including PyQtGraph complex and pipelines that cannot reduce their input. |
-| R5 chunked and governed | Governed. The known whole-montage bookkeeping and aggregates are now delta-proportional; one pure preparation row runs on a worker. Stateful delta construction and genuine per-item submission remain on the GUI thread. |
-| R6 shed quality, never liveness | **Not implemented.** WGPU fast scroll still freezes until idle. |
+| R5 chunked and governed | Governed. The known whole-montage bookkeeping and aggregates are now delta-proportional; one pure preparation row runs on a worker. Stateful delta construction and genuine per-item submission remain on the GUI thread. A pass that commits from inside another GUI callback now prices that callback's spent time (R6 partial remaps only); the index-window retarget's own model rebuild, 28–41 ms on both arms, is still unchunked. |
+| R6 shed quality, never liveness | Implemented on WGPU, for the index-window scrub. Steps 1 and 2 both land; the freeze was **not** production throughput — see below. PyQtGraph keeps the whole-frame handoff, and a session *rebirth* still takes it on both backends. |
 | R7 speculative residency is post-settle | **Not implemented.** Level 0 was 82–84% of upload bytes and ran during the fill. |
 
 Open work, roughly in dependency order:
@@ -586,7 +586,126 @@ Open work, roughly in dependency order:
    `create_texture`/`copy_texture_to_texture` off the GUI thread beside a live
    surface — unvalidated here. The seam is in place for future pure preparation
    rows; nothing about the mailbox is specific to array packing.
-2. **R6 load shedding** on WGPU fast scroll.
+2. **R6 load shedding** — *landed for the WGPU index-window scrub.* The
+   remainder is named at the end of this section.
+
+   **The freeze was a presentation barrier, not slow production.** Every
+   index-window retarget arms `atomic_successor_pending`
+   (`FrameSession.retarget_index_window`), and `_commit_tile_layer` then bails
+   `atomic-successor-wait` until the *whole* successor scope is current. A
+   scrub supersedes the round before that, so no commit ever lands. In-process
+   A/B over one 30-step index-window burst, same fixture, same process, 48
+   sources at 192², reading the source index each slot is physically drawing
+   out of `_wgpu_committed`: with shedding disabled the drawn window was
+   **pinned for the last 28 of 30 steps** while `commit_batches` held at 10 and
+   `wgpu_uploads_total` at 25, then every tile replaced at once when the input
+   stopped. With shedding the drawn window advanced
+   0 → 1 → 4 → 7 → 11 → 14 → 17 → 20 → 23 → 30, never standing still for more
+   than four steps, `commit_batches` 7 → 23 and uploads 24 → 50. Chasing
+   production throughput would have moved neither number.
+
+   The owner is `render.progressive_scheduling.RoundLoadShedding`, consulted
+   once per round from the round latch in `render.lod.selected_lod_factor`.
+   Its "falling behind" signal is `FrameSession.render_round_commits` — did the
+   round that is ending reach the backend at all — because no presentation
+   predicate can answer that question at the latch: a retarget swaps
+   `session.plan` first, so every payload reads as belonging to the wrong
+   window. Consecutive undelivered rounds escalate: `TARGET_PASS` drops the
+   refinement lanes from `LodLadder.plan` (R6 step 1, carried on
+   `RenderIntent.round_shed_target_pass`), then `RETAIN_ONLY` also drops the
+   handoff so the remap presents as it stands (R6 step 2).
+
+   **Shedding postpones the target pass; it may never cancel it.** A shed round
+   that nothing supersedes is stranded at preview quality forever, and that is
+   not a hypothetical — it took two live tests red (a reload and a data change,
+   neither of which is interactive, so the interaction-stop edge alone does not
+   cover them). `release()` therefore runs on *two* edges: the plan that admits
+   nothing more, and the end of the interaction. The first of those is
+   deliberately eager, and it costs step 1 most of its bite: a round whose
+   preview work is merely *in flight* also admits nothing, so it gets its
+   target pass back early. Step 2 is unaffected — the handoff is decided when
+   the round opens, before any plan runs — and step 2 is what the measurement
+   above is about.
+
+   Named remainder: **PyQtGraph keeps the whole-frame handoff**, because its
+   levels are baked into pixels and the partial commit shedding admits
+   collapsed the montage to zero physical tiles mid-burst rather than moving
+   what existed (`test_cropped_display_axis_scroll_keeps_complete_montage`);
+   R6 there needs the R3 tolerance ladder first. A session **rebirth** still
+   takes the atomic handoff on both backends — its successor is cold, so
+   "present what exists" would blank the montage rather than move it, which is
+   the opposite of what R6 asks for. And nothing here sheds a **pan or zoom**
+   round: those retarget the viewport rather than the index window, and their
+   tiles already move with the camera for free.
+
+   **The owed number is attributed and bounded (2026-08-02).** R5's
+   `all_gui_callbacks_below_50ms` fired on the shed arm and the maximum was
+   unreadable, because `phase_ui_work_observation_max_ms` is taken over every
+   observation while the retained list keeps a 64-deep tail — on a phase with
+   1 100–1 200 observations the maximum is always outside it. The governor now
+   retains the one record that set the epoch maximum
+   (`ResourceGovernor.ui_observation_epoch_max`, constant memory, reported as
+   `phase_ui_work_observation_max`), and the render entry names its own bill of
+   materials, so the number attributes itself.
+
+   It is **`render_entry`**, not a commit: `RenderMixin.render` is one
+   synchronous GUI callback and an index-window scrub step runs the whole
+   retarget inside it. Order-balanced two-pass runs, headless Weston, wgpu
+   bitmap, 60-tile scalar scroll — the split of the worst callback, in
+   milliseconds:
+
+   | | worst callback | viewport plan | session setup | commit |
+   |---|---:|---:|---:|---:|
+   | shedding off (control) | 62.4 / 63.5 | 3.0 / 1.7 | 37.5 / 40.9 | **3.5 / 3.5** |
+   | shed, as first landed | 102.0 / 116.1 | 2.5 / 2.0 | 40.0 / 35.8 | **35.5 / 54.4** |
+   | shed, bounded | 78.3 / 78.8 / 81.1 / 81.7 | 1.2–3.5 | 27.8–38.8 | **21.2 / 24.0 / 26.6 / 31.3** |
+
+   The entire difference between the arms is the commit: the control arm's
+   commit bails `atomic-successor-wait` in 3.5 ms, while the shed arm presents
+   the whole retained set — 48–52 tiles, **zero upload bytes** — in one
+   transaction inside that same callback. Which is R5's unchunked burst, and it
+   was ungoverned by construction: `TileAdmissionQueue` lets a `free` tile
+   bypass the item cap, the byte cap *and* the deadline, and
+   `_persistent_tile_upsert_limits` declared every physically resident rebind
+   free on the grounds that "those bindings form one visibility transaction".
+   R6 gives that transaction up by definition. So the two claims are now
+   separate: `_zero_byte_retarget_tiles` owns the byte truth (a rebind uploads
+   nothing, always), and `FrameSession.partial_remap_presentation` — latched
+   beside the handoff decision as `not atomic_successor_pending`, because after
+   one shed round the *following* rounds also find no complete predecessor to
+   hand off from — withdraws the item-cap bypass, so the rebinds stream through
+   the governor's own cap in priority order, retained-first.
+
+   That alone was not enough, and the reason is worth keeping: the governor's
+   fitted optimum for this pass was **60 items, the whole montage**, and it was
+   not wrong — it targets 32 ms and the transaction measured 29–36 ms. The
+   transaction fits; the *callback* does not, because it already contains 30–40
+   ms of retarget. R5's ceiling is on what a GUI callback blocks for, so the
+   objective now prices that: `_render_pass_optimal_point` takes
+   `callback_elapsed_ms` and charges the first chunk the responsiveness price of
+   `enclosing + chunk` rather than `chunk` alone (later chunks run in callbacks
+   of their own, and pay nothing extra). Zero when nothing encloses the pass, so
+   it is arithmetically invisible everywhere else. Fed only from a partial
+   remap: charging every commit reached from `render()` would reprice the cold
+   fill, which is precisely the cohort collapse §R5 documents. The cohort drops
+   from 60 to 8–30 and the montage keeps moving through the scrub either way.
+
+   The profiler's own R5 gates agree: `commit_callback_below_50ms` and
+   `commit_chunk_governed_or_sub_budget` both fire on the shed arm before and on
+   neither of two passes after; `all_gui_callbacks_below_50ms` still fires on
+   *every* arm, control included, which is the residual below.
+
+   **Still owed.** The residual ~28–41 ms is `session_setup_ms` — the
+   index-window retarget's own model rebuild in `FrameControllerMixin`
+   (`retarget_index_window` through `_ensure_montage_level_stats`) — and it is
+   **identical on both arms**, so it is not R6's and R6 cannot fix it. Both arms
+   are over 50 ms because of it. It is the next R5 item on this path, and it is
+   a *pass over the round's tile set* in the same callback, so it is chunkable
+   in principle. Widening the enclosing-callback charge to every nested pass is
+   owed too, behind its own fill measurement. Note also that the unshed control
+   arm is the unstable one to measure: 2 of 3 control runs died on the
+   post-scroll completion wait with every gate reading settled, which is the
+   freeze this whole section is about.
 3. **R7 post-settle prefetch**, with the warm ladder breadth-first at coarse
    levels rather than native-first.
 4. **The R3 tolerance ladder** (±20% free-reuse, ±10% preview, ±2% target),

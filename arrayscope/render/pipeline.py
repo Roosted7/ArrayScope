@@ -224,6 +224,7 @@ class FramePipeline:
             verdict,
             preview_level=int(intent.round_preview_level),
             target_level=int(intent.round_target_level),
+            shed_target_pass=bool(intent.round_shed_target_pass),
         )
         self.last_plan_states = tuple(
             (

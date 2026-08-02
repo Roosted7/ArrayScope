@@ -719,3 +719,150 @@ def test_wgpu_cropped_scrub_bounds_preview_producer_work(qtbot):
     finally:
         win.close()
         restore_default_backend(settings)
+
+
+def _drawn_sources(win) -> dict[int, int]:
+    """Tile slot -> the source index the surface is physically drawing."""
+
+    committed = getattr(win.img_view, "_wgpu_committed", None) or {}
+    return {
+        int(number): int(info["source_index"])
+        for number, info in (committed.get("tiles") or {}).items()
+        if info.get("source_index") is not None
+    }
+
+
+def test_wgpu_shed_index_scrub_moves_the_montage_and_still_completes(qtbot, monkeypatch):
+    """R6: a scrub the scheduler falls behind on keeps moving, then fills.
+
+    The mechanism, measured in-process on 2026-08-02: every index-window
+    retarget arms ``atomic_successor_pending``
+    (``FrameSession.retarget_index_window``), and ``_commit_tile_layer`` then
+    bails ``atomic-successor-wait`` until the whole successor scope is
+    current.  A scrub supersedes the round before that, so no commit lands at
+    all -- an A/B over one 30-step burst held the drawn source window pinned
+    for the last 28 steps with ``commit_batches`` and ``wgpu_uploads_total``
+    frozen, then replaced every tile at once when the input stopped.  That is
+    the contract's "freezes every tile until idle".
+
+    The load is stated rather than raced.  ``render_round_commits`` is the
+    counter the R6 owner reads, so zeroing it says "the round that just ended
+    reached the backend not once"; two of those escalate to ``RETAIN_ONLY``.
+    The first scrub below leaves it alone and is the control arm: without it
+    the branch assertion could not fail, because a montage this size never
+    arms the handoff for a reason of its own.
+    """
+
+    from arrayscope.render.progressive_scheduling import ShedLevel
+    from arrayscope.window.frame_session import FrameSession
+
+    settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
+    sources = 16
+    columns = 4
+    tile = 96
+    yy = np.arange(tile, dtype=np.float32)[:, None, None]
+    xx = np.arange(tile, dtype=np.float32)[None, :, None]
+    zz = np.arange(sources, dtype=np.float32)[None, None, :]
+    data = np.ascontiguousarray(yy * 3.0 + xx + zz * 5000.0)
+
+    win = make_backend_window(qtbot, data, backend="wgpu", require_gpu_atlas=True)
+    win.resize(640, 620)
+    try:
+        win.show()
+
+        def montage_state(start: int):
+            return win.view_state.with_montage_axis(
+                2,
+                columns=columns,
+                indices=tuple(range(start, start + 12)),
+                text=f"{start}:{start + 12}",
+            )
+
+        def goto(start: int) -> None:
+            win._set_view_state(montage_state(start))
+            win.update_image_view()
+            settle_window(
+                win,
+                lambda: _window_settled(win, tuple(range(start, start + 12))),
+                label="montage window",
+            )
+
+        # Warm every source, then return: the scrubs below move entirely within
+        # GPU-resident pages, so an upload is not what the montage waits for and
+        # the upload counter can say so.
+        goto(4)
+        goto(0)
+
+        rounds: list[tuple[object, bool]] = []
+        original_retarget = FrameSession.retarget_index_window
+
+        def record_retarget(self, **kwargs):
+            stats = original_retarget(self, **kwargs)
+            # Both facts as the round opened: the verdict relaxes again once
+            # the round runs out of shed-able work (R6 step 3), so reading it
+            # after the render call would read the release, not the decision.
+            rounds.append(
+                (self.round_load_shedding.verdict.level, bool(self.atomic_successor_pending))
+            )
+            # R5 bound, checked on every remap rather than only the shed one:
+            # the licence to present the whole retained set in one unchunked
+            # transaction is bought by atomicity, so it must be withdrawn on
+            # exactly the remaps that have none. Reading it here, against the
+            # decision made one line above, is what keeps the two from drifting
+            # apart -- the first version of this latch tracked the shed verdict
+            # instead and missed every remap whose predecessor a previous shed
+            # round had already left incomplete.
+            assert self.partial_remap_presentation is not self.atomic_successor_pending
+            return stats
+
+        monkeypatch.setattr(FrameSession, "retarget_index_window", record_retarget)
+
+        session = win.renderer._frame_session
+        assert _drawn_sources(win) == {slot: slot for slot in range(12)}
+        uploads_before = int(win.img_view.wgpuPresentationDiagnostics()["wgpu_uploads_total"])
+
+        # Control: the round that just ended did reach the backend, so this one
+        # gets the ordinary all-or-nothing successor handoff.
+        win._set_view_state(montage_state(1))
+        win.update_image_view()
+        assert rounds[-1] == (ShedLevel.NONE, True)
+        settle_window(win, lambda: _window_settled(win, tuple(range(1, 13))), label="control step")
+
+        # One round that reached the backend not once: R6 gives up the target
+        # pass first and still owes one whole frame.
+        session.render_round_commits = 0
+        win._set_view_state(montage_state(2))
+        win.update_image_view()
+        assert rounds[-1] == (ShedLevel.TARGET_PASS, True)
+
+        # A second one: now the handoff itself goes, and the remap presents as
+        # it stands instead of waiting for a complete successor.
+        session.render_round_commits = 0
+        win._set_view_state(montage_state(3))
+        win.update_image_view()
+        assert rounds[-1] == (ShedLevel.RETAIN_ONLY, False)
+
+        moved = tuple(range(3, 15))
+        settle_window(
+            win,
+            lambda: _drawn_sources(win).get(0) == 3,
+            label="shed scrub moves the montage",
+        )
+        drawn = _drawn_sources(win)
+        # Every source the window kept is drawn at its new slot, and drawing it
+        # there cost no upload: on wgpu a retained page re-binds, never re-uploads.
+        assert all(drawn.get(slot) == slot + 3 for slot in range(9))
+        assert (
+            int(win.img_view.wgpuPresentationDiagnostics()["wgpu_uploads_total"]) == uploads_before
+        )
+
+        # R6 step 3: shedding postpones the target pass, it never cancels it.
+        assert session.round_load_shedding.verdict.level is ShedLevel.NONE
+        settle_window(win, lambda: _window_settled(win, moved), label="shed round completes")
+        assert _drawn_sources(win) == {slot: slot + 3 for slot in range(12)}
+        assert win.renderer._frame_session.required_target_unsettled_tiles() == ()
+        assert int(getattr(win.renderer, "_montage_stall_assertions", 0) or 0) == 0
+        assert_wgpu_frame_matches_cpu_reference(win)
+    finally:
+        win.close()
+        restore_default_backend(settings)

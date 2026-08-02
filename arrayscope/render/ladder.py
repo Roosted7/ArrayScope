@@ -42,7 +42,7 @@ from enum import IntEnum
 
 from arrayscope.display.lod import LodDemand
 from arrayscope.kernel.task import Lane, Priority
-from arrayscope.render.progressive_scheduling import SchedulingVerdict
+from arrayscope.render.progressive_scheduling import SchedulingVerdict, is_refinement_lane
 
 COARSE_RUNG_ENABLED_DEFAULT = True
 
@@ -186,12 +186,18 @@ class LodLadder:
         *,
         preview_level: int,
         target_level: int,
+        shed_target_pass: bool = False,
     ) -> tuple[RungStep, ...]:
         """Return the ordered steps ``state`` still needs to satisfy ``demand``.
 
         Both levels are required round-planner values. There is deliberately no
         policy fallback: omitting the round owner must fail loudly. An empty
         result means the tile is converged for this demand.
+
+        ``shed_target_pass`` is the scheduler's R6 step-1 verdict for the round.
+        It drops the refinement lanes and nothing else, so a tile whose only
+        presentable rung is DESIRED on the coverage lane — a pipeline with no
+        coarse producer (R4) — still gets its first pixels.
         """
 
         policy = self.policy
@@ -360,6 +366,8 @@ class LodLadder:
 
         if verdict is not None:
             steps = [step for step in steps if verdict.admits_lane(step.lane)]
+        if shed_target_pass:
+            steps = [step for step in steps if not is_refinement_lane(step.lane)]
         return tuple(steps)
 
     def plan(
@@ -370,6 +378,7 @@ class LodLadder:
         *,
         preview_level: int,
         target_level: int,
+        shed_target_pass: bool = False,
     ) -> tuple[RungStep, ...]:
         """Plan every tile, coarse rungs across tiles before fine rungs.
 
@@ -386,6 +395,7 @@ class LodLadder:
                 verdict,
                 preview_level=preview_level,
                 target_level=target_level,
+                shed_target_pass=shed_target_pass,
             )
             for state in states
         ]

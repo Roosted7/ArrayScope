@@ -44,6 +44,9 @@ class RenderIntent:
     render_round_id: str = ""
     round_preview_level: int | None = None
     round_target_level: int | None = None
+    # R6 step 1, decided per round by the scheduler: this round produces its
+    # preview pass and nothing beyond it.
+    round_shed_target_pass: bool = False
     tile_source_ids: tuple[tuple[int, object], ...] = ()
     tile_source_indices: tuple[tuple[int, int], ...] = ()
 

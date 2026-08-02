@@ -237,6 +237,7 @@ class ResourceGovernor:
     _ui_observation_epoch_active: int = 0
     _ui_observation_epoch_count: int = 0
     _ui_observation_epoch_max_ms: float = 0.0
+    _ui_observation_epoch_max: GuiCallbackObservation | None = None
     _render_pass_sample_banks: dict[
         object, dict[tuple[str, object], list[tuple[int, float, int]]]
     ] = field(default_factory=dict)
@@ -338,7 +339,7 @@ class ResourceGovernor:
         )
         self._recent_ui_work_observations.append(observation)
         _maybe_log_ui_observation(observation)
-        self._note_ui_observation_epoch(observation.elapsed_ms)
+        self._note_ui_observation_epoch(observation)
         if float(elapsed_ms) >= WARNING_THRESHOLD_MS:
             self._recent_over_warning_callbacks.append(observation)
         self._pressure = self._pressure_with_ui(channel)
@@ -347,7 +348,7 @@ class ResourceGovernor:
         diagnostics_only = _diagnostics_only_ui_observation(observation)
         self._recent_ui_work_observations.append(observation)
         _maybe_log_ui_observation(observation)
-        self._note_ui_observation_epoch(observation.elapsed_ms)
+        self._note_ui_observation_epoch(observation)
         if observation.over_warning:
             self._recent_over_warning_callbacks.append(observation)
         if diagnostics_only:
@@ -367,6 +368,7 @@ class ResourceGovernor:
         self._ui_observation_epoch_active = int(self._ui_observation_epoch)
         self._ui_observation_epoch_count = 0
         self._ui_observation_epoch_max_ms = 0.0
+        self._ui_observation_epoch_max = None
         return int(self._ui_observation_epoch_active)
 
     def ui_observation_epoch_evidence(self, epoch: int) -> tuple[int, float, bool]:
@@ -377,13 +379,30 @@ class ResourceGovernor:
             bool(current),
         )
 
-    def _note_ui_observation_epoch(self, elapsed_ms: float) -> None:
+    def ui_observation_epoch_max(self, epoch: int) -> GuiCallbackObservation | None:
+        """Return the observation the epoch maximum came from, or ``None``.
+
+        The epoch's maximum is taken over every observation, while the
+        diagnostics tail keeps only the last 64 — so on a flooded phase the
+        maximum was reported as a bare number with nothing naming it.  That is
+        exactly the phase worth attributing, so the one observation that set it
+        is retained beside the number.  Still constant memory: one record.
+        """
+
+        if int(epoch) != int(self._ui_observation_epoch_active):
+            return None
+        return self._ui_observation_epoch_max
+
+    def _note_ui_observation_epoch(self, observation: GuiCallbackObservation) -> None:
         if int(self._ui_observation_epoch_active) <= 0:
             return
         self._ui_observation_epoch_count += 1
-        self._ui_observation_epoch_max_ms = max(
-            float(self._ui_observation_epoch_max_ms), 0.0, float(elapsed_ms)
-        )
+        elapsed_ms = max(0.0, float(observation.elapsed_ms))
+        if self._ui_observation_epoch_max is None or elapsed_ms > float(
+            self._ui_observation_epoch_max_ms
+        ):
+            self._ui_observation_epoch_max_ms = elapsed_ms
+            self._ui_observation_epoch_max = observation
 
     def decide_lane_workers(
         self, lane: ComputeLane, *, interactive: bool, busy_state: SchedulerBusyState
@@ -512,6 +531,7 @@ class ResourceGovernor:
         pass_kind: str = "preview",
         remaining_items: int | None = None,
         retained_fallback_refinement: bool = False,
+        callback_elapsed_ms: float = 0.0,
     ) -> UiWorkDecision:
         """Own R5 chunk size and deadline for preview and target passes.
 
@@ -713,6 +733,7 @@ class ResourceGovernor:
                 model=steering_model,
                 responsiveness_weight=self.responsiveness_weight,
                 item_exploration_multiple=item_exploration_multiple,
+                callback_elapsed_ms=callback_elapsed_ms,
             )
             steering = "weighted-fill-latency"
             item_ratio = float(batch) / max(
@@ -820,7 +841,8 @@ class ResourceGovernor:
                     f"residual-risk={float(steering_model.residual_rms_ms or 0.0):.2f}ms "
                     f"latency-cost={_optional_ms(regularization_ms)} "
                     f"extrapolation-cost={_optional_ms(extrapolation_ms)} "
-                    f"responsiveness-weight={self.responsiveness_weight:.2f}"
+                    f"responsiveness-weight={self.responsiveness_weight:.2f} "
+                    f"enclosing-callback={max(0.0, float(callback_elapsed_ms)):.2f}ms"
                 ),
                 (
                     f"control-achievable={_optional_bool(control_achievable)} "
@@ -1719,6 +1741,7 @@ def _render_pass_optimal_point(
     model: _RenderPassCostModel | None = None,
     responsiveness_weight: float = 1.0,
     item_exploration_multiple: float = 1.0,
+    callback_elapsed_ms: float = 0.0,
 ) -> tuple[int, float, float]:
     """Minimize fill plus latency and model-risk prices in logarithmic work.
 
@@ -1761,13 +1784,40 @@ def _render_pass_optimal_point(
             ) * _render_pass_extrapolation_weight(uncertainty_model)
         return result
 
+    enclosing_ms = max(0.0, float(callback_elapsed_ms))
+
+    def enclosing_cost(risk_adjusted_chunk_ms: float) -> float:
+        """Responsiveness the FIRST chunk owes for the callback it sits in.
+
+        R5's ceiling is on what a GUI-thread callback blocks for, and a pass
+        that runs inside another callback -- an R6 shed remap presenting from
+        inside the retarget that produced it -- does not start its blocking at
+        zero. Only the first chunk pays this: the rest run in callbacks of
+        their own, which is exactly the choice the price is meant to buy.
+        Zero when nothing encloses the pass, so every other caller is
+        arithmetically unchanged.
+        """
+
+        if enclosing_ms <= 0.0:
+            return 0.0
+        return responsiveness * (
+            _render_pass_latency_cost_ms(enclosing_ms + risk_adjusted_chunk_ms)
+            - _render_pass_latency_cost_ms(risk_adjusted_chunk_ms)
+        )
+
     def relaxed_objective(items: float) -> float:
         chunk_ms = latency(items)
         risk_adjusted_chunk_ms = chunk_ms + residual_risk_ms
-        return float(remaining) / max(1.0, float(items)) * (
-            risk_adjusted_chunk_ms
-            + responsiveness * _render_pass_latency_cost_ms(risk_adjusted_chunk_ms)
-        ) + extrapolation(items)
+        return (
+            float(remaining)
+            / max(1.0, float(items))
+            * (
+                risk_adjusted_chunk_ms
+                + responsiveness * _render_pass_latency_cost_ms(risk_adjusted_chunk_ms)
+            )
+            + enclosing_cost(risk_adjusted_chunk_ms)
+            + extrapolation(items)
+        )
 
     def derivative(items: float) -> float:
         step = max(1e-4, float(items) * 1e-4)
@@ -1823,7 +1873,9 @@ def _render_pass_optimal_point(
                 # pinned the cohort at 1 forever -- 272 single-item chunks
                 # against an optimum of 3 -- because probing 2 items scored a
                 # 630 ms penalty for 4.6 ms of actual risk.
-                chunks * (risk_adjusted_chunk_ms + latency_cost) + extrapolation_cost,
+                chunks * (risk_adjusted_chunk_ms + latency_cost)
+                + enclosing_cost(risk_adjusted_chunk_ms)
+                + extrapolation_cost,
                 chunk_ms,
                 items,
                 latency_cost,
