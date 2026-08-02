@@ -284,11 +284,25 @@ declare -a results
 status=0
 for ((run = 1; run <= repeats; run++)); do
   printf '\n--- run %s/%s (load average %s)\n' "$run" "$repeats" "$(cut -d' ' -f1 /proc/loadavg)"
-  if "$root/tools/env" pytest "${targets[@]}" -q --testmon-noselect 2>&1 | tail -25; then
-    results+=("run $run: PASS")
-  else
+  # A SKIP is not a survival. `require_wgpu_adapter` gating a target on a box
+  # without Vulkan is legitimate, but a target that skipped for any reason did
+  # not face the load this script exists to apply -- and pytest exits 0 either
+  # way, so reading the exit status alone verdicts it PASS. That is the blind
+  # spot of the tool built to re-check fragile tests under load, and a false
+  # skip is exactly what queue row "the silent wgpu skip" describes: a call
+  # -phase skip carrying a reason that is not true.
+  out="$("$root/tools/env" pytest "${targets[@]}" -q --testmon-noselect 2>&1)"
+  rc=$?
+  printf '%s\n' "$out" | tail -25
+  skipped="$(printf '%s' "$out" | grep -oE '[0-9]+ skipped' | tail -1 | cut -d' ' -f1)"
+  if [ "$rc" -ne 0 ]; then
     results+=("run $run: FAIL")
     status=1
+  elif [ -n "$skipped" ] && [ "$skipped" -gt 0 ]; then
+    results+=("run $run: PASS but $skipped SKIPPED — a skipped target did not face the load")
+    status=1
+  else
+    results+=("run $run: PASS")
   fi
 done
 
