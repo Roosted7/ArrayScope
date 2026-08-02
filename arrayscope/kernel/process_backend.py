@@ -17,6 +17,7 @@ from __future__ import annotations
 import atexit
 import multiprocessing
 import os
+import pickle
 import queue
 import threading
 import traceback
@@ -196,12 +197,24 @@ class ProcessPool:
                 self._noted_fallbacks = fallbacks
                 emit_trace("compute_slot_fallback", entry=call.entry, fallbacks=int(fallbacks))
             self._control[worker.index] = 0
-            worker.conn.send((call.entry, payload, bool(pass_token)))
+            try:
+                worker.conn.send((call.entry, payload, bool(pass_token)))
+            except (pickle.PicklingError, TypeError, AttributeError) as exc:
+                # Serialization fails before any byte reaches the pipe, so the
+                # worker is healthy — retiring it would kill a process for a
+                # payload problem. Degrade to in-process, counted, like every
+                # other transport fallback.
+                self._slots.count_fallback()
+                emit_trace("compute_pickle_fallback", entry=call.entry, error=repr(exc))
+                self._idle.put(worker)
+                worker = None
+                return call.invoke(token if pass_token else None)
             reply = self._await_reply(worker, token)
         except BaseException:
             # The worker's state is unknown after a transport failure; a child
             # error arrives as an ordinary reply and leaves it healthy.
-            self._retire(worker)
+            if worker is not None:
+                self._retire(worker)
             raise
         finally:
             for lease in leases:

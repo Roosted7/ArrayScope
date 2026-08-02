@@ -69,6 +69,12 @@ def block_until_cancelled(request, token):
     return "never cancelled"
 
 
+def called(request):
+    """Invoke the request itself — an unpicklable payload's in-process fallback."""
+
+    return request()
+
+
 def raise_value_error(request):
     """Fail the way ordinary code fails, so the parent must rebuild the type."""
 

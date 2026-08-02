@@ -105,6 +105,20 @@ def test_a_child_exception_arrives_typed_with_the_childs_traceback(pool):
     assert "raise_value_error" in caught.value.arrayscope_child_traceback
 
 
+def test_an_unpicklable_request_runs_in_process_and_keeps_the_worker(pool):
+    """Serialization fails before any byte reaches the pipe, so the worker is
+    healthy — a pickling problem must degrade to a counted in-process run, not
+    retire a process (observed live via a duplicate-class ViewState, which is
+    exactly the payload shape this stands in for)."""
+
+    fallbacks = pool._slots.fallbacks
+    value = pool.run(RemoteCall("tests.kernel.remote_entries:called", lambda: 41 + 1))
+
+    assert value == 42
+    assert pool._slots.fallbacks == fallbacks + 1
+    assert pool.run(RemoteCall(OWN_PID, None)) != os.getpid()
+
+
 def test_a_killed_worker_fails_one_task_and_the_pool_recovers(pool):
     with pytest.raises(RemoteWorkerError, match="died"):
         pool.run(RemoteCall(KILL_OWN_PROCESS, None))
