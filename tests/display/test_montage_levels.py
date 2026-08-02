@@ -400,3 +400,65 @@ def test_montage_refined_level_values_use_shader_component_for_complex_tiles():
 
     assert values.dtype == np.float32
     np.testing.assert_allclose(values, np.abs(semantic).astype(np.float32))
+
+
+def test_expected_scope_is_rebuilt_only_when_the_scope_object_moves():
+    """A repeated round scope costs nothing to re-declare.
+
+    ``ensure_expected`` rebuilds a montage-wide frozenset to decide whether the
+    scope changed, and the commit path declares the same round scope roughly
+    twenty times per commit.  The latch is object identity of an immutable
+    scope and nothing else, so the two ways it could go wrong -- a scope that
+    really moved, and a caller passing something it mutates -- both fall
+    through to the full build.
+    """
+
+    tracker = MontageLevelTracker()
+    scope = tuple(range(272))
+    first = tracker.ensure_expected("key", scope)
+
+    rebuilds = 0
+    original = frozenset
+
+    class _CountingScope(tuple):
+        def __iter__(self):
+            nonlocal rebuilds
+            rebuilds += 1
+            return super().__iter__()
+
+    assert tracker.ensure_expected("key", scope) is first
+    assert rebuilds == 0
+
+    moved = tuple(range(271))
+    assert tracker.ensure_expected("key", moved) == original(moved)
+    assert tracker.ensure_expected("key", moved) == original(moved)
+
+    # An equal-but-distinct tuple is not the latched object, so it is rebuilt
+    # rather than trusted.
+    counting = _CountingScope(moved)
+    tracker.ensure_expected("key", counting)
+    assert rebuilds == 1
+
+    # A mutable scope is never latched: the next reader must see its contents.
+    mutable = [0, 1, 2]
+    assert tracker.ensure_expected("other", mutable) == frozenset({0, 1, 2})
+    mutable.append(3)
+    assert tracker.ensure_expected("other", mutable) == frozenset({0, 1, 2, 3})
+
+
+def test_a_key_revision_moves_only_when_that_key_changes():
+    """The revision callers latch derived passes on."""
+
+    tracker = MontageLevelTracker()
+    tracker.ensure("key", (0, 1))
+    settled = tracker.revision_for("key")
+
+    tracker.ensure_expected("key", (0, 1))
+    assert tracker.revision_for("key") == settled, "re-declaring the same scope changed nothing"
+
+    seams.update_from_tile(tracker, "key", 0, None, np.asarray([[0.0, 1.0]], dtype=np.float32))
+    assert tracker.revision_for("key") > settled, "a merged source is a change"
+
+    moved = tracker.revision_for("key")
+    tracker.ensure("other", (0, 1))
+    assert tracker.revision_for("key") == moved, "another key's traffic is not this key's"

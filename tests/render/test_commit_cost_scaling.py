@@ -859,3 +859,136 @@ def test_wgpu_residency_pins_are_rederived_per_delta_not_per_montage(qt_app, mon
         f"{resident}-page resident set; only pages whose pin membership changed "
         "can change state"
     )
+
+
+def _presentation_state(tiles: int):
+    _geometry, payloads = _montage(tiles)
+    return TilePresentationState(payloads, revision=1), payloads
+
+
+def _presentation(geometry, tile_state, payloads, upserts, *, level_revision=1):
+    from arrayscope.display.model.commit import DisplayTiledPresentation
+
+    delta = TilePresentationDelta(
+        structure_revision=1,
+        payload_revision=1,
+        visibility_revision=1,
+        level_revision=level_revision,
+        histogram_revision=1,
+        viewport_revision=1,
+        base_revision=0,
+        target_revision=1,
+        upserts={tile: payloads[tile] for tile in upserts},
+        removals=(),
+        active_tiles=tuple(sorted(payloads)),
+        planned_tiles=tuple(sorted(payloads)),
+    )
+    return DisplayTiledPresentation(
+        geometry=geometry,
+        levels=(0.0, 1.0),
+        histogram_range=(0.0, 1.0),
+        viewport_policy=ViewportPolicy.PRESERVE,
+        tile_state=tile_state,
+        base_tile_state=tile_state,
+        tile_delta=delta,
+        tile_residency_budget_bytes=0,
+    )
+
+
+def test_presentation_rebinds_only_the_payloads_whose_identity_moved(monkeypatch):
+    """Binding a transaction to its levels costs the delta, not the montage.
+
+    Every payload the transaction carries must name the accepted levels, and
+    the way to guarantee that was to rebuild every wrapper.  A montage's worth
+    of ``replace`` per commit is a fixed term no cohort size can chunk away
+    (R5), and it is unnecessary: a wrapper already carrying exactly this
+    transaction's presentation identity is already bound.
+    """
+
+    from arrayscope.display.model import commit as commit_module
+
+    geometry, payloads = _montage(FIELD_TILES)
+    tile_state = TilePresentationState(payloads, revision=1)
+
+    first = _presentation(geometry, tile_state, payloads, (0,))
+    bound_state = first.tile_state
+
+    counter = _Counter(monkeypatch, commit_module, "replace")
+    second = _presentation(geometry, bound_state, dict(bound_state.payloads), (0,))
+
+    assert counter.count == 0, (
+        f"re-presenting a {FIELD_TILES}-tile montage at unchanged levels rebuilt "
+        f"{counter.count} wrappers; every one of them already named this "
+        "transaction's presentation identity"
+    )
+    assert second.tile_state is bound_state, (
+        "nothing moved, so the transaction must keep the state it was handed"
+    )
+    for tile in (0, FIELD_TILES // 2, FIELD_TILES - 1):
+        assert second.tile_state.payloads[tile] is bound_state.payloads[tile]
+
+
+def test_a_moved_level_generation_still_rebinds_every_transaction_payload(monkeypatch):
+    """The skip above is identity equality, never an assumption of sameness."""
+
+    from arrayscope.display.model import commit as commit_module
+
+    geometry, payloads = _montage(FIELD_TILES)
+    tile_state = TilePresentationState(payloads, revision=1)
+    bound = _presentation(geometry, tile_state, payloads, (0,)).tile_state
+
+    counter = _Counter(monkeypatch, commit_module, "replace")
+    moved = _presentation(
+        geometry,
+        bound,
+        dict(bound.payloads),
+        (0,),
+        level_revision=2,
+    )
+
+    # One ``replace`` per payload, plus the delta and nothing else.
+    assert counter.count >= FIELD_TILES, (
+        f"a new level generation rebound only {counter.count} of {FIELD_TILES} "
+        "payloads; every wrapper in the transaction names the generation"
+    )
+    assert all(
+        int(payload.presentation_identity.levels_generation) == 2
+        for payload in moved.tile_state.payloads.values()
+    )
+
+
+def test_plan_tile_index_is_derived_once_per_plan():
+    """The slot -> tile map is a plan property, not a per-commit walk."""
+
+    from arrayscope.display.montage import plan_tiles_by_number
+
+    view_state = (
+        ViewState.from_shape((TILE, TILE, FIELD_TILES))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=COLUMNS, indices=tuple(range(FIELD_TILES)))
+    )
+    from arrayscope.display.montage import make_montage_plan
+
+    plan = make_montage_plan(
+        view_state,
+        axis=2,
+        indices=tuple(range(FIELD_TILES)),
+        tile_shape=(TILE, TILE),
+        columns=COLUMNS,
+    )
+
+    first = plan_tiles_by_number(plan)
+    assert plan_tiles_by_number(plan) is first, (
+        "a second reader re-derived the map; the plan is immutable, so the "
+        "walk belongs to the plan and not to every commit that consults it"
+    )
+    assert first == {int(tile.montage_index): tile for tile in plan.tiles}
+
+    other = make_montage_plan(
+        view_state,
+        axis=2,
+        indices=tuple(range(FIELD_TILES - 1)),
+        tile_shape=(TILE, TILE),
+        columns=COLUMNS,
+    )
+    assert plan_tiles_by_number(other) is not first, "a different plan owns a different map"

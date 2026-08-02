@@ -38,6 +38,10 @@ class BoundedCache:
         self.hits = 0
         self.misses = 0
         self.evictions = 0
+        #: Bumped by every membership change. A caller that sweeps the whole
+        #: cache can latch on it instead of repeating the sweep to find
+        #: nothing moved; recency and counters deliberately do not move it.
+        self.revision = 0
 
     def __len__(self) -> int:
         with self.lock:
@@ -84,6 +88,7 @@ class BoundedCache:
                 self.bytes_used -= old[1]
             self._items[key] = (value, nbytes)
             self.bytes_used += nbytes
+            self.revision += 1
             self._evict()
 
     def discard(self, key):
@@ -92,6 +97,7 @@ class BoundedCache:
             if entry is None:
                 return None
             self.bytes_used -= entry[1]
+            self.revision += 1
             return entry[0]
 
     def items(self) -> tuple:
@@ -116,6 +122,7 @@ class BoundedCache:
         with self.lock:
             self._items.clear()
             self.bytes_used = 0
+            self.revision += 1
 
     def clear_counters(self) -> None:
         with self.lock:
@@ -138,6 +145,7 @@ class BoundedCache:
             value, nbytes = self._items.pop(key)
             self.bytes_used -= nbytes
             self.evictions += 1
+            self.revision += 1
             if self._on_evict is not None:
                 # Runs under the cache lock (RLock).  The hook must not re-enter
                 # this cache; the G7 tier only touches its own separate store.

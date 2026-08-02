@@ -451,6 +451,10 @@ class TileLifecycle:
         self._loading: set[int] = set()
         self._active_requests: set[int] = set()
         self._skipped: set[int] = set()
+        #: Bumped by every skip-index mutation. ``required_tile_numbers``
+        #: latches on it, so a stale answer needs a missed bump, not a
+        #: missed set comparison.
+        self._skipped_revision = 0
         self._stage_blocked: dict[object, set[int]] = {}
         self._identity_rejections = 0
         #: (tile, emitted_id, backend_id) -> consecutive rejection count; a
@@ -786,6 +790,21 @@ class TileLifecycle:
             for tile_number in required
         )
 
+    def first_pixel_presented_scope(self, tile_numbers) -> frozenset[int]:
+        """Which tiles of one required scope already own a first pixel.
+
+        The membership question, asked once. Asking
+        :meth:`first_pixels_presented` per tile answers it too, and rebuilds a
+        one-element scope tuple for each of a montage's tiles to do so.
+        """
+
+        records = self._records
+        return frozenset(
+            tile_number
+            for tile_number in (int(tile) for tile in tuple(tile_numbers or ()))
+            if (record := records.get(tile_number)) is not None and record.first_pixel_presented
+        )
+
     def visible_target_settled(self) -> bool:
         rows = tuple(rec for rec in self._records.values() if rec.active)
         return bool(not rows or all(rec.target_settled for rec in rows))
@@ -840,7 +859,7 @@ class TileLifecycle:
         rec = self.record(tile_number)
         rec.semantic = Semantic.EVALUATING
         self._evaluating.add(rec.tile_number)
-        self._skipped.discard(rec.tile_number)
+        self._skip_discard(rec.tile_number)
 
     def evaluation_completed(self, tile_number: int) -> None:
         """A fresh semantic result exists; any prior presentation stays visible.
@@ -854,7 +873,7 @@ class TileLifecycle:
         rec = self.record(tile_number)
         rec.semantic = Semantic.EVALUATED
         self._evaluating.discard(rec.tile_number)
-        self._skipped.discard(rec.tile_number)
+        self._skip_discard(rec.tile_number)
         self._request_cleared(rec)
         self._stage_unbound(rec)
         # Fresh identity: the previous emit no longer refers to what the next
@@ -1025,10 +1044,20 @@ class TileLifecycle:
         rec = self.record(tile_number)
         rec.semantic = Semantic.SKIPPED
         self._evaluating.discard(rec.tile_number)
-        self._skipped.add(rec.tile_number)
+        self._skip_add(rec.tile_number)
         self._load_cleared(rec)
         self._request_cleared(rec)
         self._stage_unbound(rec)
+
+    def _skip_add(self, tile_number: int) -> None:
+        if tile_number not in self._skipped:
+            self._skipped.add(tile_number)
+            self._skipped_revision += 1
+
+    def _skip_discard(self, tile_number: int) -> None:
+        if tile_number in self._skipped:
+            self._skipped.discard(tile_number)
+            self._skipped_revision += 1
 
     def tile_unskipped(self, tile_number: int) -> None:
         """A skipped tile re-enters the plan (index-window demote path)."""
@@ -1036,7 +1065,7 @@ class TileLifecycle:
         rec = self._records.get(int(tile_number))
         if rec is not None and rec.semantic is Semantic.SKIPPED:
             rec.semantic = Semantic.PLANNED
-            self._skipped.discard(rec.tile_number)
+            self._skip_discard(rec.tile_number)
 
     # -- load intent / evaluation requests (P2 sets-as-views) ---------------
 
@@ -1561,6 +1590,12 @@ class TileLifecycle:
         ``active_tile_requests``)."""
 
         return frozenset(self._active_requests)
+
+    @property
+    def skipped_revision(self) -> int:
+        """Monotonic revision of the skip index, for scope latches."""
+
+        return int(self._skipped_revision)
 
     @property
     def skipped_tiles(self) -> frozenset[int]:

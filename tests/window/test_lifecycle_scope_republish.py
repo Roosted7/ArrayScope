@@ -202,3 +202,34 @@ def test_every_target_input_invalidates_the_published_set(session, mutate):
     mutate(session)
 
     assert not session._lifecycle_targets_still_current(snapshot)
+
+
+def test_required_scope_is_derived_once_per_set_of_inputs(session):
+    """The one scope every commit reads ~27 times is derived when it moves.
+
+    Each answer rebuilt two montage-wide sets and a sorted tuple. All three
+    inputs -- the frame plan, the visible set, and the skip index -- are
+    replaced or revised wholesale, so the latch has an exact edge for each and
+    no way to keep a stale answer past one of them.
+    """
+
+    session.visible_tile_numbers = frozenset(range(COUNT))
+    first = session.required_tile_numbers()
+    assert first == tuple(range(COUNT))
+    assert session.required_tile_numbers() is first
+
+    session.visible_tile_numbers = frozenset(range(COUNT - 1))
+    moved = session.required_tile_numbers()
+    assert moved is not first
+    assert moved == tuple(range(COUNT - 1))
+
+    session.lifecycle.plan_applied([0])
+    session.lifecycle.tile_skipped(0)
+    skipped = session.required_tile_numbers()
+    assert skipped == tuple(range(1, COUNT - 1)), "a newly skipped tile leaves the scope"
+
+    session.lifecycle.tile_unskipped(0)
+    assert session.required_tile_numbers() == tuple(range(COUNT - 1))
+
+    session.frame_plan = SimpleNamespace(active_region_ids=(3, 4))
+    assert session.required_tile_numbers() == (3, 4), "the frame plan owns the scope when it exists"

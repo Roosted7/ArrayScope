@@ -59,6 +59,9 @@ from arrayscope.display.montage import (
     RenderedTile,
     viewport_tiles,
 )
+from arrayscope.display.montage import (
+    plan_tiles_by_number as montage_plan_tiles_by_number,
+)
 from arrayscope.display.pyramid import MaterializedLodPage
 from arrayscope.display.shader_mapping import (
     TexturePlaneKind,
@@ -990,15 +993,32 @@ class FrameSession:
     def required_tile_numbers(self) -> tuple[int, ...]:
         """The one set that admission, evidence, and completion must render."""
 
+        # Asked ~27 times per commit, and each answer rebuilt two montage-wide
+        # sets and a sorted tuple. All three inputs are replaced wholesale --
+        # ``FramePlan`` is frozen, ``visible_tile_numbers`` is reassigned as a
+        # frozenset, and the skip index carries its own revision -- so the
+        # latch cannot outlive any of them.
         frame_plan = getattr(self, "frame_plan", None)
+        visible = self.visible_tile_numbers
+        skipped_revision = int(self.lifecycle.skipped_revision)
+        latched = getattr(self, "_required_tile_numbers_latch", None)
+        if (
+            latched is not None
+            and latched[0] is frame_plan
+            and latched[1] is visible
+            and latched[2] == skipped_revision
+        ):
+            return latched[3]
         required = (
             tuple(getattr(frame_plan, "active_region_ids", ()) or ())
             if frame_plan is not None
-            else tuple(self.visible_tile_numbers)
+            else tuple(visible)
         )
-        return tuple(
+        value = tuple(
             sorted({int(tile) for tile in required} - {int(tile) for tile in self.skipped_tiles})
         )
+        self._required_tile_numbers_latch = (frame_plan, visible, skipped_revision, value)
+        return value
 
     def required_target_unsettled_tiles(self) -> tuple[int, ...]:
         return self.lifecycle.target_unsettled_tiles(self.required_tile_numbers())
@@ -1935,9 +1955,7 @@ class FrameSession:
         published_target_inputs = self._lifecycle_target_inputs()
         hits = misses = unchanged = remapped = 0
         changed_slots: set[int] = set()
-        plan_tiles_by_number = {
-            int(tile.montage_index): tile for tile in tuple(getattr(plan, "tiles", ()) or ())
-        }
+        plan_tiles_by_number = montage_plan_tiles_by_number(plan)
         planned_numbers = set(plan_tiles_by_number)
         for tile in tuple(getattr(plan, "tiles", ()) or ()):
             index = int(tile.montage_index)
@@ -3668,9 +3686,7 @@ class FrameSession:
         if not active:
             return None
         active_set = set(active)
-        plan_tiles_by_number = {
-            int(tile.montage_index): tile for tile in tuple(getattr(self.plan, "tiles", ()) or ())
-        }
+        plan_tiles_by_number = montage_plan_tiles_by_number(self.plan)
         candidate_numbers = tuple(dict.fromkeys(int(tile) for tile in self.pending_payload_upserts))
         candidate_numbers = tuple(tile for tile in candidate_numbers if tile in active_set)
         unpresented = active_set.difference(self.lifecycle.presented_tiles)
@@ -3729,9 +3745,7 @@ class FrameSession:
             free_retarget_tiles=zero_byte_retarget_tiles,
             physical_resident_fn=physical_resident_fn,
         )
-        plan_tiles_by_number = {
-            int(tile.montage_index): tile for tile in tuple(getattr(self.plan, "tiles", ()) or ())
-        }
+        plan_tiles_by_number = montage_plan_tiles_by_number(self.plan)
         admission_candidates = tuple(
             plan_tiles_by_number.get(int(tile), int(tile)) for tile in payloads
         )
@@ -4137,15 +4151,7 @@ class FrameSession:
         materialized = {int(index) for index in self.rendered_tiles}
         planned_numbers = set(self.visible_tile_numbers).difference(self.skipped_tiles)
         self.release_deferred_out_of_view_invalidations(planned_numbers)
-        plan_tiles_cache = getattr(self, "_plan_tiles_by_number_cache", None)
-        if plan_tiles_cache is None or plan_tiles_cache[0] is not self.plan:
-            plan_tiles_by_number = {
-                int(tile.montage_index): tile
-                for tile in tuple(getattr(self.plan, "tiles", ()) or ())
-            }
-            self._plan_tiles_by_number_cache = (self.plan, plan_tiles_by_number)
-        else:
-            plan_tiles_by_number = plan_tiles_cache[1]
+        plan_tiles_by_number = montage_plan_tiles_by_number(self.plan)
         dirty_numbers = {int(tile) for tile in self.dirty_payloads}
         dirty_numbers.update(int(tile) for tile in self.pending_payload_upserts)
         reconcile_numbers = dirty_numbers.intersection(planned_numbers)
@@ -4830,9 +4836,7 @@ class FrameSession:
             for tile, payload in all_candidate_upserts.items()
             if int(tile) not in zero_byte_retarget_tiles
         }
-        plan_tiles_by_number = {
-            int(tile.montage_index): tile for tile in tuple(getattr(self.plan, "tiles", ()) or ())
-        }
+        plan_tiles_by_number = montage_plan_tiles_by_number(self.plan)
         admission_candidates = tuple(
             plan_tiles_by_number.get(int(tile), int(tile)) for tile in all_candidate_upserts
         )
@@ -5025,9 +5029,7 @@ class FrameSession:
         if not required or not set(required).issubset(self._last_planned_tiles):
             self._atomic_fast_reject_reason = "planned"
             return None
-        plan_tiles_by_number = {
-            int(tile.montage_index): tile for tile in tuple(getattr(self.plan, "tiles", ()) or ())
-        }
+        plan_tiles_by_number = montage_plan_tiles_by_number(self.plan)
         previous_state = self.tile_presentation_state
         # Cache-hit scroll windows commonly have 58-59 payload mirrors ready
         # and one entering edge represented only by a resident LOD floor.
@@ -5295,11 +5297,8 @@ class FrameSession:
         if not shown_map:
             return ()
         mismatched: list[int] = []
-        plan_tiles = {
-            int(tile.montage_index): tile
-            for tile in tuple(getattr(getattr(self, "plan", None), "tiles", ()) or ())
-        }
-        state_payloads = dict(getattr(self.tile_presentation_state, "payloads", {}) or {})
+        plan_tiles = montage_plan_tiles_by_number(getattr(self, "plan", None))
+        state_payloads = getattr(self.tile_presentation_state, "payloads", None) or {}
         for tile_number, shown_identity in shown_map.items():
             current = self.display_tile_payloads.get(int(tile_number))
             tile = plan_tiles.get(int(tile_number))

@@ -104,6 +104,14 @@ class DisplayTiledPresentation:
                     getattr(prior, "lut_identity", None),
                 ),
             )
+            if prior == identity:
+                # Already bound to exactly this transaction's presentation
+                # identity. Restating it built a fresh wrapper for every
+                # montage tile on every commit -- the whole active population,
+                # not the delta -- which is the fixed term R5 says no cohort
+                # size can chunk away. Keeping the wrapper object also lets the
+                # downstream identity memos compare pointers.
+                continue
             rebound_payloads[int(tile_number)] = replace(
                 payload,
                 presentation_identity=identity,
@@ -113,8 +121,8 @@ class DisplayTiledPresentation:
         delta = replace(
             self.tile_delta,
             upserts={
-                int(tile_number): rebound_payloads[int(tile_number)]
-                for tile_number in self.tile_delta.upserts
+                int(tile_number): rebound_payloads.get(int(tile_number), payload)
+                for tile_number, payload in self.tile_delta.upserts.items()
             },
         )
         state_payloads = dict(self.tile_state.payloads)

@@ -7560,3 +7560,159 @@ def test_refined_remembered_evidence_satisfies_rough_obligation_without_dispatch
     assert probes.accepted == [("ev", 100), ("ev", 101)]
     assert [stats for _, stats in probes.tracker_updates] == [refined, refined]
     assert probes.published == [2]
+
+
+def test_round_level_scope_is_derived_once_per_round():
+    """The expected-source scope is a round property asked ~20x per commit."""
+
+    from types import SimpleNamespace
+
+    from arrayscope.render.level_stats import LevelStatsService
+
+    class _Service(LevelStatsService):
+        pass
+
+    service = _Service()
+    tiles = tuple(SimpleNamespace(montage_index=i, source_index=i) for i in range(272))
+    plan = SimpleNamespace(tiles=tiles)
+    session = SimpleNamespace(level_expected_indices=(), plan=plan)
+
+    first = service._montage_level_expected_indices(session)
+    assert first == tuple(range(272))
+    assert service._montage_level_expected_indices(session) is first, (
+        "the scope was re-walked over the whole montage for a value the round owns"
+    )
+
+    session.plan = SimpleNamespace(tiles=tiles[:271])
+    moved = service._montage_level_expected_indices(session)
+    assert moved is not first
+    assert moved == tuple(range(271))
+
+    session.level_expected_indices = (7, 8)
+    declared = service._montage_level_expected_indices(session)
+    assert declared == (7, 8), "a declared scope wins, and moves the latch with it"
+
+
+def test_family_rehydration_repeats_no_sweep_that_can_merge_nothing():
+    """Three commit-path readers ask for the same idempotent whole-scope seed."""
+
+    from types import SimpleNamespace
+
+    from arrayscope.display.model.montage_levels import LevelEvidenceQuality, TileLevelStats
+    from arrayscope.render.level_stats import LevelStatsService, _montage_level_family_key
+
+    class _Service(LevelStatsService):
+        pass
+
+    service = _Service()
+    session = SimpleNamespace(
+        level_expected_indices=tuple(range(64)),
+        plan=SimpleNamespace(tiles=()),
+        level_key=("levels", "round"),
+    )
+    cache = service._montage_source_level_cache()
+    family = _montage_level_family_key(session.level_key)
+    for source in range(64):
+        cache.put(
+            (family, source),
+            TileLevelStats(
+                source_index=source,
+                bounds=(0.0, float(source + 1)),
+                sample=None,
+                evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+            ),
+        )
+
+    assert service._rehydrate_montage_level_from_family_cache(session) == 64
+    assert service._rehydrate_montage_level_from_family_cache(session) == 0
+
+    sweeps = 0
+    original = cache.peek_many
+
+    def counted(keys):
+        nonlocal sweeps
+        sweeps += 1
+        return original(keys)
+
+    cache.peek_many = counted
+    for _ in range(3):
+        service._rehydrate_montage_level_from_family_cache(session)
+    assert sweeps == 0, f"an unchanged cache and tracker were swept {sweeps} more times"
+
+    # Both inputs re-open it: a new cache entry, and a tracker the round reset.
+    cache.put(
+        (family, 64),
+        TileLevelStats(
+            source_index=64,
+            bounds=(0.0, 1.0),
+            sample=None,
+            evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+        ),
+    )
+    session.level_expected_indices = tuple(range(65))
+    service._rehydrate_montage_level_from_family_cache(session)
+    assert sweeps == 1
+
+
+def test_presented_bounds_records_are_built_only_for_the_rows_that_widen():
+    """The clamp's diagnostic record is rendered where it is reported.
+
+    ``_shader_presented_payload_bounds`` walks the whole presented population
+    on every shader commit. Building a trace dict per tile there paid for a
+    record only the rare clamp-arming commit ever emits.
+    """
+
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from arrayscope.display.model.montage_levels import LevelEvidenceQuality, TileLevelStats
+    from arrayscope.window import frame_effects
+
+    def _payload(source: int, bounds):
+        return SimpleNamespace(
+            source_index=source,
+            quality="exact",
+            lod=SimpleNamespace(level=0),
+            level_evidence_window_stale=False,
+            level_stats=TileLevelStats(
+                source_index=source,
+                bounds=bounds,
+                sample=np.asarray(bounds, dtype=np.float32),
+                evidence_quality=LevelEvidenceQuality.ROUGH_TARGET,
+            ),
+        )
+
+    inside = {tile: _payload(tile, (2.0, 8.0)) for tile in range(272)}
+    inside[271] = _payload(271, (-5.0, 8.0))
+    session = SimpleNamespace(
+        shader_display=True,
+        session_id=1,
+        lifecycle=SimpleNamespace(
+            presented_tiles=set(inside),
+            backend_presented_identities={},
+            current_presentable_payload=lambda _tile: None,
+        ),
+        tile_presentation_state=SimpleNamespace(payloads={}),
+        display_tile_payloads=inside,
+    )
+
+    covered, rows = frame_effects._shader_presented_payload_bounds(session)
+
+    assert covered == (-5.0, 8.0)
+    assert len(rows) == 272
+    assert not any(isinstance(row, dict) for row in rows), (
+        "the walk built a trace record per presented tile; only the reporting "
+        "site knows whether any of them will be emitted"
+    )
+
+    records = frame_effects._shader_presented_bounds_observations(rows, outside=(1.0, 9.0))
+    assert len(records) == 1, (
+        f"{len(records)} records describe a widening one tile caused; the record "
+        "names the rows outside the refined window, not the population"
+    )
+    assert records[0]["tile"] == 271
+    assert records[0]["presented_bounds"] == (-5.0, 8.0)
+    assert records[0]["presentation_state"] == "admitted"
+
+    assert frame_effects._shader_presented_bounds_observations(rows, outside=(-6.0, 9.0)) == ()

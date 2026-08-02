@@ -585,3 +585,74 @@ def test_stage_bindings_replace_waiters(lc):
     lc.evaluation_started(1)
     lc.evaluation_completed(1)
     assert frozenset(i for w in lc._stage_blocked.values() for i in w) == frozenset()
+
+
+def test_first_pixel_scope_answers_a_montage_in_one_pass(lc, monkeypatch):
+    """Membership of a required scope is one query, not one query per tile.
+
+    The commit path needs "which of these already have a first pixel" before
+    it acknowledges anything.  Asking ``first_pixels_presented`` per tile
+    answers it and rebuilds a one-element scope for every montage tile to do
+    so, on the GUI thread of every commit.
+    """
+
+    tiles = tuple(range(272))
+    targets = {
+        tile: TileTarget(
+            tile_number=tile,
+            source_index=tile,
+            semantic_source_id=("source", tile),
+        )
+        for tile in tiles
+    }
+    lc.retarget(targets)
+    presented = {tile for tile in tiles if tile % 3 == 0}
+    lc.backend_presented_snapshot(
+        {tile: targets[tile].semantic_source_id for tile in sorted(presented)}
+    )
+    lc.presentation_confirmed(tuple(sorted(presented)))
+
+    calls = 0
+    original = TileLifecycle.first_pixels_presented
+
+    def counted(self, tile_numbers):
+        nonlocal calls
+        calls += 1
+        return original(self, tile_numbers)
+
+    monkeypatch.setattr(TileLifecycle, "first_pixels_presented", counted)
+
+    scope = lc.first_pixel_presented_scope(tiles)
+
+    assert scope == frozenset(presented)
+    assert calls == 0, f"answering the scope took {calls} per-tile queries over {len(tiles)} tiles"
+    # And it agrees with the per-tile oracle it replaces.
+    assert scope == frozenset(tile for tile in tiles if lc.first_pixels_presented((tile,)))
+
+
+def test_skip_revision_moves_only_when_the_skip_index_moves(lc):
+    """The revision ``required_tile_numbers`` latches its scope on."""
+
+    lc.plan_applied([1, 2])
+    settled = lc.skipped_revision
+
+    lc.tile_skipped(1)
+    skipped = lc.skipped_revision
+    assert skipped > settled
+
+    lc.tile_skipped(1)
+    assert lc.skipped_revision == skipped, "re-skipping a skipped tile changed nothing"
+
+    lc.tile_unskipped(1)
+    assert lc.skipped_revision > skipped
+    unskipped = lc.skipped_revision
+
+    lc.tile_unskipped(1)
+    assert lc.skipped_revision == unskipped
+
+    # Every route out of the skip index moves it, not only the named one.
+    lc.tile_skipped(2)
+    moved = lc.skipped_revision
+    lc.evaluation_started(2)
+    assert lc.skipped_revision > moved
+    assert 2 not in lc.skipped_tiles

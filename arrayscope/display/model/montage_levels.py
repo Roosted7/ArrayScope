@@ -109,6 +109,7 @@ class MontageLevelTracker:
     def __init__(self):
         self._tiles: dict[object, dict[int, TileLevelStats]] = {}
         self._expected: dict[object, frozenset[int]] = {}
+        self._expected_source: dict[object, object] = {}
         self._revisions: dict[object, int] = {}
         self._aggregate_cache: dict[object, tuple[int, frozenset[int], MontageLevelStats]] = {}
         self._summary_cache: dict[object, tuple[int, frozenset[int], MontageLevelStats]] = {}
@@ -123,7 +124,17 @@ class MontageLevelTracker:
     def ensure_expected(self, key: object, expected_indices: Iterable[int]) -> frozenset[int]:
         """Record expected coverage without rebuilding aggregate statistics."""
 
+        # Callers repeat one round's scope object many times per commit, and
+        # rebuilding a montage-wide frozenset to discover it is unchanged is
+        # the whole cost of the call. Identity of an immutable scope is the
+        # only claim made here; every other argument falls through to the
+        # full build, so a caller that mutates what it passes cannot latch.
+        latchable = isinstance(expected_indices, tuple | frozenset)
+        if latchable and self._expected_source.get(key) is expected_indices:
+            self._tiles.setdefault(key, {})
+            return self._expected[key]
         expected = frozenset(int(index) for index in expected_indices)
+        self._expected_source[key] = expected_indices if latchable else None
         if self._expected.get(key) != expected:
             self._expected[key] = expected
             self._invalidate(key)
@@ -181,6 +192,9 @@ class MontageLevelTracker:
 
         installed = {source_index: by_source[source_index] for source_index in sorted(expected)}
         self._expected[key] = expected
+        self._expected_source[key] = (
+            expected_indices if isinstance(expected_indices, tuple | frozenset) else None
+        )
         self._tiles[key] = installed
         self._sample_accumulators.pop(key, None)
         self._invalidate(key)
@@ -430,6 +444,11 @@ class MontageLevelTracker:
             )
         self._aggregate_cache[key] = (revision, expected, stats)
         return stats
+
+    def revision_for(self, key: object) -> int:
+        """This key's mutation revision, for callers latching derived passes."""
+
+        return int(self._revisions.get(key, 0))
 
     def _invalidate(self, key: object) -> None:
         self._revisions[key] = int(self._revisions.get(key, 0)) + 1

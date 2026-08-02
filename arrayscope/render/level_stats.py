@@ -24,7 +24,7 @@ from arrayscope.display.model.montage_levels import (
     sample_tile_level_stats,
     tile_level_stats_with_quality,
 )
-from arrayscope.display.montage import RenderedTile
+from arrayscope.display.montage import RenderedTile, plan_tiles_by_number
 from arrayscope.display.planning import LevelSourceRank, normalize_bounds
 from arrayscope.gpu.chunk_summary import representative_sample_from_histogram
 from arrayscope.kernel import (
@@ -154,6 +154,16 @@ class LevelStatsService:
         cache = self._montage_source_level_cache()
         family = _montage_level_family_key(session.level_key)
         candidates = expected
+        # A whole-scope seed is idempotent, so repeating it can only find what
+        # the previous one left. Three commit-path readers ask for it per
+        # commit, and each repeat walked every montage source to merge
+        # nothing. Neither input can change without moving one of these two
+        # revisions, so the skip is exact rather than heuristic.
+        latch_key = (session.level_key, expected)
+        latch = getattr(session, "_level_rehydrate_latch", None)
+        state = (int(cache.revision), int(tracker.revision_for(session.level_key)))
+        if max_count is None and latch is not None and latch[0] == latch_key and latch[1] == state:
+            return 0
         if max_count is not None:
             count = max(0, int(max_count))
             if count == 0:
@@ -166,9 +176,14 @@ class LevelStatsService:
             candidates = (*expected, *expected)[offset : offset + count]
             offsets[session.level_key] = (offset + len(candidates)) % len(expected)
         rehydrated = 0
+        # One lock for the whole scope. Peeking per source took the cache lock
+        # once per montage tile on a walk that runs several times per commit.
+        cached_rows = cache.peek_many(
+            tuple((family, int(source_index)) for source_index in candidates)
+        )
         for source_index in candidates:
             source_index = int(source_index)
-            cached = cache.peek((family, source_index))
+            cached = cached_rows.get((family, source_index))
             if cached is None:
                 continue
             if tracker.has_source_quality(
@@ -179,6 +194,11 @@ class LevelStatsService:
                 continue
             tracker.update_from_stats(session.level_key, cached, aggregate=False)
             rehydrated += 1
+        if max_count is None:
+            session._level_rehydrate_latch = (
+                latch_key,
+                (int(cache.revision), int(tracker.revision_for(session.level_key))),
+            )
         return rehydrated
 
     def _montage_level_key(self, document, view_state, all_indices, colormap_lut):
@@ -190,13 +210,21 @@ class LevelStatsService:
         )
 
     def _montage_level_expected_indices(self, session) -> tuple[int, ...]:
-        expected = tuple(
-            int(index) for index in getattr(session, "level_expected_indices", ()) or ()
-        )
-        if expected:
-            return expected
+        # Both inputs are immutable round properties, and this is asked ~20
+        # times per commit by the level-evidence path. Re-walking the montage
+        # for each of them is the per-commit restatement of a per-round value;
+        # the latch is keyed on the two source objects themselves, so a new
+        # plan or a new declared scope rebuilds it and nothing else can.
+        declared = getattr(session, "level_expected_indices", ()) or ()
         plan = getattr(session, "plan", None)
-        return tuple(int(tile.source_index) for tile in getattr(plan, "tiles", ()))
+        latched = getattr(session, "_montage_level_expected_latch", None)
+        if latched is not None and latched[0] is declared and latched[1] is plan:
+            return latched[2]
+        expected = tuple(int(index) for index in declared)
+        if not expected:
+            expected = tuple(int(tile.source_index) for tile in getattr(plan, "tiles", ()))
+        session._montage_level_expected_latch = (declared, plan, expected)
+        return expected
 
     def _empty_montage_level_stats(self, expected_indices) -> MontageLevelStats:
         tracker = self._montage_level_tracker()
@@ -1442,12 +1470,7 @@ class LevelStatsService:
             and callable(getattr(self.win.img_view, "acceptResidentHistogramEvidence", None))
         )
         resident_payloads = {}
-        tiles_by_number = {
-            int(getattr(tile, "montage_index", offset)): tile
-            for offset, tile in enumerate(
-                tuple(getattr(getattr(session, "plan", None), "tiles", ()) or ())
-            )
-        }
+        tiles_by_number = plan_tiles_by_number(getattr(session, "plan", None))
         for tile_number in payloads or ():
             payload = payloads.get(int(tile_number)) if isinstance(payloads, dict) else None
             rendered = getattr(session, "rendered_tiles", {}).get(int(tile_number))

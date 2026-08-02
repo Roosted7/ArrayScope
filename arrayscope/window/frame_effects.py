@@ -2493,13 +2493,21 @@ class FramePipelineEffects:
                 if cpu_atomic_successor or shader_atomic_successor
                 else frozenset()
             )
-            atomic_current_tiles = frozenset(
-                int(tile)
-                for tile, payload in active_payloads.items()
-                if (
-                    session.lifecycle.payload_is_current(int(tile), payload)
-                    or session.resident_crop_fallback_is_current(int(tile), payload)
+            # Only an armed handoff can be adjudicated by this scope, and the
+            # walk below is over the whole active population. Deriving it on
+            # every ordinary commit charged a montage-wide currency probe to a
+            # decision no ordinary commit takes.
+            atomic_current_tiles = (
+                frozenset(
+                    int(tile)
+                    for tile, payload in active_payloads.items()
+                    if (
+                        session.lifecycle.payload_is_current(int(tile), payload)
+                        or session.resident_crop_fallback_is_current(int(tile), payload)
+                    )
                 )
+                if atomic_required_tiles
+                else frozenset()
             )
             if atomic_required_tiles and not atomic_required_tiles.issubset(atomic_current_tiles):
                 # The generic builder can legitimately return an empty active
@@ -3245,10 +3253,8 @@ class FramePipelineEffects:
         renderer = self.renderer
         session = self.session
         coverage_phase_before = bool(session.scheduling_policy.verdict.coverage_open)
-        presented_before_commit = frozenset(
-            int(tile)
-            for tile in session.required_tile_numbers()
-            if session.lifecycle.first_pixels_presented((int(tile),))
+        presented_before_commit = session.lifecycle.first_pixel_presented_scope(
+            session.required_tile_numbers()
         )
         report = getattr(renderer._display_committer(), "last_tile_commit_report", None)
         renderer._last_montage_report_presented = len(
@@ -4943,6 +4949,16 @@ def shader_commit_level_source(renderer, session, *, rehydrate_max_count: int | 
 
 
 def _shader_presented_payload_bounds(session, *, prospective_tiles=()):
+    """Return the union of presented payload bounds and the rows behind it.
+
+    The rows are ``(tile, payload, presentation_state, bounds)`` tuples, not
+    the trace records they become: this walks the whole presented population
+    on every shader commit, and building a diagnostic dict per tile there cost
+    more than the fold it accompanies for a record only the rare clamp-arming
+    commit ever emits. :func:`_shader_presented_bounds_observations` renders
+    them at the one site that reports them.
+    """
+
     covered = None
     observations = []
     lifecycle = getattr(session, "lifecycle", None)
@@ -4979,23 +4995,32 @@ def _shader_presented_payload_bounds(session, *, prospective_tiles=()):
         covered = (
             bounds if covered is None else (min(covered[0], bounds[0]), max(covered[1], bounds[1]))
         )
-        observations.append(
-            {
-                "tile": int(tile),
-                "source_index": int(getattr(payload, "source_index", -1)),
-                "presented_level": int(
-                    getattr(
-                        payload,
-                        "conservative_actual_lod_level",
-                        getattr(getattr(payload, "lod", None), "level", 0),
-                    )
-                    or 0
-                ),
-                "presented_bounds": tuple(float(value) for value in bounds),
-                "presentation_state": presentation_state,
-            }
-        )
+        observations.append((int(tile), payload, presentation_state, bounds))
     return covered, tuple(observations)
+
+
+def _shader_presented_bounds_observations(rows, *, outside):
+    """Render the clamp's trace records for the rows that widened it."""
+
+    low, high = outside
+    return tuple(
+        {
+            "tile": int(tile),
+            "source_index": int(getattr(payload, "source_index", -1)),
+            "presented_level": int(
+                getattr(
+                    payload,
+                    "conservative_actual_lod_level",
+                    getattr(getattr(payload, "lod", None), "level", 0),
+                )
+                or 0
+            ),
+            "presented_bounds": (float(bounds[0]), float(bounds[1])),
+            "presentation_state": presentation_state,
+        }
+        for tile, payload, presentation_state, bounds in rows
+        if bounds[0] < low or bounds[1] > high
+    )
 
 
 def _shader_semantic_source_with_presented_clamp(session, semantic_source):
@@ -5080,12 +5105,7 @@ def _shader_level_source_covering_presented_payloads(session, source, *, prospec
         session_id=int(getattr(session, "session_id", 0) or 0),
         refined_bounds=tuple(float(value) for value in source_levels),
         published_bounds=tuple(float(value) for value in covered),
-        observations=tuple(
-            row
-            for row in observations
-            if row["presented_bounds"][0] < source_levels[0]
-            or row["presented_bounds"][1] > source_levels[1]
-        ),
+        observations=_shader_presented_bounds_observations(observations, outside=source_levels),
     )
     session._shader_presented_bounds_clamp = {
         "semantic_key": getattr(source, "semantic_key", None),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum
-from functools import lru_cache
+from functools import cached_property, lru_cache
 
 import numpy as np
 
@@ -136,6 +136,17 @@ class MontagePlan:
     gap: int
     tiles: tuple[MontageTile, ...]
 
+    @cached_property
+    def tiles_by_number(self) -> dict[int, MontageTile]:
+        """The plan's tiles indexed by montage slot.
+
+        A round property, and the plan is immutable, so it is derived once.
+        Rebuilding it per commit — as the level-evidence and identity-repair
+        paths did — charges a montage-wide walk to a delta-sized transaction.
+        """
+
+        return {int(tile.montage_index): tile for tile in self.tiles}
+
     @property
     def display_shape(self) -> tuple[int, int]:
         height, width = self.tile_shape
@@ -229,6 +240,22 @@ class MontagePlan:
                 break
             visible.extend(self.tiles[start : min(row * columns + col1 + 1, count)])
         return tuple(visible)
+
+
+def plan_tiles_by_number(plan) -> dict[int, MontageTile]:
+    """Slot -> tile for any plan-shaped object.
+
+    A real :class:`MontagePlan` derives this once and answers from the cache;
+    the walk remains for the plan-shaped stand-ins that only carry ``tiles``.
+    """
+
+    mapping = getattr(plan, "tiles_by_number", None)
+    if mapping is not None:
+        return mapping
+    return {
+        int(getattr(tile, "montage_index", offset)): tile
+        for offset, tile in enumerate(tuple(getattr(plan, "tiles", ()) or ()))
+    }
 
 
 def make_montage_plan(
