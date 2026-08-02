@@ -785,10 +785,23 @@ def test_programmatic_range_change_still_retargets_synchronously(qt_app):
     (docs/redesign/programmatic-viewport-replay-2026-07-31.md).
     """
 
+    from pyqtgraph.Qt import QtCore, QtTest
+
     view = _make_seeded_view(qt_app)
     calls = _connect_montage_viewport_bridge(view)
     try:
         assert view.in_camera_gesture is False
+        # The bridge reads QApplication.mouseButtons(), which is process-global
+        # state an earlier test's unreleased press leaves stuck — observed as
+        # this test passing alone and misclassifying in a full run. Releasing
+        # here makes the test's own precondition ("no buttons") true by
+        # construction instead of by suite ordering.
+        stuck = qt_app.mouseButtons()
+        if stuck != QtCore.Qt.MouseButton.NoButton:
+            for button in QtCore.Qt.MouseButton:
+                if button != QtCore.Qt.MouseButton.NoButton and stuck & button:
+                    QtTest.QTest.mouseRelease(view.graphicsView.viewport(), button)
+        assert qt_app.mouseButtons() == QtCore.Qt.MouseButton.NoButton
         current = view.getView().viewRange()
         view.getView().setRange(
             xRange=(current[0][0] - 3.0, current[0][1] - 3.0),
