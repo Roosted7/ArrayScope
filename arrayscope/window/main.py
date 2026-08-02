@@ -60,7 +60,11 @@ def _kernel_worker_backend(settings):
     if not compute_process_pool_enabled(settings.compute_process_pool):
         return ThreadWorkerBackend()
     from arrayscope.kernel.process_backend import ProcessWorkerBackend
+    from arrayscope.operations.source_transport import enable_shared_publication
 
+    # Only now is a private shared-memory copy of an eager base array worth
+    # its bytes: a threads-only viewer would publish segments nobody reads.
+    enable_shared_publication()
     return ProcessWorkerBackend()
 
 

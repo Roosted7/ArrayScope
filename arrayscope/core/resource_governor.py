@@ -116,6 +116,12 @@ _PROFILE_TUNING = {
 _RENDER_PASS_REQUIREMENT_MS = 32.0
 _RENDER_PASS_ITEM_INDEPENDENCE_RATIO = 0.9
 _RENDER_PASS_HARD_LIMIT_MS = 50.0
+#: Knee of the fill-optimal responsiveness curve: free below, gently priced to
+#: the steep point, strongly quadratic beyond it.
+_RENDER_PASS_LATENCY_KNEE_MS = 18.0
+_RENDER_PASS_LATENCY_STEEP_MS = 45.0
+#: Assumed display cadence when no caller reports the real one.
+_RENDER_PASS_DEFAULT_REFRESH_HZ = 60.0
 _RETAINED_FALLBACK_REBIND_BATCH_LIMIT = 32
 _RETAINED_FALLBACK_REFINEMENT_BATCH_LIMIT = 4
 _MIB = 1024.0 * 1024.0
@@ -532,6 +538,8 @@ class ResourceGovernor:
         remaining_items: int | None = None,
         retained_fallback_refinement: bool = False,
         callback_elapsed_ms: float = 0.0,
+        frame_critical: bool = False,
+        refresh_hz: float = _RENDER_PASS_DEFAULT_REFRESH_HZ,
     ) -> UiWorkDecision:
         """Own R5 chunk size and deadline for preview and target passes.
 
@@ -540,9 +548,21 @@ class ResourceGovernor:
         that channel to 8 ms collapses to one tile without shortening the
         callback. R5 permits a governed chunk up to 50 ms, so the governor
         targets 32 ms and keeps 18 ms of hard-budget margin.
+
+        That 32 ms target is fill-optimal and frame-rate-hostile: it is two
+        frames at 60 Hz and four at 144 Hz, so a fill that keeps the GUI
+        thread saturated with such chunks cannot also draw. ``frame_critical``
+        (a gesture is running, or the display is owed a presentation draw)
+        reprices the same objective against ``refresh_hz`` instead. The rate
+        is a plain parameter: the governor never asks Qt what the display
+        does, its owner does. An idle fill with nothing owed keeps the
+        fill-optimal curve exactly as before.
         """
 
         pass_kind = "target" if str(pass_kind) == "target" else "preview"
+        rate_hz = float(refresh_hz)
+        rate_hz = rate_hz if rate_hz >= 1.0 else _RENDER_PASS_DEFAULT_REFRESH_HZ
+        frame_budget_ms = 1000.0 / rate_hz if bool(frame_critical) else 0.0
         channel = f"montage_render_pass_{pass_kind}"
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
         snapshot = self.latency_feedback.channel_snapshot(channel)
@@ -734,6 +754,7 @@ class ResourceGovernor:
                 responsiveness_weight=self.responsiveness_weight,
                 item_exploration_multiple=item_exploration_multiple,
                 callback_elapsed_ms=callback_elapsed_ms,
+                frame_budget_ms=frame_budget_ms,
             )
             steering = "weighted-fill-latency"
             item_ratio = float(batch) / max(
@@ -849,6 +870,11 @@ class ResourceGovernor:
                     f"r5-achievable={_optional_bool(hard_achievable)}"
                 ),
                 "target=32.00ms hard=50.00ms",
+                (
+                    f"frame-critical={int(bool(frame_critical))} "
+                    f"refresh={rate_hz:.1f}Hz "
+                    f"frame-budget={frame_budget_ms:.2f}ms"
+                ),
             )
             + (
                 (f"retained fallback refinement cap={_RETAINED_FALLBACK_REFINEMENT_BATCH_LIMIT}",)
@@ -1639,25 +1665,72 @@ def _seeded_render_pass_model(
     )
 
 
-def _render_pass_latency_cost_ms(elapsed_ms: float) -> float:
+def _render_pass_latency_cost_ms(
+    elapsed_ms: float,
+    *,
+    knee_ms: float = _RENDER_PASS_LATENCY_KNEE_MS,
+    steep_ms: float = _RENDER_PASS_LATENCY_STEEP_MS,
+) -> float:
     """Continuous responsiveness price in absolute milliseconds.
 
-    Work below the 18 ms smooth-interaction envelope is unregularized. The
-    price rises gently to 45 ms, then joins a stronger quadratic with matching
-    value and first derivative. There is deliberately no branch at 50 ms:
-    R5 is reported there, while optimization sees the whole smooth curve.
+    Work below the smooth-interaction envelope (``knee_ms``, 18 ms by default)
+    is unregularized. The price rises gently to ``steep_ms`` (45 ms), then
+    joins a stronger quadratic with matching value and first derivative. There
+    is deliberately no branch at 50 ms: R5 is reported there, while
+    optimization sees the whole smooth curve.
+
+    The two knees are the only frame-awareness knob. Moving them down to a
+    refresh period reprices the SAME milliseconds more steeply rather than
+    adding a second charge for them, so a caller that also prices an enclosing
+    callback cannot pay twice for one overrun.
     """
 
     elapsed = max(0.0, float(elapsed_ms))
-    if elapsed <= 18.0:
+    knee = max(0.0, float(knee_ms))
+    steep = max(knee + 1.0, float(steep_ms))
+    if elapsed <= knee:
         return 0.0
     gentle = 0.01
-    if elapsed <= 45.0:
-        return gentle * (elapsed - 18.0) ** 2
-    at_45 = gentle * (45.0 - 18.0) ** 2
-    slope_at_45 = 2.0 * gentle * (45.0 - 18.0)
-    beyond = elapsed - 45.0
-    return at_45 + slope_at_45 * beyond + 0.5 * beyond**2
+    if elapsed <= steep:
+        return gentle * (elapsed - knee) ** 2
+    at_steep = gentle * (steep - knee) ** 2
+    slope_at_steep = 2.0 * gentle * (steep - knee)
+    beyond = elapsed - steep
+    return at_steep + slope_at_steep * beyond + 0.5 * beyond**2
+
+
+def _render_pass_frame_aware_knees(
+    frame_budget_ms: float,
+    fixed_ms: float,
+    minimum_chunk_ms: float,
+) -> tuple[float, float] | None:
+    """Responsiveness knees for a pass that owes the display a frame.
+
+    A frame-critical pass is priced against the refresh period instead of the
+    fill-optimal 18/45 envelope: the knee drops to half a frame and the steep
+    branch starts at one frame, so a chunk that costs more than the display's
+    own cadence is charged as the missed frames it is.
+
+    ``None`` when a frame is not for sale. Every chunk re-pays the whole fixed
+    term, so pricing a pass into frame-sized chunks multiplies that term by the
+    chunk count -- R5's cohort collapse, arriving through the responsiveness
+    price instead of through the budget. The frame must therefore be able to
+    hold at least two of the fixed cost, or shortening the chunk spends more
+    fill time than the frame it buys is worth. Measured 2026-08-02 on the cold
+    272-tile WGPU montage, whose commit carries ~11 ms of fixed cost against a
+    16.7 ms frame: without this refusal the profiler's 5 s window presented 34
+    tiles against 266 with the fill-optimal curve.
+
+    ``minimum_chunk_ms`` floors the steep point at the cheapest chunk the model
+    can produce, so the smallest legal chunk is never itself priced as an
+    overrun; the overrun is reported rather than chunked away.
+    """
+
+    budget = max(0.0, float(frame_budget_ms))
+    if budget <= 0.0 or budget < 2.0 * max(0.0, float(fixed_ms)):
+        return None
+    steep = max(budget, float(minimum_chunk_ms))
+    return 0.5 * steep, steep
 
 
 def _render_pass_extrapolation_cost_ms(ratio: float) -> float:
@@ -1742,6 +1815,7 @@ def _render_pass_optimal_point(
     responsiveness_weight: float = 1.0,
     item_exploration_multiple: float = 1.0,
     callback_elapsed_ms: float = 0.0,
+    frame_budget_ms: float = 0.0,
 ) -> tuple[int, float, float]:
     """Minimize fill plus latency and model-risk prices in logarithmic work.
 
@@ -1770,6 +1844,19 @@ def _render_pass_optimal_point(
         count = float(items)
         return float(fixed_ms) + marginal * count
 
+    frame_knees = _render_pass_frame_aware_knees(
+        frame_budget_ms,
+        fixed_ms,
+        latency(1.0) + residual_risk_ms,
+    )
+    knee_ms, steep_ms = frame_knees or (
+        _RENDER_PASS_LATENCY_KNEE_MS,
+        _RENDER_PASS_LATENCY_STEEP_MS,
+    )
+
+    def responsiveness_price_ms(chunk_ms: float) -> float:
+        return _render_pass_latency_cost_ms(chunk_ms, knee_ms=knee_ms, steep_ms=steep_ms)
+
     exploration_multiple = max(1.0, float(item_exploration_multiple))
 
     def extrapolation(items: float) -> float:
@@ -1796,13 +1883,17 @@ def _render_pass_optimal_point(
         their own, which is exactly the choice the price is meant to buy.
         Zero when nothing encloses the pass, so every other caller is
         arithmetically unchanged.
+
+        It reads the same (possibly frame-shifted) curve as the per-chunk
+        price and charges only the DIFFERENCE the enclosing milliseconds make,
+        so a frame-critical pass prices those milliseconds once, not twice.
         """
 
         if enclosing_ms <= 0.0:
             return 0.0
         return responsiveness * (
-            _render_pass_latency_cost_ms(enclosing_ms + risk_adjusted_chunk_ms)
-            - _render_pass_latency_cost_ms(risk_adjusted_chunk_ms)
+            responsiveness_price_ms(enclosing_ms + risk_adjusted_chunk_ms)
+            - responsiveness_price_ms(risk_adjusted_chunk_ms)
         )
 
     def relaxed_objective(items: float) -> float:
@@ -1813,7 +1904,7 @@ def _render_pass_optimal_point(
             / max(1.0, float(items))
             * (
                 risk_adjusted_chunk_ms
-                + responsiveness * _render_pass_latency_cost_ms(risk_adjusted_chunk_ms)
+                + responsiveness * responsiveness_price_ms(risk_adjusted_chunk_ms)
             )
             + enclosing_cost(risk_adjusted_chunk_ms)
             + extrapolation(items)
@@ -1855,7 +1946,7 @@ def _render_pass_optimal_point(
         chunks = ceil(float(remaining) / float(items))
         chunk_ms = latency(items)
         risk_adjusted_chunk_ms = chunk_ms + residual_risk_ms
-        latency_cost = responsiveness * _render_pass_latency_cost_ms(risk_adjusted_chunk_ms)
+        latency_cost = responsiveness * responsiveness_price_ms(risk_adjusted_chunk_ms)
         extrapolation_cost = extrapolation(items)
         rows.append(
             (

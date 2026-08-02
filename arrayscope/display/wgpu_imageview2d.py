@@ -3503,6 +3503,27 @@ class WgpuImageView2D(ImageViewShell):
             or self._wgpu_tile_presentation_draw_pending()
         )
 
+    def presentationRefreshRate(self) -> float:
+        """Draws per second this view's canvas paces itself at.
+
+        The screen canvas already reads the live display rate and caches it
+        behind the screen-change signals; the bitmap path reads the same
+        screen at construction. Both are exposed here so GUI-thread pacing
+        decisions can be priced against the display's real cadence without
+        anything outside this view asking Qt what screen it is on.
+        """
+
+        canvas = getattr(self, "_wgpu_canvas", None)
+        rate = getattr(canvas, "max_draws_per_second", None)
+        if rate is not None:
+            try:
+                value = float(rate)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value >= 1.0:
+                return value
+        return _bitmap_display_refresh_rate(self)
+
     def wgpuPresentationDiagnostics(self) -> dict[str, object]:
         executor = self._wgpu_executor
         canvas = getattr(self, "_wgpu_canvas", None)

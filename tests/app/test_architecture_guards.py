@@ -1014,6 +1014,12 @@ def test_qtimers_are_explicitly_allowlisted_by_category():
             ): 1,
             (
                 "arrayscope/window/display_presenter.py",
+                "DisplayPresentationMixin.defer_commit_behind_presentation_draw",
+                "singleShot",
+                "anti-hang fallback",
+            ): 1,
+            (
+                "arrayscope/window/display_presenter.py",
                 "DisplayPresentationMixin._schedule_frame_viewport_update",
                 "QTimer",
                 "UI cosmetic",

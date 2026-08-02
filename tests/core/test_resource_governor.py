@@ -15,6 +15,7 @@ from arrayscope.core.resource_governor import (
     _render_pass_cost_model,
     _render_pass_extrapolation_cost_ms,
     _render_pass_extrapolation_weight,
+    _render_pass_frame_aware_knees,
     _render_pass_latency_cost_ms,
     _render_pass_optimal_point,
     _render_pass_shared_terms,
@@ -998,3 +999,197 @@ def test_render_pass_decision_reports_the_callback_it_is_nested_in():
     )
 
     assert sum("enclosing-callback=38.00ms" in detail for detail in decision.details) == 1
+
+
+def _per_item_model() -> tuple[_RenderPassCostModel, dict]:
+    """A cost model with a real per-item term, measured over its whole span."""
+
+    model = _RenderPassCostModel(
+        fixed_ms=6.0,
+        item_ms=0.6,
+        residual_rms_ms=0.0,
+        samples=8,
+        design_points=8,
+        observed_item_min=1,
+        observed_item_max=60,
+        mean_elapsed_ms=24.0,
+    )
+    return model, {
+        "fixed_ms": 6.0,
+        "marginal_ms": 0.6,
+        "remaining_items": 60,
+        "observed_item_max": 60,
+        "observed_byte_max": 0,
+        "bytes_per_item": 0.0,
+        "model": model,
+    }
+
+
+def test_frame_aware_knee_prices_a_chunk_against_the_display_period():
+    """A frame-critical pass buys frames with cohort size; an idle one does not.
+
+    One measured model priced twice: the fill-optimal curve and one 60 Hz
+    refresh period. The frame-critical chunk must land at the period it was
+    priced against, while the idle arm keeps the fill-optimal answer byte for
+    byte. A 144 Hz frame is refused for this model -- 6.9 ms cannot hold two of
+    its 6 ms fixed term -- so a cheaper transaction carries that half.
+    """
+
+    _model, common = _per_item_model()
+
+    idle_items, idle_ms, _ = _render_pass_optimal_point(**common)
+    at_60_items, at_60_ms, _ = _render_pass_optimal_point(**common, frame_budget_ms=1000.0 / 60.0)
+
+    assert idle_items == _render_pass_optimal_point(**common, frame_budget_ms=0.0)[0]
+    assert at_60_items < idle_items
+    # The curve is a price, not a cap: a chunk may still overrun its frame when
+    # the fill time it buys is worth more than the overrun costs. What must
+    # hold is that the chosen chunk lands within half a frame of the period it
+    # was priced against, which the fill-optimal answer does not.
+    assert abs(at_60_ms - 1000.0 / 60.0) <= 0.5 * 1000.0 / 60.0
+    assert idle_ms > 2.0 * 1000.0 / 60.0
+
+    cheap = replace(_model, fixed_ms=1.5, item_ms=0.6, mean_elapsed_ms=19.5)
+    cheap_common = {**common, "fixed_ms": 1.5, "model": cheap}
+    cheap_idle = _render_pass_optimal_point(**cheap_common)[0]
+    cheap_at_144_items, cheap_at_144_ms, _ = _render_pass_optimal_point(
+        **cheap_common, frame_budget_ms=1000.0 / 144.0
+    )
+
+    assert cheap_at_144_items < cheap_idle
+    assert abs(cheap_at_144_ms - 1000.0 / 144.0) <= 0.5 * 1000.0 / 144.0
+
+
+def test_frame_aware_knee_refuses_to_collapse_a_fixed_dominated_cohort():
+    """R5's cohort collapse: what the chunk cannot buy, it must not be charged.
+
+    49.9 ms of fixed cost and 0.1 ms per item means no cohort size fits a
+    16.7 ms frame, so pricing every candidate as an overrun would only shrink
+    the cohort while every chunk still missed its frame. The frame-aware arm
+    must return the same cohort as the fill-optimal one and report the overrun.
+    """
+
+    model = _RenderPassCostModel(
+        fixed_ms=49.9,
+        item_ms=0.1,
+        residual_rms_ms=0.0,
+        samples=8,
+        design_points=8,
+        observed_item_min=1,
+        observed_item_max=60,
+        mean_elapsed_ms=53.0,
+    )
+    common = {
+        "fixed_ms": 49.9,
+        "marginal_ms": 0.1,
+        "remaining_items": 60,
+        "observed_item_max": 60,
+        "observed_byte_max": 0,
+        "bytes_per_item": 0.0,
+        "model": model,
+    }
+
+    idle = _render_pass_optimal_point(**common)
+    frame_critical = _render_pass_optimal_point(**common, frame_budget_ms=1000.0 / 60.0)
+
+    assert frame_critical[0] == idle[0]
+    assert frame_critical[1] > 1000.0 / 60.0
+
+
+def test_frame_aware_knees_floor_at_the_cheapest_chunk_the_model_can_make():
+    assert _render_pass_frame_aware_knees(16.0, 2.0, 4.0) == (8.0, 16.0)
+    # The fixed term does not shrink with the chunk: when one item already
+    # costs more than a frame, the steep branch starts there instead.
+    assert _render_pass_frame_aware_knees(16.0, 2.0, 40.0) == (20.0, 40.0)
+
+
+def test_a_frame_a_fixed_cost_cannot_fit_is_not_for_sale():
+    """Refuse the frame-aware price when the fixed term would multiply.
+
+    Every chunk re-pays the fixed cost, so pacing a pass into frame-sized
+    chunks multiplies that term by the chunk count -- R5's cohort collapse
+    reached through the responsiveness price. Measured on the cold 272-tile
+    WGPU montage (~11 ms fixed against a 16.7 ms frame): the profiler's 5 s
+    fill window presented 34 tiles with the frame knee against 266 without it.
+    """
+
+    assert _render_pass_frame_aware_knees(16.67, 11.0, 12.5) is None
+    assert _render_pass_frame_aware_knees(16.67, 4.0, 5.0) == (8.335, 16.67)
+
+    model = _RenderPassCostModel(
+        fixed_ms=11.0,
+        item_ms=1.5,
+        residual_rms_ms=0.0,
+        samples=8,
+        design_points=8,
+        observed_item_min=1,
+        observed_item_max=60,
+        mean_elapsed_ms=30.0,
+    )
+    common = {
+        "fixed_ms": 11.0,
+        "marginal_ms": 1.5,
+        "remaining_items": 272,
+        "observed_item_max": 60,
+        "observed_byte_max": 0,
+        "bytes_per_item": 0.0,
+        "model": model,
+    }
+
+    assert _render_pass_optimal_point(
+        **common, frame_budget_ms=1000.0 / 60.0
+    ) == _render_pass_optimal_point(**common)
+
+
+def test_frame_aware_knee_moves_the_enclosing_charge_instead_of_adding_one():
+    """The two prices share one curve, so the same milliseconds pay once.
+
+    The enclosing-callback charge is a DIFFERENCE on the responsiveness curve.
+    Shifting the knee must move that difference, never stack a second price on
+    top of it: a pass enclosed by nothing pays nothing under either knee, and
+    the enclosed cohort stays no larger than the unenclosed one.
+    """
+
+    _model, common = _per_item_model()
+    frame = {"frame_budget_ms": 1000.0 / 60.0}
+
+    unenclosed = _render_pass_optimal_point(**common, **frame)
+    declared_zero = _render_pass_optimal_point(**common, **frame, callback_elapsed_ms=0.0)
+    enclosed = _render_pass_optimal_point(**common, **frame, callback_elapsed_ms=38.0)
+
+    assert declared_zero == unenclosed
+    assert enclosed[0] <= unenclosed[0]
+    # And the enclosing charge itself reads the shifted curve: 38 ms of spent
+    # callback is already past a 60 Hz frame, so it must cost more there than
+    # on the fill-optimal curve, which is free until 18 ms.
+    at_frame_knee = _render_pass_latency_cost_ms(38.0, knee_ms=8.335, steep_ms=16.67)
+    assert at_frame_knee > _render_pass_latency_cost_ms(38.0)
+
+
+def test_render_pass_decision_reports_the_frame_it_was_priced_against():
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+
+    idle = governor.decide_render_pass(interactive=False, pass_kind="target", remaining_items=60)
+    paced = governor.decide_render_pass(
+        interactive=False,
+        pass_kind="target",
+        remaining_items=60,
+        frame_critical=True,
+        refresh_hz=144.0,
+    )
+
+    assert sum("frame-critical=0 refresh=60.0Hz frame-budget=0.00ms" in row for row in idle.details)
+    assert (
+        sum("frame-critical=1 refresh=144.0Hz frame-budget=6.94ms" in row for row in paced.details)
+        == 1
+    )
+    # A refresh rate the platform will not report is the governor's own
+    # default, never a division by zero.
+    unknown = governor.decide_render_pass(
+        interactive=False,
+        pass_kind="target",
+        remaining_items=60,
+        frame_critical=True,
+        refresh_hz=0.0,
+    )
+    assert any("refresh=60.0Hz frame-budget=16.67ms" in row for row in unknown.details)

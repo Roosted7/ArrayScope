@@ -45,6 +45,7 @@ from arrayscope.operations.slabs import (
     request_for_line,
     request_for_scalar,
 )
+from arrayscope.operations.source_transport import base_data_token
 from arrayscope.operations.stage_cache import StageCache
 from arrayscope.operations.stage_materialization import StageMaterializationManager
 
@@ -950,7 +951,7 @@ def _document_key(document: ArrayDocument):
     dtype = getattr(document.base_data, "dtype", None)
     dtype_key = None if dtype is None else np.dtype(dtype)
     return (
-        id(document.base_data),
+        base_data_token(document.base_data),
         tuple(np.shape(document.base_data)),
         dtype_key,
         int(document.revision),
@@ -962,7 +963,7 @@ def stage_document_key(document: ArrayDocument):
     dtype = getattr(document.base_data, "dtype", None)
     dtype_key = None if dtype is None else np.dtype(dtype)
     return (
-        id(document.base_data),
+        base_data_token(document.base_data),
         tuple(np.shape(document.base_data)),
         dtype_key,
         int(document.revision),

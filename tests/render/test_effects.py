@@ -196,14 +196,14 @@ def test_native_tile_discards_result_cancelled_after_evaluation(monkeypatch):
     tile = session.plan.tiles[1]
     evaluator = OperationEvaluator(session.document)
     token = SimpleNamespace(cancelled=False)
-    evaluate_image_snapshot = effects.evaluate_image_snapshot
+    run_image_snapshot = effects.run_image_snapshot
 
     def cancel_after_evaluation(*args, **kwargs):
-        result = evaluate_image_snapshot(*args, **kwargs)
+        result = run_image_snapshot(*args, **kwargs)
         token.cancelled = True
         return result
 
-    monkeypatch.setattr(effects, "evaluate_image_snapshot", cancel_after_evaluation)
+    monkeypatch.setattr(effects, "run_image_snapshot", cancel_after_evaluation)
 
     with pytest.raises(EvaluationCancelled):
         effects.evaluate_target_tile(

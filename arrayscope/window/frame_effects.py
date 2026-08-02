@@ -51,7 +51,10 @@ from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import Rung
 from arrayscope.render.stages import CommitBatch, LodAdmissionScope
 from arrayscope.ui.toasts import show_status_message
-from arrayscope.window.display_presenter import tile_residency_budget_bytes
+from arrayscope.window.display_presenter import (
+    DISPLAY_REFRESH_FALLBACK_HZ,
+    tile_residency_budget_bytes,
+)
 from arrayscope.window.frame_session import _base_source_id, forget_admission_verdict
 from arrayscope.window.montage_payload_cache import (
     payload_lod_matches,
@@ -274,6 +277,19 @@ class FramePipelineEffects:
             source_id = self.session.tile_semantic_source_id(int(tile.source_index))
         return semantic_key, source_id
 
+    def _tile_evaluation_context(self):
+        """The montage-tile context, built on the SUBMITTING thread (ADR 0064).
+
+        It used to be built inside the worker closure, which made every tile
+        read ``win.compute_policy`` and the renderer's memory policy from a
+        worker thread — GUI-owned state, and state a compute *process* cannot
+        reach at all. Only the cancellation token is per-task, and that is a
+        ``replace`` on the frozen context, so the closure keeps nothing but
+        data.
+        """
+
+        return self.renderer.win._evaluation_context(ComputeLane.MONTAGE_TILE, None)
+
     def evaluate_rung(self, intent, step):
         if not self._session_is_current(intent):
             return lambda _token=None: None
@@ -301,10 +317,12 @@ class FramePipelineEffects:
             )
 
             warm_canonical_plane = self._canonical_plane_warm_enabled()
+            base_context = self._tile_evaluation_context()
 
             def evaluate_preview(token=None):
                 if demand is None or semantic_source_id is None:
                     return None
+                context = replace(base_context, cancellation_token=token)
                 if step.rung == Rung.DESIRED:
                     # DESIRED is the target-quality owner even when it returns
                     # the same page-backed tuple shape as FLOOR.  Keeping both
@@ -320,9 +338,7 @@ class FramePipelineEffects:
                         semantic_source_id=semantic_source_id,
                         cancellation_token=token,
                         shader_display=bool(getattr(session, "shader_display", False)),
-                        evaluation_context=self.renderer.win._evaluation_context(
-                            ComputeLane.MONTAGE_TILE, token
-                        ),
+                        evaluation_context=context,
                         stage_cache=self.renderer.win.operation_evaluator.stage_cache,
                         stage_materializer=(
                             self.renderer.win.operation_evaluator.stage_materializer
@@ -337,9 +353,7 @@ class FramePipelineEffects:
                     level=int(step.level),
                     cancellation_token=token,
                     shader_display=bool(getattr(session, "shader_display", False)),
-                    evaluation_context=self.renderer.win._evaluation_context(
-                        ComputeLane.MONTAGE_TILE, token
-                    ),
+                    evaluation_context=context,
                     stage_cache=self.renderer.win.operation_evaluator.stage_cache,
                     stage_materializer=self.renderer.win.operation_evaluator.stage_materializer,
                     warm_canonical_plane=warm_canonical_plane,
@@ -391,6 +405,7 @@ class FramePipelineEffects:
 
         semantic_source_id = session.tile_semantic_source_id(tile.source_index)
         warm_canonical_plane = self._canonical_plane_warm_enabled()
+        base_context = self._tile_evaluation_context()
 
         def evaluate_target(token=None, semantic_source_id=semantic_source_id):
             demand = session.lod_policy_decision.demand
@@ -404,9 +419,7 @@ class FramePipelineEffects:
                 stage_materializer=self.renderer.win.operation_evaluator.stage_materializer,
                 cancellation_token=token,
                 shader_display=bool(getattr(session, "shader_display", False)),
-                evaluation_context=self.renderer.win._evaluation_context(
-                    ComputeLane.MONTAGE_TILE, token
-                ),
+                evaluation_context=replace(base_context, cancellation_token=token),
                 warm_canonical_plane=warm_canonical_plane,
             )
 
@@ -1687,6 +1700,21 @@ class FramePipelineEffects:
         if not self._session_is_current():
             emit_trace("presentation_gate", action="fired-not-current", owner_session=owner[0])
             return
+        # The paced draw and this continuation are unordered event-loop
+        # wakeups. When the display is already owed a frame, this one stands
+        # down and re-arms behind it. The resume commits directly rather than
+        # re-posting the gate: the gate's own wakeup is LowEventPriority by
+        # design and a fill keeps that queue saturated, so re-arming through it
+        # would turn a one-turn yield into the starvation
+        # `_post_visible_path_callback` documents. The gate flags are cleared
+        # above and the resume re-checks the session generation, so this is
+        # exactly the callback the gate would have run.
+        defer = getattr(self.renderer, "defer_commit_behind_presentation_draw", None)
+        if callable(defer) and defer(
+            self._commit_after_presentation_draw, interactive=interactive_active(self.renderer)
+        ):
+            emit_trace("presentation_gate", action="deferred-draw", owner_session=owner[0])
+            return
         emit_trace("presentation_gate", action="fired-commit", owner_session=owner[0])
         try:
             self.commit_pending_session()
@@ -1708,6 +1736,21 @@ class FramePipelineEffects:
                 "presentation_gate",
                 action="fired-raised",
                 owner_session=owner[0],
+                exception_type=type(exc).__name__,
+            )
+            handle_ui_exception("montage presentation commit", exc)
+
+    def _commit_after_presentation_draw(self) -> None:
+        """Resume the continuation that stood down for an owed draw."""
+
+        if not self._session_is_current():
+            return
+        try:
+            self.commit_pending_session()
+        except Exception as exc:
+            emit_trace(
+                "presentation_gate",
+                action="deferred-draw-raised",
                 exception_type=type(exc).__name__,
             )
             handle_ui_exception("montage presentation commit", exc)
@@ -4634,14 +4677,20 @@ def complete_deferred_stage_fan_in(renderer, session) -> bool:
 def submit_stage_tasks(renderer, session, stage_requests) -> None:
     if not renderer._frame_session_is_current(session):
         return
+    # One read of the GUI-owned compute/memory policy for the whole batch, on
+    # the submitting thread; the closures only swap in their own token. Built
+    # on first use so a batch with nothing to submit still touches nothing.
+    stage_context = None
     for request, plan in tuple(stage_requests):
         if request is None or request.key in session.stage_fan_in.active_requests:
             continue
+        if stage_context is None:
+            stage_context = renderer.win._evaluation_context(ComputeLane.STAGE, None)
         session.stage_fan_in.active_requests.add(request.key)
         scheduling_rank = _stage_consumer_scheduling_rank(session, request.key)
 
-        def evaluate(token, request=request, plan=plan):
-            context = renderer.win._evaluation_context(ComputeLane.STAGE, token)
+        def evaluate(token, request=request, plan=plan, base_context=stage_context):
+            context = replace(base_context, cancellation_token=token)
             return materialize_stage_candidate_chunked(
                 session.document,
                 plan.region_plan,
@@ -5966,6 +6015,8 @@ def _commit_batch_decision(
             remaining_items=remaining_items,
             retained_fallback_refinement=retained_refinement,
             callback_elapsed_ms=_enclosing_callback_elapsed_ms(window, session),
+            frame_critical=bool(interactive) or _presentation_draw_owed(window),
+            refresh_hz=_presentation_refresh_hz(window),
         )
         if retained_refinement:
             evidence = session.resident_crop_governor_stats
@@ -5981,6 +6032,20 @@ def _commit_batch_decision(
     if callable(provider):
         return provider("presentation_commit", interactive=interactive)
     return None
+
+
+def _presentation_draw_owed(window) -> bool:
+    """Whether committed pixels are still waiting for their display draw."""
+
+    predicate = getattr(window, "presentation_draw_pending", None)
+    return bool(predicate()) if callable(predicate) else False
+
+
+def _presentation_refresh_hz(window) -> float:
+    """The display's real cadence; the governor's own default when unknown."""
+
+    rate = getattr(window, "presentation_refresh_hz", None)
+    return float(rate()) if callable(rate) else DISPLAY_REFRESH_FALLBACK_HZ
 
 
 def _enclosing_callback_elapsed_ms(window, session) -> float:

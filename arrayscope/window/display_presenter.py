@@ -46,8 +46,142 @@ from arrayscope.operations.evaluator import _document_key
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.viewport_bridge import ViewportBridge
 
+#: Assumed display cadence when the view will not say what it draws at.
+DISPLAY_REFRESH_FALLBACK_HZ = 60.0
+
 
 class DisplayPresentationMixin:
+    # ---- frame-aware commit pacing -----------------------------------------
+
+    def presentation_refresh_hz(self) -> float:
+        """Draws per second the display actually offers, 60 when unknown."""
+
+        view = getattr(self.win, "img_view", None)
+        rate = getattr(view, "presentationRefreshRate", None)
+        if callable(rate):
+            try:
+                value = float(rate())
+            except Exception:
+                value = 0.0
+            if value >= 1.0:
+                return value
+        return DISPLAY_REFRESH_FALLBACK_HZ
+
+    def presentation_draw_pending(self) -> bool:
+        """Whether the display is owed a draw for already-committed pixels."""
+
+        predicate = getattr(getattr(self.win, "img_view", None), "presentationDrawPending", None)
+        if not callable(predicate):
+            return False
+        try:
+            return bool(predicate())
+        except Exception:
+            return False
+
+    def presentation_pacing_stats(self) -> dict[str, int]:
+        stats = getattr(self, "_presentation_pacing_stats_counters", None)
+        if stats is None:
+            stats = {
+                "presentation_draws": 0,
+                "commit_deferrals": 0,
+                "commit_rearms_draw_ack": 0,
+                "commit_rearms_backstop": 0,
+            }
+            self._presentation_pacing_stats_counters = stats
+        return stats
+
+    def defer_commit_behind_presentation_draw(self, rearm, *, interactive: bool) -> bool:
+        """Let an owed draw reach the display before the next commit batch.
+
+        The paced draw and the commit continuation are both ordinary event-loop
+        wakeups — a ``QTimer.singleShot`` from ``WgpuScreenCanvas.request_draw``
+        against a ``LowEventPriority`` posted gate event — and Qt orders posted
+        events against timer sources by nothing a caller can rely on. So a
+        30 ms commit routinely wins the race against a draw that was already
+        owed, and the display sees a fraction of the frames it was promised
+        while ``presentationDrawPending`` sits armed.
+
+        This is the ordering, not a scheduler: when a draw is owed, one commit
+        continuation stands down and re-arms itself behind it.
+
+        Exactly one yield per completed draw. The yield is charged against the
+        draw-ack count, so a surface that never acks (hidden, headless, a
+        compositor that dropped the frame) can strand nothing: the next
+        continuation sees the same count it already yielded at and commits.
+
+        What it yields is one event-loop turn, not a frame. The zero-delay
+        wakeup lets any draw whose paced timer is ALREADY due run first --
+        Qt fires due timers in deadline order and the draw's was armed
+        earlier -- while a draw still a whole frame away costs this commit
+        nothing. The ack still resumes the commit when it arrives first, so the
+        deferral always has a wakeup armed twice over (ADR 0051).
+
+        Only while a gesture is running. Standing every commit down for its
+        owed draw was measured on the cold 272-tile WGPU montage and refused:
+        the profiler's 5 s fill window presented 79 tiles against 266 for the
+        same tree with the deferral off, and it turned R1
+        (``physical_uploads_stay_on_round_floors``) from clean to two failures
+        per run by giving the unimplemented R7 level-0 warm room to land inside
+        the round. A fill nobody is touching has no input to be late for, and
+        the contract only accepts a slower fill when the R1-R7 verdict holds.
+        """
+
+        if not callable(rearm) or not bool(interactive):
+            return False
+        self._connect_presentation_draw_pacing()
+        view = getattr(self.win, "img_view", None)
+        if view is None or not self.presentation_draw_pending():
+            return False
+        visible = getattr(view, "isVisible", None)
+        if callable(visible) and not bool(visible()):
+            # Nothing is on screen to win a frame for, and an unmapped
+            # QGraphics viewport may never paint the ack this waits on.
+            return False
+        drawn = int(getattr(self, "_presentation_drawn_count", 0) or 0)
+        if int(getattr(self, "_commit_yielded_at_draw_count", -1)) == drawn:
+            return False
+        self._commit_yielded_at_draw_count = drawn
+        self._deferred_commit_rearm = rearm
+        self.presentation_pacing_stats()["commit_deferrals"] += 1
+        from pyqtgraph.Qt import QtCore
+
+        # Timer category: Qt event-turn barrier. Not a pace and not a delay:
+        # it hands the turn to whatever is already due, which is where the
+        # owed draw sits.
+        QtCore.QTimer.singleShot(0, self, self._run_deferred_commit_backstop)
+        return True
+
+    def _connect_presentation_draw_pacing(self) -> None:
+        view = getattr(self.win, "img_view", None)
+        if view is None or view is getattr(self, "_presentation_pacing_view", None):
+            return
+        signal = getattr(view, "presentationDrawn", None)
+        if signal is None:
+            return
+        try:
+            signal.connect(self._on_presentation_drawn_for_commit_pacing)
+        except (TypeError, RuntimeError):
+            return
+        self._presentation_pacing_view = view
+
+    def _on_presentation_drawn_for_commit_pacing(self) -> None:
+        self._presentation_drawn_count = int(getattr(self, "_presentation_drawn_count", 0) or 0) + 1
+        self.presentation_pacing_stats()["presentation_draws"] += 1
+        self._resume_deferred_commit("draw_ack")
+
+    def _run_deferred_commit_backstop(self) -> None:
+        self._resume_deferred_commit("backstop")
+
+    def _resume_deferred_commit(self, reason: str) -> None:
+        rearm = getattr(self, "_deferred_commit_rearm", None)
+        if rearm is None:
+            return
+        self._deferred_commit_rearm = None
+        if getattr(self.win, "_closing", False):
+            return
+        self.presentation_pacing_stats()[f"commit_rearms_{reason}"] += 1
+        rearm()
+
     def _apply_full_display_image(
         self,
         display_image,

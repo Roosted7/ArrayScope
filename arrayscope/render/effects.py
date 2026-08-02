@@ -48,7 +48,7 @@ from arrayscope.operations.capabilities import (
     pipeline_supports_reduced_display_lod,
     pipeline_windowable_display_axes,
 )
-from arrayscope.operations.evaluator import evaluate_image_snapshot, stage_document_key
+from arrayscope.operations.evaluator import stage_document_key
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.pipeline import evaluate as evaluate_pipeline
 from arrayscope.operations.planner import final_region_for_request
@@ -60,6 +60,7 @@ from arrayscope.operations.regions import (
     apply_region,
     region_contains,
 )
+from arrayscope.operations.remote_snapshot import run_image_snapshot
 from arrayscope.operations.slabs import (
     evaluate_slab_from_stage,
     plan_slab,
@@ -196,7 +197,7 @@ def _evaluate_native_tile_result(
                 compute_path="stage_backed",
             )
 
-    result = evaluate_image_snapshot(
+    result = run_image_snapshot(
         session.document,
         tile.view_state,
         colormap_lut=session.colormap_lut,
@@ -275,7 +276,7 @@ def canonical_plane_residency_source(
     if not _canonical_plane_warm_fits_budget(session, plane_state):
         return None
     _check_render_cancelled(cancellation_token)
-    result = evaluate_image_snapshot(
+    result = run_image_snapshot(
         session.document,
         plane_state,
         colormap_lut=session.colormap_lut,

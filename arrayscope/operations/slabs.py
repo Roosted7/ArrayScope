@@ -20,6 +20,7 @@ from arrayscope.operations.regions import (
     region_shape,
 )
 from arrayscope.operations.source_read import read_base_region
+from arrayscope.operations.source_transport import base_data_token
 from arrayscope.operations.stage_cache import StageValue
 
 
@@ -483,7 +484,7 @@ def _check_cancelled(token) -> None:
 def _default_stage_document_key(document: ArrayDocument):
     dtype = getattr(document.base_data, "dtype", None)
     return (
-        id(document.base_data),
+        base_data_token(document.base_data),
         tuple(np.shape(document.base_data)),
         None if dtype is None else str(np.dtype(dtype)),
         int(getattr(document, "revision", 0)),
