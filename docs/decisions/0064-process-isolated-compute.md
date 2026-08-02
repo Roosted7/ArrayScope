@@ -130,6 +130,17 @@ that promise:
 |---|---|---|
 | 1 | `compute_histogram_plot`, `aggregate_histogram_samples` | Already pure module functions over picklable data; proves backend + cancellation on work no frame depends on |
 | 2 | Per-tile fan-out of shared preview/target evaluation | The single largest pure-Python block (78–94 % of the stage); one immutable input array (perfect slab), one page out per tile |
+
+> **Correction, 2026-08-02.** Row 2's measurement priced
+> `evaluate_shared_preview`'s 272-iteration worker loop — which `819789f8`
+> deleted the day before this ADR was written; ADR 0059 had already turned it
+> into one kernel task per tile. The surviving per-tile body (the tail of
+> `_evaluate_tile_reduced_input_preview`) is what migrated: it is now the
+> module-level entry `render.effects:fan_out_preview_pages` behind a
+> `RemoteCall`, batch size one because supersession, lifecycle claims and
+> R2/R3 admission are already per tile. The 78–94 % figure does not transfer
+> to the successor; the per-tile cost is ~1.9–2.5 ms, and the win to measure
+> is contention relief, not the retired loop's wall time.
 | 3 | `materialize_lod_page` | Pure `(array, origin, plan) → page`; parent admits into `LodPageCache`; ship the 772 B histogram summary alongside so the parent does not redo it |
 | 4 | Upload packing (`wgpu_packed_payload_texture`) into slot-backed mailbox buffers | Documented pure; output feeds `queue.write_texture` directly from the slot |
 | 5 | Whole-array materialize/export | Rare, huge, user-initiated; subprocess precedent exists |

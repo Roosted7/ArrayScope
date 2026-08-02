@@ -8,7 +8,7 @@ the legacy methods while keeping all Qt/backend work out of the module.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from time import perf_counter
 from types import SimpleNamespace
 
@@ -42,6 +42,7 @@ from arrayscope.display.slice_engine import (
     make_image_from_slab,
     make_shader_image_from_slab,
 )
+from arrayscope.kernel.remote_call import RemoteCall
 from arrayscope.operations.capabilities import (
     pipeline_commutes_for_display_lod,
     pipeline_supports_reduced_display_lod,
@@ -1552,6 +1553,108 @@ def _preview_display_histogram(rendered, source, texture_kind, histogram):
     return np.asarray(source, dtype=np.float32)
 
 
+#: ADR 0064 migration family 2. The per-tile fan-out of a shared stage
+#: evaluation is the largest pure-Python block of a coarse rung, and it is
+#: expressible as one immutable input plane in, one page set out — so it is
+#: submitted as ``(entry, request)`` rather than as a closure.
+PREVIEW_PAGE_FAN_OUT_ENTRY = "arrayscope.render.effects:fan_out_preview_pages"
+
+
+@dataclass(frozen=True)
+class PreviewPageFanOut:
+    """One tile's share of a shared stage evaluation, as picklable data.
+
+    ``source`` is the tile's evaluated plane; ``display_plane`` carries the
+    display values only when they are a different array (a CPU-composited or
+    channel-extracted plane), so the common case ships one array, not two.
+    """
+
+    source: np.ndarray
+    plans: tuple
+    factor_xy: tuple[int, int]
+    source_origin_yx: tuple[int, int]
+    source_index: int
+    texture_kind: object = None
+    shader_mapping: object = None
+    display_plane: np.ndarray | None = None
+    display_histogram: np.ndarray | None = None
+
+
+def fan_out_preview_pages(request: PreviewPageFanOut, token=None):
+    """Reduce one evaluated tile plane into its canonical stored pages.
+
+    Pure over ``request``: no session, no cache, no lifecycle. The caller
+    admits the result, which keeps page-cache ownership in the GUI process.
+    """
+
+    _check_render_cancelled(token)
+    source = np.asarray(request.source)
+    display_plane = request.display_plane
+    rendered = SimpleNamespace(
+        image=source if display_plane is None else np.asarray(display_plane),
+        histogram_data=request.display_histogram,
+        semantic_data=None,
+        semantic_histogram_data=None,
+        shader_mapping=request.shader_mapping,
+    )
+    reduced_source = reduce_array_display_axes(
+        source,
+        (0, 1),
+        request.factor_xy,
+        source_starts={
+            0: int(request.source_origin_yx[0]),
+            1: int(request.source_origin_yx[1]),
+        },
+    )
+    pages = _materialize_shared_preview_pages(reduced_source, plans=request.plans)
+    histogram = _preview_display_histogram(
+        rendered,
+        reduced_source,
+        request.texture_kind,
+        None,
+    )
+    rough_level_stats = _preview_level_stats_from_native_source(
+        source,
+        source_index=int(request.source_index),
+        mapping=request.shader_mapping,
+    )
+    return (
+        pages,
+        None if histogram is None else np.asarray(histogram),
+        rough_level_stats,
+    )
+
+
+def run_preview_page_fan_out(request: PreviewPageFanOut):
+    """Run one tile's fan-out, off-process where a worker can save anything."""
+
+    if _preview_pages_are_passthrough(request):
+        return fan_out_preview_pages(request)
+    return RemoteCall(PREVIEW_PAGE_FAN_OUT_ENTRY, request)()
+
+
+def _preview_pages_are_passthrough(request: PreviewPageFanOut) -> bool:
+    """Would the pages be the input slice verbatim?
+
+    R5 "prepare only what preparation can save": an identity reduction whose
+    single page already has the stored geometry, dtype, and layout copies
+    nothing, so shipping the plane to a worker would be pure transport.
+    """
+
+    if max(1, int(request.factor_xy[0])) != 1 or max(1, int(request.factor_xy[1])) != 1:
+        return False
+    plans = tuple(request.plans)
+    if len(plans) != 1:
+        return False
+    source = np.asarray(request.source)
+    y0, y1, x0, x1 = plans[0].stored_rect_yx
+    return (
+        bool(source.flags.c_contiguous)
+        and source.dtype == np.dtype(plans[0].key.dtype)
+        and tuple(int(size) for size in source.shape[:2]) == (y1 - y0, x1 - x0)
+    )
+
+
 def _evaluate_tile_reduced_input_preview(
     session,
     tile,
@@ -1745,28 +1848,19 @@ def _evaluate_tile_reduced_input_preview(
         reducer=page_route.reducer,
         plans=plans,
     )
-    source_origin_yx = (valid_source_rect_yx[0], valid_source_rect_yx[2])
-    reduced_source = reduce_array_display_axes(
-        source,
-        (0, 1),
-        factor_xy,
-        source_starts={
-            0: int(source_origin_yx[0]),
-            1: int(source_origin_yx[1]),
-        },
-    )
-    pages = _materialize_shared_preview_pages(reduced_source, plans=plans)
-    histogram = _preview_display_histogram(
-        rendered,
-        reduced_source,
-        texture_kind,
-        None,
-    )
-    rough_level_stats = _preview_level_stats_from_native_source(
-        source,
+    display_plane = getattr(value, "data", None)
+    fan_out = PreviewPageFanOut(
+        source=source,
+        plans=plans,
+        factor_xy=(int(factor_xy[0]), int(factor_xy[1])),
+        source_origin_yx=(int(valid_source_rect_yx[0]), int(valid_source_rect_yx[2])),
         source_index=int(tile.source_index),
-        mapping=getattr(value, "shader_mapping", None),
+        texture_kind=texture_kind,
+        shader_mapping=getattr(value, "shader_mapping", None),
+        display_plane=None if display_plane is source else display_plane,
+        display_histogram=getattr(value, "histogram_data", None),
     )
+    pages, histogram, rough_level_stats = run_preview_page_fan_out(fan_out)
     _check_render_cancelled(cancellation_token)
     return (
         key,
@@ -1975,12 +2069,15 @@ def _check_preview_cancelled(cancellation_token) -> None:
 
 
 __all__ = [
+    "PREVIEW_PAGE_FAN_OUT_ENTRY",
+    "PreviewPageFanOut",
     "attach_montage_tile_level_stats",
     "axis_region_for_preview_indices",
     "can_evaluate_preview",
     "can_evaluate_reduced_preview",
     "evaluate_preview_tile",
     "evaluate_target_tile",
+    "fan_out_preview_pages",
     "montage_refined_level_values",
     "preview_evaluation_level",
     "preview_pipeline_commutes_for_display_lod",
@@ -1990,5 +2087,6 @@ __all__ = [
     "reduce_nd_axis_mean",
     "reduced_preview_view_state",
     "rendered_tile_from_evaluation_result",
+    "run_preview_page_fan_out",
     "tile_lod_states",
 ]
