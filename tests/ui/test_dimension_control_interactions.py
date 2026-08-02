@@ -5,7 +5,7 @@ from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
-from tests.ui.helpers import require_wgpu_adapter
+from tests.ui.helpers import make_backend_window, use_wgpu_backend
 from tests.ui.helpers import (
     settle_idle as _settle_idle,
 )
@@ -535,25 +535,15 @@ def test_wgpu_montage_x_y_swap_reuses_gpu_residency(qtbot):
     value.
     """
 
-    require_wgpu_adapter()
-    _clear_arrayscope_settings()
-    from pyqtgraph.Qt import QtCore
-
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", "wgpu")
-    settings.sync()
-    from arrayscope.window import ArrayScopeWindow
+    use_wgpu_backend()
 
     n_side, n_tiles = 5, 4
     yy, xx, kk = np.mgrid[0:n_side, 0:n_side, 0:n_tiles]
     data = (xx + 10 * yy + 100 * kk).astype(np.float32)
 
-    win = ArrayScopeWindow(data)
-    qtbot.addWidget(win)
+    win = make_backend_window(qtbot, data, backend="wgpu")
     try:
         _settle_idle(win)
-        if type(win.img_view).__name__ != "WgpuSurface":
-            pytest.skip("wgpu backend unavailable in this environment")
         win._set_view_state(
             win.view_state.with_montage_axis(2, indices=tuple(range(n_tiles)), text=":")
         )
@@ -611,15 +601,7 @@ def test_wgpu_transposed_nonsquare_montage_floor_admission_survives(qtbot):
 
     import logging
 
-    require_wgpu_adapter()
-    _clear_arrayscope_settings()
-    from pyqtgraph.Qt import QtCore
-
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", "wgpu")
-    settings.setValue("montage_quality_policy", "resident")
-    settings.sync()
-    from arrayscope.window import ArrayScopeWindow
+    use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
 
     # Many NON-SQUARE planes so each tile renders heavily reduced (floors),
     # montaged on axis 0 -> image_axes (1, 2).
@@ -635,8 +617,7 @@ def test_wgpu_transposed_nonsquare_montage_floor_admission_survives(qtbot):
     # future layout change cannot quietly move it back into the vacuous regime.
     k, n, m = 40, 256, 192
     data = np.random.default_rng(0).standard_normal((k, n, m)).astype(np.float32)
-    win = ArrayScopeWindow(data)
-    qtbot.addWidget(win)
+    win = make_backend_window(qtbot, data, backend="wgpu")
 
     floor_errors: list[logging.LogRecord] = []
 
@@ -649,8 +630,6 @@ def test_wgpu_transposed_nonsquare_montage_floor_admission_survives(qtbot):
     logging.getLogger().addHandler(handler)
     try:
         _settle_idle(win)
-        if type(win.img_view).__name__ != "WgpuSurface":
-            pytest.skip("wgpu backend unavailable in this environment")
         win._set_view_state(
             win.view_state.with_image_axes(1, 2).with_montage_axis(
                 0, indices=tuple(range(k)), text=":"

@@ -174,8 +174,10 @@ BACKENDS = ("wgpu", "pyqtgraph")
 def progressive_window(request, qt_app):
     """Production window over a progressive source, one per first-class backend.
 
-    Skips (never fails) when the requested backend is unavailable in this Qt
-    environment -- the same contract as tests/ui/helpers.make_backend_window.
+    Skips only on the environment question -- no Vulkan adapter on this box.
+    Past that gate a window that comes up on the other backend is a failed
+    surface build, and fails carrying the factory's reason, the same contract
+    as tests/ui/helpers.make_backend_window.
     """
 
     from arrayscope.app.qt_binding import prefer_pyside6
@@ -186,7 +188,7 @@ def progressive_window(request, qt_app):
 
     from arrayscope.app.launch import _prepare_qt_environment
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
+    from tests.ui.helpers import refuse_fallback_backend, require_wgpu_adapter
 
     backend = request.param
     choice = (
@@ -194,6 +196,8 @@ def progressive_window(request, qt_app):
         if backend == "wgpu"
         else ImageRenderingBackendChoice.PYQTGRAPH
     )
+    if backend == "wgpu":
+        require_wgpu_adapter()
 
     _prepare_qt_environment()
     app = pg.mkQApp()
@@ -205,9 +209,7 @@ def progressive_window(request, qt_app):
     harness = source = None
     try:
         harness, source = _make_progressive_window(app, choice, final)
-        capabilities = image_view_backend_capabilities(harness.win.img_view)
-        if capabilities.name != backend:
-            pytest.skip(f"{backend} backend unavailable in this Qt environment")
+        refuse_fallback_backend(harness.win.img_view, backend, context="this fixture")
         yield harness, source, final
     finally:
         settings = QtCore.QSettings()

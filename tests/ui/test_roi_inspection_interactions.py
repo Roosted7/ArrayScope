@@ -9,7 +9,7 @@ from tests.settle import settle_window
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
-from tests.ui.helpers import require_wgpu_adapter
+from tests.ui.helpers import make_backend_window, restore_default_backend, use_wgpu_backend
 from tests.ui.helpers import (
     settle_idle as _settle_idle,
 )
@@ -386,25 +386,13 @@ def test_hidden_montage_roi_overlay_does_not_sample_loading_placeholder(
 # never triggered. The lifecycle-scope fix now closes that phase and this is a
 # strict regression gate rather than an expected failure.
 def test_wgpu_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
-    require_wgpu_adapter()
-    _clear_arrayscope_settings()
-    from pyqtgraph.Qt import QtCore
-
-    from arrayscope.app.settings_state import ImageRenderingBackendChoice
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.display.frame_planner import FramePlanner
-    from arrayscope.window import ArrayScopeWindow
 
-    settings = QtCore.QSettings()
-    settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.WGPU.value)
-    settings.sync()
+    settings = use_wgpu_backend()
 
     data = np.arange(8 * 8, dtype=float).reshape(8, 8)
-    win = ArrayScopeWindow(data)
-    qtbot.addWidget(win)
+    win = make_backend_window(qtbot, data, backend="wgpu")
     try:
-        if image_view_backend_capabilities(win.img_view).name != "wgpu":
-            pytest.skip("WGPU backend unavailable in this Qt environment")
         win.renderer._frame_planner_instance = FramePlanner(internal_tile_shape=(4, 4))
         win.render(reason="test-wgpu-tiled-roi")
         # The committed tiled frame, not a settled session: with the planner
@@ -436,8 +424,7 @@ def test_wgpu_hidden_inspection_panel_uses_tiled_frame_payloads(qtbot):
         )
     finally:
         win.close()
-        settings.setValue("image_rendering_backend", ImageRenderingBackendChoice.PYQTGRAPH.value)
-        settings.sync()
+        restore_default_backend(settings)
 
 
 def test_detached_inspection_panel_refreshes_roi_statistics_and_histogram(qtbot, monkeypatch):

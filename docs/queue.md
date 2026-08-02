@@ -141,6 +141,50 @@ Safe to pick up alongside the numbered queue; each is self-contained.
   its exception text still uncaptured, which is the whole reason the message
   now carries it. The next real one explains itself.
 
+  **The other ten copies, audited one at a time and all now loud.** The helper
+  was the shared shape; ten test sites hand-rolled the same
+  `built window isn't wgpu -> pytest.skip` and were deliberately left for a
+  separate pass, because they do not sit in the same place relative to the
+  adapter gate and a blanket sharpening would have reddened every box without a
+  GPU. **Six were already past a gate**, and for two thirds of them the gate is
+  not visible at the call site: the three in `test_montage_interactions.py` are
+  covered by the autouse `_require_parametrized_wgpu_adapter` in
+  `tests/ui/conftest.py`, which fires on the callspec param rather than
+  anything in the test body. The other three (`test_dimension_control_
+  interactions.py` ×2, `test_roi_inspection_interactions.py`) call
+  `require_wgpu_adapter()` on their own first line — they had simply been
+  written past their own gate. All six collapse onto `make_backend_window`
+  rather than being fixed in place, which deletes the settings/construction
+  preamble with them; the two dimension-control sites were also checking
+  `type(win.img_view).__name__ != "WgpuSurface"`, a class-name test for a
+  question `backend_contract` answers.
+
+  **The four in `tests/gpu_interaction` were the real ones**, and they were
+  skipping for two reasons at once. That suite's gate is `ARRAYSCOPE_GPU_TESTS=1`
+  on a real display, which is not the question "does this box have a Vulkan
+  adapter", so their skip covered both the machine and a failed surface build
+  and could not be sharpened without first separating them. The directory's own
+  `montage_window` fixture already had the answer — it gates through
+  `use_wgpu_backend()` and then *asserts* — so the gate went in first, in that
+  order, and the skip became a refusal after it. They cannot call
+  `make_backend_window` (no `qtbot`: a real `QApplication` harness, a fixture
+  that yields, a window shown before it is registered), so the guard body it had
+  grown is now `tests/ui/helpers.refuse_fallback_backend` and both callers share
+  it. `test_progressive_open_reference.py`'s fixture docstring had promised
+  "skips (never fails) ... the same contract as make_backend_window", which
+  stopped being true when that helper changed; it now says which half skips.
+
+  **Verified.** `tools/load_fragility -t 15 -r 2` over the six tests/ui targets
+  plus the helper's own guard: 2/2 PASS, 16 passed / 2 xfailed / **zero
+  skipped** — the wgpu arms really ran, which is the only thing that makes this
+  evidence. The four `gpu_interaction` sites were run for real under the
+  headless Weston launcher (`ARRAYSCOPE_GPU_TESTS=1`, `QT_QPA_PLATFORM=wayland`,
+  `-n 0`): 6 passed, 3 failed, and the same three fail identically on `d9b722eb`
+  in a scratch worktree (V1 both arms and V2 wgpu, on pixel-ramp assertions
+  downstream of anything here) — pre-existing on this compositor, not opened by
+  this change. Every wgpu arm cleared the new adapter gate and the refusal, so
+  the sharpening is exercised rather than merely compiled.
+
 - **Settle waits no longer fail on a busy machine — DONE 2026-08-01.** Three
   concurrent full suites on `ea9c5ec4` reddened fourteen tests that all pass in
   41 s quiet, and **eleven of those failures were the single sentence

@@ -10,7 +10,7 @@ from tests.settle import SettleTimeout, settle_window
 from tests.ui.helpers import (
     clear_arrayscope_settings as _clear_arrayscope_settings,
 )
-from tests.ui.helpers import require_wgpu_adapter
+from tests.ui.helpers import make_backend_window, require_wgpu_adapter
 from tests.ui.helpers import (
     settle_idle as _settle_idle,
 )
@@ -1512,20 +1512,15 @@ def test_semantic_montage_transition_never_leaves_old_tiles_visible(
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.core.view_state import ChannelMode
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
     from arrayscope.operations.pipeline import CenteredFFT, CenteredIFFT, FFTShift
-    from arrayscope.window import ArrayScopeWindow
 
     settings = QtCore.QSettings()
     settings.setValue("image_rendering_backend", backend)
     settings.sync()
     data = np.arange(12 * 10 * 8, dtype=np.float32).reshape(12, 10, 8)
-    win = ArrayScopeWindow(data)
-    qtbot.addWidget(win)
+    win = make_backend_window(qtbot, data, backend=backend)
     try:
-        if image_view_backend_capabilities(win.img_view).name != backend:
-            pytest.skip(f"{backend} backend unavailable in this Qt environment")
         _settle_idle(win)
         if transition != "operation":
             win.operation_coordinator.load_operations(
@@ -1658,20 +1653,15 @@ def test_viewport_montage_retarget_never_leaves_old_tiles_visible(qtbot, backend
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
-    from arrayscope.window import ArrayScopeWindow
 
     settings = QtCore.QSettings()
     settings.setValue("image_rendering_backend", backend)
     settings.sync()
 
     data = np.arange(12 * 10 * 8, dtype=np.float32).reshape(12, 10, 8)
-    win = ArrayScopeWindow(data)
-    qtbot.addWidget(win)
+    win = make_backend_window(qtbot, data, backend=backend)
     try:
-        if image_view_backend_capabilities(win.img_view).name != backend:
-            pytest.skip(f"{backend} backend unavailable in this Qt environment")
         _settle_idle(win)
         initial = win.view_state.with_montage_axis(
             2, columns=3, indices=tuple(range(6)), text="0:6"
@@ -1739,10 +1729,8 @@ def test_one_index_source_window_retarget_remaps_59_without_black_frame(
 
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
     from arrayscope.core.roi import RoiGeometry, RoiKind, RoiSelection
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.display.backends import surface_for_view
     from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
-    from arrayscope.window import ArrayScopeWindow
 
     settings = QtCore.QSettings()
     settings.setValue("image_rendering_backend", backend)
@@ -1753,13 +1741,10 @@ def test_one_index_source_window_retarget_remaps_59_without_black_frame(
     for source_index in range(data.shape[2]):
         data[..., source_index] = float(source_index)
 
-    win = ArrayScopeWindow(data)
+    win = make_backend_window(qtbot, data, backend=backend)
     win.resize(1200, 700)
     win.show()
-    qtbot.addWidget(win)
     try:
-        if image_view_backend_capabilities(win.img_view).name != backend:
-            pytest.skip(f"{backend} backend unavailable in this Qt environment")
         initial_indices = tuple(range(100, 160))
         target_indices = tuple(range(101, 161))
         initial = win.view_state.with_montage_axis(

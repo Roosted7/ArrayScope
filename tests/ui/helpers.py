@@ -300,10 +300,7 @@ def make_backend_window(qtbot, data, *, backend, require_gpu_atlas=False):
 
     import pytest
 
-    from arrayscope.display.backend_contract import (
-        image_view_backend_capabilities,
-        require_image_view_backend,
-    )
+    from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.window import ArrayScopeWindow
 
     if backend == "wgpu":
@@ -311,15 +308,48 @@ def make_backend_window(qtbot, data, *, backend, require_gpu_atlas=False):
     win = ArrayScopeWindow(data)
     qtbot.addWidget(win)
     try:
-        require_image_view_backend(win.img_view, backend, context="this test")
-    except RuntimeError as exc:
+        refuse_fallback_backend(win.img_view, backend, context="this test")
+    except pytest.fail.Exception:
         win.close()
-        # ``pytrace=False``: the message already carries the traceback that
-        # explains this, and pytest's own would only show these three lines.
-        pytest.fail(str(exc), pytrace=False)
+        raise
     if require_gpu_atlas:
         assert image_view_backend_capabilities(win.img_view).tile_residency_kind == "gpu_atlas"
     return win
+
+
+def refuse_fallback_backend(view, backend, *, context) -> None:
+    """Fail -- never skip -- when a built surface is not the one asked for.
+
+    The guard body of :func:`make_backend_window`, for the tests whose window
+    construction that helper cannot own: a real ``QApplication`` harness with no
+    ``qtbot``, a fixture that yields, a window that must be sized and shown
+    before it is registered. Every caller must already be past an adapter gate
+    -- ``require_wgpu_adapter`` here, or the autouse
+    ``_require_parametrized_wgpu_adapter`` in ``tests/ui/conftest.py`` for a
+    case parametrized ``backend="wgpu"``. Past one, PyQtGraph where wgpu was
+    asked for is the factory having caught a failing surface build, not a
+    machine without a GPU, so it is a defect and fails as one.
+
+    Ten call sites hand-rolled this as ``pytest.skip`` and the argument against
+    that is in :func:`make_backend_window`: it says an environment thing about a
+    run that has already disproved it, and it says it as one more ``s`` in a
+    summary nobody reads twice. Four of the ten were skipping for two reasons at
+    once and only the gate above can separate them, so adding it is what made
+    them safe to sharpen.
+
+    ``pytest.fail(pytrace=False)`` rather than ``assert``: the message carries
+    the factory's recorded traceback, which is the only account of why the
+    build failed, and pytest's own would bury it under these three lines.
+    """
+
+    import pytest
+
+    from arrayscope.display.backend_contract import require_image_view_backend
+
+    try:
+        require_image_view_backend(view, backend, context=context)
+    except RuntimeError as exc:
+        pytest.fail(str(exc), pytrace=False)
 
 
 def require_wgpu_adapter() -> None:

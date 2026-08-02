@@ -34,8 +34,15 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(backend, tmp_path)
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.app.launch import _create_window
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
     from tests.gpu_interaction.conftest import TILE, Harness
+    from tests.ui.helpers import refuse_fallback_backend, require_wgpu_adapter
+
+    # The suite gate above is ``ARRAYSCOPE_GPU_TESTS=1`` on a real display,
+    # which is not the same question as "this box has a Vulkan adapter", so ask
+    # that one here -- the same order ``montage_window`` in conftest uses. Past
+    # it a PyQtGraph surface is a failed build, not a machine, and fails below.
+    if backend == "wgpu":
+        require_wgpu_adapter()
 
     trace_path = tmp_path / f"v1-boundary-{backend}.trace.jsonl"
     app = pg.mkQApp()
@@ -59,8 +66,7 @@ def test_one_index_boundary_scroll_has_pixels_and_trace_clean(backend, tmp_path)
         application_name="ArrayScopeTests",
     )
     try:
-        if image_view_backend_capabilities(win.img_view).name != backend:
-            pytest.skip(f"{backend} backend unavailable in this Qt environment")
+        refuse_fallback_backend(win.img_view, backend, context="this test")
         h = Harness(app, win)
         initial = tuple(range(36))
         shifted = tuple(range(1, 37))
@@ -164,9 +170,13 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
     from pyqtgraph.Qt import QtCore
 
     from arrayscope.app.launch import _create_window
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.display.model.tile_priority import prioritize_tiles
     from tests.gpu_interaction.conftest import TILE, Harness
+    from tests.ui.helpers import refuse_fallback_backend, require_wgpu_adapter
+
+    # Adapter gate before the surface build, as in V1 above.
+    if backend == "wgpu":
+        require_wgpu_adapter()
 
     trace_path = tmp_path / f"v2-center-out-{backend}.trace.jsonl"
     app = pg.mkQApp()
@@ -191,8 +201,7 @@ def test_cold_scroll_records_center_out_acknowledgements(backend, tmp_path):
     )
     expected_order = ()
     try:
-        if image_view_backend_capabilities(win.img_view).name != backend:
-            pytest.skip(f"{backend} backend unavailable in this Qt environment")
+        refuse_fallback_backend(win.img_view, backend, context="this test")
         h = Harness(app, win)
         win._set_view_state(
             win.view_state.with_montage_axis(2, columns=6, indices=tuple(range(36)), text="0:36")

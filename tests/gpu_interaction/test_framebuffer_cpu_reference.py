@@ -35,8 +35,13 @@ def gradient_montage_window():
 
     from arrayscope.app.launch import _prepare_qt_environment
     from arrayscope.app.settings_state import ImageRenderingBackendChoice
-    from arrayscope.display.backend_contract import image_view_backend_capabilities
     from arrayscope.window import ArrayScopeWindow
+    from tests.ui.helpers import refuse_fallback_backend, require_wgpu_adapter
+
+    # ``ARRAYSCOPE_GPU_TESTS=1`` on a real display is the suite's gate and says
+    # nothing about a Vulkan adapter; ask that separately, as ``montage_window``
+    # in conftest does through ``use_wgpu_backend``.
+    require_wgpu_adapter()
 
     _prepare_qt_environment()
     app = pg.mkQApp()
@@ -52,8 +57,7 @@ def gradient_montage_window():
     win.setWindowTitle("wgpu-fb-cpu-oracle")
     win.show()
     try:
-        if image_view_backend_capabilities(win.img_view).name != "wgpu":
-            pytest.skip("WGPU backend unavailable in this display environment")
+        refuse_fallback_backend(win.img_view, "wgpu", context="this fixture")
         harness = Harness(app, win)
         harness.pump(0.3)
         win._set_view_state(win.view_state.with_montage_axis(2, text=":"))
