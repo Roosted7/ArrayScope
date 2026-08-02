@@ -60,7 +60,7 @@ from arrayscope.operations.regions import (
     apply_region,
     region_contains,
 )
-from arrayscope.operations.remote_snapshot import run_image_snapshot
+from arrayscope.operations.remote_snapshot import run_image_snapshot, run_stage_backed_snapshot
 from arrayscope.operations.slabs import (
     evaluate_slab_from_stage,
     plan_slab,
@@ -154,6 +154,37 @@ def _evaluate_native_tile_result(
                         candidate = item
                         break
         if candidate is not None:
+            # The stage this tile reads is ~234 MB of complex64 the parent owns.
+            # When it has been published into a segment, the whole per-tile
+            # remainder — the slice out of the stage, the transitions after it
+            # and the display build — runs in a worker process instead of on the
+            # threads that share the GUI's GIL. Without a segment (pool off, or
+            # the stage arrived before publication) this is a dictionary lookup
+            # and the in-process composition below runs exactly as before.
+            remote = run_stage_backed_snapshot(
+                session.document,
+                tile.view_state,
+                stage_value=stage_value,
+                colormap_lut=session.colormap_lut,
+                cancellation_token=cancellation_token,
+                shader_display=bool(getattr(session, "shader_display", False)),
+                provisional_histogram=bool(getattr(session, "shader_display", False)),
+                stage_cache_max_bytes=int(getattr(stage_cache, "max_bytes", 0) or 0),
+                evaluation_context=evaluation_context,
+                canonical_orientation=bool(getattr(session, "canonical_orientation", False)),
+            )
+            if remote is not None:
+                _check_render_cancelled(cancellation_token)
+                return replace(
+                    remote,
+                    value=attach_montage_tile_level_stats(
+                        remote.value,
+                        tile,
+                        refined=not bool(getattr(session, "shader_display", False)),
+                    ),
+                    eval_ms=(perf_counter() - start) * 1000.0,
+                    compute_path="stage_backed",
+                )
             slab = evaluate_slab_from_stage(
                 session.document,
                 request,

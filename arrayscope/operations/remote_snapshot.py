@@ -7,12 +7,21 @@ plan carries stage-cache candidates, because then it participates in a
 parent-owned ``StageCache`` — reads it, claims it, writes it.
 
 So the migration seam is exactly that condition. :func:`run_image_snapshot`
-keeps the call site's signature, and only when the plan declares no cache
-candidates does it re-express the call as a ``RemoteCall``: an FFT-prefix tile
-that shares a ~123 MB stage slab keeps running in-process, where the cache it
-depends on lives, and a source-direct tile goes to a worker process. That is
-the family-3 rule ("the parent admits results") applied by refusing to move the
-cases that would have to write one.
+keeps the call site's signature, and re-expresses the call as a ``RemoteCall``
+whenever the child can be handed everything the parent's cache would have
+served it.
+
+That used to mean "no cache candidates at all", which left the whole FFT-prefix
+workload — the expensive one — on the in-process threads.
+``operations/stage_segments.py`` removes the reason: a stored stage value is
+published into its own shared-memory segment, so a request can *name* the
+~234 MB slab instead of needing the cache object that owns it. The gate is now
+the honest one: every candidate this plan would look up must resolve the same
+way in the child as in the parent — resident candidates come along as segments,
+and a candidate that is resident but unpublished refuses the move, because a
+child that silently missed it would recompute an FFT instead of reading one.
+A stage nobody has materialized yet still stays parent-side: single-flight,
+admission and R2/R3 live there (the family-3 rule, "the parent admits results").
 
 The document a child evaluates is rebuilt, not pickled: a source descriptor
 (``operations/source_transport.py``) plus the ordinary recipe wire format. That
@@ -30,11 +39,16 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from arrayscope.kernel.remote_call import RemoteCall
-from arrayscope.operations.evaluator import evaluate_image_snapshot
+from arrayscope.operations.evaluator import evaluate_image_snapshot, stage_document_key
 from arrayscope.operations.pipeline import ArrayDocument
 from arrayscope.operations.recipes import recipe_from_steps, steps_from_recipe
-from arrayscope.operations.slabs import plan_slab, request_for_image
+from arrayscope.operations.slabs import plan_slab, request_for_image, stage_key_for_candidate
 from arrayscope.operations.source_transport import base_data_token, describe_base_data
+from arrayscope.operations.stage_segments import (
+    AttachedStageCache,
+    close_retired_attachments,
+    segment_for_value,
+)
 
 #: How many rebuilt documents a process keeps. One montage session evaluates
 #: every tile against one document, so this only has to survive the moment a
@@ -56,6 +70,11 @@ class ImageSnapshotRequest:
     ``identity`` is what both sides key the rebuilt document on; it is derived
     from the source token, the recipe and the revision, so two tiles of the
     same montage rebuild the document once per process, not once per tile.
+
+    ``stage_segments`` are the parent's cached stages this evaluation may read,
+    as names a child maps; ``stage_cache_max_bytes`` is the publishing cache's
+    envelope, which the evaluation reads to decide which stage a transition
+    writes its output region for.
     """
 
     identity: object
@@ -69,16 +88,24 @@ class ImageSnapshotRequest:
     provisional_histogram: bool
     canonical_orientation: bool
     evaluation_context: object
+    stage_segments: tuple = ()
+    stage_cache_max_bytes: int = 0
 
 
 def evaluate_image_snapshot_request(request: ImageSnapshotRequest, token=None):
     """Evaluate one image snapshot from its descriptor — the moved body.
 
-    Pure over ``request``: no session, no stage cache, no lifecycle. A stage
-    cache is not merely withheld here, it is proven absent by the gate in
-    :func:`portable_image_snapshot_request`.
+    Pure over ``request``: no session, no lifecycle, and no cache this process
+    owns. The stage values it may read are exactly the ones the request names,
+    served out of shared memory by :class:`AttachedStageCache`; an evaluation
+    that would have needed anything else never became a request.
     """
 
+    segments = tuple(request.stage_segments or ())
+    if segments:
+        # Between tasks, never during one: a segment this process retired may
+        # still back the slab of the task that retired it.
+        close_retired_attachments()
     document = document_for_request(request)
     context = request.evaluation_context
     if context is not None:
@@ -90,7 +117,14 @@ def evaluate_image_snapshot_request(request: ImageSnapshotRequest, token=None):
         cancellation_token=token,
         shader_display=bool(request.shader_display),
         provisional_histogram=bool(request.provisional_histogram),
-        stage_cache=None,
+        stage_cache=(
+            None
+            if not segments
+            else AttachedStageCache(segments, max_bytes=int(request.stage_cache_max_bytes))
+        ),
+        # The attached cache matches on a stage's position and shape, never on
+        # the document key — which is just as well, because the child's own is
+        # the only one it could compute.
         stage_document_key=None,
         evaluation_context=context,
         canonical_orientation=bool(request.canonical_orientation),
@@ -124,6 +158,7 @@ def run_image_snapshot(
         shader_display=shader_display,
         provisional_histogram=provisional_histogram,
         stage_cache=stage_cache,
+        stage_document_key=stage_document_key,
         evaluation_context=evaluation_context,
         canonical_orientation=canonical_orientation,
     )
@@ -155,6 +190,7 @@ def portable_image_snapshot_request(
     shader_display: bool = False,
     provisional_histogram: bool = False,
     stage_cache=None,
+    stage_document_key=None,
     evaluation_context=None,
     canonical_orientation: bool = False,
 ) -> ImageSnapshotRequest | None:
@@ -162,8 +198,78 @@ def portable_image_snapshot_request(
 
     if document is None or view_state is None:
         return None
+    segments: tuple = ()
     if not _stage_free(document, view_state, stage_cache):
+        segments = _resident_stage_segments(document, view_state, stage_cache, stage_document_key)
+        if not segments:
+            return None
+    return _snapshot_request(
+        document,
+        view_state,
+        colormap_lut=colormap_lut,
+        shader_display=shader_display,
+        provisional_histogram=provisional_histogram,
+        evaluation_context=evaluation_context,
+        canonical_orientation=canonical_orientation,
+        stage_segments=segments,
+        stage_cache_max_bytes=int(getattr(stage_cache, "max_bytes", 0) or 0),
+    )
+
+
+def run_stage_backed_snapshot(
+    document,
+    view_state,
+    *,
+    stage_value,
+    colormap_lut=None,
+    cancellation_token=None,
+    shader_display: bool = False,
+    provisional_histogram: bool = False,
+    stage_cache_max_bytes: int = 0,
+    evaluation_context=None,
+    canonical_orientation: bool = False,
+):
+    """One tile off a stage the caller already holds, or ``None`` to stay here.
+
+    The montage fan-in hands a tile its stage value directly, so this path never
+    consults the cache at all: the value either has a published segment or it
+    does not. ``None`` means the caller keeps its own in-process composition —
+    which is the whole behaviour when the process pool is off, at the cost of
+    one dictionary lookup.
+    """
+
+    segment = segment_for_value(stage_value)
+    if segment is None:
         return None
+    request = _snapshot_request(
+        document,
+        view_state,
+        colormap_lut=colormap_lut,
+        shader_display=shader_display,
+        provisional_histogram=provisional_histogram,
+        evaluation_context=evaluation_context,
+        canonical_orientation=canonical_orientation,
+        stage_segments=(segment,),
+        stage_cache_max_bytes=int(stage_cache_max_bytes or 0),
+    )
+    if request is None:
+        return None
+    remember_document(request.identity, document, weak=True)
+    return RemoteCall(IMAGE_SNAPSHOT_ENTRY, request)(cancellation_token)
+
+
+def _snapshot_request(
+    document,
+    view_state,
+    *,
+    colormap_lut,
+    shader_display: bool,
+    provisional_histogram: bool,
+    evaluation_context,
+    canonical_orientation: bool,
+    stage_segments: tuple,
+    stage_cache_max_bytes: int,
+) -> ImageSnapshotRequest | None:
     recipe = portable_recipe_text(document)
     if recipe is None:
         return None
@@ -185,7 +291,50 @@ def portable_image_snapshot_request(
         provisional_histogram=bool(provisional_histogram),
         canonical_orientation=bool(canonical_orientation),
         evaluation_context=context,
+        stage_segments=tuple(stage_segments),
+        stage_cache_max_bytes=int(stage_cache_max_bytes),
     )
+
+
+def _resident_stage_segments(document, view_state, stage_cache, document_key) -> tuple:
+    """The published segments that answer this plan's candidates, or ``()``.
+
+    The child must reach the *same* stage decision the parent would. Its
+    lookup walks the candidates in one fixed order and takes the first hit, so
+    it agrees with the parent exactly when the segments it is given are the
+    candidates the parent's cache holds — no more, no fewer. Hence the two
+    refusals: nothing resident (the stage is not materialized yet, and
+    materializing it is parent-side work), or something resident that is not
+    published (the child would skip past it and recompute an FFT prefix that
+    already exists).
+    """
+
+    probe = getattr(stage_cache, "peek_containing_resident", None)
+    if not callable(probe):
+        return ()
+    try:
+        plan = plan_slab(document, request_for_image(view_state))
+    except Exception:
+        return ()
+    candidates = tuple(getattr(plan.region_plan, "cache_candidates", ()) or ())
+    if not candidates:
+        return ()
+    if document_key is None:
+        document_key = stage_document_key(document)
+    segments: list = []
+    seen: set = set()
+    for candidate in candidates:
+        value = probe(stage_key_for_candidate(document_key, candidate))
+        if value is None:
+            continue
+        segment = segment_for_value(value)
+        if segment is None:
+            return ()
+        if segment.name in seen:
+            continue
+        seen.add(segment.name)
+        segments.append(segment)
+    return tuple(segments)
 
 
 def _stage_free(document, view_state, stage_cache) -> bool:
@@ -195,6 +344,9 @@ def _stage_free(document, view_state, stage_cache) -> bool:
     cache or no candidate, so asking the planner is not a heuristic — it is the
     same predicate the evaluator itself branches on. A document with no enabled
     operations has no stages to declare, which skips the planning entirely.
+
+    A ``False`` is no longer a refusal, only a second question:
+    :func:`_resident_stage_segments` asks whether the cache's answer can travel.
     """
 
     if stage_cache is None:
@@ -320,4 +472,5 @@ __all__ = [
     "portable_recipe_text",
     "remember_document",
     "run_image_snapshot",
+    "run_stage_backed_snapshot",
 ]

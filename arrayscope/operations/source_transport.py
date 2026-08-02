@@ -319,6 +319,17 @@ def enable_shared_publication() -> None:
     _publication_enabled = True
 
 
+def shared_publication_enabled() -> bool:
+    """Is this process publishing arrays into shared memory at all?
+
+    One switch, two publishers: base data here, cached operation stages in
+    ``operations/stage_segments.py``. A viewer that runs every task on its own
+    threads reads neither, so neither pays for a copy.
+    """
+
+    return bool(_publication_enabled)
+
+
 def _publish_array(array: np.ndarray) -> SharedMemoryLeaf | None:
     """Copy an eager array into one shared segment this process owns forever."""
 
@@ -488,4 +499,5 @@ __all__ = [
     "base_data_token",
     "describe_base_data",
     "enable_shared_publication",
+    "shared_publication_enabled",
 ]

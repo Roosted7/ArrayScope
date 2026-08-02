@@ -13,6 +13,12 @@ from arrayscope.operations.compressed_tier import (
     split_payload_for_tier,
 )
 from arrayscope.operations.regions import RegionSpec, StageKey, region_contains, region_text
+from arrayscope.operations.stage_segments import (
+    publish_stage_value,
+    published_bytes,
+    published_count,
+    release_stage_value,
+)
 
 _PRIORITY_RANK = {
     "lowest": 0,
@@ -53,6 +59,12 @@ class StageCacheDiagnostics:
     tier_compressed_bytes: int = 0
     tier_resident_uncompressed_bytes: int = 0
     tier_recoveries: int = 0
+    # Shared-memory publication (ADR 0064). PROCESS-wide, not this cache's: one
+    # registry serves every cache, and what a reader wants to know is what the
+    # copies cost in total. Both are zero whenever the compute pool is off,
+    # because then nothing is published at all.
+    published_segments: int = 0
+    published_segment_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -111,7 +123,7 @@ class StageCache:
                 self.retention_score(key, value),
                 int(value.last_access_counter),
             ),
-            on_evict=(self._store_evicted_in_tier if tier is not None else None),
+            on_evict=self._on_evict,
         )
         self._lock = self._cache.lock
         self.candidates_seen = 0
@@ -135,6 +147,20 @@ class StageCache:
     @property
     def tier(self) -> CompressedBackingTier | None:
         return self._tier
+
+    def _on_evict(self, key: StageKey, value: StageValue, nbytes: int) -> None:
+        """Everything an entry owes when the budget drops it (eviction hook).
+
+        The shared-memory segment published for this entry is unlinked here, so
+        published bytes can never outlive cached bytes; that is what keeps the
+        segment budget in sync with this cache's without a second accountant.
+        Unlinking is a syscall on a name, not a copy, so it is cheap enough to
+        run under the cache lock — unlike publication, which does not.
+        """
+
+        if self._tier is not None:
+            self._store_evicted_in_tier(key, value, nbytes)
+        release_stage_value(key, value)
 
     def _store_evicted_in_tier(self, key: StageKey, value: StageValue, _nbytes: int) -> None:
         """Compress a raw-evicted stage value into the tier (eviction hook).
@@ -357,7 +383,18 @@ class StageCache:
             self._resident_snapshot = self._cache.items()
             self.stores += 1
             self.last_store = _key_summary(key)
-            return True
+            # A value the same put evicted again owns nothing to publish; the
+            # eviction hook has already run, so publishing it would register a
+            # segment no eviction can ever release.
+            resident = key in self._cache
+        if resident:
+            # Publication is one memcpy of the stage array into a segment a
+            # compute process can map, and it runs OUTSIDE the lock: whichever
+            # thread stored the stage pays it (for a montage, the
+            # STAGE_MATERIALIZATION kernel worker), and no GUI-thread probe
+            # waits behind it.
+            publish_stage_value(key, value, budget_bytes=self._total_max_bytes)
+        return True
 
     def resize(self, *, max_bytes: int | None = None, max_entries: int | None = None) -> None:
         with self._lock:
@@ -380,6 +417,10 @@ class StageCache:
 
     def clear(self) -> None:
         with self._lock:
+            # ``BoundedCache.clear`` drops entries without running the eviction
+            # hook, so the segments are released here by hand.
+            for key, value in self._cache.items():
+                release_stage_value(key, value)
             self._cache.clear()
             if self._tier is not None:
                 self._tier.clear()
@@ -433,6 +474,8 @@ class StageCache:
                     0 if tier_diag is None else int(tier_diag.resident_uncompressed_bytes)
                 ),
                 tier_recoveries=int(self.tier_recoveries),
+                published_segments=published_count(),
+                published_segment_bytes=published_bytes(),
             )
 
     def retention_score(self, key: StageKey, value: StageValue) -> float:

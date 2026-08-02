@@ -45,6 +45,34 @@ def child_gui_modules(request):
     )
 
 
+def stage_attachments(request):
+    """How many stage segments this process has mapped. Zero means it recomputed."""
+
+    del request
+    from arrayscope.operations import stage_segments
+
+    return int(stage_segments.attachments)
+
+
+def stage_segment_probe(request):
+    """Attach a published stage segment and report what the child sees.
+
+    The pid proves which process read it, the checksum proves it read the
+    parent's bytes, and ``writeable`` proves the parent's copy is safe from it.
+    """
+
+    from arrayscope.operations.stage_segments import attach_stage_array
+
+    array = attach_stage_array(request)
+    return {
+        "pid": os.getpid(),
+        "shape": tuple(int(size) for size in array.shape),
+        "dtype": str(array.dtype),
+        "checksum": complex(np.asarray(array).sum()),
+        "writeable": bool(array.flags.writeable),
+    }
+
+
 def child_environment(request):
     """The child's value for each named environment variable."""
 
