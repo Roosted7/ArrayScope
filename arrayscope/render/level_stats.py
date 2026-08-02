@@ -19,7 +19,6 @@ from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
     MontageLevelTracker,
     TileLevelStats,
-    aggregate_histogram_samples,
     montage_level_key,
     provisional_tile_level_stats,
     sample_tile_level_stats,
@@ -41,6 +40,7 @@ from arrayscope.kernel import (
 from arrayscope.kernel import (
     complete_inline_work as _complete_inline_work,
 )
+from arrayscope.kernel.remote_call import RemoteCall
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.evaluator import (
     _document_key,
@@ -67,6 +67,12 @@ MONTAGE_LEVEL_STATS_BACKGROUND_BUDGET_MS = 4.0
 # INTERACTIVE priority as the pixels they gate, at rank 0; the cost is one
 # bounded batch per turn.
 FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK = 0
+# The aggregate's body is `(entry, request)` rather than a closure, so a
+# process backend can run it; every other backend resolves and calls it
+# in-thread. The request is the tuple of tile samples, picklable as it stands.
+MONTAGE_HISTOGRAM_AGGREGATE_ENTRY = (
+    "arrayscope.display.model.montage_levels:aggregate_histogram_samples"
+)
 
 
 def _presentation_trace_fields(
@@ -870,7 +876,7 @@ class LevelStatsService:
             handle = self.win.kernel.submit(
                 TaskSpec(
                     key=task_key,
-                    fn=lambda samples=samples: aggregate_histogram_samples(samples),
+                    fn=RemoteCall(MONTAGE_HISTOGRAM_AGGREGATE_ENTRY, samples),
                     lane=WorkLane.DISPLAY_PREVIEW,
                     priority=Priority.INTERACTIVE,
                     scheduling_rank=FIRST_PIXEL_EVIDENCE_SCHEDULING_RANK,
@@ -893,7 +899,7 @@ class LevelStatsService:
                 scope=f"montage:{session.key!r}:histogram",
                 generation=generation,
                 key=task_key,
-                fn=lambda samples=samples: aggregate_histogram_samples(samples),
+                fn=RemoteCall(MONTAGE_HISTOGRAM_AGGREGATE_ENTRY, samples),
                 on_done=done,
                 on_stale=stale,
                 on_error=failed,

@@ -20,10 +20,14 @@ from arrayscope.display.histogram_plot import (
     finite_increasing_pair,
 )
 from arrayscope.display.histogram_view_range import HistogramViewRangePolicy
+from arrayscope.kernel.remote_call import RemoteCall
 from arrayscope.ui.icons import material_icon, set_button_icon
 
 MIN_LEVEL_SPAN_FRACTION = 1e-12
 ASYNC_HISTOGRAM_SOURCE_SIZE = 256 * 256
+# The submitted body is `(entry, request)` rather than a closure, so a process
+# backend can run it; every other backend resolves and calls it in-thread.
+HISTOGRAM_PLOT_ENTRY = "arrayscope.display.histogram_plot:compute_histogram_plot"
 
 
 _HISTOGRAM_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arrayscope-histogram")
@@ -304,7 +308,7 @@ class HistogramDisplayController(QtCore.QObject):
         submit = getattr(self.owner, "_submit_background_task", None)
         if callable(submit):
             started = submit(
-                lambda request=request: compute_histogram_plot(request),
+                RemoteCall(HISTOGRAM_PLOT_ENTRY, request),
                 on_done=self._histogram_ready.emit,
                 key=("histogram_plot", signature),
             )

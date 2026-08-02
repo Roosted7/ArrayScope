@@ -96,6 +96,16 @@ class TextureCodecChoice(Enum):
     BC = "bc"
 
 
+class ComputeProcessPoolChoice(Enum):
+    # ADR 0064 stage 1. AUTO is the *stored* default and resolves to OFF: the
+    # transport exists and the pilot families are converted, but nothing has
+    # measured a live win yet, so nobody gets worker processes without asking.
+    # ON is the explicit opt-in; widening AUTO is a measured decision.
+    AUTO = "auto"
+    ON = "on"
+    OFF = "off"
+
+
 @dataclass(frozen=True)
 class AppSettingsState:
     theme: ThemeChoice = ThemeChoice.SYSTEM
@@ -134,6 +144,8 @@ class AppSettingsState:
     resident_crop_rebind: bool = True
     memory_profile: MemoryProfileChoice = MemoryProfileChoice.BALANCED
     render_memory_budget_mb: int = 512
+    # Process-isolated compute for `RemoteCall` task bodies (ADR 0064).
+    compute_process_pool: ComputeProcessPoolChoice = ComputeProcessPoolChoice.AUTO
     # Linux/Wayland only; applied pre-QApplication (arrayscope.app.qt_platform).
     qt_platform: QtPlatformChoice = QtPlatformChoice.AUTO
     # Free-threaded builds (3.14t) only; applied at CLI launch
@@ -177,6 +189,9 @@ def settings_from_mapping(values) -> AppSettingsState:
         ),
         qt_platform=normalize_qt_platform_choice(values.get("qt_platform")),
         python_free_threading=normalize_free_threading_choice(values.get("python_free_threading")),
+        compute_process_pool=normalize_compute_process_pool_choice(
+            values.get("compute_process_pool")
+        ),
     )
 
 
@@ -200,6 +215,7 @@ def settings_to_mapping(settings: AppSettingsState):
         "render_memory_budget_mb": int(settings.render_memory_budget_mb),
         "qt_platform": settings.qt_platform.value,
         "python_free_threading": settings.python_free_threading.value,
+        "compute_process_pool": settings.compute_process_pool.value,
     }
     if settings.render_responsiveness_explicit:
         values["render_responsiveness"] = settings.render_responsiveness.value
@@ -395,6 +411,24 @@ def texture_codec_executor_mode(choice: TextureCodecChoice, *, bc_available: boo
         return "on"
     # Explicit AUTO: use a native codec when one exists, raw otherwise.
     return "auto" if bc_available else "off"
+
+
+def normalize_compute_process_pool_choice(value) -> ComputeProcessPoolChoice:
+    if isinstance(value, ComputeProcessPoolChoice):
+        return value
+    value = getattr(value, "value", value)
+    try:
+        return ComputeProcessPoolChoice(str(value))
+    except Exception:
+        # Unknown/absent -> AUTO, which resolves to off; this branch is also
+        # the effective default and must name the same choice as the field.
+        return ComputeProcessPoolChoice.AUTO
+
+
+def compute_process_pool_enabled(choice: ComputeProcessPoolChoice) -> bool:
+    """Whether this session builds worker processes. AUTO still means no."""
+
+    return normalize_compute_process_pool_choice(choice) == ComputeProcessPoolChoice.ON
 
 
 def normalize_render_memory_budget_mb(value) -> int:

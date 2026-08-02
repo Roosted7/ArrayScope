@@ -10,6 +10,7 @@ from arrayscope.app.qt_platform import QtPlatformChoice
 from arrayscope.app.settings_state import (
     AppSettingsState,
     ChunkTransportCodecChoice,
+    ComputeProcessPoolChoice,
     FFTBackendChoice,
     FFTWorkersChoice,
     ImageRenderingBackendChoice,
@@ -74,6 +75,9 @@ class WindowMenuMixin:
             "qt_platform": self._settings.value("qt_platform", QtPlatformChoice.AUTO.value),
             "python_free_threading": self._settings.value(
                 "python_free_threading", FreeThreadingChoice.ENABLED.value
+            ),
+            "compute_process_pool": self._settings.value(
+                "compute_process_pool", ComputeProcessPoolChoice.AUTO.value
             ),
         }
         # Presence, not a fallback value: ``settings_from_mapping`` reads the

@@ -97,3 +97,29 @@ def test_widget_without_submitter_still_computes_on_module_executor(
     controller._schedule_histogram_job(_request())
 
     assert len(submitted) == 1
+
+
+def test_the_submitted_body_is_a_resolvable_remote_call(controller_factory):
+    """ADR 0064: the submit site hands the kernel `(entry, request)`, not a closure.
+
+    A closure would run identically today and silently exclude this family
+    from the process pool forever, so the descriptor is what is asserted --
+    and its entry has to resolve to the same function the widget calls inline.
+    """
+
+    from arrayscope.display.histogram_plot import compute_histogram_plot
+    from arrayscope.kernel.remote_call import RemoteCall, resolve_entry
+
+    submitted = []
+    controller = controller_factory(
+        lambda fn, *, on_done, key: submitted.append(fn) or WorkStart(True, "scheduled")
+    )
+    request = _request()
+
+    controller._schedule_histogram_job(request)
+
+    assert len(submitted) == 1
+    assert isinstance(submitted[0], RemoteCall)
+    assert resolve_entry(submitted[0].entry) is compute_histogram_plot
+    assert submitted[0].request is request
+    assert np.array_equal(submitted[0]().y, compute_histogram_plot(request).y)

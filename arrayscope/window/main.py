@@ -12,6 +12,7 @@ import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtWidgets
 
 from arrayscope.app.errors import handle_ui_exception
+from arrayscope.app.settings_state import compute_process_pool_enabled
 from arrayscope.core.compute_policy import (
     ComputeLane,
     EvaluationContext,
@@ -45,6 +46,22 @@ from arrayscope.window.rank_handoff import WindowRankHandoffMixin
 from arrayscope.window.render import RenderOrchestrator
 from arrayscope.window.render_coordinator import RenderCoordinator
 from arrayscope.window.state_sync import StateSyncMixin
+
+
+def _kernel_worker_backend(settings):
+    """Threads, or threads plus worker processes for `RemoteCall` bodies.
+
+    The pool is one per GUI process and shared by every window; a backend that
+    borrows it hands its reference back at shutdown. Off (ADR 0064 stage 1
+    rollout), every submitted `RemoteCall` still runs — in-thread, through its
+    own `__call__` — so the converted submit sites are unconditional.
+    """
+
+    if not compute_process_pool_enabled(settings.compute_process_pool):
+        return ThreadWorkerBackend()
+    from arrayscope.kernel.process_backend import ProcessWorkerBackend
+
+    return ProcessWorkerBackend()
 
 
 class ArrayScopeWindow(
@@ -143,7 +160,10 @@ class ArrayScopeWindow(
             self.renderer._memory_policy(),
         )
         self._init_compare_document(data)
-        self.kernel = Kernel(ThreadWorkerBackend(), handler_error_hook=handle_ui_exception)
+        self.kernel = Kernel(
+            _kernel_worker_backend(self.app_settings),
+            handler_error_hook=handle_ui_exception,
+        )
         self.kernel_bridge = QtKernelBridge(self.kernel, self)
         self.visible_evaluation_controller = KernelEvaluationController(
             self.kernel,

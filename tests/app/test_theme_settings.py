@@ -188,6 +188,7 @@ def test_settings_round_trip_defaults_and_values():
             "render_memory_budget_mb": "1024",
             "qt_platform": "xcb",
             "python_free_threading": "force_disabled",
+            "compute_process_pool": "on",
         }
     )
     values = settings_state.settings_to_mapping(settings)
@@ -212,6 +213,7 @@ def test_settings_round_trip_defaults_and_values():
         "render_memory_budget_mb": 1024,
         "qt_platform": "xcb",
         "python_free_threading": "force_disabled",
+        "compute_process_pool": "on",
     }
     assert settings.image_rendering_backend == settings_state.ImageRenderingBackendChoice.AUTO
     defaults = settings_state.settings_from_mapping({})
@@ -243,6 +245,20 @@ def test_settings_round_trip_defaults_and_values():
     assert settings_state.settings_to_mapping(bitmap)["wgpu_present_method"] == "bitmap"
     assert defaults.memory_profile == settings_state.MemoryProfileChoice.BALANCED
     assert defaults.render_memory_budget_mb == 512
+    # ADR 0064 stage 1: AUTO is stored, and AUTO still resolves to no worker
+    # processes. Only the explicit pin builds a pool.
+    assert defaults.compute_process_pool == settings_state.ComputeProcessPoolChoice.AUTO
+    assert not settings_state.compute_process_pool_enabled(defaults.compute_process_pool)
+    assert not settings_state.compute_process_pool_enabled(
+        settings_state.ComputeProcessPoolChoice.OFF
+    )
+    assert settings_state.compute_process_pool_enabled(settings_state.ComputeProcessPoolChoice.ON)
+    assert (
+        settings_state.settings_from_mapping(
+            {"compute_process_pool": "nonsense"}
+        ).compute_process_pool
+        == settings_state.ComputeProcessPoolChoice.AUTO
+    )
     assert defaults.qt_platform == settings_state.QtPlatformChoice.AUTO
     # ADR 0050: resident LOD is the montage default once validated on hardware.
     assert defaults.montage_quality_policy == settings_state.MontageQualityPolicyChoice.RESIDENT

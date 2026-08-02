@@ -247,3 +247,19 @@ def test_wgpu_histogram_resolve_observes_cancellation_between_rows():
             cancellation_token=token,
         )
     assert resolve_calls == [0]
+
+
+def test_the_montage_aggregate_entry_resolves_to_the_aggregate_function():
+    """ADR 0064: the aggregate's body is `(entry, request)`, not a closure.
+
+    The entry is a string, so a rename of the aggregate would leave it
+    pointing at nothing; resolving it here is what turns that into a failure
+    at build time rather than at the first montage histogram.
+    """
+
+    from arrayscope.display.model.montage_levels import aggregate_histogram_samples
+    from arrayscope.kernel.remote_call import resolve_entry
+
+    entry = level_stats.MONTAGE_HISTOGRAM_AGGREGATE_ENTRY
+
+    assert resolve_entry(entry) is aggregate_histogram_samples
