@@ -50,7 +50,6 @@ from arrayscope.operations.evaluator import (
 from arrayscope.render import effects as render_effects
 from arrayscope.render.progressive_scheduling import SchedulingWork
 from arrayscope.window import frame_effects as montage_commit
-from arrayscope.window.frame_effects import on_gui_thread, run_on_gui_thread
 from arrayscope.window.frame_session import (
     SemanticLevelEvidenceProgress,
     SemanticLevelEvidenceTarget,
@@ -2419,29 +2418,7 @@ class LevelStatsService:
             return False
         win = getattr(self, "win", None)
         image_view = None if win is None else getattr(win, "img_view", None)
-        # `image_view_backend_capabilities` is a read of an immutable frozen
-        # dataclass hung off the view; it is not a Qt call and is safe from the
-        # presentation owner. `applyHistogramMetadata` below is a widget
-        # mutation and is not — ADR 0065 stage 2 slice B posts the whole
-        # publication rather than splitting it, because its later steps
-        # (`_note_montage_level_source_applied`, the publication counter) exist
-        # only to record what the widget accepted.
         if image_view is None or image_view_backend_capabilities(image_view).shader_windowing:
-            return False
-        if not on_gui_thread():
-            session_id = int(getattr(session, "session_id", 0) or 0)
-            session_key = session.key
-            run_on_gui_thread(
-                self,
-                lambda: (
-                    self._publish_first_cpu_histogram(session)
-                    if self._is_current_frame_session(session_id, session_key)
-                    else None
-                ),
-            )
-            # The caller learns "not published *yet*". Both callers use the
-            # answer only to decide whether to do more publication work now,
-            # and the posted copy re-derives that from live state.
             return False
         summary = self._montage_level_tracker().summary_for(session.level_key)
         if summary is None:

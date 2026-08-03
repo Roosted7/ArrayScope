@@ -32,7 +32,6 @@ Structural rules (ADR 0051):
 
 from __future__ import annotations
 
-import copy
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -221,40 +220,6 @@ class _LevelEntry:
     owner: ClaimOwner
     request: object = None
     order: int = 0
-
-
-def _staged_record_clone(record: TileRecord) -> TileRecord:
-    """Copy one record so a staged event cannot reach the origin's state.
-
-    Every scalar field carries over; the four mutable containers are rebuilt.
-    Anything else a record holds is a frozen dataclass or an opaque handle the
-    machine only ever rebinds, never mutates in place.
-
-    A ``__dict__`` copy rather than ``dataclasses.replace`` because this runs
-    once per record per commit: ``replace`` re-enters ``__init__`` with twenty
-    keyword arguments, and on a 272-tile montage that alone was 1.9 ms per
-    plan against 0.6 ms for this (measured on the probe fixture). It is also
-    the field-agnostic form — a field added to the record travels without
-    anyone editing this function.
-    """
-
-    clone = TileRecord.__new__(TileRecord)
-    fields = clone.__dict__
-    fields.update(record.__dict__)
-    # ``_LevelEntry`` is mutable: ``level_materializing``/``level_resident``/
-    # ``release_*`` all rebind ``entry.phase`` in place, so a shallow dict copy
-    # would let a staged residency event rewrite the origin's phase.
-    fields["levels"] = {key: _staged_level_entry(entry) for key, entry in record.levels.items()}
-    fields["resigned"] = set(record.resigned)
-    fields["preview_claims"] = dict(record.preview_claims)
-    fields["presentable_payloads"] = dict(record.presentable_payloads)
-    return clone
-
-
-def _staged_level_entry(entry: _LevelEntry) -> _LevelEntry:
-    clone = _LevelEntry.__new__(_LevelEntry)
-    clone.__dict__.update(entry.__dict__)
-    return clone
 
 
 @dataclass
@@ -1637,87 +1602,6 @@ class TileLifecycle:
         """Tiles the plan skipped (view behind ``skipped_tiles``)."""
 
         return frozenset(self._skipped)
-
-    def staged_clone(self) -> TileLifecycle:
-        """A private copy every event method may mutate without side effects.
-
-        ADR 0065 stage 2 slice D: presentation *planning* must be able to run
-        twice and be dropped once, so the planner runs the lifecycle events it
-        always ran — against this clone.  The applier installs the clone (or
-        drops it); nothing in between reaches the session's real machine.
-
-        Every mutable container the event methods write is copied: the record
-        map, each record's four mutable fields, and the six membership sets.
-        The immutable per-record values (``target``, ``task_claim``, payload
-        refs) are shared by reference — they are frozen dataclasses, so a
-        clone that shares them cannot diverge.  The completeness of this list
-        is pinned by ``tests/presentation/test_presentation_plan_split.py``,
-        which walks ``__dict__`` and fails on any attribute the clone shares
-        with its origin and a mutating event could reach.
-        """
-
-        clone = copy.copy(self)
-        clone._records = {
-            tile_number: _staged_record_clone(record)
-            for tile_number, record in self._records.items()
-        }
-        clone._parked = set(self._parked)
-        clone._evaluating = set(self._evaluating)
-        clone._presented = set(self._presented)
-        clone._loading = set(self._loading)
-        clone._active_requests = set(self._active_requests)
-        clone._skipped = set(self._skipped)
-        clone._stage_blocked = {key: set(value) for key, value in self._stage_blocked.items()}
-        clone._identity_rejection_counts = dict(self._identity_rejection_counts)
-        clone._backend_identities = dict(self._backend_identities)
-        return clone
-
-    def install_staged(self, staged: TileLifecycle) -> None:
-        """Adopt a staged clone's state *in place*.
-
-        Swapping the object would be one assignment, but the machine is
-        referenced by the session's collection views and by anything holding a
-        :class:`TileRecord`, and a swap silently strands all of them one
-        generation behind.  Copying field-by-field keeps every identity in the
-        graph and costs one dict update per record.
-
-        Records are never removed by the machine, so a staged record map is
-        always a superset of the live one — new tiles are adopted, existing
-        records are refreshed, none are dropped.
-        """
-
-        if staged is self:
-            return
-        live_records = self._records
-        for tile_number, record in staged._records.items():
-            live = live_records.get(tile_number)
-            if live is None:
-                live_records[tile_number] = record
-            elif live is not record:
-                live.__dict__.update(record.__dict__)
-        for name in (
-            "_parked",
-            "_evaluating",
-            "_presented",
-            "_loading",
-            "_active_requests",
-            "_skipped",
-        ):
-            live_set = getattr(self, name)
-            live_set.clear()
-            live_set.update(getattr(staged, name))
-        self._skipped_revision = int(staged._skipped_revision)
-        self._level_order = int(staged._level_order)
-        self._level_revision = int(staged._level_revision)
-        self._identity_rejections = int(staged._identity_rejections)
-        self._stage_blocked.clear()
-        self._stage_blocked.update(
-            {key: set(value) for key, value in staged._stage_blocked.items()}
-        )
-        self._identity_rejection_counts.clear()
-        self._identity_rejection_counts.update(staged._identity_rejection_counts)
-        self._backend_identities.clear()
-        self._backend_identities.update(staged._backend_identities)
 
     def counters(self) -> dict[str, int]:
         """Cheap diagnostics summary (rendered into diagnostics snapshots)."""

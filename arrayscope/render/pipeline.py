@@ -106,56 +106,6 @@ class PipelineEffects(Protocol):
 
 
 @dataclass(frozen=True)
-class _RetargetStaging:
-    """One retarget's frozen inputs, read under the session-order lock.
-
-    ADR 0065 stage 2 slice D2b move 2, the same shape ``_PrepareStaging`` took
-    in D2a: everything the plan needs, read once by the phase that is allowed
-    to touch live state, so the plan itself is a computation. ``states`` is
-    already a snapshot by contract (``PipelineEffects.tile_states``).
-    """
-
-    intent: RenderIntent
-    demand: Any
-    scope: LodAdmissionScope
-    verdict: SchedulingVerdict
-    states: tuple
-    #: The generation staging claimed. Phase 3 refuses if it has moved on.
-    admission_generation: int
-    #: ADR 0065 stage 2 slice D2c. ``None`` for effects that keep the
-    #: single-call ``tile_states`` shape — then ``states`` is already the
-    #: snapshot and the stage phase paid for it. Otherwise the effects' own
-    #: three-phase split is in use: this is its frozen phase-1 record, phase 2
-    #: plans the snapshot from it, and phase 3 applies what that planned.
-    tile_states_staging: Any = None
-
-    @property
-    def staged_session(self):
-        """The private session copy phase 2 may write, if there is one.
-
-        ``None`` means the middle has nothing private to write to, and the
-        caller's own staged work (the swap marks) must stay under its lock.
-        """
-
-        staging = self.tile_states_staging
-        return staging.session if getattr(staging, "staged", False) else None
-
-
-@dataclass(frozen=True)
-class _RetargetPlan:
-    """What phase 2 decided, including the diagnostics phase 3 publishes."""
-
-    admissions: tuple
-    plan_states: tuple
-    plan_steps: tuple
-    refusals: Counter
-    interactive_native_deferred: int
-    states: tuple = ()
-    #: The effects' planned tile-state snapshot, applied by phase 3.
-    tile_states_plan: Any = None
-
-
-@dataclass(frozen=True)
 class _RungKey:
     """Kernel task key for one tile rung under one semantic target.
 
@@ -227,40 +177,6 @@ class FramePipeline:
         Returns the number of submitted kernel tasks. Safe to call on every
         interaction event: convergence means zero submissions, and stale
         work is superseded by family, never hunted down by ad-hoc flags.
-
-        ADR 0065 stage 2 slice D2b move 2: this is the composition of three
-        phases and nothing else, the same shape the prepare seam took in D2a.
-        :meth:`stage_retarget` reads and writes session state, :meth:`plan_retarget`
-        is a computation over what staging froze, :meth:`admit_retarget` claims
-        and submits. A caller that holds the session-order lock can therefore
-        drop it for the middle — see ``FrameRuntimeMixin.retarget_frame_pipeline``,
-        which does exactly that — while this composition stays the anchor that
-        keeps the two orders identical.
-        """
-
-        staged = self.stage_retarget(intent, demand, scope)
-        if staged is None:
-            return 0
-        return self.admit_retarget(staged, self.plan_retarget(staged))
-
-    def stage_retarget(
-        self, intent: RenderIntent, demand, scope: LodAdmissionScope
-    ) -> _RetargetStaging | None:
-        """Phase 1: adopt the intent and freeze the snapshot's inputs.
-
-        Everything here touches state two threads can reach — the pipeline's
-        intent/admission generation and the kernel scope. It is the phase that
-        belongs under the session-order lock, and it returns ``None`` when
-        there is nothing to plan.
-
-        ADR 0065 stage 2 slice D2c: ``effects.tile_states`` used to run *here*,
-        and D2b measured it as the retarget's whole remaining hold (2223 ms per
-        three fills) because its interior writes the session — evaluation-claim
-        releases and crop-rebind seeding. An effects implementation that offers
-        the three-phase split gets only its cheap staging here; the snapshot
-        itself is planned in phase 2 and applied in phase 3. One that does not
-        (a test double, anything outside this window) keeps the single call and
-        the old placement, so the two orders stay identical.
         """
 
         if bool(getattr(self.kernel, "is_shutting_down", False)):
@@ -271,7 +187,7 @@ class FramePipeline:
             # self-sustaining loop on the GUI thread of a window that no
             # longer exists (2026-07-31 stranded-fill trace:
             # kernel_submit_refused_shutdown x1901 in one process).
-            return None
+            return 0
         previous = self._current_intent
         self._current_intent = intent
         self._admission_generation += 1
@@ -288,58 +204,20 @@ class FramePipeline:
             self._ready_upserts.clear()
 
         verdict = self.effects.scheduling_verdict()
-        stage_states = getattr(self.effects, "stage_tile_states", None)
-        states: tuple = ()
-        tile_states_staging = None
-        if callable(stage_states):
-            tile_states_staging = stage_states(intent, demand, scope)
-            if tile_states_staging is not None and not getattr(
-                tile_states_staging, "staged", False
-            ):
-                # The effects could not take a private session copy, so their
-                # planner writes where it reads. Run the whole pass here, where
-                # the caller's lock still covers it, and carry the snapshot.
-                planned_states = self.effects.plan_tile_states(tile_states_staging)
-                self.effects.apply_tile_states_plan(planned_states)
-                states = tuple(planned_states.states)
-                tile_states_staging = None
-        else:
-            states = tuple(self.effects.tile_states(intent, demand, scope))
+        states = self.effects.tile_states(intent, demand, scope)
+        session = getattr(self.effects, "session", None)
+        session_id = int(getattr(session, "session_id", 0) or 0)
+        if session_id > 0:
+            self.kernel.rerank_unstarted_tile_tasks(
+                session_id=session_id,
+                scheduling_ranks={
+                    int(state.tile_number): int(state.scheduling_rank) for state in states
+                },
+            )
         if not intent.render_round_id:
             raise ValueError("frame pipeline intent has no progressive render round identity")
         if intent.round_preview_level is None or intent.round_target_level is None:
             raise ValueError("frame pipeline intent has no round-owned LOD floors")
-        return _RetargetStaging(
-            intent=intent,
-            demand=demand,
-            scope=scope,
-            verdict=verdict,
-            states=states,
-            admission_generation=admission_generation,
-            tile_states_staging=tile_states_staging,
-        )
-
-    def plan_retarget(self, staged: _RetargetStaging) -> _RetargetPlan:
-        """Phase 2: the ladder plan and the step filter. **Takes no lock.**
-
-        A computation over ``staged`` — the frozen states, demand and verdict —
-        plus two effects predicates that only read
-        (``_defer_native_quality_during_interaction`` on the intent, and
-        ``retained_native_source_available`` on the stage cache). It writes
-        nothing on the pipeline either: the diagnostics it produces travel in
-        the returned record and phase 3 publishes them, so two planners racing
-        cannot interleave one plan's ``last_plan_states`` with another's.
-        """
-
-        intent = staged.intent
-        demand = staged.demand
-        verdict = staged.verdict
-        states = staged.states
-        tile_states_plan = None
-        plan_states_fn = getattr(self.effects, "plan_tile_states", None)
-        if staged.tile_states_staging is not None and callable(plan_states_fn):
-            tile_states_plan = plan_states_fn(staged.tile_states_staging)
-            states = tuple(tile_states_plan.states)
         steps = self.ladder.plan(
             states,
             demand,
@@ -348,7 +226,7 @@ class FramePipeline:
             target_level=int(intent.round_target_level),
             shed_target_pass=bool(intent.round_shed_target_pass),
         )
-        plan_states = tuple(
+        self.last_plan_states = tuple(
             (
                 int(state.tile_number),
                 tuple(int(level) for level in state.resident_levels),
@@ -358,7 +236,7 @@ class FramePipeline:
             )
             for state in states
         )
-        plan_steps = tuple(
+        self.last_plan_steps = tuple(
             (int(step.tile_number), int(step.rung), int(step.level)) for step in steps
         )
         # Why the coarse rungs are absent, aggregated per plan.  A plan with no
@@ -371,6 +249,10 @@ class FramePipeline:
             if int(state.tile_number) in coarse_tiles:
                 continue
             refusals[self.ladder.coarse_rung_refusal(state, demand, verdict)] += 1
+        self.last_coarse_rung_refusals = tuple(sorted(refusals.items()))
+        self._coarse_rung_refusals.update(refusals)
+        self.counters.ladder_plans += 1
+        submitted = 0
         presented_preview_tiles = {
             int(state.tile_number)
             for state in states
@@ -380,80 +262,19 @@ class FramePipeline:
         # submission order (the kernel heap is FIFO within equal priority).
         # NEVER express ordering through `deps`: dependencies fail-propagate,
         # so a skipped floor would park its tile's exact work forever.
-        admissions: list = []
-        deferred = 0
         for step in steps:
             if self._defer_native_quality_during_interaction(
                 intent, step, presented_preview_tiles
             ) and not self.effects.retained_native_source_available(intent, step):
-                deferred += 1
+                self.counters.interactive_native_deferred += 1
                 continue
-            admissions.append((intent, step))
-        return _RetargetPlan(
-            admissions=tuple(admissions),
-            plan_states=plan_states,
-            plan_steps=plan_steps,
-            refusals=refusals,
-            interactive_native_deferred=deferred,
-            states=tuple(states),
-            tile_states_plan=tile_states_plan,
-        )
-
-    def admit_retarget(self, staged: _RetargetStaging, planned: _RetargetPlan) -> int:
-        """Phase 3: apply the planned snapshot, publish diagnostics, claim and submit.
-
-        The kernel rerank moved here from phase 1 with the snapshot it reads
-        (ADR 0065 stage 2 slice D2c). It is a kernel-queue reordering of
-        unstarted tasks and nothing between the two positions consumes it, so
-        the submits below still see the same order they always did.
-
-        The currency check is the existing admission generation, and it is the
-        whole staleness story of the split: a retarget that staged, released
-        the lock and found a *later* retarget had staged in the meantime has
-        planned against a superseded snapshot, and that later retarget owns
-        the admissions. Drop it — the same rule
-        :meth:`_drain_pending_admissions` already applies to a queued chunk.
-        """
-
-        if int(staged.admission_generation) != int(self._admission_generation):
-            self.counters.retargets_superseded += 1
-            # Nothing is applied: the tile-state plan's session writes belong to
-            # the retarget that owns the admissions, and the successor's own
-            # staging planned them again. Applying here would install claim
-            # releases and crop rebinds decided against a snapshot two
-            # generations old (ADR 0065 stage 2 slice D2c).
-            return 0
-        apply_states = getattr(self.effects, "apply_tile_states_plan", None)
-        if (
-            planned.tile_states_plan is not None
-            and callable(apply_states)
-            and not apply_states(planned.tile_states_plan)
-        ):
-            # The effects refused the plan (a foreign generation, or a live
-            # write in the unlocked middle). It re-arms its own wakeup.
-            return 0
-        session = getattr(self.effects, "session", None)
-        session_id = int(getattr(session, "session_id", 0) or 0)
-        if session_id > 0:
-            self.kernel.rerank_unstarted_tile_tasks(
-                session_id=session_id,
-                scheduling_ranks={
-                    int(state.tile_number): int(state.scheduling_rank) for state in planned.states
-                },
-            )
-        self.last_plan_states = planned.plan_states
-        self.last_plan_steps = planned.plan_steps
-        self.last_coarse_rung_refusals = tuple(sorted(planned.refusals.items()))
-        self._coarse_rung_refusals.update(planned.refusals)
-        self.counters.ladder_plans += 1
-        self.counters.interactive_native_deferred += int(planned.interactive_native_deferred)
-        self._pending_admissions.extend(planned.admissions)
-        submitted = self._drain_pending_admissions(
-            staged.admission_generation,
+            self._pending_admissions.append((intent, step))
+        submitted += self._drain_pending_admissions(
+            admission_generation,
             max_inspected=self._admission_chunk_limit(),
         )
         if self._pending_admissions:
-            self._arm_admission_continuation(staged.admission_generation)
+            self._arm_admission_continuation(admission_generation)
         self._flush_ready()
         return submitted
 

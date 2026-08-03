@@ -45,9 +45,7 @@ from arrayscope.window import frame_effects as montage_commit
 from arrayscope.window.frame_effects import (
     FramePipelineEffects,
     on_gui_thread,
-    post_to_presentation_owner,
     run_on_gui_thread,
-    session_order_lock,
     session_order_lock_section,
 )
 from arrayscope.window.montage_viewport import (
@@ -106,47 +104,6 @@ def timed_montage_retarget(method):
                     )
 
     return timed
-
-
-def post_frame_pipeline_retarget(renderer, session, **kwargs) -> None:
-    """Run one ladder retarget on the presentation owner; do not wait.
-
-    ADR 0065 stage 2 slice B, for the callers that already ignore the return
-    value. The measured motivation is in
-    ``presentation/owner.montage_completion_route``: ``retarget_frame_pipeline``
-    held the GUI side of the session-order lock ~89 ms x 52 calls in one fill,
-    65 % of all GUI-side hold, and that is what made routing the per-tile
-    completion stream censor the 272-tile probe.
-
-    The closure captures the identity pair and re-checks it, like every other
-    posted continuation in this tree: a viewport or resize retarget names one
-    session generation, and if a rebirth superseded it the successor arrived
-    with a retarget of its own. That is the opposite of the replan gate's rule
-    (``fire()`` deliberately replans whatever is current), and deliberately so
-    — the gate is a *standing* "there is work" signal with no session of its
-    own, while these calls are the tail of one session's viewport change.
-
-    A module function rather than a mixin method so the fallback is reachable
-    for a renderer that is only a stub of one: with no owner to take the post
-    the retarget runs inline, exactly as before, and nothing in the closure is
-    evaluated.
-    """
-
-    if session is None:
-        return
-
-    session_id = int(getattr(session, "session_id", 0) or 0)
-    session_key = session.key
-
-    def retarget() -> None:
-        current = getattr(renderer, "_frame_session", None)
-        if current is None or not renderer._is_current_frame_session(session_id, session_key):
-            return
-        renderer.retarget_frame_pipeline(current, **kwargs)
-
-    if post_to_presentation_owner(renderer, retarget):
-        return
-    renderer.retarget_frame_pipeline(session, **kwargs)
 
 
 def _reduced_input_coarse_rung_available(session, seed_tile) -> bool:
@@ -459,45 +416,6 @@ class FrameRuntimeMixin:
                 return
             self.retarget_frame_pipeline(current)
 
-        # ADR 0065 stage 2 slice B set out to make this fire an owner-thread
-        # operation — decision 10 puts it FIRST, as the highest-count caller
-        # with no dependents — and measurement refused it *on its own*. Written,
-        # then reverted, then re-made in slice D3b with its coupled half (see
-        # the note below the history): `post_to_presentation_owner(self, fire)`
-        # in place of the timer, alone, censored the 272-tile wgpu probe 3/3
-        # (5, 140, 21 of 272 presented) against 272/272 with everything else
-        # in slice B landed and only this line back on the timer, on the same
-        # box within minutes. Bisected to this line alone.
-        #
-        # The cause is what the 1 ms timer actually buys, which is not the
-        # 1 ms. The gate's coalescing has TWO terms: the armed flag, which
-        # counts requests, and the barrier, which decides how many completions
-        # fold into one fire. The barrier here has never been the flag — it is
-        # the GUI event loop's own occupancy. During a fill the loop is inside
-        # 20-45 ms commits, so a singleShot(1) fire cannot run until a commit
-        # ends, and every completion that landed during that commit folds into
-        # the one armed gate. The presentation owner has no equivalent: its
-        # event deque holds only the ~6 `montage-stage-plan` bodies a fill
-        # produces, so `_drain`'s tail-of-batch rule (which IS the right
-        # barrier, and is what stage 2 decision 1 asks for) fires essentially
-        # immediately. One retarget per completion is the O(N²) storm the
-        # docstring above exists to prevent, and the probe measured it.
-        #
-        # So this conversion is not first in the order — it is LAST, coupled to
-        # re-enabling `frame:` routing in `montage_completion_route`. Only when
-        # the per-tile admissions arrive on the owner does the owner have a
-        # batch whose tail is a real barrier, and at that point the flag and
-        # the drain shape together reproduce what the event loop was doing by
-        # accident. Slice D owns both, together.
-        #
-        # ADR 0065 stage 2 slice D3b made the conversion again, coupled to the
-        # `frame:` routing clause exactly as this comment demands, with the
-        # owner's drain batched and the commit gate's wakeup deferred to the
-        # batch tail. The pair censored the probe a FIFTH time (9/9 fills, 59-161
-        # of 272 presented) and is reverted with it; the routing clause in
-        # `montage_completion_route` carries the numbers. Nothing about the
-        # paragraph above changed — this fire is still coupled, and still last.
-        #
         # Timer category: UI cosmetic. Event-turn barrier for coalescing a
         # current-session replan; kernel completion still owns work delivery.
         # A zero timer re-armed by completion/presentation callbacks can stay
@@ -514,6 +432,7 @@ class FrameRuntimeMixin:
         # request exactly once wherever it came from.
         run_on_gui_thread(self, lambda: Qt.QtCore.QTimer.singleShot(1, self, fire))
 
+    @session_order_lock_section
     @timed_montage_retarget
     def retarget_frame_pipeline(
         self,
@@ -522,164 +441,88 @@ class FrameRuntimeMixin:
         force_commit: bool = False,
         prepared_lod_swap_ready: bool | None = None,
     ) -> int:
-        """One ladder retarget: stage, plan, admit — three lock spans, not one.
-
-        ADR 0065 stage 2 slice D2b move 2. This funnel was one
-        ``session_order_lock_section`` for its whole body and the measured
-        result was 28-38 GUI-side holds per fill at ~50 ms mean and ~195 ms
-        worst — half the reason 630 owner acquisitions could not fit between
-        the GUI's sections, which is what refused the ``frame:`` routing
-        clause three times. The phases now are:
-
-        1. under the lock — the currency check, the LOD demand and the round
-           latch (a read-modify-write that stays atomic), the intent, the
-           admission scope, the deferred stage fan-in, and the pipeline's own
-           staging (which adopts the intent and freezes the snapshot's inputs,
-           including one private session copy);
-        2. without the lock — the swap marks, the evaluation-claim releases,
-           the crop-rebind seed, the per-tile ladder-state snapshot,
-           ``ladder.plan`` and the step filter — every one of them against the
-           private copy;
-        3. under the lock — the planned session writes, the admissions and
-           their kernel submits, then the trace and the commit/settle tail.
-
-        ADR 0065 stage 2 slice D2c moved the swap marks and the state snapshot
-        out of (1). D2b left them there and measured them as the entire
-        remaining hold: ``effects.tile_states`` 2223 ms and
-        ``mark_ladder_swaps_for_current_demand`` 1816 ms per three fills against
-        an unlocked ``ladder.plan`` of single-digit milliseconds. Neither is
-        expensive because of arithmetic; both are session **writes**, so
-        neither could leave the lock by being moved — only by being planned.
-
-        The stale check on re-acquisition is the pipeline's admission
-        generation (``admit_retarget`` refuses a plan a later staging
-        superseded) plus the session currency re-read below: a retarget whose
-        plan raced a rebirth drops rather than admitting into the successor.
-        """
-
-        with session_order_lock(self):
-            if session is None or not self._frame_session_is_current(session):
-                return 0
-            if prepared_lod_swap_ready is None:
-                render_lod.selected_lod_factor(session)
-            intent = self._montage_render_intent(session)
-            scope = self._lod_admission_scope(session, intent)
-            pipeline = self._frame_pipeline_for_session(session)
-            ladder_policy = getattr(getattr(pipeline, "ladder", None), "policy", None)
-            if montage_commit.complete_deferred_stage_fan_in(self, session):
-                return 0
-            montage_commit.rearm_ready_stage_dependents(session)
-            currency = (
-                int(getattr(session, "session_id", 0) or 0),
-                getattr(session, "key", None),
-            )
-            staged = pipeline.stage_retarget(intent, session.lod_policy_decision.demand, scope)
-            if prepared_lod_swap_ready is None and getattr(staged, "staged_session", None) is None:
-                # No planner underneath (a test double's effects, or nothing to
-                # stage): mark against the live session where it always was.
-                lod_swap_ready = render_lod.mark_ladder_swaps_for_current_demand(session)
-        if prepared_lod_swap_ready is not None:
+        if session is None or not self._frame_session_is_current(session):
+            return 0
+        if prepared_lod_swap_ready is None:
+            render_lod.selected_lod_factor(session)
+            # This is the final demand snapshot used by lifecycle retargeting.
+            # A preceding viewport callback may have marked swaps for an earlier
+            # camera delivery; re-mark against this exact decision so resident
+            # TARGET_READY tiles cannot be stranded with no presentation owner.
+            lod_swap_ready = render_lod.mark_ladder_swaps_for_current_demand(session)
+        else:
             # Viewport retargets compute demand and mark swaps immediately
             # before entering the pipeline. Carry that exact result across
             # this boundary instead of repeating the all-visible-tile scan.
             # Completion-driven replans omit this argument and refresh from
             # their live residency/lifecycle epochs above.
             lod_swap_ready = bool(prepared_lod_swap_ready)
-        if staged is None:
-            submitted = 0
-        else:
-            staged_session = getattr(staged, "staged_session", None)
-            if prepared_lod_swap_ready is None and staged_session is not None:
-                # This is the final demand snapshot used by lifecycle retargeting.
-                # A preceding viewport callback may have marked swaps for an earlier
-                # camera delivery; re-mark against this exact decision so resident
-                # TARGET_READY tiles cannot be stranded with no presentation owner.
-                #
-                # It runs against the private copy and *before* the plan, which
-                # is the order it always had: the marks it writes to
-                # ``dirty_payloads`` are read by the state snapshot two calls
-                # later, and they travel to the live session with the rest of
-                # the plan.
-                lod_swap_ready = render_lod.mark_ladder_swaps_for_current_demand(staged_session)
-            planned = pipeline.plan_retarget(staged)
-            with session_order_lock(self):
-                if not self._is_current_frame_session(*currency) or session is not getattr(
-                    self, "_frame_session", None
-                ):
-                    # The plan was decided against a generation that no longer
-                    # exists. Its successor arrived with a retarget of its own
-                    # (the existing currency idiom); admitting here would claim
-                    # lifecycle state for the wrong window.
-                    emit_trace(
-                        "pipeline_plan",
-                        session_id=int(currency[0]),
-                        submitted=0,
-                        action="dropped-stale-plan",
-                    )
-                    return 0
-                submitted = pipeline.admit_retarget(staged, planned)
-        # The tail — trace, flush obligation, settle — is session state again.
-        with session_order_lock(self):
-            emit_trace(
-                "pipeline_plan",
-                session_id=int(getattr(session, "session_id", 0) or 0),
-                submitted=int(submitted),
-                states=tuple(getattr(pipeline, "last_plan_states", ()) or ()),
-                steps=tuple(getattr(pipeline, "last_plan_steps", ()) or ()),
-                # The policy the steps were planned against, and why the coarse
-                # rungs are absent when they are.  Without these a plan of pure
-                # rung=2 steps names no cause for its own missing preview.
-                render_round_id=str(getattr(session, "render_round_id", "") or ""),
-                round_preview_level=int(getattr(session, "round_preview_level", 0) or 0),
-                round_target_level=int(getattr(session, "round_target_level", 0) or 0),
-                policy_reduced_input=bool(getattr(ladder_policy, "reduced_input_available", False)),
-                demand_level=int(getattr(session.lod_policy_decision.demand, "desired_level", -1)),
-                # Whether this plan believed an interaction was in flight. Expensive
-                # native rungs are deferred only when it is True, so a camera change
-                # that lands *after* a cold plan gets the worst of both: the plan
-                # admits ~1 s uncancellable work, and the change then discards it.
-                interactive=bool(getattr(intent, "interactive", False)),
-                coarse_rung_refusals=tuple(
-                    getattr(pipeline, "last_coarse_rung_refusals", ()) or ()
-                ),
-                first_pixels_presented=bool(session.visible_first_pixels_presented()),
-                required_tile_count=len(session.required_tile_numbers()),
-                scheduling_phase=str(session.scheduling_policy.verdict.phase.value),
-                first_pass_quality=getattr(session, "first_pass_quality", None),
-                first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
-            )
-            if (
-                getattr(session, "pending_level_tiles", None)
-                or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
-            ):
-                self._schedule_montage_cached_level_stats(session)
-            if (
-                force_commit
-                or lod_swap_ready
-                or session.flush_pending
-                or session.final_commit_pending
-                or session.pending_payload_upserts
-            ):
-                # Queued payload upserts are their own flush obligation: bounded
-                # commits can consume the flush flags while upserts remain queued,
-                # and a session with upserts but no flush owner never presents
-                # them (2026-07-16 churn harness: 202 pending upserts, flush
-                # flags clear, kernel idle).  The bounded commit inside owns
-                # pacing; this only guarantees an owner exists.
-                self.apply_ready_montage_display(session)
-            if not submitted:
-                if session.round_load_shedding.release():
-                    # R6 step 3.  A shed plan that admits nothing has no shed-able
-                    # work left, so shedding is now the only reason the round is
-                    # short of target quality — and nothing else is guaranteed to
-                    # come back for it.  The interaction-stop edge below is the
-                    # other release, and it does not cover a round the user never
-                    # touched (a reload or a data change plans exactly like this).
-                    self.request_montage_replan(session)
-                self._finish_frame_session_if_complete(session)
-            if not session.is_complete():
-                self._ensure_montage_watchdog()
-            return int(submitted)
+        intent = self._montage_render_intent(session)
+        scope = self._lod_admission_scope(session, intent)
+        pipeline = self._frame_pipeline_for_session(session)
+        ladder_policy = getattr(getattr(pipeline, "ladder", None), "policy", None)
+        if montage_commit.complete_deferred_stage_fan_in(self, session):
+            return 0
+        montage_commit.rearm_ready_stage_dependents(session)
+        submitted = pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
+        emit_trace(
+            "pipeline_plan",
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            submitted=int(submitted),
+            states=tuple(getattr(pipeline, "last_plan_states", ()) or ()),
+            steps=tuple(getattr(pipeline, "last_plan_steps", ()) or ()),
+            # The policy the steps were planned against, and why the coarse
+            # rungs are absent when they are.  Without these a plan of pure
+            # rung=2 steps names no cause for its own missing preview.
+            render_round_id=str(getattr(session, "render_round_id", "") or ""),
+            round_preview_level=int(getattr(session, "round_preview_level", 0) or 0),
+            round_target_level=int(getattr(session, "round_target_level", 0) or 0),
+            policy_reduced_input=bool(getattr(ladder_policy, "reduced_input_available", False)),
+            demand_level=int(getattr(session.lod_policy_decision.demand, "desired_level", -1)),
+            # Whether this plan believed an interaction was in flight. Expensive
+            # native rungs are deferred only when it is True, so a camera change
+            # that lands *after* a cold plan gets the worst of both: the plan
+            # admits ~1 s uncancellable work, and the change then discards it.
+            interactive=bool(getattr(intent, "interactive", False)),
+            coarse_rung_refusals=tuple(getattr(pipeline, "last_coarse_rung_refusals", ()) or ()),
+            first_pixels_presented=bool(session.visible_first_pixels_presented()),
+            required_tile_count=len(session.required_tile_numbers()),
+            scheduling_phase=str(session.scheduling_policy.verdict.phase.value),
+            first_pass_quality=getattr(session, "first_pass_quality", None),
+            first_pass_pixels_presented=bool(session.first_pass_pixels_presented()),
+        )
+        if (
+            getattr(session, "pending_level_tiles", None)
+            or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+        ):
+            self._schedule_montage_cached_level_stats(session)
+        if (
+            force_commit
+            or lod_swap_ready
+            or session.flush_pending
+            or session.final_commit_pending
+            or session.pending_payload_upserts
+        ):
+            # Queued payload upserts are their own flush obligation: bounded
+            # commits can consume the flush flags while upserts remain queued,
+            # and a session with upserts but no flush owner never presents
+            # them (2026-07-16 churn harness: 202 pending upserts, flush
+            # flags clear, kernel idle).  The bounded commit inside owns
+            # pacing; this only guarantees an owner exists.
+            self.apply_ready_montage_display(session)
+        if not submitted:
+            if session.round_load_shedding.release():
+                # R6 step 3.  A shed plan that admits nothing has no shed-able
+                # work left, so shedding is now the only reason the round is
+                # short of target quality — and nothing else is guaranteed to
+                # come back for it.  The interaction-stop edge below is the
+                # other release, and it does not cover a round the user never
+                # touched (a reload or a data change plans exactly like this).
+                self.request_montage_replan(session)
+            self._finish_frame_session_if_complete(session)
+        if not session.is_complete():
+            self._ensure_montage_watchdog()
+        return int(submitted)
 
     @session_order_lock_section
     def replan_deferred_interactive_native_quality(self) -> bool:
@@ -757,16 +600,8 @@ class FrameRuntimeMixin:
                 )
                 or {}
             )
-            # Stays GUI-side (ADR 0065 stage 2 slice B): this queue seam probes
-            # `img_view.residentHistogramEvidence` /
-            # `acceptResidentHistogramEvidence`, which read live backend state.
-            # This whole funnel is reached only from the GUI-thread
-            # interaction-stop edge (`MainWindow._note_interaction_edge`), so
-            # the probe is already where it belongs and only the retarget below
-            # crosses.
             self._queue_montage_level_stats_for_payloads(session, acknowledged)
-        post_frame_pipeline_retarget(
-            self,
+        self.retarget_frame_pipeline(
             session,
             force_commit=bool(residency_deferred or histogram_deferred),
         )
@@ -1276,12 +1111,7 @@ class FrameRuntimeMixin:
         self._last_montage_priority_retarget_unsettled = remaining
         self._record_gui_budget(budget)
         if remaining:
-            # ADR 0065 stage 2 slice D2b move 3: hover-driven, fire-and-forget,
-            # and the last statement of the funnel — the priority order is
-            # already written onto the session above, and this only asks the
-            # ladder to re-plan against it. Posted, so a hover does not put a
-            # whole retarget inside the GUI's session-order section.
-            post_frame_pipeline_retarget(self, session)
+            self.retarget_frame_pipeline(session)
 
     def apply_montage_viewport_retarget(self) -> None:
         if getattr(self.win, "_closing", False):
@@ -1721,20 +1551,6 @@ def _stall_tile_probe_row_actionable(row: dict[str, object]) -> bool:
 
 
 def _interactive_active(window) -> bool:
-    """Whether a gesture is in flight. Torn reads are tolerated by design.
-
-    ADR 0065 stage 2 slice B: the ladder retarget reads this from the
-    presentation owner while the GUI thread writes it (an input handler sets
-    ``render_coordinator.interactive_active`` and
-    ``win._viewport_interaction_active``). Both are plain ``bool`` attribute
-    loads, so the worst outcome is one retarget planned against the previous
-    answer — the same one-event staleness the owner's own counters accept, and
-    self-correcting because the edge that flips the flag has its own replan
-    (``replan_deferred_interactive_native_quality`` on the stop edge, a
-    viewport retarget on the start edge). A snapshot here would be a lie with a
-    longer lifetime, not a fix.
-    """
-
     coordinator = getattr(window.win, "render_coordinator", None)
     return bool(
         (coordinator is not None and getattr(coordinator, "interactive_active", False))

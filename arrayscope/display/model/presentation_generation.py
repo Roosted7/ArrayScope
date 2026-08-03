@@ -52,43 +52,6 @@ class PresentationGenerationTracker:
     tile_values: dict[int, tuple[float, float]] = field(default_factory=dict)
     stale_active_tiles: set[int] = field(default_factory=set)
 
-    def staged_clone(self) -> PresentationGenerationTracker:
-        """A private copy for speculative presentation planning (ADR 0065).
-
-        The planner may run twice and be dropped once, so every mutation it
-        makes here has to land somewhere the session cannot see until the
-        applier installs it.  The three mutable containers are rebuilt; the
-        scalars and the frozen ``active_tiles`` copy by value.
-        """
-
-        return PresentationGenerationTracker(
-            revision=int(self.revision),
-            target_levels=self.target_levels,
-            target_source=self.target_source,
-            semantic_key=self.semantic_key,
-            active_tiles=self.active_tiles,
-            tile_revisions=dict(self.tile_revisions),
-            tile_values=dict(self.tile_values),
-            stale_active_tiles=set(self.stale_active_tiles),
-        )
-
-    def install_staged(self, staged: PresentationGenerationTracker) -> None:
-        """Adopt a staged clone's state in place, keeping this object's identity."""
-
-        if staged is self:
-            return
-        self.revision = int(staged.revision)
-        self.target_levels = staged.target_levels
-        self.target_source = staged.target_source
-        self.semantic_key = staged.semantic_key
-        self.active_tiles = staged.active_tiles
-        self.tile_revisions.clear()
-        self.tile_revisions.update(staged.tile_revisions)
-        self.tile_values.clear()
-        self.tile_values.update(staged.tile_values)
-        self.stale_active_tiles.clear()
-        self.stale_active_tiles.update(staged.stale_active_tiles)
-
     @property
     def target(self) -> LevelPresentationTarget | None:
         if self.target_levels is None:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import os
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
@@ -383,21 +382,6 @@ class LifecycleRenderedTiles(dict):
         if initial:
             self.update(initial)
 
-    def _rebound(self, lifecycle) -> LifecycleRenderedTiles:
-        """A copy over ``lifecycle``, WITHOUT replaying the entries as events.
-
-        The presentation planner runs against a staged lifecycle clone, so its
-        collections have to read that clone.  Rebuilding through ``__init__``
-        would fire ``evaluation_completed`` for every existing entry — which is
-        why the rebind is spelled out here rather than left to the caller.
-        """
-
-        clone = LifecycleRenderedTiles.__new__(LifecycleRenderedTiles)
-        dict.__init__(clone)
-        dict.update(clone, self)
-        clone._lifecycle = lifecycle
-        return clone
-
     def __setitem__(self, key, value):
         index = int(key)
         super().__setitem__(index, value)
@@ -445,18 +429,6 @@ class _LifecycleTileSetView:
         self._lifecycle = lifecycle
         for index in tuple(seed or ()):
             self.add(int(index))
-
-    def _rebound(self, lifecycle) -> _LifecycleTileSetView:
-        """A view of the same kind over ``lifecycle``, seeded with nothing.
-
-        The membership already lives in the machine, so re-seeding would
-        re-fire every event.  Used to point a staged session's views at its
-        staged lifecycle clone.
-        """
-
-        clone = object.__new__(type(self))
-        clone._lifecycle = lifecycle
-        return clone
 
     def _snapshot(self) -> frozenset[int]:
         return getattr(self._lifecycle, self._view)
@@ -702,119 +674,6 @@ class LifecycleStageFanIn(StageFanInState):
 
 # A round's tiles share one crop, so a handful of snapshots covers it.
 _SOURCE_ANCHOR_SNAPSHOT_CACHE_LIMIT = 32
-
-
-#: Every mutable container a presentation *plan* can write, with the callable
-#: that makes the planner's private copy of it.
-#:
-#: ADR 0065 stage 2 slice D's prerequisite.  Preparation used to plan and
-#: mutate in one pass, so preparing twice — which a take-miss makes an ordinary
-#: outcome, not a rare one — corrupted the session (slice C's three-arm bisect,
-#: docs/redesign/presentation-owner-stage2-2026-08-03.md).  The planner now
-#: runs against a staged session whose every mutable presentation container is
-#: one of these copies; the applier installs them.  A container missing from
-#: this table is a write that escapes a dropped plan, which is exactly what
-#: ``tests/window/test_presentation_plan_split.py`` fails on: it fingerprints
-#: the whole session, plans, drops, and demands the fingerprint is unchanged.
-#:
-#: ``lifecycle`` and ``level_generation`` are not here because they are not
-#: containers — they own their own :meth:`staged_clone`.
-_PRESENTATION_PLAN_CONTAINERS: tuple[tuple[str, object], ...] = (
-    ("display_tile_payloads", dict),
-    ("dirty_payloads", OrderedDict),
-    ("pending_payload_upserts", OrderedDict),
-    ("pending_removals", set),
-    ("tile_source_ids", dict),
-    ("_identity_retry_attempts", dict),
-    ("retained_out_of_view", OrderedDict),
-    ("deferred_out_of_view_invalidations", set),
-    ("acknowledged_source_ids", set),
-    ("lod_preview_metadata", dict),
-    # ADR 0065 stage 2 slice D: the prepare seam plans against a staged session
-    # too, and ``shader_commit_level_source`` mutates the R3 clamp record in
-    # place (``true_bounds``/``published_bounds``) rather than rebinding it.
-    # An in-place write to a shared dict is exactly the leak the harvest's
-    # identity diff cannot see, and this one is load-bearing: a dropped plan
-    # that advanced ``true_bounds`` would release the clamp against bounds no
-    # commit ever presented.
-    ("_shader_presented_bounds_clamp", dict),
-    # ADR 0065 stage 2 slice D2c: the retarget's STAGE phase plans against a
-    # staged session too, and the resident-crop-rebind seed
-    # (``rebind_resident_crop_tiles``) writes these three.  The first two are
-    # the rebind's own record of which slots it rebound and which fell back to
-    # a crop-local subset — ``resident_crop_fallback_is_current`` and the
-    # atomic-successor gate read them, so a dropped seed that left them behind
-    # would claim coverage no commit ever presented.  The third is the governed
-    # seed's evidence dict, mutated in place by ``admission_chunk_limit``.
-    ("resident_crop_rebound_source_ids", dict),
-    ("resident_crop_fallback_source_ids", dict),
-    ("resident_crop_governor_stats", dict),
-    # Pure memos.  Their writes are idempotent for one residency epoch, so
-    # sharing them would be harmless — but "harmless" is a judgement that has
-    # to be re-made every time one of them grows a new writer, and the copy
-    # costs a dict of tens of entries.
-    ("_source_anchor_content_key_cache", dict),
-    ("_source_anchor_snapshot_starts_cache", dict),
-    ("_lod_page_set_key_cache", dict),
-)
-
-
-#: Attributes a plan installs IN PLACE rather than by assignment: the two state
-#: machines, and the collections that are views bound to the lifecycle.  See
-#: :class:`TilePresentationPlan` for why identity has to survive a commit.
-_PRESENTATION_PLAN_IN_PLACE_ATTRS: tuple[str, ...] = (
-    "lifecycle",
-    "level_generation",
-    "loading_tiles",
-    "skipped_tiles",
-    "active_tile_requests",
-    "rendered_tiles",
-)
-
-
-@dataclass(frozen=True)
-class TilePresentationPlan:
-    """One planned presentation transaction and every session write it implies.
-
-    Produced by :meth:`FrameSession.plan_tile_presentation` without touching
-    the session, and consumed by :meth:`FrameSession.apply_tile_presentation_plan`,
-    which performs every write in one pass.  Planning twice and applying once
-    is defined to be identical to planning once and applying once; planning and
-    dropping is defined to be a no-op.
-
-    ``staged`` is the whole contract for plain attributes: name -> value to
-    install.  It is derived, not enumerated — the harvest compares the staged
-    session's ``__dict__`` against the live one by identity, so a write the
-    planner makes to an attribute nobody thought of still travels.  What has to
-    be enumerated is :data:`_PRESENTATION_PLAN_CONTAINERS`: the containers
-    whose *contents* a planner mutates in place.
-
-    The two state machines and the machine-backed collections travel in their
-    own fields instead, because they are installed IN PLACE.  Their object
-    identity is load-bearing: the session's ``loading_tiles`` /
-    ``skipped_tiles`` / ``active_tile_requests`` / ``rendered_tiles`` are views
-    bound to the lifecycle, and callers hold ``TileRecord`` references across
-    commits.  A swap would leave every one of them a generation behind.
-    """
-
-    #: ``None`` when the plan produced no transaction (the atomic fast path
-    #: declining, for instance); its ``staged`` writes may still be real.
-    state: TilePresentationState | None
-    delta: TilePresentationDelta | None
-    #: Which builder produced it: ``full``, ``pending-followup``, ``atomic``
-    #: or ``atomic-declined``.
-    path: str
-    session_id: int
-    session_object_id: int
-    staged: dict
-    trace_fields: dict
-    lifecycle: object
-    level_generation: object
-    rendered_tiles: dict
-
-    @property
-    def accepted(self) -> bool:
-        return self.delta is not None
 
 
 @dataclass
@@ -4263,196 +4122,6 @@ class FrameSession:
             )
         return tuple(evicted)
 
-    # ------------------------------------------------- planner / applier split
-
-    def _staged_presentation_session(self) -> FrameSession:
-        """A private session a planner may mutate freely (ADR 0065 slice D).
-
-        A shallow copy shares every read-only input with the live session —
-        plan, rendered tiles, caches, policy — so the planner sees exactly what
-        it saw before the split, and costs one ``__dict__`` copy.  What it does
-        NOT share is anything the builder writes: the containers of
-        :data:`_PRESENTATION_PLAN_CONTAINERS` are copied, and the two state
-        machines hand out their own staged clones.
-
-        The page cache stays shared on purpose.  ``_ensure_floor_payloads`` and
-        the texture resolver only *probe* it (``render/lod.py``: "Dictionary
-        probes only; no reduction, no copies"), and the one true admitter,
-        :meth:`admit_preview_plane`, is a completion-path call the builder
-        never makes.  ``_best_floor_key_memo``'s inner dict is the one shared
-        structure a planner writes, and it is idempotent by construction: it is
-        keyed by a residency-epoch guard that is re-checked immediately before
-        the store, so a value written from staged state equals the value the
-        live session would compute.
-
-        ADR 0065 stage 2 slice D2a: the staged session also carries the LIVE
-        ``__dict__`` **as it was at staging time**.  That snapshot, not the live
-        session at harvest time, is what :meth:`_harvest_presentation_plan`
-        diffs against.  The difference only shows once planning runs outside
-        the session-order lock: a live write landing mid-plan would otherwise
-        make the harvest's identity diff read the planner's *unchanged* value
-        as a write, and the applier would then revert a live write no planner
-        ever saw.  Diffing against the baseline means a plan carries exactly
-        what its own planner changed, and nothing else.
-        """
-
-        baseline = dict(self.__dict__)
-        staged = copy.copy(self)
-        staged._presentation_plan_baseline = baseline
-        for name, factory in _PRESENTATION_PLAN_CONTAINERS:
-            current = getattr(self, name, None)
-            if current is not None:
-                setattr(staged, name, factory(current))
-        lifecycle = self.lifecycle.staged_clone()
-        staged.lifecycle = lifecycle
-        staged.level_generation = self.level_generation.staged_clone()
-        # ADR 0051 P2: these attributes are *views* over the machine, so a
-        # staged session whose views still read the live machine would answer
-        # ``loading_tiles``/``skipped_tiles`` from state its own plan already
-        # moved on from (the first symptom the split produced:
-        # ``presentation_confirmed`` cleared the load intent on the clone while
-        # ``session.loading_tiles`` kept reporting the tile as loading).
-        for name in ("loading_tiles", "skipped_tiles", "active_tile_requests", "rendered_tiles"):
-            view = getattr(self, name, None)
-            rebound = getattr(view, "_rebound", None)
-            if callable(rebound):
-                setattr(staged, name, rebound(lifecycle))
-        return staged
-
-    def _harvest_presentation_plan(
-        self,
-        staged: FrameSession,
-        state: TilePresentationState | None,
-        delta: TilePresentationDelta | None,
-        *,
-        path: str,
-    ) -> TilePresentationPlan:
-        """Freeze whatever the planner diverged on into an appliable record.
-
-        Identity, not equality, is the test: a shallow copy starts out sharing
-        every value, so anything the planner rebound or replaced is exactly the
-        set of ``is``-different entries.  Deriving the field list rather than
-        writing it down is what keeps the record honest when the builder grows
-        a new write.
-
-        The comparison is against the baseline ``_staged_presentation_session``
-        froze, falling back to the live ``__dict__`` only for a staged session
-        built some other way.  See that method for why the distinction is
-        load-bearing once planning runs unlocked.
-        """
-
-        live = staged.__dict__.pop("_presentation_plan_baseline", None)
-        if live is None:
-            live = self.__dict__
-        missing = object()
-        staged_writes = {
-            name: value
-            for name, value in staged.__dict__.items()
-            if value is not live.get(name, missing)
-        }
-        trace_fields = dict(staged_writes.pop("_presentation_build_trace", None) or {})
-        staged_writes.pop("_presentation_build_path", None)
-        # Installed in place, never assigned — see TilePresentationPlan.
-        for name in _PRESENTATION_PLAN_IN_PLACE_ATTRS:
-            staged_writes.pop(name, None)
-        return TilePresentationPlan(
-            state=state,
-            delta=delta,
-            path=str(path),
-            session_id=int(self.session_id),
-            session_object_id=id(self),
-            staged=staged_writes,
-            trace_fields=trace_fields,
-            lifecycle=staged.lifecycle,
-            level_generation=staged.level_generation,
-            rendered_tiles=dict(staged.rendered_tiles),
-        )
-
-    def plan_tile_presentation(
-        self,
-        source_ids: dict[int, object] | None,
-        *,
-        cold_deadline_ms: float | None = None,
-        max_upserts: int | None = None,
-        max_upsert_bytes: int | None = None,
-        upsert_cost_fn=None,
-        physical_resident_fn=None,
-        pace_resident_retargets: bool = False,
-    ) -> TilePresentationPlan:
-        """Decide one presentation transaction without committing to it."""
-
-        staged = self._staged_presentation_session()
-        state, delta = FrameSession._build_tile_presentation(
-            staged,
-            source_ids,
-            cold_deadline_ms=cold_deadline_ms,
-            max_upserts=max_upserts,
-            max_upsert_bytes=max_upsert_bytes,
-            upsert_cost_fn=upsert_cost_fn,
-            physical_resident_fn=physical_resident_fn,
-            pace_resident_retargets=pace_resident_retargets,
-        )
-        return self._harvest_presentation_plan(
-            staged,
-            state,
-            delta,
-            path=str(getattr(staged, "_presentation_build_path", "full")),
-        )
-
-    def _install_staged_rendered_tiles(self, staged: dict) -> None:
-        """Mirror a plan's ``rendered_tiles`` without re-firing its events.
-
-        Today no builder writes this collection — it is the evaluator's, and a
-        commit only reads it.  The mirror exists so that stops being an
-        invariant nobody checks: if a build ever does write it, the write
-        travels with the plan instead of leaking out of a dropped one.  The
-        semantic events those writes imply already ran on the staged lifecycle
-        and arrive through ``install_staged``, so this pass goes through
-        ``dict`` directly.
-        """
-
-        live = self.rendered_tiles
-        if live is staged:
-            return
-        for tile_number in tuple(live):
-            if tile_number not in staged:
-                dict.pop(live, tile_number, None)
-        for tile_number, value in staged.items():
-            if dict.get(live, tile_number) is not value:
-                dict.__setitem__(live, tile_number, value)
-
-    def apply_tile_presentation_plan(
-        self, plan: TilePresentationPlan
-    ) -> tuple[TilePresentationState | None, TilePresentationDelta | None]:
-        """Commit one plan's writes to this session, in the builder's order.
-
-        Dict insertion order is the builder's write order, so replaying it is
-        replaying the order the monolithic builder used.  The applier is
-        deliberately mechanical: every decision was already taken, so nothing
-        here can decide differently on a second attempt.
-        """
-
-        if plan.session_object_id != id(self) or int(plan.session_id) != int(self.session_id):
-            # A plan is bound to the session generation it was decided against.
-            # Applying one to a different session is the "wrong-transaction
-            # take" the identity tuple of decision 3 exists to refuse; refusing
-            # it here too means the refusal cannot be skipped by a caller that
-            # forgot to validate.
-            raise RuntimeError("presentation plan does not belong to this session")
-        apply_started = perf_counter()
-        self.lifecycle.install_staged(plan.lifecycle)
-        self.level_generation.install_staged(plan.level_generation)
-        self._install_staged_rendered_tiles(plan.rendered_tiles)
-        for name, value in plan.staged.items():
-            setattr(self, name, value)
-        if plan.trace_fields:
-            emit_trace(
-                "presentation_build_timing",
-                **plan.trace_fields,
-                apply_ms=(perf_counter() - apply_started) * 1000.0,
-            )
-        return plan.state, plan.delta
-
     def build_tile_presentation(
         self,
         source_ids: dict[int, object] | None,
@@ -4464,42 +4133,6 @@ class FrameSession:
         physical_resident_fn=None,
         pace_resident_retargets: bool = False,
     ) -> tuple[TilePresentationState, TilePresentationDelta]:
-        """Plan and immediately apply one presentation transaction.
-
-        The inline anchor: identical to what the monolithic builder did, and
-        the shape every caller outside the prepare seam still wants.
-        """
-
-        plan = self.plan_tile_presentation(
-            source_ids,
-            cold_deadline_ms=cold_deadline_ms,
-            max_upserts=max_upserts,
-            max_upsert_bytes=max_upsert_bytes,
-            upsert_cost_fn=upsert_cost_fn,
-            physical_resident_fn=physical_resident_fn,
-            pace_resident_retargets=pace_resident_retargets,
-        )
-        return self.apply_tile_presentation_plan(plan)
-
-    def _build_tile_presentation(
-        self,
-        source_ids: dict[int, object] | None,
-        *,
-        cold_deadline_ms: float | None = None,
-        max_upserts: int | None = None,
-        max_upsert_bytes: int | None = None,
-        upsert_cost_fn=None,
-        physical_resident_fn=None,
-        pace_resident_retargets: bool = False,
-    ) -> tuple[TilePresentationState, TilePresentationDelta]:
-        """The builder body. ``self`` here is a *staged* session, never a live one.
-
-        Every write it makes is a write to the plan.  It emits no build trace
-        of its own — a build that is never applied never happened, so the
-        record travels in ``_presentation_build_trace`` and the applier emits
-        it with its own ``apply_ms``.
-        """
-
         build_started = perf_counter()
         source_ids = dict(source_ids or {})
         pending_followup = self._paced_pending_presentation_followup(
@@ -4511,14 +4144,14 @@ class FrameSession:
             pace_resident_retargets=pace_resident_retargets,
         )
         if pending_followup is not None:
-            self._presentation_build_path = "pending-followup"
-            self._presentation_build_trace = {
-                "session_id": int(self.session_id),
-                "path": "pending-followup",
-                "elapsed_ms": (perf_counter() - build_started) * 1000.0,
-                "max_upserts": max_upserts,
-                "pending_upserts": len(self.pending_payload_upserts),
-            }
+            emit_trace(
+                "presentation_build_timing",
+                session_id=int(self.session_id),
+                path="pending-followup",
+                elapsed_ms=(perf_counter() - build_started) * 1000.0,
+                max_upserts=max_upserts,
+                pending_upserts=len(self.pending_payload_upserts),
+            )
             return pending_followup
         previous_state = self.tile_presentation_state
         previous_payloads = dict(previous_state.payloads)
@@ -5362,61 +4995,31 @@ class FrameSession:
             level_only_drain=level_only_drain,
         )
         state = previous_state.apply_delta(delta)
-        self._presentation_build_path = "full"
-        self._presentation_build_trace = {
-            "session_id": int(self.session_id),
-            "path": "full",
-            "elapsed_ms": (perf_counter() - build_started) * 1000.0,
-            "setup_ms": (timing_setup_done - build_started) * 1000.0,
-            "candidates_ms": (timing_candidates_done - timing_setup_done) * 1000.0,
-            "payloads_ms": (timing_payloads_done - timing_candidates_done) * 1000.0,
-            "floor_ms": (timing_floor_done - timing_candidates_done) * 1000.0,
-            "unpresented_ms": (timing_unpresented_done - timing_floor_done) * 1000.0,
-            "floor_scope_ms": (timing_floor_scope_done - timing_unpresented_done) * 1000.0,
-            "payload_cleanup_ms": (timing_payloads_done - timing_floor_scope_done) * 1000.0,
-            "upserts_ms": (timing_upserts_done - timing_payloads_done) * 1000.0,
-            "admission_ms": (timing_admission_done - timing_upserts_done) * 1000.0,
-            "finish_ms": (perf_counter() - timing_admission_done) * 1000.0,
-            "max_upserts": max_upserts,
-            "dirty_payloads": len(self.dirty_payloads),
-            "pending_upserts": len(self.pending_payload_upserts),
-        }
-        return state, delta
-
-    def plan_atomic_successor_presentation(self) -> TilePresentationPlan:
-        """Decide the atomic successor transaction without committing to it.
-
-        The declining case is still a plan, not a ``None``: the rejection
-        reason is a session write (``_atomic_fast_reject_reason``, which the
-        prepare seam reads straight afterwards), and slice D's whole point is
-        that a write the caller never applies never happened.
-        """
-
-        staged = self._staged_presentation_session()
-        built = FrameSession._build_atomic_successor_presentation(staged)
-        state, delta = (None, None) if built is None else built
-        return self._harvest_presentation_plan(
-            staged,
-            state,
-            delta,
-            path="atomic" if built is not None else "atomic-declined",
+        emit_trace(
+            "presentation_build_timing",
+            session_id=int(self.session_id),
+            path="full",
+            elapsed_ms=(perf_counter() - build_started) * 1000.0,
+            setup_ms=(timing_setup_done - build_started) * 1000.0,
+            candidates_ms=(timing_candidates_done - timing_setup_done) * 1000.0,
+            payloads_ms=(timing_payloads_done - timing_candidates_done) * 1000.0,
+            floor_ms=(timing_floor_done - timing_candidates_done) * 1000.0,
+            unpresented_ms=(timing_unpresented_done - timing_floor_done) * 1000.0,
+            floor_scope_ms=(timing_floor_scope_done - timing_unpresented_done) * 1000.0,
+            payload_cleanup_ms=(timing_payloads_done - timing_floor_scope_done) * 1000.0,
+            upserts_ms=(timing_upserts_done - timing_payloads_done) * 1000.0,
+            admission_ms=(timing_admission_done - timing_upserts_done) * 1000.0,
+            finish_ms=(perf_counter() - timing_admission_done) * 1000.0,
+            max_upserts=max_upserts,
+            dirty_payloads=len(self.dirty_payloads),
+            pending_upserts=len(self.pending_payload_upserts),
         )
+        return state, delta
 
     def build_atomic_successor_presentation(
         self,
     ) -> tuple[TilePresentationState, TilePresentationDelta] | None:
-        """Plan and immediately apply one atomic successor. The inline anchor."""
-
-        plan = self.plan_atomic_successor_presentation()
-        state, delta = self.apply_tile_presentation_plan(plan)
-        return None if delta is None else (state, delta)
-
-    def _build_atomic_successor_presentation(
-        self,
-    ) -> tuple[TilePresentationState, TilePresentationDelta] | None:
         """Build a complete compatible successor without full reconciliation.
-
-        ``self`` is a *staged* session (see :meth:`_build_tile_presentation`).
 
         The general builder repairs arbitrary lifecycle, visibility, removal,
         and level states. A resident scroll successor has a narrower contract:
@@ -6059,50 +5662,10 @@ class FrameSession:
         self._tile_states_cached_revision = -1
         self._tile_states_cached_tuple = ()
 
-    def peek_dirty_tiles(self) -> tuple[int, ...]:
-        """The dirty set, without taking it.
-
-        ADR 0065 stage 2 slice C, decision 2 — the sharpest correctness edge in
-        the stage. Preparation of a presentation transaction now happens on the
-        presentation owner, and the GUI thread may legitimately drop that
-        transaction (mailbox miss, failed validation, a frame that turned
-        critical between prepare and take). Consuming here would strand every
-        tile in it: nothing re-dirties them, because from the session's point
-        of view they were committed.
-
-        So prepare peeks and :meth:`release_dirty_tiles` consumes on the
-        acknowledgement of the delta that was actually accepted.
-        """
-
-        return tuple(dict.fromkeys(int(tile) for tile in self.dirty_tiles))
-
-    def release_dirty_tiles(self, tiles, *, prefix: int | None = None) -> int:
-        """Drop exactly ``tiles`` from the dirty set; return how many went.
-
-        Exactly, not wholesale: tiles dirtied *after* the peek belong to the
-        next transaction and a `clear()` here would swallow them — the same
-        stranding in the other direction.
-
-        ``prefix`` is the list's length at peek time, and it is what makes
-        "exactly" survive a concurrent append of a tile the peek already
-        named (ADR 0065 stage 2 slice D2b: the commit releases the order lock
-        across its backend submit, and the only other writer of this list —
-        the evaluation admission — appends). By value, that re-append would be
-        removed with the peeked one and the tile would never present again; by
-        prefix, the peeked entries go and everything appended since stays.
-        """
-
-        if prefix is not None:
-            released = max(0, min(int(prefix), len(self.dirty_tiles)))
-            del self.dirty_tiles[:released]
-            return released
-        wanted = {int(tile) for tile in tuple(tiles or ())}
-        if not wanted:
-            return 0
-        remaining = [int(tile) for tile in self.dirty_tiles if int(tile) not in wanted]
-        released = len(self.dirty_tiles) - len(remaining)
-        self.dirty_tiles[:] = remaining
-        return released
+    def consume_dirty_tiles(self) -> tuple[int, ...]:
+        tiles = tuple(dict.fromkeys(int(tile) for tile in self.dirty_tiles))
+        self.dirty_tiles.clear()
+        return tiles
 
     def note_committed(self) -> None:
         self.last_commit_monotonic = monotonic()

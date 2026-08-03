@@ -227,3 +227,61 @@ Any stage may be reverted independently while the lock holds the invariant.
 - Crash containment: an owner-thread exception is forwarded to the existing
   UI error hook; the thread is respawned with a fresh session snapshot the
   same way a session rebirth already works.
+
+## Status update 2026-08-03 — stage 1 stands, stage 2 reverted
+
+Stage 2 (slices B–D3b, `76a92cd0..8c69b361`) was **reverted** on 2026-08-03. Stage 1
+(`4db839cd`) and slice A (`b0312b70`) stand. The tree is at `b0312b70` for `arrayscope/`
+and `tests/`; the reverted tip is preserved at tag `ab-stage2-preserved-8c69b361`, and the
+full stage-2 measurement record is kept unreverted at
+[`../redesign/presentation-owner-stage2-2026-08-03.md`](../redesign/presentation-owner-stage2-2026-08-03.md).
+
+### What stands
+
+Stage 1's claim verified in the field: `montage-stage-plan` bodies appear in **0 of 2632**
+GUI-thread drain observations in trace 4, where trace 3 carried 4.4 s of them at p50 13.7 ms.
+Routing low-frequency work across the bridge works.
+
+Note that stage 1 *posts* the stage-plan completion tail back to the GUI thread. Slice B deleted
+that post and ran the same body inline on the dispatching thread, which is what produced the
+**798 ms** worst owner event in trace 4. Reverting slice B removes that stall.
+
+### What the Consequences section above got wrong
+
+> "GIL contention transfers from *everything against the GUI thread* to *owner thread against
+> workers* — acceptable: the owner's work is the same work, now off the input/paint path."
+
+**Falsified by stage 2's own D2c measurement.** `mark_ladder_swaps` went 439–597 ms → 1175–1235 ms
+with an **identical call count** against the same staged session, "because it now genuinely runs
+concurrently with the presentation owner under one GIL." Moving work to a second thread in one
+interpreter does not make it the same work; unlocking it makes both threads run concurrently and
+each runs slower. Any future stage must budget for this, not assume it away.
+
+### The adjudication rule this program cost the most to learn
+
+**Adjudicate on `montage.presentation_draw_count` deltas — the physical wgpu draw count — and
+nothing else.** Across two rounds of optimization every headline number was true and none of them
+was the frame rate: lock holds shrank 526 → 15–20 ms, callback medians shrank, and the screen got
+*slower*. Three separate "wins" were later shown to be instrument artifacts:
+
+- `payload_build p50 8.0–10.3 → 3.2–5.1 ms` — the timer's endpoint moved strictly earlier (slice C),
+  and `_reset_commit_timings` never cleared the attribute, so once slice C moved the write to the
+  owner thread the term became a cross-thread echo that **exceeds the whole callback duration** in
+  44–61 % of observations.
+- `PrepTimings.prepare_apply_ms` is never assigned anywhere in the tree, so the published
+  `last_tile_prepare_apply_ms` is permanently `0.0`.
+- Per-funnel lock-hold tables quoted throughout the refutation ledger came from ad-hoc
+  instrumentation that was never landed and cannot be reproduced from the tree in any state.
+
+Corollary for experiment design: per-run spread on draw rate is ~±10 %, so **any A/B with fewer than
+about five runs per arm is noise**, and a same-code null control arm is required to separate a real
+effect from worktree-level bias.
+
+### Where stage 3 stands
+
+Unchanged in intent and now the only live successor: session state owner-owned, the GUI reading
+published immutable snapshots, **no shared lock on the hot path**. The five refutations recorded in
+the graveyard establish that no policy on a shared exclusion primitive reaches it. But stage 3 should
+not be attempted until the GUI-thread planner cost is removed on its own terms — the retarget was
+still ~91 % GUI-thread and 96 % `submitted=0` in trace 4, and work that does not need to happen at all
+should be deleted before it is moved.

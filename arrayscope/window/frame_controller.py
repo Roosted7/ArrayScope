@@ -47,15 +47,9 @@ from arrayscope.render.stages import RenderIntent
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window import frame_effects as montage_commit
 from arrayscope.window.display_presenter import tile_residency_budget_bytes
-from arrayscope.window.frame_effects import (
-    FramePipelineEffects,
-    on_gui_thread,
-    run_on_gui_thread,
-    session_order_lock_section,
-)
+from arrayscope.window.frame_effects import FramePipelineEffects, session_order_lock_section
 from arrayscope.window.frame_runtime import (
     FrameRuntimeMixin,
-    post_frame_pipeline_retarget,
 )
 from arrayscope.window.frame_session import FrameSession, plan_presentation_transition
 from arrayscope.window.montage_payload_cache import (
@@ -591,13 +585,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         if memory_policy is not None:
             session.tile_residency_budget_bytes = tile_residency_budget_bytes(memory_policy)
         lod_swap_ready = session.mark_ladder_swaps_for_viewport(refresh_demand=False)
-        # ADR 0065 stage 2 slice B: fire-and-forget, so it goes to the owner.
-        # The presentation request below no longer waits behind a whole ladder
-        # retarget on the GUI thread; it arms the same gate it always did, and
-        # the retarget's own `apply_ready_montage_display` is idempotent
-        # against it.
-        post_frame_pipeline_retarget(
-            self,
+        self.retarget_frame_pipeline(
             session,
             prepared_lod_swap_ready=lod_swap_ready,
         )
@@ -1475,20 +1463,6 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # the successor target.  They produce no ``missing_tiles`` entry, so
         # index-window retargeting must always give the ladder one chance to
         # admit the exact/desired follow-up for any unsettled target.
-        #
-        # ADR 0065 stage 2 slice D2b move 3 tried to POST this one — it is the
-        # last statement of the funnel and `update_image_view` returns on the
-        # True below, so it passes the syntactic fire-and-forget test — and
-        # measurement refused it. `test_wgpu_shed_index_scrub_moves_the_montage_
-        # and_still_completes` reds with `ShedLevel.RETAIN_ONLY, streak=2` where
-        # it demands NONE: R6's shed release lives in the retarget's tail, and
-        # the round it belongs to is opened by the retarget that this index-
-        # window rebuild owes. Deferring it by one owner hop lets the next
-        # scrub step supersede the post, and the round is never released.
-        #
-        # So the dependent is real and it is not in this callback's body: it is
-        # the rebuild-then-replan pair itself. This caller stays inline, and
-        # what shrinks its hold is the retarget's own three spans above.
         self.retarget_frame_pipeline(session)
         return True
 
@@ -1834,11 +1808,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             session.stage_planning_async = False
             session.deferred_missing_tiles = tuple(missing_tiles)
             montage_commit.submit_deferred_stage_fan_in_plan(self, session, missing_tiles)
-            # Slice B: the viewport-only path's non-latch tails are
-            # fire-and-forget. The `submitted` reader above (the convergence
-            # latch) is NOT converted — it needs the count synchronously and
-            # moves in slice D.
-            post_frame_pipeline_retarget(self, session)
+            self.retarget_frame_pipeline(session)
             return True
 
         if _viewport_interaction_active(self):
@@ -1851,7 +1821,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             session.stage_planning_async = False
             session.deferred_missing_tiles = tuple(missing_tiles)
             montage_commit.submit_deferred_stage_fan_in_plan(self, session, missing_tiles)
-            post_frame_pipeline_retarget(self, session)
+            self.retarget_frame_pipeline(session)
             return True
 
         stage_plan = montage_commit.build_stage_fan_in_plan(self, session.document, missing_tiles)
@@ -1864,7 +1834,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         )
         self.show_frame_session_slow_overlay(session)
         montage_commit.submit_stage_tasks(self, session, stage_plan["stage_requests"])
-        post_frame_pipeline_retarget(self, session)
+        self.retarget_frame_pipeline(session)
         return True
 
     @session_order_lock_section
@@ -2026,35 +1996,16 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         pipeline = getattr(session, "pipeline", None)
         if pipeline is None:
             # Commit-only test/teardown sessions do not own a live pipeline.
-            # A synchronous commit is a backend submit, so from the
-            # presentation owner it is posted rather than run: the retarget
-            # that reaches this always owns a pipeline (the retarget builds
-            # one), so this branch stays GUI-only in practice.
-            if on_gui_thread():
-                self.commit_frame_session_presentation(session)
-            else:
-                session_id = int(getattr(session, "session_id", 0) or 0)
-                session_key = session.key
-                run_on_gui_thread(
-                    self,
-                    lambda: (
-                        self.commit_frame_session_presentation(session)
-                        if self._is_current_frame_session(session_id, session_key)
-                        else None
-                    ),
-                )
+            self.commit_frame_session_presentation(session)
         else:
-            # Already thread-branched: the gate arms flags here and posts its
-            # own Qt continuation, so the arming half is where the caller is.
             pipeline.effects.request_presentation()
         if (
             getattr(session, "show_loading_overlays", False)
             and not session.visible_plan_complete()
             and not session.is_complete()
         ):
-            # ADR 0065 stage 2 slice B: the decision reads session state where
-            # the retarget runs; only the chrome crosses to the GUI thread.
-            self._post_montage_staleness_chrome(session, stale=True)
+            self.win.img_view.setImageStale(True)
+            self.win.img_view.setEvaluationOverlay(True, "Updating image frame...")
 
     @session_order_lock_section
     def commit_frame_session_presentation(self, session) -> None:
@@ -2111,57 +2062,20 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             self._schedule_montage_refined_level_stats(session)
         return True
 
-    def _post_montage_staleness_chrome(self, session, *, stale: bool) -> None:
-        """Publish the staleness/evaluation overlay pair on the GUI thread.
-
-        ADR 0065 stage 2 slice B. The predicate that decides whether the frame
-        is stale is session state and evaluates wherever the retarget runs; the
-        two setters and the overlay clear are Qt and do not. The posted half
-        re-checks currency for the ordinary posted-continuation reason: a
-        rebirth can land between the decision and the paint, and chrome for a
-        session that no longer exists is worse than late chrome.
-        """
-
-        if on_gui_thread():
-            self._apply_montage_staleness_chrome(session, stale=stale)
-            return
-        session_id = int(getattr(session, "session_id", 0) or 0)
-        session_key = session.key
-        run_on_gui_thread(
-            self,
-            lambda: (
-                self._apply_montage_staleness_chrome(session, stale=stale)
-                if self._is_current_frame_session(session_id, session_key)
-                else None
-            ),
-        )
-
-    def _apply_montage_staleness_chrome(self, session, *, stale: bool) -> None:
-        img_view = self.win.img_view
-        if stale:
-            img_view.setImageStale(True)
-            img_view.setEvaluationOverlay(True, "Updating image frame...")
-            return
-        img_view.setImageStale(False)
-        img_view.setEvaluationOverlay(False)
-        if hasattr(img_view, "clearMontageTileOverlays"):
-            img_view.clearMontageTileOverlays()
-        self.win.operation_evaluator.last_status = CacheStatusSnapshot(
-            CacheStatus.READY, "Image frame ready"
-        )
-
     def _settle_montage_visible_plan_if_complete(self, session) -> bool:
         if not self._frame_session_is_current(session):
             return False
         if not session.visible_plan_complete():
             return False
         session.show_loading_overlays = False
-        # Plain attribute clear, not a QTimer: the slow overlay is armed by a
-        # kernel `on_slow` callback and disarmed by dropping this key, so the
-        # stop needs no GUI thread of its own (the stage-2 map expected a timer
-        # here; the tree has none).
         self._stop_frame_session_slow_overlay()
-        self._post_montage_staleness_chrome(session, stale=False)
+        self.win.operation_evaluator.last_status = CacheStatusSnapshot(
+            CacheStatus.READY, "Image frame ready"
+        )
+        self.win.img_view.setImageStale(False)
+        self.win.img_view.setEvaluationOverlay(False)
+        if hasattr(self.win.img_view, "clearMontageTileOverlays"):
+            self.win.img_view.clearMontageTileOverlays()
         # "In view complete" is exactly the edge the deferred out-of-view
         # invalidation is waiting for, so this is where it is invited.  The
         # prefetch entry invites it too; the drain owns its own gates so the

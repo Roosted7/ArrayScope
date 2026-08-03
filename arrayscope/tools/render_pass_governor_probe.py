@@ -32,27 +32,6 @@ from arrayscope.tools.interaction_budget import bounded_interaction_settle_timeo
 from arrayscope.tools.profile_montage_workflow import run_profile_montage_workflow
 
 _BACKENDS = ("pyqtgraph", "wgpu")
-#: Which of the presentation owner's counters the fill table carries, in the
-#: order that reads as an argument: how much work crossed, how many hand-offs
-#: it cost each side, what each side waited, and whether anything was left
-#: behind. Everything else in the snapshot is teardown hygiene.
-_OWNER_COUNTERS = (
-    "events_dispatched",
-    "messages_dispatched",
-    "owner_batch_acquisitions",
-    "owner_events_per_batch_max",
-    "batch_tail_deferrals",
-    "owner_lock_acquisitions",
-    "owner_lock_wait_ms_total",
-    "owner_lock_wait_ms_max",
-    "gui_lock_acquisitions",
-    "gui_lock_wait_ms_total",
-    "gui_lock_wait_ms_max",
-    "owner_yields_to_gui",
-    "pending_events",
-    "pending_messages",
-    "errors",
-)
 _COMPONENTS = (
     "payload_build_ms",
     "prepare_ms",
@@ -108,18 +87,6 @@ class FillSummary:
     presented_tiles: int
     exact_payload_tiles: int
     application_renderer: str
-    #: The fill's wall clock and the draws it spent, so "the draws carry less"
-    #: and "there were fewer draws" are different readings rather than one
-    #: number. Slice D3 needed exactly this distinction to rule out frame
-    #: pacing as the mechanism of the routed censoring.
-    phase_ms: float
-    presentation_draws: int
-    tile_presentation_draws: int
-    #: ADR 0065's owner counters at the end of the fill. The hand-off counts
-    #: are the adjudicated quantity for the batching mechanisms, so they are
-    #: printed beside the fill they belong to rather than left to a teardown
-    #: dump nobody reads.
-    owner: dict
 
 
 @dataclass(frozen=True)
@@ -189,10 +156,6 @@ def _fill_summary(record: dict[str, object], *, backend: str, repeat: int) -> Fi
         ),
         presented_tiles=int(record.get("active_presented_tile_count", 0) or 0),
         exact_payload_tiles=int(record.get("final_exact_payload_count", 0) or 0),
-        phase_ms=float(record.get("elapsed_ms", 0.0) or 0.0),
-        presentation_draws=int(record.get("presentation_draw_count", 0) or 0),
-        tile_presentation_draws=int(record.get("tile_presentation_draw_count", 0) or 0),
-        owner=dict(record.get("presentation_owner", {}) or {}),
         application_renderer=(
             (
                 f"{(record.get('wgpu_backend_type', '') or 'unknown')!s} / "
@@ -500,17 +463,6 @@ def _print_markdown(
             f"{_fmt(row.preview_tiles_per_s)} | {_fmt(row.target_settle_ms)} | "
             f"{_fmt(row.target_tiles_per_s)} | {row.presented_tiles}/"
             f"{row.exact_payload_tiles} | {row.settlement_status} |"
-        )
-    print()
-    print("| backend | run | wall ms | tile draws | total draws | owner counters |")
-    print("|---|---:|---:|---:|---:|---|")
-    for row in fills:
-        owner = ", ".join(
-            f"{name}={row.owner[name]}" for name in _OWNER_COUNTERS if name in row.owner
-        )
-        print(
-            f"| {row.backend} | {row.repeat} | {_fmt(row.phase_ms)} | "
-            f"{row.tile_presentation_draws} | {row.presentation_draws} | {owner or 'n/a'} |"
         )
     print()
     print(

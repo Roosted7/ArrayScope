@@ -166,21 +166,15 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
         ),
     )
     effects = SimpleNamespace()
-    # ADR 0065 slice D2b: the retarget drives the pipeline's three phases, so
-    # the double answers them rather than the composed `retarget`.
     pipeline = SimpleNamespace(
         effects=effects,
         ladder=SimpleNamespace(policy=LadderPolicy()),
-        stage_retarget=lambda _intent, _demand, _scope: object(),
-        plan_retarget=lambda _staged: object(),
-        admit_retarget=lambda _staged, _planned: 0,
+        retarget=lambda _intent, _demand, _scope: 0,
         last_plan_states=(),
         last_plan_steps=(),
     )
     runtime = SimpleNamespace()
     runtime._frame_session_is_current = lambda candidate: candidate is session
-    runtime._is_current_frame_session = lambda _session_id, _key: True
-    runtime._frame_session = session
     runtime._montage_render_intent = lambda _session: object()
     runtime._lod_admission_scope = lambda _session, _intent: object()
     runtime._frame_pipeline_for_session = lambda _session: pipeline
@@ -2969,28 +2963,8 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
     service._remember_montage_source_level_stats = lambda *_args: None
     service._maybe_publish_after_level_evidence = lambda *_args, **_kwargs: None
 
-    def configure_evidence():
-        # ADR 0065 stage 2 slice C split one call in two: the *decision* is
-        # session state and evaluates on the presentation owner, the *install*
-        # is a widget call the submit makes. Both halves together are what
-        # `_configure_wgpu_evidence_obligation` used to be, and this test is
-        # about their combined contract, so it drives the pair.
-        from arrayscope.window import frame_effects as montage_commit
-
-        boundary = montage_commit.read_frame_boundary_inputs(renderer, session)
-        required, deferred, obligation = effects._wgpu_evidence_obligation_decision(
-            session, boundary
-        )
-        effects._install_wgpu_evidence_obligation(
-            SimpleNamespace(
-                evidence_required=required,
-                evidence_deferred=deferred,
-                evidence_obligation=obligation,
-            )
-        )
-
     # -- gesture: the cold obligation is deferred, no dispatch happens -------
-    configure_evidence()
+    effects._configure_wgpu_evidence_obligation()
     assert view.dispatched is False
     assert service._queue_montage_level_stats_for_payloads(session, {0: object()}) == 0
     assert session._wgpu_histogram_evidence_deferred is True
@@ -3012,7 +2986,7 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
     def forced_commit(current, *, force_commit=False):
         assert force_commit is True
         assert current.backend_refresh_pending is True
-        configure_evidence()
+        effects._configure_wgpu_evidence_obligation()
         quiet_edge_queued.append(
             service._queue_montage_level_stats_for_payloads(current, {0: object()})
         )
@@ -7020,12 +6994,7 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
         def __init__(self):
             self.win = self
             self.img_view = SimpleNamespace(
-                rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
-                # ADR 0065 stage 2 slice D2a: the commit's prepare freezes its
-                # widget reads in one staging section instead of making them
-                # mid-plan, so `getLevels` is now read on every commit rather
-                # than only on the hidden-warm fallback path.
-                getLevels=lambda: None,
+                rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")
             )
             self.commits = 0
 
@@ -7059,15 +7028,12 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
         planned_tiles=(0,),
     )
     session = SimpleNamespace(
-        session_id=1,
-        key=("frame",),
         scheduling_policy=_refine_scheduling_policy(),
         display_committed=False,
         atomic_successor_pending=False,
         force_auto=False,
         tile_presentation_state=TilePresentationState(),
-        peek_dirty_tiles=lambda: (),
-        release_dirty_tiles=lambda _tiles: 0,
+        consume_dirty_tiles=lambda: (),
         ensure_tile_states=lambda: (),
         build_tile_presentation=lambda *_args, **_kwargs: (TilePresentationState(), delta),
         _selected_lod_factor=lambda: 1,
@@ -7085,14 +7051,6 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
             snapshot=lambda: SimpleNamespace(counts={}),
         ),
     )
-    # ADR 0065 stage 2 slice D: the prepare seam plans against a staged session
-    # and the take applies the plan. This double is about the commit *gate* —
-    # a loading-only first commit must not reach the backend — so it stages as
-    # the identity and applies as a no-op, which puts the bail's own writes
-    # exactly where a real session's applier would put them.
-    session._staged_presentation_session = lambda: session
-    session._harvest_presentation_plan = lambda _staged, _state, _delta, *, path: path
-    session.apply_tile_presentation_plan = lambda _plan: (None, None)
 
     win = _Window()
     win.commit_frame_session_presentation(session)

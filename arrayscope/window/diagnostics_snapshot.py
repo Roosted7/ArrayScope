@@ -563,7 +563,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
                 window.renderer, "_last_montage_stage_attach_wait_ms", None
             ),
             last_level_stats_ms=getattr(window.renderer, "_last_montage_level_stats_ms", None),
-            last_tile_payload_build_ms=_commit_timing(window, "prep", "payload_build_ms"),
+            last_tile_payload_build_ms=getattr(
+                window.renderer, "_last_montage_tile_payload_build_ms", None
+            ),
             last_visible_upload_ms=None
             if upload_timing is None
             else upload_timing.visible_upload_ms,
@@ -581,17 +583,33 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             if upload_timing is None
             else upload_timing.tile_layer_rgb_window_ms,
             last_level_sync_ms=None if upload_timing is None else upload_timing.level_sync_ms,
-            last_tile_commit_ms=_commit_timing(window, "submit", "tile_commit_ms"),
-            last_tile_prepare_apply_ms=_commit_timing(window, "prep", "prepare_apply_ms"),
-            last_tile_layer_apply_ms=_commit_timing(window, "submit", "tile_layer_apply_ms"),
-            last_tile_acknowledge_ms=_commit_timing(window, "submit", "acknowledge_ms"),
-            last_tile_retained_store_ms=_commit_timing(window, "submit", "retained_store_ms"),
-            last_tile_state_publish_ms=_commit_timing(window, "submit", "state_publish_ms"),
-            last_tile_geometry_sync_ms=_commit_timing(window, "submit", "geometry_sync_ms"),
-            last_tile_identity_check_ms=_commit_timing(window, "submit", "identity_check_ms"),
-            last_tile_followup_ms=_commit_timing(window, "submit", "followup_ms"),
+            last_tile_commit_ms=getattr(window.renderer, "_last_montage_tile_commit_ms", None),
+            last_tile_prepare_apply_ms=getattr(
+                window.renderer, "_last_montage_tile_prepare_apply_ms", None
+            ),
+            last_tile_layer_apply_ms=getattr(
+                window.renderer, "_last_montage_tile_layer_apply_ms", None
+            ),
+            last_tile_acknowledge_ms=getattr(
+                window.renderer, "_last_montage_tile_acknowledge_ms", None
+            ),
+            last_tile_retained_store_ms=getattr(
+                window.renderer, "_last_montage_tile_retained_store_ms", None
+            ),
+            last_tile_state_publish_ms=getattr(
+                window.renderer, "_last_montage_tile_state_publish_ms", None
+            ),
+            last_tile_geometry_sync_ms=getattr(
+                window.renderer, "_last_montage_tile_geometry_sync_ms", None
+            ),
+            last_tile_identity_check_ms=getattr(
+                window.renderer, "_last_montage_tile_identity_check_ms", None
+            ),
+            last_tile_followup_ms=getattr(window.renderer, "_last_montage_tile_followup_ms", None),
             last_set_image_ms=getattr(window.renderer, "_last_set_image_ms", None),
-            last_overlay_update_ms=_commit_timing(window, "submit", "overlay_update_ms"),
+            last_overlay_update_ms=getattr(
+                window.renderer, "_last_montage_overlay_update_ms", None
+            ),
             cached_tiles_last_session=int(
                 getattr(window.renderer, "_montage_cached_tiles_last_session", 0) or 0
             ),
@@ -1020,24 +1038,3 @@ def _region_transition_summary(transition):
         f"input={region_text(transition.required_input_region)} "
         f"expanded={expanded_text}"
     )
-
-
-def _commit_timing(window, half: str, field: str):
-    """One field of the per-commit timing record, or ``None``.
-
-    ADR 0065 stage 2 decision 12. These used to be twenty independent
-    ``_last_montage_*`` attributes on the renderer, which was fine while one
-    thread wrote all of them. With preparation on the presentation owner a
-    snapshot taken between the two halves would report the prepare block of one
-    commit beside the submit block of another; the record is published by a
-    single attribute swap, so a read is either wholly one commit or wholly the
-    one before it.
-
-    ``None`` for a window that has not committed yet — the same answer the
-    absent attribute gave.
-    """
-
-    record = getattr(getattr(window, "renderer", None), "_last_montage_commit_timings", None)
-    if record is None:
-        return None
-    return getattr(getattr(record, half, None), field, None)
