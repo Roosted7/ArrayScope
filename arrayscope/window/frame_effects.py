@@ -2767,6 +2767,15 @@ class FramePipelineEffects:
             tile_delta = prepared_atomic["tile_delta"]
         else:
             session._atomic_prepared_transaction = None
+            # ADR 0065 stage 2 slice D's prerequisite: both of these are now
+            # ``plan_*`` followed by ``apply_tile_presentation_plan`` — the
+            # delta is decided against a staged session and the writes land in
+            # one mechanical pass afterwards. This seam still runs both halves,
+            # here, in this order, on this thread, which is what makes the
+            # split behaviour-preserving. What it buys is that the *planning*
+            # half is now safe to run speculatively: when the seam moves to the
+            # owner it keeps the plan and the take applies it, so a prepared
+            # transaction the GUI drops writes nothing (slice C's finding).
             fast_atomic = (
                 session.build_atomic_successor_presentation()
                 if cpu_atomic_successor or shader_atomic_successor
