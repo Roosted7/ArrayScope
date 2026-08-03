@@ -16,7 +16,7 @@ acquisition count that trends to zero, which nobody can read if it is not
 recorded.
 
 The third is the anti-convoy rule, which is a claim about *order* rather than
-about correctness: holding the lock per event is not enough, because a Python
+about correctness: holding the lock per batch is not enough, because a Python
 lock hands off by race and the owner re-acquires it in the same breath it
 released it. Measured on the 272-tile wgpu probe, that barging cost GUI-side
 sections 50–550 ms at a stretch; with the announcement and the stand-aside in
@@ -24,6 +24,15 @@ place the same probe charges them under a millisecond apiece. The pins below
 are counting ones — how many events of a queued stream the drain gets through
 while a GUI section is waiting — mutation-checked against the same stream with
 the stand-aside removed.
+
+The fourth is the batch itself (ADR 0065 stage 2 slice D3b, mechanism M1). The
+drain took the lock per *event* until 2026-08-03, and slice D3 measured that as
+the routed fill's remaining cost — ~700 hand-offs per fill on one lock, each
+cheap, 1.0-1.4 s of an 8 s fill together. A batch is bounded twice over, by
+count and by elapsed dispatch, and both bounds are pinned below because either
+alone can be satisfied by an implementation that starves the other side: an
+unbounded count would hold the bridge for a whole completion stream, and an
+unbounded clock would do the same for eight expensive bodies.
 
 What they deliberately do not pin is the *balance* the stand-aside strikes:
 one turn per announcement rather than priority until the waiter queue empties.
@@ -46,7 +55,12 @@ import pytest
 
 from arrayscope.kernel import InlineWorkerBackend, Kernel, TaskSpec
 from arrayscope.kernel.completions import RoutedCompletionQueue
-from arrayscope.presentation.owner import PresentationOwner, montage_completion_route
+from arrayscope.presentation.owner import (
+    _EVENT_BATCH_LIMIT,
+    _EVENT_BATCH_MS,
+    PresentationOwner,
+    montage_completion_route,
+)
 
 #: Bounds a join or a handler wait that a working owner satisfies immediately.
 #: Only a wedged owner ever spends it.
@@ -59,7 +73,12 @@ BLOCKED_OBSERVATION_S = 0.2
 #: A stream long enough that "the owner ran all of it" and "the owner was
 #: interrupted" are different counts, short enough that the interrupted arm
 #: does not sit on the stand-aside's ceiling for long.
-YIELD_STREAM_EVENTS = 20
+#:
+#: Denominated in *batches* since M1, and that is not cosmetic: the stand-aside
+#: happens once per batch, so a stream of one or two batches leaves too few
+#: stand-asides for `BLOCKED_OBSERVATION_S` to distinguish "held off" from
+#: "slow", and the ceiling pin below would flake rather than fail.
+YIELD_STREAM_EVENTS = 10 * _EVENT_BATCH_LIMIT
 
 #: Per-event cost for the arm that needs a real interval during which a GUI
 #: section can be waiting. Nothing is timed against it.
@@ -118,11 +137,12 @@ class _ThreadRecorder:
         ("montage-stage-plan:('vol', 0)", True),
         ("montage-stage-plan:7", True),
         # Per-tile admissions and the frame-admission continuation are the
-        # larger prize and stay on the bridge anyway: routing ~500 of them per
-        # fill through the one-lock migration bridge censored the 272-tile
-        # probe, because the GUI sections they serialize against are dominated
-        # by `retarget_frame_pipeline` (~89 ms x 52). That method is what
-        # stage 2 turns into an owner message; the clause follows it there.
+        # larger prize (7.1 s of the 124 s trace) and stay on the bridge: five
+        # attempts have routed them and five have censored the 272-tile probe.
+        # Slice D3b is the last of them and the one that retires the standing
+        # diagnosis — batching the drain's lock sections cut owner acquisitions
+        # 700 -> ~290 and left the GUI's wait unchanged, so the cost is the
+        # owner's occupancy of the one bridge lock, not the hand-offs.
         ("frame:7", False),
         ("frame:7:tile:3", False),
         # Prefetch bodies warm wgpu residency directly: stage 3, not stage 1.
@@ -345,6 +365,143 @@ def _queued_stream(seconds: float):
     return kernel, owner
 
 
+# ---------------------------------------------------------- the bounded batch
+
+
+def test_one_lock_section_covers_a_whole_batch_of_events():
+    """M1's claim, counted: acquisitions are per batch, not per event.
+
+    The stream is several batches long so the count distinguishes the two
+    designs by a factor rather than by one: per-event locking makes it
+    ``YIELD_STREAM_EVENTS`` acquisitions, which is the mutation this fails
+    against, and the batched drain makes it one per ``_EVENT_BATCH_LIMIT``.
+
+    ``owner_lock_acquisitions`` is asserted alongside because it is the number
+    the migration reads, and a batch counter that did not move it would be
+    bookkeeping rather than a mechanism.
+    """
+
+    kernel, owner = _queued_stream(0.0)
+    try:
+        owner.start()
+        owner.wake()
+        assert kernel.drained.wait(OWNER_WAIT_S)
+    finally:
+        owner.shutdown(timeout=OWNER_WAIT_S)
+
+    snapshot = owner.snapshot()
+    assert snapshot["events_dispatched"] == YIELD_STREAM_EVENTS
+    assert snapshot["owner_events_per_batch_max"] == _EVENT_BATCH_LIMIT
+    expected_batches = YIELD_STREAM_EVENTS // _EVENT_BATCH_LIMIT
+    assert snapshot["owner_batch_acquisitions"] == expected_batches
+    assert snapshot["owner_lock_acquisitions"] == expected_batches
+
+
+def test_a_batch_closes_on_its_time_budget_before_its_event_count():
+    """The second bound, which the count bound cannot stand in for.
+
+    Eight bodies that each cost more than the whole budget would hold the
+    bridge for eight times a frame if only the count closed a batch. Each event
+    here costs more than ``_EVENT_BATCH_MS`` on its own, so every batch must be
+    one event long — and the events are not free, which is the only way to ask
+    this question at all.
+
+    No clock is adjudicated: the assertion is on the batch counter, and the
+    sleep is what the *product* would have to be slower than for the bound to
+    be wrong.
+    """
+
+    seconds = (_EVENT_BATCH_MS / 1000.0) * 2.0
+    kernel = _CountingKernel(seconds, 3)
+    owner = PresentationOwner(kernel)
+    for _ in range(3):
+        owner.append(_dispatchable(lambda: None))
+    try:
+        owner.start()
+        owner.wake()
+        assert kernel.drained.wait(OWNER_WAIT_S)
+    finally:
+        owner.shutdown(timeout=OWNER_WAIT_S)
+
+    snapshot = owner.snapshot()
+    assert snapshot["events_dispatched"] == 3
+    assert snapshot["owner_events_per_batch_max"] == 1
+    assert snapshot["owner_batch_acquisitions"] == 3
+
+
+# ------------------------------------------------------------ the batch tail
+
+
+def test_a_deferred_callback_runs_once_at_the_tail_of_the_batch():
+    """M2's barrier, expressed the only way it is observable: as an order.
+
+    The gate post is the caller. Deferred from inside the first event of a
+    stream, it must run after the *last* one — that is what turns a commit
+    cohort into "everything this batch admitted" instead of "whatever arrived
+    during the previous commit". A test that only asserted the callback ran
+    would pass with the deferral deleted, so the whole claim is the position.
+    """
+
+    owner = PresentationOwner(_NullKernel())
+    order: list[str] = []
+    done = threading.Event()
+
+    def admit(index: int) -> None:
+        order.append(f"event-{index}")
+        if index == 0:
+            assert owner.defer_to_batch_tail(lambda: order.append("tail")) is True
+
+    for index in range(3):
+        owner.append(_dispatchable(lambda index=index: admit(index)))
+    owner.post(lambda: (order.append("message"), done.set()))
+
+    owner.start()
+    try:
+        assert done.wait(OWNER_WAIT_S)
+    finally:
+        owner.shutdown(timeout=OWNER_WAIT_S)
+
+    assert order == ["event-0", "event-1", "event-2", "tail", "message"]
+    assert owner.snapshot()["batch_tail_deferrals"] == 1
+    assert owner.snapshot()["pending_batch_tail"] == 0
+
+
+def test_a_deferral_from_another_thread_is_refused_rather_than_queued():
+    """A refusal is the caller keeping its own wakeup, so it must be honest.
+
+    Off the owner thread there is no batch to be the tail of, and a queued
+    callback nobody drains is the lost wakeup the presentation gate may not
+    have. Both refusal terms are checked here — the wrong thread, and the owner
+    thread with nothing queued behind it — because the caller posts inline on
+    exactly this answer.
+    """
+
+    owner = PresentationOwner(_NullKernel())
+    owner.append(_dispatchable(lambda: None))
+
+    assert owner.defer_to_batch_tail(lambda: None) is False
+
+    ran = threading.Event()
+    answers: list[bool] = []
+
+    def only_event() -> None:
+        # Inside a batch, but the deque behind it is empty: the tail is now.
+        answers.append(owner.defer_to_batch_tail(lambda: None))
+        ran.set()
+
+    owner._events.clear()
+    owner.append(_dispatchable(only_event))
+    owner.start()
+    owner.wake()
+    try:
+        assert ran.wait(OWNER_WAIT_S)
+    finally:
+        owner.shutdown(timeout=OWNER_WAIT_S)
+
+    assert answers == [False]
+    assert owner.snapshot()["batch_tail_deferrals"] == 0
+
+
 # --------------------------------------------------------------- containment
 
 
@@ -558,6 +715,11 @@ def test_the_snapshot_carries_every_counter(owned_kernel):
         "running",
         "pending_events",
         "pending_messages",
+        "pending_batch_tail",
+        "owner_batch_acquisitions",
+        "owner_events_per_batch_max",
+        "batch_tail_deferrals",
+        "batch_tail_dropped_at_stop",
         "events_dispatched",
         "events_dropped_at_stop",
         "messages_posted",

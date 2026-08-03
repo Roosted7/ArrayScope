@@ -39,12 +39,37 @@ sink's ``append``/``wake`` — must touch no session or presentation lock at all
 Both of those are therefore lock-free here: a bare ``deque.append`` and an
 ``Event.set``.
 
-Dispatch takes the lock **per event, not per batch**, and stands aside between
-events for an announced GUI section (see :meth:`PresentationOwner._yield_to_gui`).
-The GUI thread competes for the same lock, and a batch held end to end is
-exactly the multi-frame stall the owner exists to remove. Both rules are
-written for the volume stage 2 will route, not for the six stage-plan bodies a
-fill produces today.
+Dispatch takes the lock **per bounded batch** — up to :data:`_EVENT_BATCH_LIMIT`
+events or :data:`_EVENT_BATCH_MS` of dispatch time, whichever comes first — and
+stands aside between batches for an announced GUI section (see
+:meth:`PresentationOwner._yield_to_gui`).
+
+That rule was the other way round until 2026-08-03, and the flip is worth
+stating because the reasoning it replaces was correct when written. Stage 1's
+rule was "per event, never per batch": the GUI held session sections for 20-45
+ms at a time (``retarget_frame_pipeline`` at ~89 ms x 52 per fill), so a batch
+held end to end was one more multi-frame stall on top of the GUI's own. Slices
+D2a-D2c planned and applied those sections away, and slice D3 then measured the
+routed fill with **every** GUI-side hold under a frame — and it still censored.
+The cost it named was hand-off count: ~700 owner acquisitions per fill on one
+``RLock``, the GUI's mean wait per acquisition 3.5-4.2 ms (nothing) and its
+total 1.0-1.4 s of an 8 s fill (everything).
+
+The batch is what that reading asks for, and **the measurement then refuted the
+reading**: batching cut owner acquisitions to 267-303 and left the GUI's total
+wait exactly where it was (1010-1577 ms against 933-1460 ms unbatched, same
+box, interleaved arms — see :func:`montage_completion_route`). What costs the
+fill is the owner's *occupancy* of the bridge, not the number of times it hands
+it over, and no drain policy can shrink an occupancy.
+
+So the rule stands on a smaller claim than the one it was built for: the GUI's
+worst wait for the bridge is bounded by **one batch** rather than by one body,
+which is under a frame by construction and is the same budget shape the Qt
+bridge's own drain uses. With the ``frame:`` clause narrowed there are ~6 events
+a fill to batch, so this is scaffolding held for the next attempt, measured
+neutral rather than measured good. The stand-aside is unchanged, and still
+between batches rather than inside one — yielding under the lock would be a
+convoy with extra latency.
 """
 
 from __future__ import annotations
@@ -73,6 +98,14 @@ _YIELD_SLEEP_S = 0.0002
 #: honoured (it can only be a bug, but bugs happen while a migration bridge is
 #: in the tree) must not park the drain forever.
 _YIELD_MAX_CHECKS = 250
+
+#: Events dispatched under one order-lock acquisition, and the wall-clock
+#: budget that closes a batch early. Both are the Qt bridge drain's own numbers:
+#: a batch is bounded by whichever comes first, so a stream of cheap admissions
+#: costs one hand-off per eight and a stream of expensive ones still hands the
+#: lock back inside a frame.
+_EVENT_BATCH_LIMIT = 8
+_EVENT_BATCH_MS = 8.0
 
 _GUI = "gui"
 _OWNER = "owner"
@@ -258,6 +291,68 @@ def montage_completion_route(event: Any) -> bool:
     the admissions running on the commit's thread. Both are new mechanism, not
     a shrink.
 
+    **Slice D3b built both of those and the probe refused a fifth time — and
+    this entry retires the D3 diagnosis above rather than extending it.** The
+    two mechanisms were: one order-lock section per bounded batch (8 events or
+    8 ms) instead of per event, and the gate's Qt post deferred to the tail of
+    the owner's drain batch (:meth:`PresentationOwner.defer_to_batch_tail`)
+    whenever an admission armed it with more admissions still queued. Nine
+    routed fills against nine control fills, interleaved on one box:
+    **9/9 censored (59, 75, 91, 100, 108, 108, 112, 137, 161 of 272) against a
+    control that presents 272/272 on every fill** (settle 4.59-4.99 s; the
+    control's first fill of each process reports its milestone late with all
+    272 presented, on both arms, and is environmental).
+
+    The counters are the finding, because M1 did exactly what it was designed
+    to do and it bought nothing:
+
+    ===========================  ==============  ==============  ===========
+    per fill                     routed, batch 8 routed, batch 1 control
+    ===========================  ==============  ==============  ===========
+    ``owner_lock_acquisitions``  267-303         682-702         3-5
+    ``gui_lock_wait_ms_total``   1010-1577       933-1460        1-132
+    ``gui_lock_wait_ms_max``     138-176         148-167         11-80
+    ``owner_yields_to_gui``      22-38           32-39           0-3
+    ===========================  ==============  ==============  ===========
+
+    Cutting the hand-offs by 2.4x moved the GUI's total wait **not at all**. So
+    the quantity that costs 1.0-1.5 s of an ~8 s fill is not the number of
+    alternations (D3's reading, refuted here by its own successor) but the
+    owner's *occupancy* of the bridge — ~640 admission bodies' worth of work
+    holding a lock the GUI needs. No batching, priority or stand-aside policy
+    can reduce an occupancy; only taking the admission path off this lock can.
+
+    M2 failed for a reason worth stating separately, because it looks like a
+    tuning failure and is not: **the drain batch is not a barrier, because the
+    owner is never behind its producers.** The deferral was accepted 9-17 times
+    per fill against ~640 admissions — every other gate arm found the event
+    deque already empty, i.e. the tail was *now*. What made the single-threaded
+    predecessor's cohorts large was the GUI thread being *busy committing* while
+    completions queued behind it in the same loop; the owner has no equivalent
+    occupancy to accumulate against, and 8 ms of batching does not create one.
+
+    The cohorts show the third-order consequence, and it names where a barrier
+    must act. Routed target passes fit ``fixed=0.00ms item=11.2-16.0ms`` with
+    ``frame-critical=1``; control target passes fit ``fixed=2.4-8.0ms
+    item=0.27-0.79ms`` with ``frame-critical=0``. That degenerate fit is R5's
+    documented fill bistability: small cohorts misattribute the commit's fixed
+    cost to the item term, the model then prices any larger chunk out of the
+    frame budget, and the chunk stays at 8 for the rest of the pass. Cohort
+    collapse is therefore not merely a symptom of the routing — it **latches**,
+    which is why a barrier that produces a large *first* cohort is a
+    precondition and a barrier that merely averages is not. Throughput per
+    callback-second: control 404-527 target items/s, routed 47-197.
+
+    Draw rate is unchanged again (control 20-32 tile draws per fill, routed
+    23-31, over comparable wall clock), which rules out pacing for the second
+    time.
+
+    Both mechanisms are kept — they are inert with this clause narrowed (the
+    batch holds the ~6 stage-plan bodies, and the deferral is refused 100% of
+    the time, measured) and they are what the next attempt would otherwise
+    rebuild. Neither is evidence of anything on its own, and the bisect says so:
+    M1 alone and M2 alone censor identically to the pair.
+
     Two further exclusions are deliberate rather than incidental:
 
     - Histogram and level-evidence completions (``montage:…:histogram``,
@@ -304,6 +399,11 @@ class PresentationOwner:
         #: must stay a bare ``deque.append`` — see the module docstring — and
         #: because the two are drained at different points (see :meth:`_drain`).
         self._messages: deque = deque()
+        #: Callbacks deferred to the tail of the batch that is running right
+        #: now (:meth:`defer_to_batch_tail`). Appended only by the owner thread
+        #: and only while it is inside a batch, so it needs no lock and no
+        #: cross-thread contract at all.
+        self._batch_tail: deque = deque()
         self._wake = threading.Event()
         self._stop = False
         self._thread: threading.Thread | None = None
@@ -315,6 +415,10 @@ class PresentationOwner:
         self.messages_dropped_at_stop = 0
         self.worst_event_ms = 0.0
         self.worst_event_key_head = ""
+        self.owner_batch_acquisitions = 0
+        self.owner_events_per_batch_max = 0
+        self.batch_tail_deferrals = 0
+        self.batch_tail_dropped_at_stop = 0
         self.owner_lock_acquisitions = 0
         self.owner_lock_wait_ms_total = 0.0
         self.owner_lock_wait_ms_max = 0.0
@@ -385,6 +489,53 @@ class PresentationOwner:
         self._messages.append(callback)
         self.messages_posted += 1
         self._wake.set()
+
+    def defer_to_batch_tail(self, callback: Callable[[], None]) -> bool:
+        """Run ``callback`` once at the tail of the batch already running.
+
+        ADR 0065 stage 2 slice D3b, and the answer to the second blocker D3
+        named: **the commit gate's cohorts were an accident of single-threading
+        and need a barrier of their own.** Before the admissions moved here, an
+        admission could not land inside a commit because both ran on the GUI
+        thread; the gate therefore batched whatever arrived between commits, and
+        cohorts of 55-91 tiles were the result. Routed, every admission arms the
+        gate from this thread while the GUI is mid-commit, so the next commit
+        presents only what arrived during the previous one — measured cohorts of
+        ones and eights, and a censored fill.
+
+        The barrier this restores is the drain batch. The *arming* still happens
+        immediately (the gate-owner flags are the coalescing key and nothing
+        about their single-flight semantics changes); only the **wakeup** waits,
+        until the event deque is empty. One gate post per batch, not per
+        admission, and the cohort is everything the batch admitted.
+
+        Returns ``False`` — meaning "post it yourself, now" — unless the caller
+        is the owner thread *inside a batch with events still queued*. Both
+        terms matter: off the owner thread there is no batch to be the tail of,
+        and with an empty event deque the tail is now, so deferring would only
+        add a hop. A refusal is therefore never a lost wakeup; it is the caller
+        keeping the wakeup it already had.
+
+        **Measured, and it does not work**, which is why the ``frame:`` clause
+        in :func:`montage_completion_route` is narrow again: with the
+        admissions routed, the deferral was accepted 9-17 times per fill against
+        ~640 admissions, because the owner is never behind its producers and an
+        empty deque means the tail is *now*. The predecessor's cohorts came from
+        the GUI thread being busy inside a 20-45 ms commit while completions
+        piled up in the same loop — an occupancy the owner has no equivalent of,
+        and one that 8 ms of batching does not manufacture. A barrier that
+        works has to hold the wakeup on the *gate's* terms (a quantity, a
+        deadline), not on the drain's structure. Kept for the next attempt;
+        refused 100% of the time as the tree stands.
+        """
+
+        if self._stop or threading.current_thread() is not self._thread:
+            return False
+        if not self._events:
+            return False
+        self._batch_tail.append(callback)
+        self.batch_tail_deferrals += 1
+        return True
 
     # ------------------------------------------------------------- lifecycle
 
@@ -471,34 +622,61 @@ class PresentationOwner:
         for is a message behind an event stream that never drains — bounded in
         practice by the fill being finite, and visible as ``pending_messages``
         in :meth:`snapshot` rather than assumed away.
+
+        The deferred **batch tail** (:meth:`defer_to_batch_tail`) runs at the
+        same point, and ahead of the messages: it carries the presentation
+        gate's wakeup, which is a queued Qt event the GUI cannot act on until
+        it next turns its loop, so posting it before the retarget message
+        costs the owner nothing and gives the GUI its cohort one hop sooner.
         """
 
         events = self._events
         messages = self._messages
         while not self._stop:
-            try:
-                event = events.popleft()
-            except IndexError:
-                event = None
-            if event is not None:
-                self._dispatch(event)
+            if events:
+                self._dispatch_event_batch()
                 self._yield_to_gui()
                 continue
+            self._run_batch_tail()
             try:
                 message = messages.popleft()
             except IndexError:
+                if events:
+                    continue
                 return
             self._dispatch_message(message)
             self._yield_to_gui()
 
+    def _run_batch_tail(self) -> None:
+        """Run what the batch deferred, with the lock down.
+
+        Deliberately outside any order-lock section: the one caller posts a Qt
+        event, which needs no session ordering, and running it under the lock
+        would put a hand-off back exactly where this mechanism removes one. A
+        raising tail is contained the way every other body here is — the owner
+        thread must outlive what it runs.
+        """
+
+        tail = self._batch_tail
+        while True:
+            try:
+                callback = tail.popleft()
+            except IndexError:
+                return
+            try:
+                callback()
+            except BaseException:  # the owner thread must outlive its bodies
+                self.errors += 1
+                self.last_error = traceback.format_exc()
+
     def _yield_to_gui(self) -> None:
-        """Give up **one turn** to a waiting GUI section, between events.
+        """Give up **one turn** to a waiting GUI section, between batches.
 
         The receiving half of the announcement made in
         :meth:`timed_order_lock`, and the anti-convoy mechanism: re-acquiring
         the order lock immediately after releasing it wins the race against a
         thread that has been waiting for it, because a Python lock hands off
-        by race and not by queue order. Called **between** events, never while
+        by race and not by queue order. Called **between** batches, never while
         the lock is held — yielding under the lock would be the convoy with
         extra latency.
 
@@ -515,9 +693,12 @@ class PresentationOwner:
         admission and the commit taking turns on one thread. So the owner
         stands aside until one GUI section has been admitted and then takes
         its turn back, even if more sections are queued behind that one. A
-        section announced during the next event triggers the next stand-aside,
+        section announced during the next batch triggers the next stand-aside,
         which is one-for-one alternation under contention and full owner
-        throughput whenever the GUI is idle.
+        throughput whenever the GUI is idle. Since 2026-08-03 the unit of that
+        alternation is a batch rather than an event, which is the whole of what
+        makes it affordable at admission volume: the turns are the same shape,
+        there are eight times fewer of them.
 
         Both terms are read without a lock, so both are advisory: a torn read
         costs one event of extra wait in either direction. The wait is a poll
@@ -558,23 +739,59 @@ class PresentationOwner:
             # (the window is unwinding) but a *non-zero* count outside teardown
             # would be a lost wakeup, and only the counter can say which.
             self.messages_dropped_at_stop += 1
-
-    def _dispatch(self, event: Any) -> None:
-        failure: BaseException | None = None
-        with self.timed_order_lock(_OWNER):
-            started = perf_counter()
+        tail = self._batch_tail
+        while True:
             try:
-                self._kernel.dispatch_event(event)
-            except BaseException as exc:  # the owner thread must outlive its bodies
-                failure = exc
-                self.errors += 1
-                self.last_error = traceback.format_exc()
-            event_ms = (perf_counter() - started) * 1000.0
-            self.events_dispatched += 1
-            if event_ms > self.worst_event_ms:
-                self.worst_event_ms = event_ms
-                self.worst_event_key_head = _key_head(getattr(event.spec, "key", None))
-        if failure is not None and self._error_hook is not None:
+                tail.popleft()
+            except IndexError:
+                return
+            # Same rule, and the same reason it is a count rather than a run: a
+            # gate post delivered into a window that is unwinding is a wakeup
+            # for a commit that must not happen.
+            self.batch_tail_dropped_at_stop += 1
+
+    def _dispatch_event_batch(self) -> None:
+        """Dispatch up to one bounded batch under ONE order-lock section.
+
+        The batch closes on whichever of the two bounds arrives first, and on
+        ``_stop`` — re-checked per event, so a shutdown never waits out a batch
+        it could have abandoned. Failures are collected rather than reported
+        inside the section: an error hook is application code and must not run
+        with the migration bridge held.
+        """
+
+        events = self._events
+        failures: list[BaseException] = []
+        dispatched = 0
+        with self.timed_order_lock(_OWNER):
+            self.owner_batch_acquisitions += 1
+            batch_started = perf_counter()
+            while dispatched < _EVENT_BATCH_LIMIT and not self._stop:
+                try:
+                    event = events.popleft()
+                except IndexError:
+                    break
+                started = perf_counter()
+                try:
+                    self._kernel.dispatch_event(event)
+                except BaseException as exc:  # the owner thread must outlive its bodies
+                    failures.append(exc)
+                    self.errors += 1
+                    self.last_error = traceback.format_exc()
+                now = perf_counter()
+                event_ms = (now - started) * 1000.0
+                self.events_dispatched += 1
+                dispatched += 1
+                if event_ms > self.worst_event_ms:
+                    self.worst_event_ms = event_ms
+                    self.worst_event_key_head = _key_head(getattr(event.spec, "key", None))
+                if (now - batch_started) * 1000.0 >= _EVENT_BATCH_MS:
+                    break
+        if dispatched > self.owner_events_per_batch_max:
+            self.owner_events_per_batch_max = dispatched
+        if self._error_hook is None:
+            return
+        for failure in failures:
             # A hook that raises would kill the one thread that reports it.
             try:
                 self._error_hook(failure)
@@ -679,6 +896,11 @@ class PresentationOwner:
             "messages_dropped_at_stop": int(self.messages_dropped_at_stop),
             "worst_event_ms": float(self.worst_event_ms),
             "worst_event_key_head": str(self.worst_event_key_head),
+            "pending_batch_tail": len(self._batch_tail),
+            "owner_batch_acquisitions": int(self.owner_batch_acquisitions),
+            "owner_events_per_batch_max": int(self.owner_events_per_batch_max),
+            "batch_tail_deferrals": int(self.batch_tail_deferrals),
+            "batch_tail_dropped_at_stop": int(self.batch_tail_dropped_at_stop),
             "owner_lock_acquisitions": int(self.owner_lock_acquisitions),
             "owner_lock_wait_ms_total": float(self.owner_lock_wait_ms_total),
             "owner_lock_wait_ms_max": float(self.owner_lock_wait_ms_max),

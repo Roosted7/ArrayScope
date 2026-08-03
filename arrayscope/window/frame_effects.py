@@ -2306,16 +2306,45 @@ class FramePipelineEffects:
                 lambda effects=self, owner=owner: effects._on_presentation_gate(owner),
             )
             return
-        emit_trace("presentation_gate", action="armed-post", owner_session=owner[0])
         # Low priority is the fairness contract: already queued input, paint,
         # heartbeat, and kernel-delivery events run before the next bounded
         # presentation slice. The receiver is parented to the orchestrator,
         # and `_on_presentation_gate` rechecks the session generation.
-        Qt.QtCore.QCoreApplication.postEvent(
-            receiver,
-            _PresentationGateEvent(self, owner),
-            int(Qt.QtCore.Qt.EventPriority.LowEventPriority.value),
-        )
+        gate_event = _PresentationGateEvent(self, owner)
+
+        def post_the_gate() -> None:
+            Qt.QtCore.QCoreApplication.postEvent(
+                receiver,
+                gate_event,
+                int(Qt.QtCore.Qt.EventPriority.LowEventPriority.value),
+            )
+
+        # ADR 0065 stage 2 slice D3b, mechanism M2: the commit gate's cohort
+        # barrier, made to depend on the owner's batch rather than on the
+        # admissions happening to run on the commit's own thread. Called from
+        # an admission body with more admissions already queued behind it, the
+        # *arm* stays where it is (the gate-owner flags above are unchanged and
+        # still the single-flight key) and only the wakeup waits for the tail of
+        # the drain batch — one post per batch instead of one per admission,
+        # and the commit that answers it presents the whole batch. Slice D3
+        # measured the alternative: routed admissions collapsed cohorts from
+        # 55-91 tiles to runs of ones and eights, because every commit re-armed
+        # the gate while it ran and the next one presented only what arrived
+        # during the previous one.
+        #
+        # The owner refuses the deferral unless it is genuinely mid-batch, so
+        # this is never a wakeup handed to something that will not deliver it —
+        # and with the `frame:` clause narrow again (D3b's routing was refused
+        # with the mechanism still in place) it refuses *every* time, measured:
+        # `batch_tail_deferrals` was 0 across nine control fills. Read
+        # `PresentationOwner.defer_to_batch_tail` before building on this; the
+        # barrier is kept for the next attempt, not because it works today.
+        owner_thread = _presentation_owner(self.renderer)
+        if owner_thread is not None and owner_thread.defer_to_batch_tail(post_the_gate):
+            emit_trace("presentation_gate", action="armed-batch-tail", owner_session=owner[0])
+            return
+        emit_trace("presentation_gate", action="armed-post", owner_session=owner[0])
+        post_the_gate()
 
     def _on_presentation_gate(self, owner=None) -> None:
         """One gate wakeup: decide under the lock, then commit outside it.

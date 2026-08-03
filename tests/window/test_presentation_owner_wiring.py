@@ -194,6 +194,12 @@ def test_a_posted_retarget_runs_the_ladder_on_the_owner_thread(qtbot):
     on its own schedule from the GUI thread, and this test owns one of those
     calls, not the traffic around it. The owner thread's name can appear in
     that list only if a ladder retarget ran off the GUI thread.
+
+    The row carries ``force_commit`` as well as the thread, and that is not
+    belt-and-braces: slice D3b put the replan gate's ``fire()`` on the owner too
+    (coupled to the ``frame:`` routing, and reverted with it), which made the
+    thread alone stop naming *this* post. The keyword names it whoever else is
+    posting retargets, so the pin survives the next attempt at that pair.
     """
 
     from arrayscope.window.frame_runtime import post_frame_pipeline_retarget
@@ -204,21 +210,23 @@ def test_a_posted_retarget_runs_the_ladder_on_the_owner_thread(qtbot):
         owner = win.presentation_owner
         session = renderer._frame_session
         assert session is not None
-        threads: list[str] = []
+        retargets: list[tuple[str, bool]] = []
         original = type(renderer).retarget_frame_pipeline
 
         def spy(self, target, **kwargs):
-            threads.append(threading.current_thread().name)
+            retargets.append(
+                (threading.current_thread().name, bool(kwargs.get("force_commit", False)))
+            )
             return original(self, target, **kwargs)
 
         renderer.retarget_frame_pipeline = spy.__get__(renderer, type(renderer))
-        assert OWNER_THREAD_NAME not in threads
+        assert (OWNER_THREAD_NAME, True) not in retargets
 
         before = owner.snapshot()["messages_dispatched"]
-        post_frame_pipeline_retarget(renderer, session)
+        post_frame_pipeline_retarget(renderer, session, force_commit=True)
 
         _wait(qtbot, lambda: owner.snapshot()["messages_dispatched"] > before)
-        assert OWNER_THREAD_NAME in threads
+        assert (OWNER_THREAD_NAME, True) in retargets
     finally:
         win.close()
 
@@ -228,9 +236,17 @@ def test_a_posted_retarget_for_a_superseded_session_does_not_run(qtbot):
 
     A posted operation can land after a rebirth. Slice B's rule is that the
     closure carries the identity pair it was built with and drops itself; the
-    mutation is deleting that check, which this test fails. The evidence is
-    again the owner thread's absence from the retarget log, because the GUI
-    thread keeps retargeting this window for reasons of its own.
+    mutation is deleting that check, which this test fails.
+
+    The evidence used to be "the owner thread never ran a retarget", and slice
+    D3b showed how narrow that oracle was: with the replan gate's ``fire()``
+    posted to the owner (the D3b pair, since reverted) the owner thread runs
+    retargets for reasons this test does not control, and the assertion turns
+    vacuous-or-wrong depending on timing. The replacement names *this* post
+    rather than the thread — ``force_commit=True`` is a keyword the gate's fire
+    never passes — and the wait is a sentinel message posted behind it, since
+    the owner drains messages FIFO: once the sentinel has run, the retarget
+    either ran or dropped itself, and there is nothing left to race.
     """
 
     from arrayscope.window.frame_runtime import post_frame_pipeline_retarget
@@ -241,24 +257,25 @@ def test_a_posted_retarget_for_a_superseded_session_does_not_run(qtbot):
         owner = win.presentation_owner
         session = renderer._frame_session
         assert session is not None
-        threads: list[str] = []
-        renderer.retarget_frame_pipeline = lambda *_args, **_kwargs: threads.append(
-            threading.current_thread().name
+        retargets: list[tuple[str, bool]] = []
+        renderer.retarget_frame_pipeline = lambda *_args, **kwargs: retargets.append(
+            (threading.current_thread().name, bool(kwargs.get("force_commit", False)))
         )
+        behind = threading.Event()
 
         # Post and supersede inside ONE order-lock section, so the closure
         # cannot be dispatched between the two: without this the test would be
         # racing the owner for its own precondition.
         with owner.timed_order_lock("gui"):
-            before = owner.snapshot()["messages_dispatched"]
             # Advance the generation the way an index-window retarget does:
             # same object, new id. The post names the OLD one.
             session_id = int(session.session_id)
-            post_frame_pipeline_retarget(renderer, session)
+            post_frame_pipeline_retarget(renderer, session, force_commit=True)
+            owner.post(behind.set)
             session.session_id = session_id + 1
 
-        _wait(qtbot, lambda: owner.snapshot()["messages_dispatched"] > before)
-        assert OWNER_THREAD_NAME not in threads
+        assert behind.wait(interaction_settle_timeout_ms() / 1000.0)
+        assert (OWNER_THREAD_NAME, True) not in retargets
     finally:
         win.close()
 
@@ -677,6 +694,14 @@ def test_a_plan_a_later_retarget_superseded_admits_nothing(qtbot):
     decisions taken against a snapshot two generations old. The refusal is
     therefore read as a session fingerprint that does not move, not only as a
     submission count of zero.
+
+    Slice D3b routes the per-tile admissions to the owner thread, and a
+    fingerprint is only evidence about *this* apply if nothing else can write
+    the session between the two reads. So the adjudicated span takes the GUI
+    side of the session-order lock — which is what a real GUI-side caller of
+    ``admit_retarget`` does anyway, and what the bridge exists for. Without it
+    an admission landing mid-assertion reds a test about something else
+    entirely.
     """
 
     from tests.window.test_presentation_plan_split import _session_fingerprint
@@ -703,11 +728,12 @@ def test_a_plan_a_later_retarget_superseded_admits_nothing(qtbot):
         assert second is not None
         pipeline.admit_retarget(second, pipeline.plan_retarget(second))
 
-        superseded_before = int(pipeline.counters.retargets_superseded)
-        fingerprint_before = _session_fingerprint(session)
+        with win.presentation_owner.timed_order_lock("gui"):
+            superseded_before = int(pipeline.counters.retargets_superseded)
+            fingerprint_before = _session_fingerprint(session)
 
-        assert pipeline.admit_retarget(first, planned) == 0
-        assert int(pipeline.counters.retargets_superseded) == superseded_before + 1
-        assert _session_fingerprint(session) == fingerprint_before
+            assert pipeline.admit_retarget(first, planned) == 0
+            assert int(pipeline.counters.retargets_superseded) == superseded_before + 1
+            assert _session_fingerprint(session) == fingerprint_before
     finally:
         win.close()

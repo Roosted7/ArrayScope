@@ -7643,6 +7643,15 @@ def _phase_record(
             getattr(win, "_persistent_tile_layer_fast_drain_enabled_count", 0) or 0
         ),
         "montage_overlay_count": _montage_overlay_count(win),
+        # ADR 0065's migration gauge, per phase rather than at teardown: the
+        # hand-off counts are what slice D3 named as the routed fill's cost, so
+        # a probe that cannot read them cannot adjudicate a mechanism aimed at
+        # them. A window without an owner (unit shells) reports nothing.
+        "presentation_owner": (
+            {}
+            if getattr(win, "presentation_owner", None) is None
+            else dict(win.presentation_owner.snapshot())
+        ),
         "presentation_draw_count": int(presentation.get("draw_count", 0)),
         "presentation_last_draw_ms": float(presentation.get("last_draw_ms", 0.0) or 0.0),
         "presentation_max_draw_ms": float(presentation.get("max_draw_ms", 0.0) or 0.0),

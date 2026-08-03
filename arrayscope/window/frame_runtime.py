@@ -461,9 +461,10 @@ class FrameRuntimeMixin:
 
         # ADR 0065 stage 2 slice B set out to make this fire an owner-thread
         # operation — decision 10 puts it FIRST, as the highest-count caller
-        # with no dependents — and measurement refused it. Written, then
-        # reverted: `post_to_presentation_owner(self, fire)` in place of the
-        # timer below censored the 272-tile wgpu probe 3/3
+        # with no dependents — and measurement refused it *on its own*. Written,
+        # then reverted, then re-made in slice D3b with its coupled half (see
+        # the note below the history): `post_to_presentation_owner(self, fire)`
+        # in place of the timer, alone, censored the 272-tile wgpu probe 3/3
         # (5, 140, 21 of 272 presented) against 272/272 with everything else
         # in slice B landed and only this line back on the timer, on the same
         # box within minutes. Bisected to this line alone.
@@ -488,6 +489,14 @@ class FrameRuntimeMixin:
         # batch whose tail is a real barrier, and at that point the flag and
         # the drain shape together reproduce what the event loop was doing by
         # accident. Slice D owns both, together.
+        #
+        # ADR 0065 stage 2 slice D3b made the conversion again, coupled to the
+        # `frame:` routing clause exactly as this comment demands, with the
+        # owner's drain batched and the commit gate's wakeup deferred to the
+        # batch tail. The pair censored the probe a FIFTH time (9/9 fills, 59-161
+        # of 272 presented) and is reverted with it; the routing clause in
+        # `montage_completion_route` carries the numbers. Nothing about the
+        # paragraph above changed — this fire is still coupled, and still last.
         #
         # Timer category: UI cosmetic. Event-turn barrier for coalescing a
         # current-session replan; kernel completion still owns work delivery.

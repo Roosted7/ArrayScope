@@ -823,3 +823,141 @@ simply carries less.
    (`operation_evaluator`'s unlocked display cache, `MontageLevelTracker`, the
    lazily created `preparedTiledUploads` mailbox) become real the moment
    admissions run off the GUI thread, and none of them is currently defended.
+
+## Slice D3b: both named blockers were built, and the diagnosis behind one of them is refuted (2026-08-03)
+
+D3 closed with two owed mechanisms rather than another shrink. Both were built
+and measured together, and the routing is refused a **fifth** time. The value of
+this attempt is not the verdict — it is that the counters retire D3's own
+explanation of the fourth one.
+
+### What was built
+
+- **M1 — batched owner lock sections** (`arrayscope/presentation/owner.py`).
+  `_dispatch_event_batch` replaces the per-event `_dispatch`: one
+  `timed_order_lock("owner")` section covers up to `_EVENT_BATCH_LIMIT = 8`
+  events or `_EVENT_BATCH_MS = 8.0` of dispatch, `_stop` re-checked per event,
+  then release and `_yield_to_gui` between batches. Counters
+  `owner_batch_acquisitions` / `owner_events_per_batch_max`. The module
+  docstring's "per event, never per batch" rule is rewritten with the reasoning
+  that made it right in stage 1 and the measurement that flipped it.
+- **M2 — a cohort barrier that does not need thread co-location**
+  (`PresentationOwner.defer_to_batch_tail`, called from
+  `FramePipelineEffects.request_presentation`). Arming is unchanged — the
+  gate-owner flags stay the single-flight key — and only the Qt post is
+  deferred, to the point where the event deque empties, ahead of the posted
+  messages. Refused (so the caller posts inline, keeping its own wakeup) off the
+  owner thread or with nothing queued behind the caller. Counter
+  `batch_tail_deferrals`; a new `armed-batch-tail` trace action.
+- The D3 change verbatim: `montage_completion_route` widened to
+  `("frame:", "montage-stage-plan:")` and `request_montage_replan`'s `fire()`
+  converted to `post_to_presentation_owner`, with both test consequences D3
+  recorded (the timer census keeps its entry because the no-owner fallback keeps
+  the timer; the superseded-retarget oracle moves to a `force_commit=True`
+  marker plus a sentinel message).
+
+The probe learned to print what this needs: `presentation_owner` (the whole
+counter snapshot) joins the phase record, and the fill table carries wall ms,
+tile-presentation draws, total draws and the owner counters.
+
+### The measurement: 9/9 censored against 9/9 complete
+
+`render_pass_governor_probe --backend wgpu --tiles 272 --repeat 3`, arms
+alternated in one loop on one box (three routed invocations, three control):
+
+| arm | invocation | run 0 | run 1 | run 2 |
+|---|---|---|---|---|
+| routed + M1 + M2 | A | 100/272 censored | 75/272 | 108/272 |
+| routed + M1 + M2 | B | 59/272 censored | 112/272 | 161/272 |
+| routed + M1 + M2 | C | 108/272 censored | 137/272 | 91/272 |
+| control (M1+M2 in tree, routing narrowed) | 1 | 261/272 late-milestone | 272/272 within-5s | 272/272 |
+| control | 2 | 264/272 late-milestone | 272/272 within-5s | 272/272 |
+| control | 3 | 272/272 late-milestone | 272/272 within-5s | 272/272 |
+
+Control settle 4.59-4.99 s. The control's *first fill per process* reports its
+target-settled milestone late with 261-272 tiles presented, on every invocation
+and on both arms; it is environmental (this box, this week) and is nothing like
+the routed arm's 59-161 presented.
+
+Bisected, one invocation each:
+
+| arm | run 0 | run 1 | run 2 |
+|---|---|---|---|
+| routed, M1 only (M2 refused) | 95/272 | 143/272 | 117/272 |
+| routed, M2 only (`_EVENT_BATCH_LIMIT = 1`) | 82/272 | 114/272 | 70/272 |
+
+Neither half rescues anything, and neither half is the one that breaks it.
+
+### What the counters retire
+
+| per fill | routed, batch 8 | routed, batch 1 | control |
+|---|---|---|---|
+| `events_dispatched` | 636-649 | 634-649 | 2 |
+| `messages_dispatched` | 48-53 | 48-53 | 1-3 |
+| `owner_lock_acquisitions` | 267-303 | 682-702 | 3-5 |
+| `owner_batch_acquisitions` | 216-255 | 634-649 | 2 |
+| `batch_tail_deferrals` | 12-17 | 15-16 | 0 |
+| `gui_lock_acquisitions` | 228-301 | 261-300 | 1167-1280 |
+| `gui_lock_wait_ms_total` | 1010-1577 | 933-1460 | 1-132 |
+| `gui_lock_wait_ms_max` | 138-176 | 148-167 | 11-80 |
+| `owner_lock_wait_ms_total` | 228-297 | 285-299 | 0-21 |
+| `owner_yields_to_gui` | 22-38 | 32-39 | 0-3 |
+| `errors` / `pending_*` | 0 | 0 | 0 |
+
+**M1 did exactly what it was designed to do and it bought nothing.** Hand-offs
+fell 2.4x and the GUI's total wait did not move. D3 read the fourth refutation
+as hand-off count ("there is no policy under which 700 alternations cost less
+than the hand-offs themselves"); the correct quantity is the owner's
+**occupancy** of the bridge — ~640 admission bodies holding a lock the GUI
+needs — and an occupancy is invariant under every batching, priority and
+stand-aside policy. Only removing the admission path from this lock changes it.
+
+**M2 failed for a structural reason, not a tuning one: the drain batch is not a
+barrier, because the owner is never behind its producers.** The deferral was
+accepted 12-17 times per fill against ~640 admissions — every other gate arm
+found the deque already empty, so "the tail of the batch" *was* now. What made
+the single-threaded predecessor's cohorts large was the GUI thread being busy
+inside a 20-45 ms commit while completions queued in the same loop. The owner
+has no equivalent occupancy, and 8 ms of batching does not manufacture one.
+
+### The cohort collapse latches through R5, which is new
+
+The governor's own fit, printed per pass by the probe:
+
+| arm | target-pass fit | frame-critical |
+|---|---|---|
+| control | `fixed=2.4-8.0ms item=0.27-0.79ms` | 0 |
+| routed (all three bisect arms) | `fixed=0.00ms item=11.2-16.0ms` | 1 |
+
+That is the documented fill bistability (`arrayscope-fill-bistability`): small
+cohorts misattribute the commit's fixed cost to the item term, the model prices
+any larger chunk out of the 16.67 ms frame budget, and the chunk stays at 8 for
+the rest of the pass — `8,8,8,8,…` in every routed target pass against control
+runs of `32,32,32` and `68,68,68`. So cohort size is not merely a symptom of
+where the admissions run: **it latches**. A barrier for the next attempt has to
+produce a large *first* cohort, not a large average one.
+
+Throughput per callback-second, target pass: control 404-527 items/s, routed
+47-197. Draw rate is unchanged for the second time (control 20-32 tile draws per
+fill, routed 23-31, comparable wall clock), which rules out frame pacing again.
+
+### What is kept, and what the next attempt owes
+
+Kept: M1, M2, their pins, and the probe's owner/draw instrumentation. Reverted:
+the routing clause and the `fire()` conversion, together, as always. With the
+clause narrow both mechanisms are **inert and measured so** — the batch holds
+the ~6 stage-plan bodies a fill produces, and the deferral is refused 100% of
+the time — so keeping them is a decision to hold the scaffolding, not a claim
+that either buys anything today.
+
+1. The blocker is unchanged in *shape* and sharper in *statement*: the
+   admission path must stop sharing one lock with the commit. What D3b adds is
+   that no policy on the drain's side can substitute, because the cost is
+   occupancy. A reader/writer or per-family bridge, or admissions writing state
+   the commit reads through a snapshot, is the only family left.
+2. The commit-gate barrier must be stated on the gate's own terms — a quantity
+   of pending admissions, or a deadline — because the drain has no accumulation
+   to be the tail of. And it must be measured against R5's fit, not only
+   against cohort size, since the collapse is bistable.
+3. `fire()` on the owner remains correct and coalescing (48-53 messages against
+   ~640 events, zero pending at teardown) and blocked only by the routing.
