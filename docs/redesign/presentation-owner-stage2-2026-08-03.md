@@ -638,3 +638,188 @@ which are the prepare, not the submit); the retarget is unchanged.
    admission containers, so applying one prepared before an admission deletes
    that admission.
 3. `frame:` routing was not re-attempted, per the slice's scope.
+
+## Slice D3: the stated condition was met, and the routing is refused a fourth time (2026-08-03)
+
+D2c's whole point was the condition D2a named — "GUI-side hold under roughly a
+frame" — so D3 is that condition being cashed in. It was met. The fill censored
+anyway, and the counters name a blocker of a different kind, which is why this
+entry closes the "shrink one more section" line of attack rather than extending
+it.
+
+### What was built (both halves, exactly as the coupling requires)
+
+- `montage_completion_route` widened to `("frame:", "montage-stage-plan:")`.
+- the replan gate's `fire()` converted from `run_on_gui_thread` +
+  `singleShot(1)` to `post_to_presentation_owner(self, fire)` with an inline
+  fallback for a renderer with no owner.
+- test-side consequences: the routing table's `frame:` rows flip to routed, the
+  timer census in `test_architecture_guards` loses its
+  `request_montage_replan` / `singleShot` entry, and
+  `test_a_posted_retarget_for_a_superseded_session_does_not_run` needs a new
+  oracle — its evidence was "the owner thread never ran a retarget", which
+  stops naming a caller once the replan gate's fire is also on the owner. (The
+  replacement that worked: mark the post with `force_commit=True`, which the
+  gate's fire never passes, and wait on a sentinel message posted behind it,
+  since the owner drains messages FIFO.)
+
+Everything above is reverted. What is kept is this section and the ledger entry
+in `montage_completion_route`.
+
+### The affinity re-audit: the named debt is not on the routed path
+
+The debt D2a recorded — `_queue_montage_level_stats_for_payloads` reaching
+`img_view.residentHistogramEvidence` through
+`_queue_wgpu_resident_histogram_evidence`, the one genuinely GPU-affine call
+left inside a prepare — **is not reachable from `apply_commit`**. Instrumented
+on the routed arm (a thread-name trace at each of the three funnels, three
+probe runs), `_queue_montage_level_stats_for_payloads` and
+`_schedule_montage_histogram_aggregate` ran on `MainThread` only, and
+`_queue_wgpu_resident_histogram_evidence` never ran at all in a cold fill. Its
+live callers are the ack (`frame_effects.py` ~4868, GUI-side commit), the
+prepare's deliberate live-session exception, and the interaction-stop edge
+(`frame_runtime.py` ~758) — none of them a `frame:` body. No fix was owed and
+none was made.
+
+The rest of the audit of `apply_commit` -> `_admit_ready_payloads` -> the three
+`_admit_*` helpers -> `mark_materialized` came back clean of Qt: `frame_session`
+has no Qt reference at all, `render/lod.py` none, the lifecycle and level
+trackers are plain dictionaries. Three findings worth keeping:
+
+- `image_view_backend_capabilities(view)` is classified inconsistently in the
+  tree — a "live image-view probe" at `frame_effects.py:2280` and "not a Qt
+  call, safe from the presentation owner" at `level_stats.py:2422`. The second
+  is correct (`display/backend_contract.py` is `getattr` chains onto a frozen
+  dataclass); the first is merely guarded incidentally, because `on_gui_thread()`
+  is the *first* term of its `and` chain. Worth reconciling, not a defect.
+- `_prepare_backend_uploads` is mirror-based as documented, with one unaudited
+  edge: `view.preparedTiledUploads` *lazily creates* the mailbox and writes it
+  onto the widget (`imageview2d.py:1033`), so a first touch from the owner is an
+  unsynchronised attribute write. Benign in practice, not race-free by
+  construction.
+- `store_montage_tile_result` (reached from `_admit_evaluation_result`) mutates
+  `operation_evaluator`'s display cache, counters and `last_status` with no
+  lock, and the GUI reads the same cache. Not Qt affinity — genuine shared
+  mutable state that only becomes two-threaded when the admissions move.
+
+### The measurement: 6/6 censored against 6/6 green, interleaved
+
+`render_pass_governor_probe --backend wgpu --tiles 272 --repeat 3`, arms
+alternated in one loop on one box:
+
+| block | arm | run 0 | run 1 | run 2 |
+|---|---|---|---|---|
+| 1 | routing + fire | 66/272 censored | 36/272 censored | 64/272 censored |
+| 2 | control | 272/272 within-5s | 272/272 | 272/272 |
+| 3 | routing + fire | 40/272 censored | 61/272 censored | 125/272 censored |
+| 4 | control | 272/272 within-5s | 272/272 | 272/272 |
+
+Control target settle 4.27-4.81 s. Two earlier instrumented triples on the same
+arm censored identically (36/51/90, 88/33/74, 70/31/115, 72/38/77), so the
+verdict rests on 18 routed fills, not six.
+
+Bisected, as the previous attempts were:
+
+| arm | run 0 | run 1 | run 2 |
+|---|---|---|---|
+| routing only (`fire()` back on the timer) | 108/272 | 29/272 | 35/272 |
+| `fire()` only (routing narrowed) | 18/272 | 5/272 | 5/272 |
+
+The `fire()`-alone arm reproduces slice B's storm unchanged, so **the coupling
+claim is still true** — it is the routing that fails, in both of its arms.
+
+### The condition was met, measured on the failing arm itself
+
+GUI-side holds, instrumented per calling funnel (the lock context itself,
+attributed to the first caller frame that is not the decorator or `_order_lock`),
+three routed fills:
+
+| GUI section | calls | total ms | max ms |
+|---|---:|---:|---:|
+| `_commit_tile_layer` | 74-132 | 294-604 | 15-20 |
+| `_submit_prepared_transaction` | 70-128 | 194-531 | 16-20 |
+| `retarget_frame_pipeline` | 12-87 | 16-162 | 4-6 |
+| `commit_pending_session` | 74-132 | 19-31 | 2-6 |
+| `apply_montage_viewport_retarget` | 3 | 141-224 | 49-126 |
+
+Against D2a's 526 ms and 194 ms worst cases, every per-fill section is now
+under a frame except a three-call viewport retarget that is not fill traffic.
+**The precondition holds and the fill still censors**, which retires it as the
+open question.
+
+### What the counters say instead
+
+| per fill | routed arm | control arm |
+|---|---|---|
+| `events_dispatched` | 637-662 | 2 |
+| `owner_lock_acquisitions` | 692-719 | 3-5 |
+| `gui_lock_acquisitions` | 280-356 | 1210-1327 |
+| `gui_lock_wait_ms_total` | 984-1407 | 0.7-192 |
+| `gui_lock_wait_ms_max` | 135-221 | 0-100 |
+| `owner_lock_wait_ms_total` | 147-331 | 0-6 |
+| `owner_yields_to_gui` | 31-41 | 0-4 |
+| `errors` | 0 | 0 |
+
+Neither side starves the way stage 1 (owner 5.4 s of 8.6) or D2a (owner 1.8 s
+of ~8) did, and no wedge is left behind: `pending_events` and
+`pending_messages` are zero at teardown, `errors` zero, `messages_dispatched`
+52-59 against 637-662 events — so the replan gate's coalescing *works* once the
+barrier is real, which is the one thing this attempt proves positively.
+
+The cost is the bridge itself. ~700 owner acquisitions and ~300 GUI
+acquisitions per fill on one `RLock`; the GUI's mean wait per acquisition is
+3.5-4.2 ms, which is nothing, and its total is 1.0-1.4 s of an ~8 s fill, which
+is everything. The stand-aside trades a turn and cannot make 700 alternations
+cheaper than 700 alternations.
+
+Two second-order numbers say the same in the fill's own units:
+
+- **Cohorts collapse.** Control `1,1,3,4,25,68,68,68,34` and `1,1,3,91,91,86`
+  against routed runs of ones and eights,
+  `1,1,1,1,1,1,1,2,128,13,16,8,8,4,68,18` and
+  `1,1,1,1,15,1,2,1,1,1,1,1,1,1,8,8,8,8,8,8,8,8,8,8,8,8`. The commit gate's
+  batching never came from the gate — it came from admissions being on the
+  *commit's own thread*, so none could land inside a commit. Routed, every
+  commit re-arms the gate while it runs and the next one presents only what
+  arrived during the previous one.
+- **Throughput per callback-second** falls 412-472 -> 112-294 items/s, and one
+  routed target pass admitted 437 items for 272 tiles — the same tiles
+  re-committed. Target chunks go 14-19 (control) -> 20-41.
+
+### Draw-rate structure (informative, per the slice's ask)
+
+`profile_montage_workflow`'s cold-fill record already carries the draw counters,
+so the probe was made to print them rather than reconstructing from the trace
+ring. Per fill, tile-presentation draws / total presentation draws / wall ms:
+
+| arm | run 0 | run 1 | run 2 |
+|---|---|---|---|
+| routed | 31 / 40 / 5439 | 35 / 46 / 5543 | 34 / 42 / 5258 |
+| control | 32 / 42 / 5072 | 24 / 33 / 4561 | 25 / 35 / 4865 |
+| control (2nd block) | 28 / 38 / 4774 | 21 / 32 / 4287 | 25 / 35 / 4665 |
+
+**Draw rate is not what changes**: 5.3-6.4 draws/s on both arms. The control
+puts 272 tiles on screen with those draws and the routed arm puts 36-66. The
+program's adjudicator therefore says the same thing the settle column does, and
+from a direction that rules out frame pacing as the mechanism — each draw
+simply carries less.
+
+### What the next attempt owes, named by the measurement
+
+1. **The migration bridge has to stop being one lock for the admission path.**
+   Every previous slice shortened a section; this one shows sections are no
+   longer the cost, hand-off count is. A per-family lock, a reader/writer split,
+   or admissions writing state the commit reads through a snapshot — all of them
+   new mechanism, none of them a shrink.
+2. **The commit gate needs a barrier of its own.** Its cohorts were an accident
+   of single-threading, and any design that moves admissions off the commit's
+   thread has to replace that accident deliberately — otherwise cohort size
+   becomes "whatever arrived during the last commit", which is what censored
+   here.
+3. `fire()` on the owner is *correct and coalescing* (52-59 messages against
+   637-662 events, zero pending at teardown) and remains blocked only by the
+   routing it is coupled to. Nothing new is owed there.
+4. Three non-Qt thread-safety items surfaced by the audit above
+   (`operation_evaluator`'s unlocked display cache, `MontageLevelTracker`, the
+   lazily created `preparedTiledUploads` mailbox) become real the moment
+   admissions run off the GUI thread, and none of them is currently defended.

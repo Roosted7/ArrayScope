@@ -108,6 +108,12 @@ def montage_completion_route(event: Any) -> bool:
     belongs with it: when stage 2 has shrunk the GUI sections, routing the
     admissions costs what the ADR predicted instead of the fill.
 
+    (**That last sentence is the prediction slice D3 falsified.** The sections
+    were shrunk to well under a frame and the fill censored anyway. Read the
+    D3 entry at the end of this ledger before acting on any condition stated
+    between here and it — the earlier ones are kept because each names what it
+    measured, not because any of them is still the open question.)
+
     Stage 2 slice B measured a second, tighter coupling in the same direction,
     and it reorders the plan. The replan gate's ``fire()`` cannot become a
     posted operation *before* this clause opens. Its coalescing has never come
@@ -183,6 +189,74 @@ def montage_completion_route(event: Any) -> bool:
     ``mark_ladder_swaps_for_current_demand`` (1.7-1.8 s, one call to 164 ms).
     Those two are the R5 model rebuild, and getting them off the lock needs the
     planner/applier treatment slice D1 gave the commit — not another split.
+
+    **Slice D3 met that condition and the probe refused a fourth time. This is
+    the entry that changes the plan**, because the stated precondition was
+    satisfied and it was not enough. D2c planned/applied both staging writes,
+    and the GUI-side holds, instrumented per calling funnel on the routed arm
+    itself, are now all well under a frame:
+
+    ==============================  =====  ========  =======
+    GUI section (per fill)          calls  total ms  max ms
+    ==============================  =====  ========  =======
+    ``_commit_tile_layer``          74-132   294-604   15-20
+    ``_submit_prepared_transaction`` 70-128   194-531   16-20
+    ``retarget_frame_pipeline``      12-87     16-162    4-6
+    ``commit_pending_session``      74-132     19-31    2-6
+    ==============================  =====  ========  =======
+
+    The fill censors anyway. Six fills on the widened clause against six
+    control fills, interleaved on one box within the hour: **6/6 censored (36,
+    40, 61, 64, 66, 125 of 272 presented) against 6/6 ``272/272 within-5s``**,
+    target settle 4.27-4.81 s. Bisected as before — routing alone censors
+    (108/29/35 of 272) with ``fire()`` on the timer, and ``fire()`` alone
+    without routing storms exactly as slice B measured (18, 5, 5 of 272), so
+    the coupling claim survives and the routing does not.
+
+    The counters name a blocker that is **not hold time**, which is why no
+    further hold-shrinking slice can reach it:
+
+    ==========================  ===============  =============
+    per fill                    routed arm       control arm
+    ==========================  ===============  =============
+    ``events_dispatched``       637-662          2
+    ``owner_lock_acquisitions`` 692-719          3-5
+    ``gui_lock_acquisitions``   280-356          1210-1327
+    ``gui_lock_wait_ms_total``  984-1407         0.7-192
+    ``gui_lock_wait_ms_max``    135-221          0-100
+    ``owner_lock_wait_ms_total`` 147-331         0-6
+    ``owner_yields_to_gui``     31-41            0-4
+    ==========================  ===============  =============
+
+    Neither side starves the way stage 1 (owner 5.4 s) or D2a (owner 1.8 s)
+    did. What happens instead is **~700 hand-offs per fill on one RLock**: the
+    GUI's mean wait per acquisition is 3.5-4.2 ms, which is nothing, and its
+    total is 1.0-1.4 s of an ~8 s fill, which is everything. The stand-aside
+    fires 31-41 times and cannot help — it trades a turn, and there is no
+    policy under which 700 alternations cost less than the hand-offs
+    themselves.
+
+    Two second-order measurements say the same thing in the fill's own units:
+
+    - **cohorts collapse**, control ``1,1,3,4,25,68,68,68,34`` /
+      ``1,1,3,91,91,86`` against routed runs of ones and eights
+      (``1,1,1,1,1,1,1,2,128,13,16,8,8,4,68,18``). The commit gate's batching
+      never came from the gate: it came from the admissions being on the
+      *commit's* thread, so none could land inside a commit. Routed, every
+      commit re-arms the gate while it runs and presents only what arrived
+      during the previous one.
+    - **throughput per callback-second** falls 412-472 -> 112-294 items/s, and
+      one routed target pass admitted 437 items for 272 tiles: the same tiles
+      re-committed. Draw rate is *unchanged* (21-32 tile draws per control fill
+      against 31-35 routed, over comparable wall clock), so this is not a
+      pacing effect — the draws carry less each.
+
+    So the condition for a fifth attempt is not another section. It is that the
+    admission path stop sharing one lock with the commit — a per-family or
+    reader/writer bridge, or the admissions writing state the commit reads
+    through a snapshot — **plus** a commit-gate barrier that does not depend on
+    the admissions running on the commit's thread. Both are new mechanism, not
+    a shrink.
 
     Two further exclusions are deliberate rather than incidental:
 
