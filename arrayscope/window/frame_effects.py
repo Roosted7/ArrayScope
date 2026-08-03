@@ -48,6 +48,14 @@ from arrayscope.operations.regions import region_contains, region_is_full
 from arrayscope.operations.slabs import plan_slab, request_for_image, stage_key_for_candidate
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import payload_ref_from_display_payload
+from arrayscope.presentation.prepared_transaction import (
+    AckInputs,
+    CommitTimings,
+    PreparedPresentationTransaction,
+    PrepTimings,
+    SubmitTimings,
+    TransactionIdentity,
+)
 from arrayscope.presentation.residency import capture_residency_snapshot
 from arrayscope.render import effects as render_effects
 from arrayscope.render import lod as render_lod
@@ -2464,695 +2472,61 @@ class FramePipelineEffects:
             **details,
         )
 
-    def _commit_tile_layer(self, direct_presentation, *, commit_start: float) -> None:
+    # ------------------------------------------------------------ the commit
+    #
+    # ADR 0065 stage 2 slice C splits one ~700-line GUI callback into four
+    # phases with explicit seams:
+    #
+    #   prepare  ``_prepare_tile_layer_transaction``  owner *or* GUI, Qt-free
+    #   submit   ``_submit_prepared_transaction``     GUI only
+    #   ack      ``_acknowledge_transaction``         GUI today, postable
+    #   residue  the ack's tail                       GUI only
+    #
+    # The ack is written against a frozen ``AckInputs`` and makes no live
+    # image-view read, which is the whole prerequisite for slice D posting it
+    # to the owner; what slice D still owes is the post itself and the
+    # followup message that drives the residue.
+    #
+    # ``_commit_tile_layer`` runs all four back to back on the GUI thread and
+    # is the *correctness anchor*: a mailbox miss, a failed validation, a frame
+    # that turned critical between prepare and take, and the whole
+    # ``partial_remap_presentation`` path all land here, unchanged in meaning.
+    # The split path calls exactly the same methods from two threads, which is
+    # what keeps the fallback from being a second implementation.
+
+    def _begin_commit_frame(self, dirty_tiles) -> None:
+        """The GUI-side preamble of one commit attempt. GUI thread only.
+
+        Everything here is read by the GUI — the viewport policy the next
+        retarget consults, the commit-active guard, the timing scratch — and
+        none of it is preparation, so the owner's prepare writes none of it.
+        The take runs this immediately before it submits.
+        """
+
         renderer = self.renderer
         session = self.session
-        display_image, rendered_geometry = direct_presentation
-        dirty_tiles = session.consume_dirty_tiles()
-        tile_source_ids = renderer._montage_tile_source_ids(session)
-        renderer._montage_committed_tile_upserts_last_flush = len(dirty_tiles)
+        renderer._montage_committed_tile_upserts_last_flush = len(tuple(dirty_tiles or ()))
         renderer._current_montage_geometry = session.plan.geometry
         renderer._current_montage_plan = session.plan
         renderer._next_viewport_policy = ViewportPolicy.PRESERVE
         renderer._montage_presentation_commit_active = True
         _reset_commit_timings(renderer)
-        forget_admission_verdict(session)
         renderer._last_montage_commit_outcome = "started"
+
+    def _commit_tile_layer(self, direct_presentation, *, commit_start: float) -> None:
+        """Prepare, submit and acknowledge one commit inline. GUI thread only."""
+
+        renderer = self.renderer
+        dirty_tiles = self.session.peek_dirty_tiles()
+        self._begin_commit_frame(dirty_tiles)
         try:
-            payload_start = perf_counter()
-            selected_lod_factor = int(session._selected_lod_factor())
-            reuse_any_lod = bool(getattr(session, "_resident_lod_active", lambda: False)())
-            if not session.lifecycle.presented_tiles:
-                previous_payloads = {
-                    key: payload
-                    for key, payload in previous_tiled_payloads_by_base_source(
-                        getattr(renderer.win, "_committed_display_frame", None)
-                    ).items()
-                    if reuse_any_lod or payload_lod_matches(payload, selected_lod_factor)
-                }
-                retained_payloads = (
-                    renderer._retained_tiled_payload_store().payloads_by_base_source(
-                        lod_factor=None if reuse_any_lod else selected_lod_factor
-                    )
-                )
-                if retained_payloads:
-                    previous_payloads.update(retained_payloads)
-                if previous_payloads:
-                    session.seed_display_tile_payloads(
-                        previous_payloads,
-                        tile_source_ids,
-                        tile_numbers=tuple(session.dirty_payloads),
-                    )
-                    # The pipeline retarget already owns the round's LOD
-                    # decision and swap obligations. Re-running the complete
-                    # 272-tile ladder scan inside the first presentation
-                    # callback made a one-item governed target delta take
-                    # 100+ ms before backend admission. Seed only; subsequent
-                    # governed continuations consume the obligations already
-                    # published by the retarget owner.
-            payload_seed_done = perf_counter()
-            base_tile_state = session.tile_presentation_state
-            fast_drain = persistent_tile_layer_fast_drain_enabled(renderer, session)
-            renderer._persistent_tile_layer_fast_drain_last_enabled = bool(fast_drain)
-            renderer._persistent_tile_layer_fast_drain_enabled_count = int(
-                getattr(renderer, "_persistent_tile_layer_fast_drain_enabled_count", 0) or 0
-            ) + int(bool(fast_drain))
-            capabilities = image_view_backend_capabilities(renderer.win.img_view)
-            atomic_successor_pending = _atomic_successor_handoff_pending(session)
-            cpu_atomic_successor, shader_atomic_successor = _atomic_successor_commit_modes(
-                capabilities,
-                pending=atomic_successor_pending,
+            transaction = self._prepare_tile_layer_transaction(
+                direct_presentation,
+                dirty_tiles=dirty_tiles,
             )
-            limits = tile_layer_upsert_limits(renderer, session)
-            if cpu_atomic_successor or shader_atomic_successor:
-                # Hidden warming bounds GPU uploads; the eventual source-slot
-                # handoff itself is one complete transaction and must not be
-                # built once under the upload cap and then rebuilt unbounded.
-                limits = {}
-            renderer._last_montage_commit_max_upserts = int(
-                dict(limits or {}).get("max_upserts", 0) or 0
-            )
-            renderer._last_montage_commit_unbounded_reason = (
-                "atomic_successor"
-                if cpu_atomic_successor or shader_atomic_successor
-                else "first_cpu_frame"
-                if not bool(getattr(session, "shader_display", False))
-                and not bool(getattr(session, "display_committed", False))
-                else ""
-            )
-            cold_deadline_ms = None
-            renderer._last_montage_pass_budget_ms = None
-            renderer._last_montage_governor_details = ()
-            if limits:
-                limits = dict(limits)
-                cold_deadline_ms = limits.pop("cold_deadline_ms", None)
-                renderer._last_montage_pass_budget_ms = limits.pop("pass_budget_ms", None)
-                renderer._last_montage_governor_details = tuple(
-                    limits.pop("governor_details", ()) or ()
-                )
-            cpu_backend = not bool(capabilities.shader_windowing)
-            renderer._last_montage_atomic_successor_pending_before = bool(atomic_successor_pending)
-            renderer._last_montage_shader_atomic_successor = bool(shader_atomic_successor)
-            requested_levels = session_requested_levels(session)
-            if cpu_backend and requested_levels is None:
-                # Automatic widget synchronization is deliberately silent: it
-                # must not masquerade as user input. Register the refined
-                # semantic target here, before building the CPU delta, so the
-                # pixels, delta revision, and acknowledgement all describe
-                # the same generation. Otherwise the widget shows successor
-                # levels while level_generation remains stuck on the
-                # predecessor window and all tiles stay stale forever.
-                current_level_source = renderer._montage_level_source_for_session(
-                    session,
-                    allow_partial=False,
-                )
-                current_levels = normalize_bounds(getattr(current_level_source, "levels", None))
-                if current_level_source is not None:
-                    current_level_source = (
-                        WindowLevelController()
-                        .decide(
-                            previous=getattr(session, "applied_level_source", None),
-                            candidate=current_level_source,
-                            explicit_auto=bool(getattr(session, "force_auto", False)),
-                            mode=session.window_mode,
-                        )
-                        .as_level_source()
-                    )
-                    current_levels = normalize_bounds(current_level_source.levels)
-                    session.applied_level_source = current_level_source
-                if (
-                    current_level_source is not None
-                    and current_levels is not None
-                    and getattr(current_level_source, "semantic_key", None) == session.level_key
-                    and (
-                        getattr(session.level_generation, "semantic_key", None) != session.level_key
-                        or not levels_match(
-                            getattr(session.level_generation, "target_levels", None),
-                            current_levels,
-                        )
-                    )
-                ):
-                    session.begin_level_presentation_update(current_levels)
-            elif requested_levels is None:
-                # Shader levels are one global physical uniform, but the
-                # payload identities crossing this transaction must name the
-                # same acknowledged generation. Register the provisional
-                # source before building the delta, then rebind the current
-                # wrappers without rebuilding or re-uploading pixels.
-                current_level_source = shader_commit_level_source(
-                    renderer,
-                    session,
-                    rehydrate_max_count=dict(limits or {}).get("max_upserts"),
-                )
-                if current_level_source is not None:
-                    current_level_source = (
-                        WindowLevelController()
-                        .decide(
-                            previous=getattr(session, "applied_level_source", None),
-                            candidate=current_level_source,
-                            explicit_auto=bool(getattr(session, "force_auto", False)),
-                            mode=session.window_mode,
-                        )
-                        .as_level_source()
-                    )
-                    current_level_source = _shader_level_source_covering_presented_payloads(
-                        session,
-                        current_level_source,
-                        prospective_tiles=(
-                            *(int(tile) for tile in dirty_tiles),
-                            *(
-                                int(tile)
-                                for tile in getattr(session, "pending_payload_upserts", ())
-                            ),
-                        ),
-                    )
-                    # The applied source and convergence target are separate:
-                    # the target may already name these levels while a prior
-                    # display decision still owns the applied source. Publish
-                    # every accepted controller decision, not only revisions.
-                    session.applied_level_source = current_level_source
-                current_levels = normalize_bounds(getattr(current_level_source, "levels", None))
-                if (
-                    current_level_source is not None
-                    and current_levels is not None
-                    and getattr(current_level_source, "semantic_key", None) == session.level_key
-                    and (
-                        getattr(session.level_generation, "semantic_key", None) != session.level_key
-                        or not levels_match(
-                            getattr(session.level_generation, "target_levels", None),
-                            current_levels,
-                        )
-                    )
-                ):
-                    session.begin_level_presentation_update(
-                        current_levels,
-                        source=current_level_source,
-                    )
-                if current_levels is not None:
-                    level_bind_tiles = tuple(
-                        dict.fromkeys(
-                            (
-                                *(int(tile) for tile in dirty_tiles),
-                                *(
-                                    int(tile)
-                                    for tile in getattr(session, "pending_payload_upserts", ())
-                                ),
-                            )
-                        )
-                    )
-                    session.bind_payloads_to_level_generation(
-                        level_bind_tiles,
-                        max_count=dict(limits or {}).get("max_upserts"),
-                    )
-            payload_level_done = perf_counter()
-            renderer._last_montage_commit_dirty_before = len(
-                getattr(session, "dirty_payloads", ()) or ()
-            )
-            renderer._last_montage_commit_pending_before = len(
-                getattr(session, "pending_payload_upserts", ()) or ()
-            )
-            renderer._last_montage_commit_presented_before = len(session.lifecycle.presented_tiles)
-            prepared_atomic = getattr(session, "_atomic_prepared_transaction", None)
-            prepared_atomic_current = bool(
-                (cpu_atomic_successor or shader_atomic_successor)
-                and _prepared_atomic_transaction_current(
-                    session,
-                    prepared_atomic,
-                )
-            )
-            renderer._last_montage_atomic_prepared_reused = bool(prepared_atomic_current)
-            renderer._last_montage_atomic_fast_built = False
-            renderer._last_montage_atomic_fast_reject_reason = ""
-            payload_build_call_start = perf_counter()
-            if prepared_atomic_current:
-                base_tile_state = prepared_atomic["base_tile_state"]
-                tile_state = prepared_atomic["tile_state"]
-                tile_delta = prepared_atomic["tile_delta"]
-            else:
-                session._atomic_prepared_transaction = None
-                fast_atomic = (
-                    session.build_atomic_successor_presentation()
-                    if cpu_atomic_successor or shader_atomic_successor
-                    else None
-                )
-                renderer._last_montage_atomic_fast_reject_reason = str(
-                    getattr(session, "_atomic_fast_reject_reason", "") or ""
-                )
-                if fast_atomic is not None:
-                    tile_state, tile_delta = fast_atomic
-                    renderer._last_montage_atomic_fast_built = True
-                else:
-                    tile_state, tile_delta = session.build_tile_presentation(
-                        tile_source_ids,
-                        cold_deadline_ms=cold_deadline_ms,
-                        **limits,
-                    )
-                    if cpu_atomic_successor or shader_atomic_successor:
-                        tile_delta = replace(tile_delta, atomic_handoff=True)
-            payload_build_call_done = perf_counter()
-            tile_delta = _priority_ordered_tile_delta(session, tile_delta)
-            payload_priority_done = perf_counter()
-            active_payloads = tile_state.active_payloads(tile_delta)
-            payload_state_done = perf_counter()
-            first_display_commit = not bool(session.display_committed)
-            renderer._last_montage_commit_first_display = bool(first_display_commit)
-            renderer._last_montage_commit_delta_upserts = len(tile_delta.upserts)
-            if persistent_tile_residency_backend(renderer, session):
-                upserted_tiles = {int(tile) for tile in tile_delta.upserts}
-                dirty_tiles = tuple(
-                    int(tile) for tile in dirty_tiles if int(tile) in upserted_tiles
-                )
-            atomic_required_tiles = (
-                frozenset(int(tile) for tile in session.atomic_successor_required_scope())
-                if cpu_atomic_successor or shader_atomic_successor
-                else frozenset()
-            )
-            # Only an armed handoff can be adjudicated by this scope, and the
-            # walk below is over the whole active population. Deriving it on
-            # every ordinary commit charged a montage-wide currency probe to a
-            # decision no ordinary commit takes.
-            atomic_current_tiles = (
-                frozenset(
-                    int(tile)
-                    for tile, payload in active_payloads.items()
-                    if (
-                        session.lifecycle.payload_is_current(int(tile), payload)
-                        or session.resident_crop_fallback_is_current(int(tile), payload)
-                    )
-                )
-                if atomic_required_tiles
-                else frozenset()
-            )
-            if atomic_required_tiles and not atomic_required_tiles.issubset(atomic_current_tiles):
-                # The generic builder can legitimately return an empty active
-                # scope after rejecting stale crop wrappers. Comparing against
-                # that delta's own empty scope made the transaction look
-                # complete and submitted a zero-tile atomic handoff, hiding
-                # the complete predecessor. The transition owner already
-                # froze the physical obligation; only that required scope can
-                # authorize the backend swap.
-                session.final_commit_pending = False
-                session.flush_pending = False
-                renderer._last_montage_tile_payload_build_ms = (
-                    perf_counter() - payload_start
-                ) * 1000.0
-                self._note_commit_bail(
-                    "atomic-successor-wait",
-                    wakeup="replan",
-                    active_payloads=len(atomic_current_tiles),
-                    active_tiles=len(atomic_required_tiles),
-                )
-                renderer.request_montage_replan(session)
+            if transaction is None:
                 return
-            explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
-            level_key = getattr(session, "level_key", None)
-            existing_level_stats = (
-                None
-                if level_key is None
-                else renderer._montage_level_tracker().summary_for(level_key)
-            )
-            level_stats_seeded = bool(
-                existing_level_stats is not None and existing_level_stats.source_indices
-            )
-            level_payloads = (
-                active_payloads
-                if first_display_commit or not level_stats_seeded
-                else dict(tile_delta.upserts)
-            )
-            if level_payloads:
-                renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
-            if self._empty_first_commit_can_wait(
-                first_display_commit, explicit_auto, active_payloads, tile_delta
-            ):
-                session.final_commit_pending = False
-                session.flush_pending = False
-                renderer._last_montage_tile_payload_build_ms = (
-                    perf_counter() - payload_start
-                ) * 1000.0
-                self._note_commit_bail("empty-first-commit-wait", wakeup="replan")
-                renderer.request_montage_replan(session)
-                return
-            prepare_apply_start = perf_counter()
-            prepare_stats_start = perf_counter()
-            level_stats = renderer._montage_level_stats_for_session(session)
-            renderer._last_montage_tile_prepare_stats_ms = (
-                perf_counter() - prepare_stats_start
-            ) * 1000.0
-            semantic_commit = tiled_payloads_include_semantics(active_payloads)
-            frame_commit = tiled_payloads_can_commit_frame(active_payloads)
-            # Automatic windowing applies to first-pixel payloads too.  A
-            # preview may intentionally omit committed value semantics, but it
-            # still needs the rough semantic source used by the shader and
-            # histogram; tying levels to ``semantic_commit`` displayed those
-            # first tiles at the widget fallback (0, 1).
-            decision_force_auto = bool(explicit_auto and active_payloads)
-            prepare_metadata_start = perf_counter()
-            level_generation_semantic_key = getattr(
-                getattr(session, "level_generation", None),
-                "semantic_key",
-                None,
-            )
-            semantic_level_supersession = bool(
-                level_generation_semantic_key is not None
-                and level_generation_semantic_key != session.level_key
-            )
-            metadata_can_advance = bool(
-                first_display_commit
-                or semantic_level_supersession
-                or (
-                    bool(getattr(session, "shader_display", False))
-                    and not bool(getattr(session, "first_pass_histogram_published", False))
-                )
-                or self._side_work_visible_settled()
-            )
-            level_metadata_improved = bool(
-                metadata_can_advance
-                and (
-                    semantic_level_supersession
-                    or renderer._should_publish_montage_level_metadata(session, level_stats)
-                )
-            )
-            publish_auto_metadata = bool(
-                explicit_auto
-                and metadata_can_advance
-                and (first_display_commit or level_metadata_improved)
-            )
-            # The aggregate histogram plot is derived from the level stats, so
-            # it must (re)publish whenever those stats first arrive or improve
-            # — not only on the first display commit. On startup the first
-            # commit runs before any tile has level stats, so a first-commit-
-            # only publish left the histogram panel empty until an unrelated
-            # action (index change, channel toggle) forced a fresh first
-            # commit (field defect 2026-07).
-            first_pass_complete = renderer._first_pass_level_evidence_complete(session)
-            publish_first_pass_histogram = bool(
-                first_pass_complete
-                and not bool(getattr(session, "first_pass_histogram_published", False))
-            )
-            publish_refined_histogram = bool(
-                level_metadata_improved and bool(getattr(level_stats, "refined", False))
-            )
-            histogram_metadata_pending = bool(getattr(session, "histogram_metadata_pending", False))
-            publish_histogram_plot = bool(
-                publish_first_pass_histogram
-                or publish_refined_histogram
-                or histogram_metadata_pending
-            )
-            publish_metadata = (
-                publish_auto_metadata or publish_histogram_plot or level_metadata_improved
-            )
-            # Instrumentation: record why a commit did/did not (re)apply level
-            # metadata, so the levels/histogram-stranding path is observable from
-            # runtime diagnostics without a debugger.
-            renderer._last_montage_level_decision = {
-                "first_display_commit": bool(first_display_commit),
-                "semantic_commit": bool(semantic_commit),
-                "frame_commit": bool(frame_commit),
-                "decision_force_auto": bool(decision_force_auto),
-                "explicit_auto": bool(explicit_auto),
-                "metadata_can_advance": bool(metadata_can_advance),
-                "semantic_level_supersession": bool(semantic_level_supersession),
-                "level_metadata_improved": bool(level_metadata_improved),
-                "histogram_metadata_pending": bool(histogram_metadata_pending),
-                "publish_histogram_plot": bool(publish_histogram_plot),
-                "publish_metadata": bool(publish_metadata),
-                "level_stats_rank": None
-                if level_stats is None
-                else str(getattr(level_stats, "rank", None)),
-                "level_stats_quality": int(getattr(level_stats, "evidence_quality", 0) or 0),
-                "active_payload_count": len(dict(active_payloads or {})),
-            }
-            renderer._montage_level_decision_count = (
-                int(getattr(renderer, "_montage_level_decision_count", 0)) + 1
-            )
-            renderer._last_montage_tile_prepare_metadata_ms = (
-                perf_counter() - prepare_metadata_start
-            ) * 1000.0
-            if (
-                self._empty_progressive_commit_settled(
-                    first_display_commit, explicit_auto, tile_delta
-                )
-                and not publish_metadata
-            ):
-                session.final_commit_pending = False
-                session.flush_pending = False
-                renderer._last_montage_tile_payload_build_ms = (
-                    perf_counter() - payload_start
-                ) * 1000.0
-                session.note_committed()
-                # The required scope is settled with nothing to upsert, so no
-                # backend acknowledgement will follow this cycle.  Re-affirm
-                # targets closed by retained payloads (idempotent per
-                # requirement) so whole-workflow replay sees the closure even
-                # for presentation state restored outside the ordinary
-                # retarget/acknowledge events.
-                session.lifecycle.note_retained_satisfaction(session.required_tile_numbers())
-                self._note_commit_bail("empty-progressive-settled", wakeup="noop-finish")
-                self._finish_after_noop_commit()
-                return
-            rendered_geometry = replace(
-                rendered_geometry, montage_tile_states=session.ensure_tile_states()
-            )
-            renderer._last_montage_tile_payload_build_ms = (perf_counter() - payload_start) * 1000.0
-            renderer._last_montage_tile_payload_seed_ms = (
-                payload_seed_done - payload_start
-            ) * 1000.0
-            renderer._last_montage_tile_payload_level_ms = (
-                payload_level_done - payload_seed_done
-            ) * 1000.0
-            renderer._last_montage_tile_payload_state_ms = (
-                payload_state_done - payload_level_done
-            ) * 1000.0
-            renderer._last_montage_tile_payload_build_call_ms = (
-                payload_build_call_done - payload_build_call_start
-            ) * 1000.0
-            renderer._last_montage_tile_payload_priority_ms = (
-                payload_priority_done - payload_build_call_done
-            ) * 1000.0
-            renderer._last_montage_tile_payload_active_ms = (
-                payload_state_done - payload_priority_done
-            ) * 1000.0
-            prepare_source_start = perf_counter()
-            # A cold CPU-windowed first commit may window from a provisional
-            # refined subset (first-batch acceptance in
-            # tile_layer_first_pixels_wait_for_level_source); the partial
-            # source must therefore be visible to the windowing decision on
-            # exactly that commit, not only when metadata publication is due.
-            first_cpu_commit_source = bool(
-                first_display_commit and not bool(capabilities.shader_windowing)
-            )
-            semantic_source = renderer._montage_level_source_for_session(
-                session,
-                allow_partial=bool(publish_metadata or first_cpu_commit_source),
-                rehydrate_max_count=(
-                    dict(limits or {}).get("max_upserts")
-                    if not bool(capabilities.shader_windowing)
-                    else 0
-                ),
-            )
-            # The presentation decision runs its controller once more from
-            # ``applied_level_source`` to ``semantic_source``.  Feeding the
-            # unclamped refined source here would immediately undo the R3
-            # clamp selected above on the very transaction that introduces
-            # the rebound/outlying payload.
-            semantic_source = _shader_semantic_source_with_presented_clamp(
-                session,
-                semantic_source,
-            )
-            renderer._last_montage_tile_prepare_source_ms = (
-                perf_counter() - prepare_source_start
-            ) * 1000.0
-            prepare_histogram_start = perf_counter()
-            histogram_plot_data = (
-                renderer._montage_histogram_plot_data_for_session(
-                    session, allow_partial=publish_metadata
-                )
-                if publish_histogram_plot
-                else None
-            )
-            renderer._last_montage_tile_prepare_histogram_ms = (
-                perf_counter() - prepare_histogram_start
-            ) * 1000.0
-            if tile_layer_first_pixels_wait_for_level_source(
-                renderer,
-                session,
-                first_display_commit,
-                level_stats,
-            ):
-                capabilities = image_view_backend_capabilities(renderer.win.img_view)
-                publish_rough_histogram = getattr(
-                    renderer.win.img_view, "applyHistogramMetadata", None
-                )
-                if (
-                    not bool(capabilities.shader_windowing)
-                    and semantic_source is not None
-                    and histogram_plot_data is not None
-                    and callable(publish_rough_histogram)
-                ):
-                    publish_rough_histogram(
-                        histogramData=histogram_plot_data,
-                        histogramPlotData=histogram_plot_data,
-                        levels=semantic_source.levels,
-                        histogramRange=semantic_source.histogram_range,
-                    )
-                    renderer._note_montage_level_source_applied(
-                        session, semantic_source, explicit=False
-                    )
-                session.final_commit_pending = True
-                session.flush_pending = True
-                if (
-                    not getattr(session, "pending_level_tiles", None)
-                    and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0
-                ):
-                    renderer._mark_montage_level_scan_pending(session)
-                renderer._schedule_montage_cached_level_stats(session)
-                self._note_commit_bail("level-evidence-wait", wakeup="level-scan")
-                return
-            warm_levels = normalize_bounds(requested_levels)
-            if warm_levels is None and semantic_source is not None:
-                warm_levels = normalize_bounds(getattr(semantic_source, "levels", None))
-            if warm_levels is None:
-                warm_levels = normalize_bounds(renderer.win.img_view.getLevels())
-            cpu_backend = not bool(capabilities.shader_windowing)
-            atomic_successor = bool(cpu_atomic_successor or shader_atomic_successor)
-            renderer._last_montage_atomic_successor = bool(atomic_successor)
-            resident_predicate = getattr(renderer.win.img_view, "tiledPayloadResident", None)
-            cold_gpu_successor = _cold_gpu_successor_requires_hidden_warm(
-                session=session,
-                cpu_backend=cpu_backend,
-                resident_predicate=resident_predicate,
-                upserts=dict(tile_delta.upserts or {}),
-            )
-            if cold_gpu_successor and interactive_active(renderer):
-                # Keep the acknowledged pixels during the gesture. The
-                # interaction-stop edge replans this exact dirty transaction;
-                # hidden residency then absorbs allocation/upload cost before
-                # the semantic swap reaches the canvas.
-                session._interactive_residency_deferred = True
-                session.final_commit_pending = False
-                session.flush_pending = False
-                self._note_commit_bail(
-                    "interactive-residency-deferred", wakeup="interaction-stop-edge"
-                )
-                return
-            rebound_source_ids = dict(
-                getattr(session, "resident_crop_fallback_source_ids", None) or {}
-            )
-            rebound_scope = (
-                frozenset(int(tile) for tile in session.atomic_successor_required_scope())
-                if atomic_successor
-                else frozenset()
-            )
-            resident_rebind_handoff = bool(
-                rebound_scope
-                and rebound_scope.issubset(active_payloads)
-                and all(
-                    rebound_source_ids.get(tile)
-                    == getattr(active_payloads[tile], "source_id", None)
-                    for tile in rebound_scope
-                )
-            )
-            # The crop-rebind seed already asked the backend to prove every
-            # successor binding physically resident.  Those pages remain
-            # pinned by the currently committed predecessor until this atomic
-            # mapping handoff.  Re-probing the complete 272-tile scope here is
-            # neither warming nor a safety gain; it was an ungoverned
-            # GUI-thread scan immediately before the mapping-only submit.
-            requires_hidden_warm = bool(
-                (atomic_successor and not resident_rebind_handoff) or cold_gpu_successor
-            )
-            if (
-                requires_hidden_warm
-                and bool(tile_delta.upserts)
-                and warm_levels is not None
-                and not _warm_atomic_successor_residency(
-                    renderer,
-                    session,
-                    rendered_geometry,
-                    tile_delta,
-                    levels=warm_levels,
-                    rgb_already_windowed=bool(
-                        getattr(display_image, "rgb_already_windowed", False)
-                    ),
-                    payloads=(
-                        active_payloads if atomic_successor else dict(tile_delta.upserts or {})
-                    ),
-                    batch_size=2,
-                )
-            ):
-                session._atomic_prepared_transaction = {
-                    "session_id": int(getattr(session, "session_id", 0) or 0),
-                    "level_revision": int(
-                        getattr(getattr(session, "level_generation", None), "revision", 0) or 0
-                    ),
-                    "marker_kind": (
-                        "cpu-compatible" if cpu_atomic_successor else "shader-successor"
-                    ),
-                    "base_tile_state": base_tile_state,
-                    "tile_state": tile_state,
-                    "tile_delta": tile_delta,
-                    "payload_markers": {
-                        int(tile): (
-                            _cpu_transaction_payload_marker(payload)
-                            if cpu_atomic_successor
-                            else _shader_successor_transaction_payload_marker(payload)
-                        )
-                        for tile, payload in active_payloads.items()
-                    },
-                }
-                # Residency preparation owns its receiver-bound continuation
-                # and requests exactly one semantic replan when complete.
-                # Replanning the whole frame after every warmed holder is an
-                # O(tiles^2) event-loop starvation loop during scroll churn.
-                session.final_commit_pending = False
-                session.flush_pending = False
-                self._note_commit_bail(
-                    "hidden-warm-residency-wait", wakeup="warm-residency-continuation"
-                )
-                return
-            renderer._last_montage_tile_prepare_apply_ms = (
-                perf_counter() - prepare_apply_start
-            ) * 1000.0
-            # "Emitted" means handed across the backend boundary, not merely
-            # selected by the transaction builder. In particular, the
-            # refined-level gate above may defer a complete PyQtGraph frame;
-            # marking it emitted before that decision strands the lifecycle
-            # at TARGET_EMITTED even though no scene update occurred.
-            session.lifecycle.commit_emitted(tile_delta.upserts)
-            applied = self._present_tile_delta(
-                display_image,
-                rendered_geometry,
-                tile_state=tile_state,
-                base_tile_state=base_tile_state,
-                tile_delta=tile_delta,
-                semantic_source=semantic_source,
-                applied_level_source=session.applied_level_source,
-                histogram_plot_data=histogram_plot_data,
-                first_display_commit=first_display_commit,
-                explicit_auto=explicit_auto,
-                requested_levels=requested_levels,
-                semantic_commit=frame_commit,
-                decision_force_auto=decision_force_auto,
-            )
-            if not applied:
-                self._note_commit_bail("backend-declined", wakeup="rearm-if-backlog")
-                return
-            if histogram_metadata_pending and histogram_plot_data is not None:
-                session.histogram_metadata_pending = False
-            session.backend_refresh_pending = False
-            renderer._last_montage_commit_outcome = "backend-applied"
-            session._atomic_prepared_transaction = None
-            self._acknowledge_and_publish(
-                tile_delta,
-                tile_state,
-                rendered_geometry,
-                active_payloads,
-                commit_start=commit_start,
-                atomic_successor=atomic_successor,
-                first_pass_histogram_published=bool(
-                    publish_first_pass_histogram and histogram_plot_data is not None
-                ),
-            )
+            self._submit_prepared_transaction(transaction, commit_start=commit_start)
         except BaseException as exc:
             # A throw is an early commit return that names neither its outcome
             # nor its wakeup, so it was the one commit exit invisible to the
@@ -3167,57 +2541,751 @@ class FramePipelineEffects:
         finally:
             _finish_presentation_commit(renderer)
 
-    def _note_commit_raised(self, exc: BaseException, *, dirty_tiles=()) -> None:
-        """Record a commit throw as the terminal bail it is.
+    # --------------------------------------------------------------- prepare
 
-        Deliberately NOT a wakeup: re-arming would replay a delta that is about
-        to throw again at full flush rate, which the rescue ADR 0051 forbids.
-        In-flight worker completions can nevertheless request presentation
-        after this frame returns, so the terminal mark is generation-scoped:
-        it blocks this failed owner without poisoning a successor generation.
+    def _prepare_tile_layer_transaction(
+        self, direct_presentation, *, dirty_tiles
+    ) -> PreparedPresentationTransaction | None:
+        """Everything a commit decides before the backend is touched.
+
+        Runs on the presentation owner when the owner drives it and on the GUI
+        thread when the inline anchor does, so **nothing in here may touch
+        Qt**. The GUI-affine reads it used to make are served by snapshots:
+        ``physical_resident_fn`` and the committed frame come from
+        ``_physical_residency_inputs`` (decision 5), the frame-boundary probes
+        come from ``read_frame_boundary_inputs`` (decision 6), and the backend
+        capabilities are a frozen dataclass rather than a widget call.
+
+        Returns ``None`` when the commit bailed. Every bail names its outcome
+        and its armed wakeup exactly as before; the only one that reaches Qt
+        posts instead (``level-evidence-wait``'s rough-histogram publication,
+        decision 9).
+
+        **This must not consume the dirty set** (decision 2). It is handed the
+        peeked tiles; ``release_dirty_tiles`` runs on the acknowledgement of
+        the delta that was actually accepted, so a dropped transaction strands
+        nothing.
         """
 
         renderer = self.renderer
         session = self.session
-        tiles = tuple(int(tile) for tile in tuple(dirty_tiles or ()))
-        renderer._montage_commit_failed_owner = (
-            int(getattr(session, "session_id", 0) or 0),
-            id(session),
+        display_image, rendered_geometry = direct_presentation
+        tile_source_ids = renderer._montage_tile_source_ids(session)
+        forget_admission_verdict(session)
+        payload_start = perf_counter()
+        selected_lod_factor = int(session._selected_lod_factor())
+        reuse_any_lod = bool(getattr(session, "_resident_lod_active", lambda: False)())
+        _resident_fn, seed_committed_frame = self._physical_residency_inputs()
+        if not session.lifecycle.presented_tiles:
+            previous_payloads = {
+                key: payload
+                for key, payload in previous_tiled_payloads_by_base_source(
+                    seed_committed_frame
+                ).items()
+                if reuse_any_lod or payload_lod_matches(payload, selected_lod_factor)
+            }
+            retained_payloads = renderer._retained_tiled_payload_store().payloads_by_base_source(
+                lod_factor=None if reuse_any_lod else selected_lod_factor
+            )
+            if retained_payloads:
+                previous_payloads.update(retained_payloads)
+            if previous_payloads:
+                session.seed_display_tile_payloads(
+                    previous_payloads,
+                    tile_source_ids,
+                    tile_numbers=tuple(session.dirty_payloads),
+                )
+                # The pipeline retarget already owns the round's LOD
+                # decision and swap obligations. Re-running the complete
+                # 272-tile ladder scan inside the first presentation
+                # callback made a one-item governed target delta take
+                # 100+ ms before backend admission. Seed only; subsequent
+                # governed continuations consume the obligations already
+                # published by the retarget owner.
+        payload_seed_done = perf_counter()
+        base_tile_state = session.tile_presentation_state
+        base_revision = int(getattr(base_tile_state, "revision", 0) or 0)
+        fast_drain = persistent_tile_layer_fast_drain_enabled(renderer, session)
+        capabilities = image_view_backend_capabilities(renderer.win.img_view)
+        atomic_successor_pending = _atomic_successor_handoff_pending(session)
+        cpu_atomic_successor, shader_atomic_successor = _atomic_successor_commit_modes(
+            capabilities,
+            pending=atomic_successor_pending,
         )
-        renderer._last_montage_commit_exception = {
-            "type": type(exc).__name__,
-            "message": str(exc),
-            "traceback": traceback_text(exc),
-            "session_id": int(getattr(session, "session_id", 0) or 0),
-            "semantic_key": repr(getattr(session, "key", None)),
-            "committing_tiles": tiles[:16],
-            "committing_tile_count": len(tiles),
-        }
-        self._note_commit_bail(
-            "raised",
-            wakeup="none (terminal)",
-            exception_type=type(exc).__name__,
-            exception_message=str(exc),
-            committing_tile_count=len(tiles),
+        boundary = read_frame_boundary_inputs(renderer, session)
+        limits = tile_layer_upsert_limits(renderer, session, boundary=boundary)
+        if cpu_atomic_successor or shader_atomic_successor:
+            # Hidden warming bounds GPU uploads; the eventual source-slot
+            # handoff itself is one complete transaction and must not be
+            # built once under the upload cap and then rebuilt unbounded.
+            limits = {}
+        max_upserts = int(dict(limits or {}).get("max_upserts", 0) or 0)
+        unbounded_reason = (
+            "atomic_successor"
+            if cpu_atomic_successor or shader_atomic_successor
+            else "first_cpu_frame"
+            if not bool(getattr(session, "shader_display", False))
+            and not bool(getattr(session, "display_committed", False))
+            else ""
         )
-
-    def _configure_wgpu_evidence_obligation(self) -> None:
-        """Install, defer, or clear the phase-1 resident-histogram obligation."""
-
-        renderer = self.renderer
-        session = self.session
-        configure_gpu_evidence = getattr(
-            renderer.win.img_view,
-            "setResidentHistogramEvidenceRequired",
+        cold_deadline_ms = None
+        pass_budget_ms = None
+        governor_details: tuple = ()
+        if limits:
+            limits = dict(limits)
+            cold_deadline_ms = limits.pop("cold_deadline_ms", None)
+            pass_budget_ms = limits.pop("pass_budget_ms", None)
+            governor_details = tuple(limits.pop("governor_details", ()) or ())
+        cpu_backend = not bool(capabilities.shader_windowing)
+        requested_levels = session_requested_levels(session)
+        if cpu_backend and requested_levels is None:
+            # Automatic widget synchronization is deliberately silent: it
+            # must not masquerade as user input. Register the refined
+            # semantic target here, before building the CPU delta, so the
+            # pixels, delta revision, and acknowledgement all describe
+            # the same generation. Otherwise the widget shows successor
+            # levels while level_generation remains stuck on the
+            # predecessor window and all tiles stay stale forever.
+            current_level_source = renderer._montage_level_source_for_session(
+                session,
+                allow_partial=False,
+            )
+            current_levels = normalize_bounds(getattr(current_level_source, "levels", None))
+            if current_level_source is not None:
+                current_level_source = (
+                    WindowLevelController()
+                    .decide(
+                        previous=getattr(session, "applied_level_source", None),
+                        candidate=current_level_source,
+                        explicit_auto=bool(getattr(session, "force_auto", False)),
+                        mode=session.window_mode,
+                    )
+                    .as_level_source()
+                )
+                current_levels = normalize_bounds(current_level_source.levels)
+                session.applied_level_source = current_level_source
+            if (
+                current_level_source is not None
+                and current_levels is not None
+                and getattr(current_level_source, "semantic_key", None) == session.level_key
+                and (
+                    getattr(session.level_generation, "semantic_key", None) != session.level_key
+                    or not levels_match(
+                        getattr(session.level_generation, "target_levels", None),
+                        current_levels,
+                    )
+                )
+            ):
+                session.begin_level_presentation_update(current_levels)
+        elif requested_levels is None:
+            # Shader levels are one global physical uniform, but the
+            # payload identities crossing this transaction must name the
+            # same acknowledged generation. Register the provisional
+            # source before building the delta, then rebind the current
+            # wrappers without rebuilding or re-uploading pixels.
+            current_level_source = shader_commit_level_source(
+                renderer,
+                session,
+                rehydrate_max_count=dict(limits or {}).get("max_upserts"),
+            )
+            if current_level_source is not None:
+                current_level_source = (
+                    WindowLevelController()
+                    .decide(
+                        previous=getattr(session, "applied_level_source", None),
+                        candidate=current_level_source,
+                        explicit_auto=bool(getattr(session, "force_auto", False)),
+                        mode=session.window_mode,
+                    )
+                    .as_level_source()
+                )
+                current_level_source = _shader_level_source_covering_presented_payloads(
+                    session,
+                    current_level_source,
+                    prospective_tiles=(
+                        *(int(tile) for tile in dirty_tiles),
+                        *(int(tile) for tile in getattr(session, "pending_payload_upserts", ())),
+                    ),
+                )
+                # The applied source and convergence target are separate:
+                # the target may already name these levels while a prior
+                # display decision still owns the applied source. Publish
+                # every accepted controller decision, not only revisions.
+                session.applied_level_source = current_level_source
+            current_levels = normalize_bounds(getattr(current_level_source, "levels", None))
+            if (
+                current_level_source is not None
+                and current_levels is not None
+                and getattr(current_level_source, "semantic_key", None) == session.level_key
+                and (
+                    getattr(session.level_generation, "semantic_key", None) != session.level_key
+                    or not levels_match(
+                        getattr(session.level_generation, "target_levels", None),
+                        current_levels,
+                    )
+                )
+            ):
+                session.begin_level_presentation_update(
+                    current_levels,
+                    source=current_level_source,
+                )
+            if current_levels is not None:
+                level_bind_tiles = tuple(
+                    dict.fromkeys(
+                        (
+                            *(int(tile) for tile in dirty_tiles),
+                            *(
+                                int(tile)
+                                for tile in getattr(session, "pending_payload_upserts", ())
+                            ),
+                        )
+                    )
+                )
+                session.bind_payloads_to_level_generation(
+                    level_bind_tiles,
+                    max_count=dict(limits or {}).get("max_upserts"),
+                )
+        payload_level_done = perf_counter()
+        dirty_before = len(getattr(session, "dirty_payloads", ()) or ())
+        pending_before = len(getattr(session, "pending_payload_upserts", ()) or ())
+        presented_before = len(session.lifecycle.presented_tiles)
+        prepared_atomic = getattr(session, "_atomic_prepared_transaction", None)
+        prepared_atomic_current = bool(
+            (cpu_atomic_successor or shader_atomic_successor)
+            and _prepared_atomic_transaction_current(
+                session,
+                prepared_atomic,
+            )
+        )
+        atomic_fast_built = False
+        atomic_fast_reject_reason = ""
+        payload_build_call_start = perf_counter()
+        if prepared_atomic_current:
+            base_tile_state = prepared_atomic["base_tile_state"]
+            base_revision = int(getattr(base_tile_state, "revision", 0) or 0)
+            tile_state = prepared_atomic["tile_state"]
+            tile_delta = prepared_atomic["tile_delta"]
+        else:
+            session._atomic_prepared_transaction = None
+            fast_atomic = (
+                session.build_atomic_successor_presentation()
+                if cpu_atomic_successor or shader_atomic_successor
+                else None
+            )
+            atomic_fast_reject_reason = str(
+                getattr(session, "_atomic_fast_reject_reason", "") or ""
+            )
+            if fast_atomic is not None:
+                tile_state, tile_delta = fast_atomic
+                atomic_fast_built = True
+            else:
+                tile_state, tile_delta = session.build_tile_presentation(
+                    tile_source_ids,
+                    cold_deadline_ms=cold_deadline_ms,
+                    **limits,
+                )
+                if cpu_atomic_successor or shader_atomic_successor:
+                    tile_delta = replace(tile_delta, atomic_handoff=True)
+        payload_build_call_done = perf_counter()
+        tile_delta = _priority_ordered_tile_delta(session, tile_delta)
+        payload_priority_done = perf_counter()
+        active_payloads = tile_state.active_payloads(tile_delta)
+        payload_state_done = perf_counter()
+        first_display_commit = not bool(session.display_committed)
+        delta_upserts = len(tile_delta.upserts)
+        if persistent_tile_residency_backend(renderer, session):
+            upserted_tiles = {int(tile) for tile in tile_delta.upserts}
+            dirty_tiles = tuple(int(tile) for tile in dirty_tiles if int(tile) in upserted_tiles)
+        atomic_required_tiles = (
+            frozenset(int(tile) for tile in session.atomic_successor_required_scope())
+            if cpu_atomic_successor or shader_atomic_successor
+            else frozenset()
+        )
+        # Only an armed handoff can be adjudicated by this scope, and the
+        # walk below is over the whole active population. Deriving it on
+        # every ordinary commit charged a montage-wide currency probe to a
+        # decision no ordinary commit takes.
+        atomic_current_tiles = (
+            frozenset(
+                int(tile)
+                for tile, payload in active_payloads.items()
+                if (
+                    session.lifecycle.payload_is_current(int(tile), payload)
+                    or session.resident_crop_fallback_is_current(int(tile), payload)
+                )
+            )
+            if atomic_required_tiles
+            else frozenset()
+        )
+        prep_partial = PrepTimings(
+            payload_build_ms=(perf_counter() - payload_start) * 1000.0,
+            payload_seed_ms=(payload_seed_done - payload_start) * 1000.0,
+            payload_level_ms=(payload_level_done - payload_seed_done) * 1000.0,
+        )
+        if atomic_required_tiles and not atomic_required_tiles.issubset(atomic_current_tiles):
+            # The generic builder can legitimately return an empty active
+            # scope after rejecting stale crop wrappers. Comparing against
+            # that delta's own empty scope made the transaction look
+            # complete and submitted a zero-tile atomic handoff, hiding
+            # the complete predecessor. The transition owner already
+            # froze the physical obligation; only that required scope can
+            # authorize the backend swap.
+            session.final_commit_pending = False
+            session.flush_pending = False
+            self._publish_prepare_timings(prep_partial)
+            self._note_commit_bail(
+                "atomic-successor-wait",
+                wakeup="replan",
+                active_payloads=len(atomic_current_tiles),
+                active_tiles=len(atomic_required_tiles),
+            )
+            renderer.request_montage_replan(session)
+            return None
+        explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
+        level_key = getattr(session, "level_key", None)
+        existing_level_stats = (
+            None if level_key is None else renderer._montage_level_tracker().summary_for(level_key)
+        )
+        level_stats_seeded = bool(
+            existing_level_stats is not None and existing_level_stats.source_indices
+        )
+        level_payloads = (
+            active_payloads
+            if first_display_commit or not level_stats_seeded
+            else dict(tile_delta.upserts)
+        )
+        if level_payloads:
+            renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
+        if self._empty_first_commit_can_wait(
+            first_display_commit, explicit_auto, active_payloads, tile_delta
+        ):
+            session.final_commit_pending = False
+            session.flush_pending = False
+            self._publish_prepare_timings(prep_partial)
+            self._note_commit_bail("empty-first-commit-wait", wakeup="replan")
+            renderer.request_montage_replan(session)
+            return None
+        prepare_stats_start = perf_counter()
+        level_stats = renderer._montage_level_stats_for_session(session)
+        prepare_stats_ms = (perf_counter() - prepare_stats_start) * 1000.0
+        semantic_commit = tiled_payloads_include_semantics(active_payloads)
+        frame_commit = tiled_payloads_can_commit_frame(active_payloads)
+        # Automatic windowing applies to first-pixel payloads too.  A
+        # preview may intentionally omit committed value semantics, but it
+        # still needs the rough semantic source used by the shader and
+        # histogram; tying levels to ``semantic_commit`` displayed those
+        # first tiles at the widget fallback (0, 1).
+        decision_force_auto = bool(explicit_auto and active_payloads)
+        prepare_metadata_start = perf_counter()
+        level_generation_semantic_key = getattr(
+            getattr(session, "level_generation", None),
+            "semantic_key",
             None,
         )
-        if not callable(configure_gpu_evidence):
-            return
+        semantic_level_supersession = bool(
+            level_generation_semantic_key is not None
+            and level_generation_semantic_key != session.level_key
+        )
+        metadata_can_advance = bool(
+            first_display_commit
+            or semantic_level_supersession
+            or (
+                bool(getattr(session, "shader_display", False))
+                and not bool(getattr(session, "first_pass_histogram_published", False))
+            )
+            or self._side_work_visible_settled()
+        )
+        level_metadata_improved = bool(
+            metadata_can_advance
+            and (
+                semantic_level_supersession
+                or renderer._should_publish_montage_level_metadata(session, level_stats)
+            )
+        )
+        publish_auto_metadata = bool(
+            explicit_auto
+            and metadata_can_advance
+            and (first_display_commit or level_metadata_improved)
+        )
+        # The aggregate histogram plot is derived from the level stats, so
+        # it must (re)publish whenever those stats first arrive or improve
+        # — not only on the first display commit. On startup the first
+        # commit runs before any tile has level stats, so a first-commit-
+        # only publish left the histogram panel empty until an unrelated
+        # action (index change, channel toggle) forced a fresh first
+        # commit (field defect 2026-07).
+        first_pass_complete = renderer._first_pass_level_evidence_complete(session)
+        publish_first_pass_histogram = bool(
+            first_pass_complete
+            and not bool(getattr(session, "first_pass_histogram_published", False))
+        )
+        publish_refined_histogram = bool(
+            level_metadata_improved and bool(getattr(level_stats, "refined", False))
+        )
+        histogram_metadata_pending = bool(getattr(session, "histogram_metadata_pending", False))
+        publish_histogram_plot = bool(
+            publish_first_pass_histogram or publish_refined_histogram or histogram_metadata_pending
+        )
+        publish_metadata = (
+            publish_auto_metadata or publish_histogram_plot or level_metadata_improved
+        )
+        # Instrumentation: record why a commit did/did not (re)apply level
+        # metadata, so the levels/histogram-stranding path is observable from
+        # runtime diagnostics without a debugger.
+        level_decision = {
+            "first_display_commit": bool(first_display_commit),
+            "semantic_commit": bool(semantic_commit),
+            "frame_commit": bool(frame_commit),
+            "decision_force_auto": bool(decision_force_auto),
+            "explicit_auto": bool(explicit_auto),
+            "metadata_can_advance": bool(metadata_can_advance),
+            "semantic_level_supersession": bool(semantic_level_supersession),
+            "level_metadata_improved": bool(level_metadata_improved),
+            "histogram_metadata_pending": bool(histogram_metadata_pending),
+            "publish_histogram_plot": bool(publish_histogram_plot),
+            "publish_metadata": bool(publish_metadata),
+            "level_stats_rank": None
+            if level_stats is None
+            else str(getattr(level_stats, "rank", None)),
+            "level_stats_quality": int(getattr(level_stats, "evidence_quality", 0) or 0),
+            "active_payload_count": len(dict(active_payloads or {})),
+        }
+        renderer._montage_level_decision_count = (
+            int(getattr(renderer, "_montage_level_decision_count", 0)) + 1
+        )
+        prepare_metadata_ms = (perf_counter() - prepare_metadata_start) * 1000.0
+        if (
+            self._empty_progressive_commit_settled(first_display_commit, explicit_auto, tile_delta)
+            and not publish_metadata
+        ):
+            session.final_commit_pending = False
+            session.flush_pending = False
+            self._publish_prepare_timings(prep_partial, level_decision=level_decision)
+            session.note_committed()
+            # The required scope is settled with nothing to upsert, so no
+            # backend acknowledgement will follow this cycle.  Re-affirm
+            # targets closed by retained payloads (idempotent per
+            # requirement) so whole-workflow replay sees the closure even
+            # for presentation state restored outside the ordinary
+            # retarget/acknowledge events.
+            session.lifecycle.note_retained_satisfaction(session.required_tile_numbers())
+            self._note_commit_bail("empty-progressive-settled", wakeup="noop-finish")
+            self._finish_after_noop_commit()
+            return None
+        tile_states = session.ensure_tile_states()
+        rendered_geometry = replace(rendered_geometry, montage_tile_states=tile_states)
+        prepare_source_start = perf_counter()
+        # A cold CPU-windowed first commit may window from a provisional
+        # refined subset (first-batch acceptance in
+        # tile_layer_first_pixels_wait_for_level_source); the partial
+        # source must therefore be visible to the windowing decision on
+        # exactly that commit, not only when metadata publication is due.
+        first_cpu_commit_source = bool(
+            first_display_commit and not bool(capabilities.shader_windowing)
+        )
+        semantic_source = renderer._montage_level_source_for_session(
+            session,
+            allow_partial=bool(publish_metadata or first_cpu_commit_source),
+            rehydrate_max_count=(
+                dict(limits or {}).get("max_upserts")
+                if not bool(capabilities.shader_windowing)
+                else 0
+            ),
+        )
+        # The presentation decision runs its controller once more from
+        # ``applied_level_source`` to ``semantic_source``.  Feeding the
+        # unclamped refined source here would immediately undo the R3
+        # clamp selected above on the very transaction that introduces
+        # the rebound/outlying payload.
+        semantic_source = _shader_semantic_source_with_presented_clamp(
+            session,
+            semantic_source,
+        )
+        prepare_source_ms = (perf_counter() - prepare_source_start) * 1000.0
+        prepare_histogram_start = perf_counter()
+        histogram_plot_data = (
+            renderer._montage_histogram_plot_data_for_session(
+                session, allow_partial=publish_metadata
+            )
+            if publish_histogram_plot
+            else None
+        )
+        prepare_histogram_ms = (perf_counter() - prepare_histogram_start) * 1000.0
+        prep = replace(
+            prep_partial,
+            payload_state_ms=(payload_state_done - payload_level_done) * 1000.0,
+            payload_build_call_ms=(payload_build_call_done - payload_build_call_start) * 1000.0,
+            payload_priority_ms=(payload_priority_done - payload_build_call_done) * 1000.0,
+            payload_active_ms=(payload_state_done - payload_priority_done) * 1000.0,
+            prepare_stats_ms=prepare_stats_ms,
+            prepare_metadata_ms=prepare_metadata_ms,
+            prepare_source_ms=prepare_source_ms,
+            prepare_histogram_ms=prepare_histogram_ms,
+        )
+        if tile_layer_first_pixels_wait_for_level_source(
+            renderer,
+            session,
+            first_display_commit,
+            level_stats,
+        ):
+            self._publish_prepare_timings(prep, level_decision=level_decision)
+            if (
+                not bool(capabilities.shader_windowing)
+                and semantic_source is not None
+                and histogram_plot_data is not None
+            ):
+                # Decision 9: the one Qt call inside a prepare bail. On the
+                # GUI thread this is the plain call it always was; from the
+                # owner it becomes the posted residue, with the ordinary
+                # currency re-check every posted continuation carries.
+                self._post_rough_histogram_publication(semantic_source, histogram_plot_data)
+            session.final_commit_pending = True
+            session.flush_pending = True
+            if (
+                not getattr(session, "pending_level_tiles", None)
+                and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0
+            ):
+                renderer._mark_montage_level_scan_pending(session)
+            renderer._schedule_montage_cached_level_stats(session)
+            self._note_commit_bail("level-evidence-wait", wakeup="level-scan")
+            return None
+        warm_levels = normalize_bounds(requested_levels)
+        if warm_levels is None and semantic_source is not None:
+            warm_levels = normalize_bounds(getattr(semantic_source, "levels", None))
+        if warm_levels is None:
+            warm_levels = normalize_bounds(self._committed_display_levels())
+        cpu_backend = not bool(capabilities.shader_windowing)
+        atomic_successor = bool(cpu_atomic_successor or shader_atomic_successor)
+        resident_predicate, previous_frame = self._physical_residency_inputs()
+        cold_gpu_successor = _cold_gpu_successor_requires_hidden_warm(
+            session=session,
+            cpu_backend=cpu_backend,
+            resident_predicate=resident_predicate,
+            upserts=dict(tile_delta.upserts or {}),
+        )
+        if cold_gpu_successor and boundary.interactive:
+            # Keep the acknowledged pixels during the gesture. The
+            # interaction-stop edge replans this exact dirty transaction;
+            # hidden residency then absorbs allocation/upload cost before
+            # the semantic swap reaches the canvas.
+            session._interactive_residency_deferred = True
+            session.final_commit_pending = False
+            session.flush_pending = False
+            self._publish_prepare_timings(prep, level_decision=level_decision)
+            self._note_commit_bail("interactive-residency-deferred", wakeup="interaction-stop-edge")
+            return None
+        rebound_source_ids = dict(getattr(session, "resident_crop_fallback_source_ids", None) or {})
+        rebound_scope = (
+            frozenset(int(tile) for tile in session.atomic_successor_required_scope())
+            if atomic_successor
+            else frozenset()
+        )
+        resident_rebind_handoff = bool(
+            rebound_scope
+            and rebound_scope.issubset(active_payloads)
+            and all(
+                rebound_source_ids.get(tile) == getattr(active_payloads[tile], "source_id", None)
+                for tile in rebound_scope
+            )
+        )
+        # The crop-rebind seed already asked the backend to prove every
+        # successor binding physically resident.  Those pages remain
+        # pinned by the currently committed predecessor until this atomic
+        # mapping handoff.  Re-probing the complete 272-tile scope here is
+        # neither warming nor a safety gain; it was an ungoverned
+        # GUI-thread scan immediately before the mapping-only submit.
+        requires_hidden_warm = bool(
+            (atomic_successor and not resident_rebind_handoff) or cold_gpu_successor
+        )
+        commit_kind = (
+            CommitKind.EXPLICIT_AUTO_WINDOW
+            if (decision_force_auto if first_display_commit else explicit_auto)
+            else CommitKind.FULL_FRAME_INITIAL
+            if first_display_commit
+            else CommitKind.PROGRESSIVE_FRAME_PATCH
+        )
+        prepared_atomic_record = {
+            "session_id": int(getattr(session, "session_id", 0) or 0),
+            "level_revision": int(
+                getattr(getattr(session, "level_generation", None), "revision", 0) or 0
+            ),
+            "marker_kind": ("cpu-compatible" if cpu_atomic_successor else "shader-successor"),
+            "base_tile_state": base_tile_state,
+            "tile_state": tile_state,
+            "tile_delta": tile_delta,
+            "payload_markers": {
+                int(tile): (
+                    _cpu_transaction_payload_marker(payload)
+                    if cpu_atomic_successor
+                    else _shader_successor_transaction_payload_marker(payload)
+                )
+                for tile, payload in active_payloads.items()
+            },
+        }
+        evidence_required, evidence_deferred, evidence_obligation = (
+            self._wgpu_evidence_obligation_decision(boundary)
+        )
+        identity = TransactionIdentity(
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            session_object_id=id(session),
+            session_key=session.key,
+            level_revision=int(
+                getattr(getattr(session, "level_generation", None), "revision", 0) or 0
+            ),
+            base_revision=base_revision,
+            render_round_id=str(getattr(session, "render_round_id", "") or ""),
+            scope=frozenset(int(tile) for tile in active_payloads),
+            capabilities_id=id(capabilities),
+            eviction_stamp=self._residency_eviction_stamp(),
+            payload_markers=dict(prepared_atomic_record["payload_markers"]),
+        )
+        presentation_decision, render_context, direct_eligible = self._decide_direct_presentation(
+            display_image,
+            rendered_geometry,
+            previous_frame=previous_frame,
+            tile_state=tile_state,
+            base_tile_state=base_tile_state,
+            tile_delta=tile_delta,
+            semantic_source=semantic_source,
+            applied_level_source=session.applied_level_source,
+            histogram_plot_data=histogram_plot_data,
+            explicit_auto=explicit_auto,
+            requested_levels=requested_levels,
+            allow_uncommitted_persistent=first_display_commit,
+        )
+        return PreparedPresentationTransaction(
+            identity=identity,
+            display_image=display_image,
+            geometry=rendered_geometry,
+            tile_state=tile_state,
+            base_tile_state=base_tile_state,
+            tile_delta=tile_delta,
+            active_payloads=active_payloads,
+            tile_states=tuple(tile_states or ()),
+            dirty_tiles=tuple(int(tile) for tile in dirty_tiles),
+            capabilities=capabilities,
+            semantic_source=semantic_source,
+            applied_level_source=session.applied_level_source,
+            histogram_plot_data=histogram_plot_data,
+            requested_levels=requested_levels,
+            commit_kind=commit_kind,
+            first_display_commit=first_display_commit,
+            explicit_auto=explicit_auto,
+            decision_force_auto=decision_force_auto,
+            semantic_commit=semantic_commit,
+            frame_commit=frame_commit,
+            atomic_successor=atomic_successor,
+            cpu_atomic_successor=cpu_atomic_successor,
+            shader_atomic_successor=shader_atomic_successor,
+            atomic_successor_pending_before=bool(atomic_successor_pending),
+            atomic_prepared_reused=bool(prepared_atomic_current),
+            atomic_fast_built=bool(atomic_fast_built),
+            atomic_fast_reject_reason=str(atomic_fast_reject_reason),
+            requires_hidden_warm=requires_hidden_warm,
+            warm_levels=warm_levels,
+            prepared_atomic=prepared_atomic_record,
+            limits=dict(limits or {}),
+            max_upserts=max_upserts,
+            unbounded_reason=unbounded_reason,
+            pass_budget_ms=pass_budget_ms,
+            governor_details=governor_details,
+            render_pass_token=_render_pass_token(session),
+            pass_kind=_delta_pass_kind(tile_delta),
+            frame_critical_at_prepare=bool(boundary.frame_critical),
+            interactive_at_prepare=bool(boundary.interactive),
+            presentation_decision=presentation_decision,
+            previous_frame=previous_frame,
+            render_context=render_context,
+            direct_delta_eligible=bool(direct_eligible),
+            evidence_obligation=evidence_obligation,
+            evidence_required=evidence_required,
+            evidence_deferred=evidence_deferred,
+            publish_metadata=publish_metadata,
+            publish_first_pass_histogram=publish_first_pass_histogram,
+            publish_histogram_plot=publish_histogram_plot,
+            histogram_metadata_pending=histogram_metadata_pending,
+            level_decision=level_decision,
+            coverage_phase_before=bool(session.scheduling_policy.verdict.coverage_open),
+            presented_before_commit=session.lifecycle.first_pixel_presented_scope(
+                session.required_tile_numbers()
+            ),
+            dirty_before=dirty_before,
+            pending_before=pending_before,
+            presented_before=presented_before,
+            fast_drain=bool(fast_drain),
+            prep=prep,
+            prepared_off_thread=not on_gui_thread(),
+            delta_upserts=delta_upserts,
+        )
+
+    # ------------------------------------------------- prepare-side helpers
+
+    def _publish_prepare_timings(self, prep: PrepTimings, *, level_decision=None) -> None:
+        """Mirror one prepare block onto the renderer, for a bail or a take.
+
+        Decision 12 in its narrow form: the *merged* record is what
+        diagnostics read and it is swapped atomically at the end of the
+        commit, but a bail never reaches that merge, so its prepare block would
+        otherwise be invisible. These attribute writes are plain floats on a
+        diagnostics object; from the owner they are torn-read tolerant for the
+        same reason the owner's own counters are.
+        """
+
+        renderer = self.renderer
+        renderer._last_montage_tile_payload_build_ms = float(prep.payload_build_ms)
+        renderer._last_montage_tile_payload_seed_ms = float(prep.payload_seed_ms)
+        renderer._last_montage_tile_payload_level_ms = float(prep.payload_level_ms)
+        renderer._last_montage_tile_payload_state_ms = float(prep.payload_state_ms)
+        renderer._last_montage_tile_payload_build_call_ms = float(prep.payload_build_call_ms)
+        renderer._last_montage_tile_payload_priority_ms = float(prep.payload_priority_ms)
+        renderer._last_montage_tile_payload_active_ms = float(prep.payload_active_ms)
+        renderer._last_montage_tile_prepare_stats_ms = float(prep.prepare_stats_ms)
+        renderer._last_montage_tile_prepare_metadata_ms = float(prep.prepare_metadata_ms)
+        renderer._last_montage_tile_prepare_source_ms = float(prep.prepare_source_ms)
+        renderer._last_montage_tile_prepare_histogram_ms = float(prep.prepare_histogram_ms)
+        renderer._last_montage_commit_timings = CommitTimings(prep=prep)
+        if level_decision is not None:
+            renderer._last_montage_level_decision = dict(level_decision)
+
+    def _committed_display_levels(self):
+        """``getLevels()`` where it is legal, the last acknowledged pair else.
+
+        ``img_view.getLevels()`` is a widget call. Prepare runs on the owner,
+        so it reads what the last acknowledgement froze into AckInputs; the
+        only consumer is the hidden-warm level fallback, whose two other
+        sources (the user's request, the semantic source) are already
+        preferred over it.
+        """
+
+        if on_gui_thread():
+            return self.renderer.win.img_view.getLevels()
+        return getattr(self.renderer, "_last_montage_physical_levels", None)
+
+    def _residency_eviction_stamp(self):
+        """The page-table eviction stamp the snapshot was taken against."""
+
+        snapshot = getattr(self.renderer, "_presentation_residency_snapshot", None)
+        probe = None if snapshot is None else snapshot.probe
+        return None if probe is None else tuple(probe.eviction_stamp)
+
+    def _wgpu_evidence_obligation_decision(self, boundary):
+        """Decide the phase-1 resident-histogram obligation; do not install it.
+
+        The decision is session state and evaluates anywhere; the install is
+        ``setResidentHistogramEvidenceRequired``, a widget call the submit
+        makes. Splitting them is what lets the whole prepare leave the GUI
+        thread. Returns ``(required, deferred, obligation)`` — the obligation
+        tuple travels in the transaction and is what the GUI installs.
+        """
+
+        session = self.session
+        if not bool(boundary.supports_resident_evidence):
+            return False, False, None
         gpu_evidence_required = bool(
             session.scheduling_policy.verdict.coverage_open
             and not getattr(session, "first_pass_histogram_published", False)
         )
-        gpu_evidence_deferred = bool(gpu_evidence_required and interactive_active(renderer))
+        gpu_evidence_deferred = bool(gpu_evidence_required and boundary.interactive)
         session._wgpu_histogram_evidence_deferred = gpu_evidence_deferred
         # The backend evidence key already includes the committed plane
         # identity, resident frontier, and shader mapping. The phase key
@@ -3228,137 +3296,52 @@ class FramePipelineEffects:
             "wgpu-resident-histogram",
             session.level_key,
         )
-        configure_gpu_evidence(
-            gpu_evidence_required and not gpu_evidence_deferred,
-            evidence_obligation if gpu_evidence_required else None,
-        )
         if gpu_evidence_deferred:
             # A deferred COLD obligation is still phase-1 evidence debt.
             # Without the barrier, first pixels close COVERAGE evidence-empty
             # and the quiet-edge forced commit lands in REFINE, where
             # ``gpu_evidence_required`` is gated off — the rough histogram
             # never dispatches (codex review 2026-07-19, finding 1). The
-            # publication transition in ``_acknowledge_and_publish`` releases
-            # the barrier; a scope retarget resets it.
+            # publication transition in the acknowledgement releases the
+            # barrier; a scope retarget resets it.
             session.scheduling_policy.set_coverage_evidence_pending(True)
             emit_trace(
                 "wgpu_histogram_deferred",
                 reason="interaction_active",
                 session_id=int(getattr(session, "session_id", 0) or 0),
             )
+        return gpu_evidence_required, gpu_evidence_deferred, evidence_obligation
 
-    def _present_tile_delta(
-        self,
-        display_image,
-        geometry,
-        *,
-        tile_state,
-        base_tile_state,
-        tile_delta,
-        semantic_source,
-        applied_level_source,
-        histogram_plot_data,
-        first_display_commit: bool,
-        explicit_auto: bool,
-        requested_levels,
-        semantic_commit: bool,
-        decision_force_auto: bool,
-    ) -> bool:
+    def _post_rough_histogram_publication(self, semantic_source, histogram_plot_data) -> None:
+        """The level-evidence-wait bail's Qt half, posted when off the GUI."""
+
         renderer = self.renderer
         session = self.session
-        self._configure_wgpu_evidence_obligation()
-        apply_start = perf_counter()
-        if first_display_commit and self._commit_direct_delta(
-            display_image,
-            geometry,
-            tile_state=tile_state,
-            base_tile_state=base_tile_state,
-            tile_delta=tile_delta,
-            semantic_source=semantic_source,
-            applied_level_source=applied_level_source,
-            histogram_plot_data=histogram_plot_data,
-            explicit_auto=explicit_auto,
-            requested_levels=requested_levels,
-            semantic_commit=semantic_commit,
-            allow_uncommitted_persistent=True,
-        ):
-            applied = True
-        elif first_display_commit:
-            applied = renderer._apply_full_display_image(
-                display_image,
-                geometry=geometry,
-                window_mode=session.window_mode,
-                previous_frame=getattr(renderer.win, "_committed_display_frame", None),
-                force_auto=decision_force_auto,
-                defer_side_panels=getattr(session, "defer_side_panels", False),
-                semantic_source=semantic_source,
-                applied_level_source=applied_level_source,
-                histogram_plot_data=histogram_plot_data,
-                commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW
-                if decision_force_auto
-                else CommitKind.FULL_FRAME_INITIAL,
-                document_key=_document_key(session.document),
-                request_key=session.key,
-                render_generation=session.render_generation,
-                montage_level_key=session.level_key,
-                tile_state=tile_state,
-                base_tile_state=base_tile_state,
-                tile_delta=tile_delta,
-                frame_plan=session.frame_plan,
-                user_levels=requested_levels,
-                semantic_commit=semantic_commit,
-            )
-        elif self._commit_direct_delta(
-            display_image,
-            geometry,
-            tile_state=tile_state,
-            base_tile_state=base_tile_state,
-            tile_delta=tile_delta,
-            semantic_source=semantic_source,
-            applied_level_source=applied_level_source,
-            histogram_plot_data=histogram_plot_data,
-            explicit_auto=explicit_auto,
-            requested_levels=requested_levels,
-            semantic_commit=semantic_commit,
-        ):
-            applied = True
-        else:
-            applied = renderer._apply_progressive_display_image(
-                display_image,
-                geometry=geometry,
-                window_mode=session.window_mode,
-                previous_frame=getattr(renderer.win, "_committed_display_frame", None),
-                force_auto=False,
-                viewport_policy=ViewportPolicy.PRESERVE,
-                semantic_source=semantic_source,
-                applied_level_source=applied_level_source,
-                histogram_plot_data=histogram_plot_data,
-                commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW
-                if explicit_auto
-                else CommitKind.PROGRESSIVE_FRAME_PATCH,
-                document_key=_document_key(session.document),
-                request_key=session.key,
-                render_generation=session.render_generation,
-                montage_level_key=session.level_key,
-                tile_state=tile_state,
-                base_tile_state=base_tile_state,
-                tile_delta=tile_delta,
-                frame_plan=session.frame_plan,
-                user_levels=requested_levels,
-                semantic_commit=semantic_commit,
-            )
-        renderer._last_montage_tile_layer_apply_ms = (perf_counter() - apply_start) * 1000.0
-        # A commit the presenter caught and reported must decline here rather
-        # than fall through to acknowledgement: there is no report describing
-        # this delta, and the caller would otherwise acknowledge whatever the
-        # previous transaction left behind.
-        return bool(applied)
+        session_id = int(getattr(session, "session_id", 0) or 0)
+        session_key = session.key
 
-    def _commit_direct_delta(
+        def publish() -> None:
+            if not renderer._is_current_frame_session(session_id, session_key):
+                return
+            apply_metadata = getattr(renderer.win.img_view, "applyHistogramMetadata", None)
+            if not callable(apply_metadata):
+                return
+            apply_metadata(
+                histogramData=histogram_plot_data,
+                histogramPlotData=histogram_plot_data,
+                levels=semantic_source.levels,
+                histogramRange=semantic_source.histogram_range,
+            )
+            renderer._note_montage_level_source_applied(session, semantic_source, explicit=False)
+
+        run_on_gui_thread(renderer, publish)
+
+    def _decide_direct_presentation(
         self,
         display_image,
         geometry,
         *,
+        previous_frame,
         tile_state,
         base_tile_state,
         tile_delta,
@@ -3367,25 +3350,40 @@ class FramePipelineEffects:
         histogram_plot_data,
         explicit_auto: bool,
         requested_levels,
-        semantic_commit: bool,
-        allow_uncommitted_persistent: bool = False,
-    ) -> bool:
+        allow_uncommitted_persistent: bool,
+    ):
+        """Hoist ``decide_presentation`` out of ``_commit_direct_delta``.
+
+        ADR 0065 stage 2 decision 4. ``display/planning.py`` is Qt-free, so the
+        decision belongs with the rest of preparation; what stays GUI-side is
+        the *submit* it feeds. Returns ``(decision, context, eligible)``, where
+        ``eligible`` is False when the direct-delta path does not apply at all
+        and the submit must go through the presenter's full/progressive form.
+
+        The decision is bound to the ``previous_frame`` it was made against.
+        The take validates ``previous_frame is win._committed_display_frame``
+        and treats a mismatch as a miss, because a frame republished between
+        prepare and take is a different base for the delta.
+        """
+
         renderer = self.renderer
         session = self.session
         if not direct_montage_tile_delta_commit_enabled(
             renderer,
             session,
-            allow_uncommitted_persistent=allow_uncommitted_persistent,
+            allow_uncommitted_persistent=bool(allow_uncommitted_persistent),
         ):
-            return False
-        previous_frame = getattr(renderer.win, "_committed_display_frame", None)
+            return None, None, False
         if previous_frame is None or not isinstance(
             getattr(previous_frame, "value_source", None), TiledValueSource
         ):
-            return False
-        previous_geometry = getattr(previous_frame, "geometry", None)
-        if not safe_tiled_payload_geometry_retarget(previous_geometry, geometry):
-            return False
+            return None, None, False
+        if not safe_tiled_payload_geometry_retarget(
+            getattr(previous_frame, "geometry", None), geometry
+        ):
+            return None, None, False
+        if getattr(geometry, "montage", None) is None:
+            return None, None, False
         context = renderer._render_request_context(
             document_key=_document_key(session.document),
             request_key=session.key,
@@ -3422,13 +3420,376 @@ class FramePipelineEffects:
                 user_levels=requested_levels,
             )
         )
+        return decision, context, True
+
+    # ---------------------------------------------------------------- submit
+
+    def _submit_prepared_transaction(
+        self, transaction: PreparedPresentationTransaction, *, commit_start: float
+    ) -> None:
+        """Backend apply/submit and the Qt half of one commit. GUI thread only.
+
+        The hidden-warm branch lives here and not in prepare because it does
+        real GPU uploads (ADR 0065 "what stays GUI-side in stage 2"); the
+        transaction carries ``requires_hidden_warm`` and the frozen prepared
+        dict so this side needs no session walk of its own.
+        """
+
+        renderer = self.renderer
+        session = self.session
+        self._apply_prepared_diagnostics(transaction)
+        if (
+            transaction.requires_hidden_warm
+            and bool(transaction.tile_delta.upserts)
+            and transaction.warm_levels is not None
+            and not _warm_atomic_successor_residency(
+                renderer,
+                session,
+                transaction.geometry,
+                transaction.tile_delta,
+                levels=transaction.warm_levels,
+                rgb_already_windowed=bool(
+                    getattr(transaction.display_image, "rgb_already_windowed", False)
+                ),
+                payloads=(
+                    transaction.active_payloads
+                    if transaction.atomic_successor
+                    else dict(transaction.tile_delta.upserts or {})
+                ),
+                batch_size=2,
+            )
+        ):
+            session._atomic_prepared_transaction = dict(transaction.prepared_atomic or {})
+            # Residency preparation owns its receiver-bound continuation
+            # and requests exactly one semantic replan when complete.
+            # Replanning the whole frame after every warmed holder is an
+            # O(tiles^2) event-loop starvation loop during scroll churn.
+            session.final_commit_pending = False
+            session.flush_pending = False
+            self._note_commit_bail(
+                "hidden-warm-residency-wait", wakeup="warm-residency-continuation"
+            )
+            return
+        # "Emitted" means handed across the backend boundary, not merely
+        # selected by the transaction builder. In particular, the
+        # refined-level gate in prepare may defer a complete PyQtGraph frame;
+        # marking it emitted before that decision strands the lifecycle
+        # at TARGET_EMITTED even though no scene update occurred.
+        session.lifecycle.commit_emitted(transaction.tile_delta.upserts)
+        submit_started = perf_counter()
+        applied = self._present_tile_delta(transaction)
+        submit_span_ms = (perf_counter() - submit_started) * 1000.0
+        renderer._last_montage_submit_span_ms = float(submit_span_ms)
+        renderer._last_montage_tile_prepare_apply_ms = float(
+            transaction.prep.prepare_stats_ms
+            + transaction.prep.prepare_metadata_ms
+            + transaction.prep.prepare_source_ms
+            + transaction.prep.prepare_histogram_ms
+        )
+        if not applied:
+            self._note_commit_bail("backend-declined", wakeup="rearm-if-backlog")
+            return
+        if transaction.histogram_metadata_pending and transaction.histogram_plot_data is not None:
+            session.histogram_metadata_pending = False
+        session.backend_refresh_pending = False
+        renderer._last_montage_commit_outcome = "backend-applied"
+        session._atomic_prepared_transaction = None
+        ack = self._capture_ack_inputs(
+            transaction,
+            commit_start=commit_start,
+            submit_span_ms=submit_span_ms,
+        )
+        self._acknowledge_transaction(ack)
+
+    def _apply_prepared_diagnostics(self, transaction) -> None:
+        """Mirror a taken transaction's prepare-side facts onto the renderer.
+
+        Everything here used to be written by the prepare region directly.
+        With prepare on the owner, the *take* is the first moment these values
+        may touch GUI-read state, and doing it in one place is what keeps a
+        diagnostics read from mixing two commits.
+        """
+
+        renderer = self.renderer
+        renderer._persistent_tile_layer_fast_drain_last_enabled = bool(transaction.fast_drain)
+        renderer._persistent_tile_layer_fast_drain_enabled_count = int(
+            getattr(renderer, "_persistent_tile_layer_fast_drain_enabled_count", 0) or 0
+        ) + int(bool(transaction.fast_drain))
+        renderer._last_montage_commit_max_upserts = int(transaction.max_upserts)
+        renderer._last_montage_commit_unbounded_reason = str(transaction.unbounded_reason)
+        renderer._last_montage_pass_budget_ms = transaction.pass_budget_ms
+        renderer._last_montage_governor_details = tuple(transaction.governor_details)
+        renderer._last_montage_atomic_successor_pending_before = bool(
+            transaction.atomic_successor_pending_before
+        )
+        renderer._last_montage_shader_atomic_successor = bool(transaction.shader_atomic_successor)
+        renderer._last_montage_atomic_successor = bool(transaction.atomic_successor)
+        renderer._last_montage_atomic_prepared_reused = bool(transaction.atomic_prepared_reused)
+        renderer._last_montage_atomic_fast_built = bool(transaction.atomic_fast_built)
+        renderer._last_montage_atomic_fast_reject_reason = str(
+            transaction.atomic_fast_reject_reason
+        )
+        renderer._last_montage_commit_dirty_before = int(transaction.dirty_before)
+        renderer._last_montage_commit_pending_before = int(transaction.pending_before)
+        renderer._last_montage_commit_presented_before = int(transaction.presented_before)
+        renderer._last_montage_commit_first_display = bool(transaction.first_display_commit)
+        renderer._last_montage_commit_delta_upserts = int(transaction.delta_upserts)
+        self._publish_prepare_timings(transaction.prep, level_decision=transaction.level_decision)
+
+    def _capture_ack_inputs(
+        self, transaction, *, commit_start: float, submit_span_ms: float
+    ) -> AckInputs:
+        """Freeze what only the GUI thread can observe, for the ack handler.
+
+        The resident-histogram evidence is probed **once** and travels as one
+        bool (decision 8). Both of its consumers — the coverage barrier and the
+        evidence-selection branch — must describe the same commit, and a live
+        backend probe called twice inside one commit can legitimately disagree.
+        """
+
+        renderer = self.renderer
+        session = self.session
+        committer = renderer._display_committer()
+        report = getattr(committer, "last_tile_commit_report", None)
+        capabilities = image_view_backend_capabilities(renderer.win.img_view)
+        resident_gpu_evidence = getattr(renderer.win.img_view, "residentHistogramEvidence", None)
+        evidence = bool(
+            callable(resident_gpu_evidence) and resident_gpu_evidence(transaction.active_payloads)
+        )
+        # Decision 5's capture point, and it is here rather than earlier: the
+        # page table stopped changing when the submit returned. The committed
+        # frame is republished by the residue, so the pair is re-frozen there
+        # too; this one is what the *next* prepare reads.
+        snapshot = capture_residency_snapshot(renderer.win)
+        boundary = read_frame_boundary_inputs(renderer, session)
+        renderer._last_ack_frame_boundary = boundary
+        return AckInputs(
+            transaction=transaction,
+            report=report,
+            committed_levels=normalize_bounds(renderer.win.img_view.getLevels()),
+            shader_windowing=bool(capabilities.shader_windowing),
+            resident_histogram_evidence=evidence,
+            residency_snapshot=snapshot,
+            committed_frame=getattr(renderer.win, "_committed_display_frame", None),
+            submit=SubmitTimings(
+                submit_span_ms=float(submit_span_ms),
+                tile_layer_apply_ms=float(
+                    getattr(renderer, "_last_montage_tile_layer_apply_ms", 0.0) or 0.0
+                ),
+                set_image_ms=float(getattr(renderer, "_last_set_image_ms", 0.0) or 0.0),
+            ),
+            draw_pending_at_submit=bool(boundary.draw_pending),
+            interactive_at_submit=bool(boundary.interactive),
+            first_pass_histogram_published=bool(
+                transaction.publish_first_pass_histogram
+                and transaction.histogram_plot_data is not None
+            ),
+            applied=True,
+            commit_start=float(commit_start),
+        )
+
+    # ------------------------------------------------------- acknowledgement
+
+    def _acknowledge_transaction(self, ack: AckInputs) -> None:
+        """The acknowledgement bookkeeping for one submitted transaction.
+
+        One gate guards the whole handler: the transaction's session identity
+        against the live one, and ``report.acknowledges(delta)``. Today both
+        callers are the GUI thread microseconds after the submit, so a refusal
+        is nearly impossible — which is exactly why it is *counted* and traced.
+        When slice D posts this to the owner the refusal becomes reachable
+        (a rebirth landing between submit and ack), and a silent refusal at
+        that point is invisible: today's synchronous code never needed the
+        verdict, so it never had one.
+        """
+
+        transaction = ack.transaction
+        session = self.session
+        if not transaction.identity.matches_session(session):
+            self._note_ack_refused("session-identity", ack)
+            return
+        self._acknowledge_and_publish(ack)
+
+    def _note_ack_refused(self, reason: str, ack: AckInputs) -> None:
+        renderer = self.renderer
+        renderer._montage_ack_refused_stale = (
+            int(getattr(renderer, "_montage_ack_refused_stale", 0) or 0) + 1
+        )
+        emit_trace(
+            "presentation_gate",
+            action="ack-refused-stale",
+            reason=str(reason),
+            owner_session=int(ack.transaction.identity.session_id),
+            live_session=int(getattr(self.session, "session_id", 0) or 0),
+        )
+
+    def _note_commit_raised(self, exc: BaseException, *, dirty_tiles=()) -> None:
+        """Record a commit throw as the terminal bail it is.
+
+        Deliberately NOT a wakeup: re-arming would replay a delta that is about
+        to throw again at full flush rate, which the rescue ADR 0051 forbids.
+        In-flight worker completions can nevertheless request presentation
+        after this frame returns, so the terminal mark is generation-scoped:
+        it blocks this failed owner without poisoning a successor generation.
+        """
+
+        renderer = self.renderer
+        session = self.session
+        tiles = tuple(int(tile) for tile in tuple(dirty_tiles or ()))
+        renderer._montage_commit_failed_owner = (
+            int(getattr(session, "session_id", 0) or 0),
+            id(session),
+        )
+        renderer._last_montage_commit_exception = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": traceback_text(exc),
+            "session_id": int(getattr(session, "session_id", 0) or 0),
+            "semantic_key": repr(getattr(session, "key", None)),
+            "committing_tiles": tiles[:16],
+            "committing_tile_count": len(tiles),
+        }
+        self._note_commit_bail(
+            "raised",
+            wakeup="none (terminal)",
+            exception_type=type(exc).__name__,
+            exception_message=str(exc),
+            committing_tile_count=len(tiles),
+        )
+
+    def _install_wgpu_evidence_obligation(self, transaction) -> None:
+        """Install, defer, or clear the phase-1 resident-histogram obligation.
+
+        The *decision* is made in prepare (``_wgpu_evidence_obligation_decision``);
+        this is the widget call it produces, and the obligation tuple travels
+        in the transaction so the submit needs no session read of its own.
+        """
+
+        configure_gpu_evidence = getattr(
+            self.renderer.win.img_view,
+            "setResidentHistogramEvidenceRequired",
+            None,
+        )
+        if not callable(configure_gpu_evidence):
+            return
+        required = bool(transaction.evidence_required)
+        configure_gpu_evidence(
+            required and not bool(transaction.evidence_deferred),
+            transaction.evidence_obligation if required else None,
+        )
+
+    def _present_tile_delta(self, transaction) -> bool:
+        renderer = self.renderer
+        session = self.session
+        self._install_wgpu_evidence_obligation(transaction)
+        apply_start = perf_counter()
+        display_image = transaction.display_image
+        geometry = transaction.geometry
+        if transaction.first_display_commit and self._commit_direct_delta(transaction):
+            applied = True
+        elif transaction.first_display_commit:
+            applied = renderer._apply_full_display_image(
+                display_image,
+                geometry=geometry,
+                window_mode=session.window_mode,
+                previous_frame=getattr(renderer.win, "_committed_display_frame", None),
+                force_auto=transaction.decision_force_auto,
+                defer_side_panels=getattr(session, "defer_side_panels", False),
+                semantic_source=transaction.semantic_source,
+                applied_level_source=transaction.applied_level_source,
+                histogram_plot_data=transaction.histogram_plot_data,
+                commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW
+                if transaction.decision_force_auto
+                else CommitKind.FULL_FRAME_INITIAL,
+                document_key=_document_key(session.document),
+                request_key=session.key,
+                render_generation=session.render_generation,
+                montage_level_key=session.level_key,
+                tile_state=transaction.tile_state,
+                base_tile_state=transaction.base_tile_state,
+                tile_delta=transaction.tile_delta,
+                frame_plan=session.frame_plan,
+                user_levels=transaction.requested_levels,
+                semantic_commit=transaction.frame_commit,
+            )
+        elif self._commit_direct_delta(transaction):
+            applied = True
+        else:
+            applied = renderer._apply_progressive_display_image(
+                display_image,
+                geometry=geometry,
+                window_mode=session.window_mode,
+                previous_frame=getattr(renderer.win, "_committed_display_frame", None),
+                force_auto=False,
+                viewport_policy=ViewportPolicy.PRESERVE,
+                semantic_source=transaction.semantic_source,
+                applied_level_source=transaction.applied_level_source,
+                histogram_plot_data=transaction.histogram_plot_data,
+                commit_kind=CommitKind.EXPLICIT_AUTO_WINDOW
+                if transaction.explicit_auto
+                else CommitKind.PROGRESSIVE_FRAME_PATCH,
+                document_key=_document_key(session.document),
+                request_key=session.key,
+                render_generation=session.render_generation,
+                montage_level_key=session.level_key,
+                tile_state=transaction.tile_state,
+                base_tile_state=transaction.base_tile_state,
+                tile_delta=transaction.tile_delta,
+                frame_plan=session.frame_plan,
+                user_levels=transaction.requested_levels,
+                semantic_commit=transaction.frame_commit,
+            )
+        renderer._last_montage_tile_layer_apply_ms = (perf_counter() - apply_start) * 1000.0
+        # A commit the presenter caught and reported must decline here rather
+        # than fall through to acknowledgement: there is no report describing
+        # this delta, and the caller would otherwise acknowledge whatever the
+        # previous transaction left behind.
+        return bool(applied)
+
+    def _commit_direct_delta(self, transaction) -> bool:
+        """Submit the prepared delta. The decision was made in prepare.
+
+        ADR 0065 stage 2 decision 4: everything above ``commit_tiled_delta``
+        used to live here and is now ``_decide_direct_presentation``. What
+        remains is the wgpu/pyqtgraph submit and the committed-frame rebuild,
+        which is the half that genuinely needs the GUI thread.
+        """
+
+        renderer = self.renderer
+        session = self.session
+        if not transaction.direct_delta_eligible:
+            return False
+        geometry = transaction.geometry
+        tile_state = transaction.tile_state
+        previous_frame = getattr(renderer.win, "_committed_display_frame", None)
+        decision = transaction.presentation_decision
+        context = transaction.render_context
+        if previous_frame is not transaction.previous_frame or decision is None:
+            # Inline anchor only: the split path validates this identity at
+            # take and misses instead. Re-deciding here keeps the anchor
+            # honest for the one caller that can reach it — a frame republished
+            # between prepare and submit inside the same callback.
+            decision, context, eligible = self._decide_direct_presentation(
+                transaction.display_image,
+                geometry,
+                previous_frame=previous_frame,
+                tile_state=tile_state,
+                base_tile_state=transaction.base_tile_state,
+                tile_delta=transaction.tile_delta,
+                semantic_source=transaction.semantic_source,
+                applied_level_source=transaction.applied_level_source,
+                histogram_plot_data=transaction.histogram_plot_data,
+                explicit_auto=transaction.explicit_auto,
+                requested_levels=transaction.requested_levels,
+                allow_uncommitted_persistent=transaction.first_display_commit,
+            )
+            if not eligible or decision is None:
+                return False
         renderer._last_montage_decision_levels = normalize_bounds(decision.levels)
         renderer._last_montage_decision_source_rank = int(
             getattr(getattr(decision, "applied_level_source", None), "rank", 0) or 0
         )
         set_image_start = perf_counter()
-        if getattr(geometry, "montage", None) is None:
-            return False
         committer = renderer._display_committer()
         committer.commit_tiled_delta(decision.display_presentation)
         renderer._last_set_image_ms = (perf_counter() - set_image_start) * 1000.0
@@ -3444,7 +3805,7 @@ class FramePipelineEffects:
             getattr(getattr(previous_frame, "value_source", None), "transposed", False)
         )
         semantic_frame_commit = bool(
-            semantic_commit and bool(getattr(report, "presented_tiles", ()))
+            transaction.frame_commit and bool(getattr(report, "presented_tiles", ()))
         )
         if semantic_frame_commit or orientation_changed:
             committed_state = getattr(committer, "last_tile_committed_state", None)
@@ -3473,24 +3834,29 @@ class FramePipelineEffects:
         renderer.win.img_view.setImageStale(False)
         return True
 
-    def _acknowledge_and_publish(
-        self,
-        tile_delta,
-        tile_state,
-        geometry,
-        active_payloads,
-        *,
-        commit_start: float,
-        atomic_successor: bool,
-        first_pass_histogram_published: bool,
-    ) -> None:
+    def _acknowledge_and_publish(self, ack: AckInputs) -> None:
+        """Everything the backend report unlocks, in the order it unlocks it.
+
+        Driven entirely by :class:`AckInputs` — the report, the committed
+        levels, the one resident-evidence bool, the residency snapshot. No live
+        image-view read survives in here, which is what lets slice D post this
+        whole method to the presentation owner without changing a line of its
+        ordering.
+        """
+
         renderer = self.renderer
         session = self.session
-        coverage_phase_before = bool(session.scheduling_policy.verdict.coverage_open)
-        presented_before_commit = session.lifecycle.first_pixel_presented_scope(
-            session.required_tile_numbers()
-        )
-        report = getattr(renderer._display_committer(), "last_tile_commit_report", None)
+        transaction = ack.transaction
+        tile_delta = transaction.tile_delta
+        tile_state = transaction.tile_state
+        geometry = transaction.geometry
+        active_payloads = transaction.active_payloads
+        commit_start = float(ack.commit_start)
+        atomic_successor = bool(transaction.atomic_successor)
+        first_pass_histogram_published = bool(ack.first_pass_histogram_published)
+        coverage_phase_before = bool(transaction.coverage_phase_before)
+        presented_before_commit = transaction.presented_before_commit
+        report = ack.report
         renderer._last_montage_report_presented = len(
             tuple(getattr(report, "presented_tiles", ()) or ())
         )
@@ -3510,7 +3876,7 @@ class FramePipelineEffects:
             tile_state,
         )
         acknowledge_start = perf_counter()
-        committed_levels = normalize_bounds(renderer.win.img_view.getLevels())
+        committed_levels = ack.committed_levels
         renderer._last_montage_physical_levels = committed_levels
         presented_before = set(session.lifecycle.presented_tiles)
         first_pixels_before = bool(session.required_first_pixels_presented())
@@ -3533,8 +3899,16 @@ class FramePipelineEffects:
                 report,
                 acknowledged,
             )
+        # Decision 2, the sharpest correctness edge in the stage: the dirty
+        # set is released HERE, on the acknowledgement of the delta that was
+        # actually accepted — not at the top of the commit. A transaction the
+        # GUI drops (mailbox miss, failed validation, a frame that turned
+        # critical between prepare and take) therefore leaves every tile in it
+        # dirty, and the next prepare presents them again. Exactly the peeked
+        # tiles go, so anything dirtied since the peek survives for the next
+        # transaction.
+        session.release_dirty_tiles(transaction.dirty_tiles)
         renderer._last_montage_tile_acknowledge_ms = (perf_counter() - acknowledge_start) * 1000.0
-        _call(renderer, "_refresh_tile_truth_overlay")
         retained_start = perf_counter()
         accepted_payloads = accepted_tiled_payloads(acknowledged.payloads, tile_delta, report)
         retention_started_at = getattr(renderer, "_slice_retention_started_at", None)
@@ -3598,22 +3972,17 @@ class FramePipelineEffects:
                     # camera shows the successor extent while the active
                     # plan remains the predecessor's partial tile set.
                     renderer._frame_viewport_retarget_after_commit = True
-        if (
-            committed_levels is not None
-            and image_view_backend_capabilities(renderer.win.img_view).shader_windowing
-        ):
+        if committed_levels is not None and ack.shader_windowing:
             session.update_level_presentation_scope()
             session.acknowledge_uniform_level_presentation(committed_levels)
         if not session.has_stale_level_presentations():
             session.set_level_update_pending(False)
-        resident_gpu_evidence = getattr(
-            renderer.win.img_view,
-            "residentHistogramEvidence",
-            None,
-        )
-        gpu_evidence_waiting = bool(
-            callable(resident_gpu_evidence) and resident_gpu_evidence(active_payloads)
-        )
+        # Decision 8: ONE probe result for both consumers. The backend read
+        # happened once, GUI-side, in `_capture_ack_inputs`; two live calls
+        # inside one commit can legitimately disagree and would leave the
+        # coverage barrier and the evidence selection describing different
+        # commits.
+        gpu_evidence_waiting = bool(ack.resident_histogram_evidence)
         if gpu_evidence_waiting:
             session.scheduling_policy.set_coverage_evidence_pending(True)
         if accepted_payloads or gpu_evidence_waiting:
@@ -3714,14 +4083,24 @@ class FramePipelineEffects:
             session.plan, tuple(session.tile_states), rect
         )
         renderer._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
-        # ADR 0065 stage 2 decision 5, the capture point. Here and not earlier:
-        # the page table stopped moving when the submit returned, and
-        # `_sync_committed_montage_geometry` above has just republished
-        # `_committed_display_frame`, so this is the one instant in the commit
-        # where the two halves the crop-rebind seed reads describe the same
-        # transaction. Under the order lock by construction — every caller of
-        # this is inside a `session_order_lock_section` commit funnel.
-        renderer._presentation_residency_snapshot = capture_residency_snapshot(renderer.win)
+        # ADR 0065 stage 2 decision 5, the publication point. The snapshot
+        # itself was frozen GUI-side in `_capture_ack_inputs` (the page table
+        # stopped moving when the submit returned); it is re-taken here because
+        # `_sync_committed_montage_geometry` just republished
+        # `_committed_display_frame`, and the crop-rebind seed needs the two
+        # halves to describe one transaction. Off the GUI thread the re-take is
+        # unavailable and the AckInputs copy stands — one geometry sync of
+        # staleness in the committed-frame half, which the seed re-validates
+        # anyway.
+        renderer._presentation_residency_snapshot = (
+            capture_residency_snapshot(renderer.win) if on_gui_thread() else ack.residency_snapshot
+        )
+        # Map O15: the tile-truth overlay used to refresh BETWEEN the
+        # acknowledgement and the retained store. It refreshes post-ack now —
+        # a real ordering change to overlay chrome, and it is deliberate: the
+        # overlay reads what `mark_presented` wrote, so between-ack showed the
+        # predecessor's truth for one frame on every commit.
+        _call(renderer, "_refresh_tile_truth_overlay")
         self._finish_commit(
             report,
             tile_state,
@@ -3758,19 +4137,7 @@ class FramePipelineEffects:
             getattr(session, "rearm_visible_parked_payloads", lambda: ())() or ()
         )
         renderer._last_montage_tile_commit_ms = (perf_counter() - commit_start) * 1000.0
-        chunk_qualities = {
-            str(getattr(payload, "quality", "exact") or "exact")
-            for payload in dict(getattr(tile_delta, "upserts", {}) or {}).values()
-        }
-        pass_kind = (
-            "preview"
-            if chunk_qualities and chunk_qualities <= {"preview", "fallback"}
-            else "target"
-            if chunk_qualities == {"exact"}
-            else "mixed"
-            if chunk_qualities
-            else "metadata"
-        )
+        pass_kind = _delta_pass_kind(tile_delta)
         renderer._last_montage_pass_kind = pass_kind
         if trace_enabled():
             priority_ranks = dict(getattr(tile_delta, "priority_ranks", {}) or {})
@@ -4071,6 +4438,57 @@ class FramePipelineEffects:
             schedule_near_viewport_montage_prefetch(renderer, session)
         renderer._retry_live_profile_after_montage_tile()
         renderer._last_montage_tile_followup_ms = (perf_counter() - followup_start) * 1000.0
+        self._publish_commit_timings()
+
+    def _publish_commit_timings(self) -> None:
+        """Merge the prepare and submit blocks and publish them in one swap.
+
+        ADR 0065 stage 2 decision 12. Twenty independent ``_last_montage_*``
+        attributes were a fine diagnostic while one thread wrote all of them;
+        with preparation on the presentation owner a reader can catch the
+        prepare block of one commit beside the submit block of the next. One
+        frozen object, one attribute assignment, and the read is either wholly
+        this commit or wholly the previous one.
+
+        The scratch attributes survive because the trace record and
+        ``_commit_feedback_details`` are GUI-thread-only readers of GUI-thread
+        writes; ``diagnostics_snapshot`` — which reads from anywhere — reads
+        the record.
+        """
+
+        renderer = self.renderer
+        existing = getattr(renderer, "_last_montage_commit_timings", None)
+        prep = existing.prep if isinstance(existing, CommitTimings) else PrepTimings()
+        renderer._last_montage_commit_timings = CommitTimings(
+            prep=prep,
+            submit=SubmitTimings(
+                tile_commit_ms=float(getattr(renderer, "_last_montage_tile_commit_ms", 0.0) or 0.0),
+                tile_layer_apply_ms=float(
+                    getattr(renderer, "_last_montage_tile_layer_apply_ms", 0.0) or 0.0
+                ),
+                set_image_ms=float(getattr(renderer, "_last_set_image_ms", 0.0) or 0.0),
+                submit_span_ms=float(getattr(renderer, "_last_montage_submit_span_ms", 0.0) or 0.0),
+                acknowledge_ms=float(
+                    getattr(renderer, "_last_montage_tile_acknowledge_ms", 0.0) or 0.0
+                ),
+                retained_store_ms=float(
+                    getattr(renderer, "_last_montage_tile_retained_store_ms", 0.0) or 0.0
+                ),
+                state_publish_ms=float(
+                    getattr(renderer, "_last_montage_tile_state_publish_ms", 0.0) or 0.0
+                ),
+                geometry_sync_ms=float(
+                    getattr(renderer, "_last_montage_tile_geometry_sync_ms", 0.0) or 0.0
+                ),
+                overlay_update_ms=float(
+                    getattr(renderer, "_last_montage_overlay_update_ms", 0.0) or 0.0
+                ),
+                identity_check_ms=float(
+                    getattr(renderer, "_last_montage_tile_identity_check_ms", 0.0) or 0.0
+                ),
+                followup_ms=float(getattr(renderer, "_last_montage_tile_followup_ms", 0.0) or 0.0),
+            ),
+        )
 
     def _record_commit_feedback(self, report) -> None:
         renderer = self.renderer
@@ -4097,7 +4515,20 @@ class FramePipelineEffects:
                 "texture_upload",
                 backend_name,
             )
-        commit_feedback_ms = renderer._last_montage_tile_commit_ms
+        # ADR 0065 stage 2 decision 6, and this is the ONE place the definition
+        # lives. `commit_feedback_ms` used to be the whole GUI callback, which
+        # was the same thing as long as preparation ran inside it. With
+        # preparation on the presentation owner it is the **GUI submit span**
+        # (`_present_tile_delta` entry to return) for every commit channel
+        # below — montage_commit, montage_present_total, tile_layer_commit and
+        # montage_render_pass_* — together. Together is not a nicety: the
+        # governor fits one model across them, and changing half of them would
+        # poison the fit by alternation. The span falls back to the callback
+        # total when no submit was measured (an inline path that never reached
+        # the submit, and every pre-slice-C caller in a test).
+        commit_feedback_ms = float(
+            getattr(renderer, "_last_montage_submit_span_ms", 0.0) or 0.0
+        ) or float(renderer._last_montage_tile_commit_ms)
         pool_growth_ms = min(
             commit_feedback_ms,
             max(0.0, float(getattr(report, "pool_growth_ms", 0.0) or 0.0)),
@@ -5829,9 +6260,9 @@ def viewport_convergence_latch_backend(window, _session=None) -> bool:
     )
 
 
-def tile_layer_upsert_limits(window, session) -> dict[str, object]:
+def tile_layer_upsert_limits(window, session, *, boundary=None) -> dict[str, object]:
     if persistent_gpu_tile_residency_backend(window, session):
-        return _persistent_tile_upsert_limits(window, session)
+        return _persistent_tile_upsert_limits(window, session, boundary=boundary)
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
     if not (
         not capabilities.shader_windowing
@@ -5851,13 +6282,15 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
         )
     ):
         return {}
-    interactive = interactive_active(window)
+    boundary = read_frame_boundary_inputs(window, session) if boundary is None else boundary
+    interactive = bool(boundary.interactive)
     decision = _commit_batch_decision(
         window,
         interactive=interactive,
         pass_token=_render_pass_token(session),
         remaining_items=_render_pass_remaining_items(session),
         session=session,
+        boundary=boundary,
     )
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
@@ -6065,6 +6498,81 @@ def viewport_interaction_active(window) -> bool:
     return bool(getattr(window.win, "_viewport_interaction_active", False))
 
 
+@dataclass(frozen=True)
+class FrameBoundaryInputs:
+    """The governor's frame-boundary facts, frozen at one instant.
+
+    ADR 0065 stage 2 slice C, decision 6. Three of these are image-view calls
+    (``presentationDrawPending``, ``presentationRefreshRate``,
+    ``setResidentHistogramEvidenceRequired``'s existence) and one is meaningful
+    only inside a GUI render entry, so a prepare running on the presentation
+    owner cannot read any of them. It uses what the last acknowledgement froze
+    instead, and the GUI re-reads them at take: **if ``frame_critical`` flipped
+    true in between, the take drops the transaction** rather than submitting a
+    chunk sized for an idle frame into a critical one.
+    """
+
+    interactive: bool = False
+    draw_pending: bool = False
+    refresh_hz: float = DISPLAY_REFRESH_FALLBACK_HZ
+    callback_elapsed_ms: float = 0.0
+    supports_resident_evidence: bool = False
+
+    @property
+    def frame_critical(self) -> bool:
+        return bool(self.interactive or self.draw_pending)
+
+
+def read_frame_boundary_inputs(window, session) -> FrameBoundaryInputs:
+    """Read the frame-boundary facts where reading them is legal.
+
+    On the GUI thread: live, exactly as every caller read them before. Off it:
+    the values ``_capture_ack_inputs`` froze, except ``interactive`` — that one
+    stays live because it is a pair of plain ``bool`` attribute loads and
+    ``frame_runtime._interactive_active`` documents why a snapshot of it would
+    be a lie with a longer lifetime.
+    """
+
+    renderer = getattr(window, "renderer", window)
+    if on_gui_thread():
+        img_view = getattr(getattr(renderer, "win", None), "img_view", None)
+        boundary = FrameBoundaryInputs(
+            interactive=bool(interactive_active(renderer)),
+            draw_pending=bool(_presentation_draw_owed(renderer)),
+            refresh_hz=float(_presentation_refresh_hz(renderer)),
+            callback_elapsed_ms=float(_enclosing_callback_elapsed_ms(renderer, session)),
+            supports_resident_evidence=callable(
+                getattr(img_view, "setResidentHistogramEvidenceRequired", None)
+            ),
+        )
+        renderer._last_gui_frame_boundary = boundary
+        return boundary
+    frozen = getattr(renderer, "_last_ack_frame_boundary", None) or getattr(
+        renderer, "_last_gui_frame_boundary", None
+    )
+    if isinstance(frozen, FrameBoundaryInputs):
+        return replace(
+            frozen,
+            interactive=bool(interactive_active(renderer)),
+            callback_elapsed_ms=0.0,
+        )
+    return FrameBoundaryInputs(interactive=bool(interactive_active(renderer)))
+
+
+def _delta_pass_kind(tile_delta) -> str:
+    """What kind of pass this delta is, by the qualities it carries."""
+
+    chunk_qualities = {
+        str(getattr(payload, "quality", "exact") or "exact")
+        for payload in dict(getattr(tile_delta, "upserts", {}) or {}).values()
+    }
+    if chunk_qualities and chunk_qualities <= {"preview", "fallback"}:
+        return "preview"
+    if chunk_qualities == {"exact"}:
+        return "target"
+    return "mixed" if chunk_qualities else "metadata"
+
+
 def _identity_rejected_delta_signature(tile_delta, report):
     """Signature of a delta whose upserts were ALL identity-rejected.
 
@@ -6203,17 +6711,19 @@ def wgpu_payload_upload_nbytes(payload) -> int:
     return max(1, int(total))
 
 
-def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
+def _persistent_tile_upsert_limits(window, session, *, boundary=None) -> dict[str, object]:
     if not persistent_gpu_tile_residency_backend(window, session):
         return {}
     capabilities = image_view_backend_capabilities(getattr(window.win, "img_view", None))
-    interactive = interactive_active(window)
+    boundary = read_frame_boundary_inputs(window, session) if boundary is None else boundary
+    interactive = bool(boundary.interactive)
     decision = _commit_batch_decision(
         window,
         interactive=interactive,
         pass_token=_render_pass_token(session),
         remaining_items=_render_pass_remaining_items(session),
         session=session,
+        boundary=boundary,
     )
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
@@ -6254,10 +6764,32 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
         "pace_resident_retargets": bool(getattr(session, "partial_remap_presentation", False)),
         "governor_details": tuple(getattr(decision, "details", ()) or ()),
     }
-    resident = getattr(getattr(window.win, "img_view", None), "tiledPayloadResident", None)
+    # ADR 0065 stage 2 decision 5. The builder's residency question is
+    # answered by the snapshot the last acknowledgement froze whenever this
+    # runs off the GUI thread; ``tiledPayloadResident`` walks the live page
+    # table, and ``tuple(dict)`` against a concurrent writer is a
+    # ``RuntimeError``, not a torn read. On the GUI thread it is still the
+    # live probe, byte-for-byte what this always passed.
+    resident = _physical_resident_predicate(window)
     if callable(resident):
         limits["physical_resident_fn"] = resident
     return limits
+
+
+def _physical_resident_predicate(window):
+    """``tiledPayloadResident`` where legal, the frozen probe everywhere else.
+
+    ``None`` — no snapshot, or eviction has moved since it was taken — is the
+    builder's existing "no residency seam" branch, which predates this file
+    and already defines the degraded behaviour.
+    """
+
+    renderer = getattr(window, "renderer", window)
+    if on_gui_thread():
+        img_view = getattr(getattr(renderer, "win", None), "img_view", None)
+        return getattr(img_view, "tiledPayloadResident", None)
+    snapshot = getattr(renderer, "_presentation_residency_snapshot", None)
+    return None if snapshot is None else snapshot.physical_resident_fn()
 
 
 def _render_pass_token(session) -> tuple[int, str, bool]:
@@ -6287,6 +6819,7 @@ def _commit_batch_decision(
     pass_token=None,
     remaining_items: int | None = None,
     session=None,
+    boundary=None,
 ):
     governor = getattr(window.win, "resource_governor", None)
     pass_kind = (
@@ -6316,14 +6849,16 @@ def _commit_batch_decision(
             and callable(required_target_unsettled)
             and required_target_unsettled()
         )
+        if boundary is None:
+            boundary = read_frame_boundary_inputs(window, session)
         decision = decide_pass(
             interactive=interactive,
             pass_kind=pass_kind,
             remaining_items=remaining_items,
             retained_fallback_refinement=retained_refinement,
-            callback_elapsed_ms=_enclosing_callback_elapsed_ms(window, session),
-            frame_critical=bool(interactive) or _presentation_draw_owed(window),
-            refresh_hz=_presentation_refresh_hz(window),
+            callback_elapsed_ms=float(boundary.callback_elapsed_ms),
+            frame_critical=bool(interactive) or bool(boundary.draw_pending),
+            refresh_hz=float(boundary.refresh_hz),
         )
         if retained_refinement:
             evidence = session.resident_crop_governor_stats
@@ -6417,6 +6952,7 @@ def _reset_commit_timings(renderer) -> None:
         "_last_montage_tile_prepare_source_ms",
         "_last_montage_tile_prepare_histogram_ms",
         "_last_montage_tile_layer_apply_ms",
+        "_last_montage_submit_span_ms",
         "_last_montage_tile_acknowledge_ms",
         "_last_montage_tile_retained_store_ms",
         "_last_montage_tile_state_publish_ms",

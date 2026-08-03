@@ -2963,8 +2963,26 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
     service._remember_montage_source_level_stats = lambda *_args: None
     service._maybe_publish_after_level_evidence = lambda *_args, **_kwargs: None
 
+    def configure_evidence():
+        # ADR 0065 stage 2 slice C split one call in two: the *decision* is
+        # session state and evaluates on the presentation owner, the *install*
+        # is a widget call the submit makes. Both halves together are what
+        # `_configure_wgpu_evidence_obligation` used to be, and this test is
+        # about their combined contract, so it drives the pair.
+        from arrayscope.window import frame_effects as montage_commit
+
+        boundary = montage_commit.read_frame_boundary_inputs(renderer, session)
+        required, deferred, obligation = effects._wgpu_evidence_obligation_decision(boundary)
+        effects._install_wgpu_evidence_obligation(
+            SimpleNamespace(
+                evidence_required=required,
+                evidence_deferred=deferred,
+                evidence_obligation=obligation,
+            )
+        )
+
     # -- gesture: the cold obligation is deferred, no dispatch happens -------
-    effects._configure_wgpu_evidence_obligation()
+    configure_evidence()
     assert view.dispatched is False
     assert service._queue_montage_level_stats_for_payloads(session, {0: object()}) == 0
     assert session._wgpu_histogram_evidence_deferred is True
@@ -2986,7 +3004,7 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
     def forced_commit(current, *, force_commit=False):
         assert force_commit is True
         assert current.backend_refresh_pending is True
-        effects._configure_wgpu_evidence_obligation()
+        configure_evidence()
         quiet_edge_queued.append(
             service._queue_montage_level_stats_for_payloads(current, {0: object()})
         )
@@ -7033,7 +7051,8 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
         atomic_successor_pending=False,
         force_auto=False,
         tile_presentation_state=TilePresentationState(),
-        consume_dirty_tiles=lambda: (),
+        peek_dirty_tiles=lambda: (),
+        release_dirty_tiles=lambda _tiles: 0,
         ensure_tile_states=lambda: (),
         build_tile_presentation=lambda *_args, **_kwargs: (TilePresentationState(), delta),
         _selected_lod_factor=lambda: 1,

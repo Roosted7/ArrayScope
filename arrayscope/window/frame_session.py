@@ -5662,10 +5662,38 @@ class FrameSession:
         self._tile_states_cached_revision = -1
         self._tile_states_cached_tuple = ()
 
-    def consume_dirty_tiles(self) -> tuple[int, ...]:
-        tiles = tuple(dict.fromkeys(int(tile) for tile in self.dirty_tiles))
-        self.dirty_tiles.clear()
-        return tiles
+    def peek_dirty_tiles(self) -> tuple[int, ...]:
+        """The dirty set, without taking it.
+
+        ADR 0065 stage 2 slice C, decision 2 — the sharpest correctness edge in
+        the stage. Preparation of a presentation transaction now happens on the
+        presentation owner, and the GUI thread may legitimately drop that
+        transaction (mailbox miss, failed validation, a frame that turned
+        critical between prepare and take). Consuming here would strand every
+        tile in it: nothing re-dirties them, because from the session's point
+        of view they were committed.
+
+        So prepare peeks and :meth:`release_dirty_tiles` consumes on the
+        acknowledgement of the delta that was actually accepted.
+        """
+
+        return tuple(dict.fromkeys(int(tile) for tile in self.dirty_tiles))
+
+    def release_dirty_tiles(self, tiles) -> int:
+        """Drop exactly ``tiles`` from the dirty set; return how many went.
+
+        Exactly, not wholesale: tiles dirtied *after* the peek belong to the
+        next transaction and a `clear()` here would swallow them — the same
+        stranding in the other direction.
+        """
+
+        wanted = {int(tile) for tile in tuple(tiles or ())}
+        if not wanted:
+            return 0
+        remaining = [int(tile) for tile in self.dirty_tiles if int(tile) not in wanted]
+        released = len(self.dirty_tiles) - len(remaining)
+        self.dirty_tiles[:] = remaining
+        return released
 
     def note_committed(self) -> None:
         self.last_commit_monotonic = monotonic()

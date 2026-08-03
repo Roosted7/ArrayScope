@@ -1218,6 +1218,37 @@ def test_presentation_commit_holds_camera_replay_while_coverage_is_open():
     assert scheduled == [1]
 
 
+def _first_display_transaction():
+    """A minimal first-display transaction for the submit-decline pins."""
+
+    from arrayscope.presentation.prepared_transaction import (
+        PreparedPresentationTransaction,
+        TransactionIdentity,
+    )
+
+    return PreparedPresentationTransaction(
+        identity=TransactionIdentity(
+            session_id=0,
+            session_object_id=0,
+            session_key=("session",),
+            level_revision=0,
+            base_revision=0,
+            render_round_id="",
+            scope=frozenset(),
+            capabilities_id=0,
+            eviction_stamp=None,
+        ),
+        display_image=None,
+        geometry=None,
+        tile_state=None,
+        base_tile_state=None,
+        tile_delta=None,
+        active_payloads={},
+        first_display_commit=True,
+        frame_commit=True,
+    )
+
+
 def test_present_tile_delta_declines_when_the_presenter_reported_a_failure():
     """A backend commit that raised is caught and reported by the presenter,
     which returns False.  Declining here is what keeps the caller from
@@ -1241,23 +1272,14 @@ def test_present_tile_delta_declines_when_the_presenter_reported_a_failure():
         _last_montage_tile_layer_apply_ms=0.0,
     )
     effects_bridge = FramePipelineEffects(renderer, session)
-    effects_bridge._configure_wgpu_evidence_obligation = lambda *_a, **_k: None
+    effects_bridge._install_wgpu_evidence_obligation = lambda *_a, **_k: None
     effects_bridge._commit_direct_delta = lambda *_a, **_k: False
 
+    # ADR 0065 stage 2 slice C: the submit's twelve keyword arguments became
+    # one prepared transaction. The values are the same values — what changed
+    # is that the presentation owner decided them before this thread woke up.
     applied = effects_bridge._present_tile_delta(
-        None,
-        None,
-        tile_state=None,
-        base_tile_state=None,
-        tile_delta=None,
-        semantic_source=None,
-        applied_level_source=None,
-        histogram_plot_data=None,
-        first_display_commit=True,
-        explicit_auto=False,
-        requested_levels=None,
-        semantic_commit=True,
-        decision_force_auto=False,
+        _first_display_transaction(),
     )
 
     assert applied is False
@@ -1281,23 +1303,14 @@ def test_present_tile_delta_reports_applied_when_the_presenter_succeeded():
         _last_montage_tile_layer_apply_ms=0.0,
     )
     effects_bridge = FramePipelineEffects(renderer, session)
-    effects_bridge._configure_wgpu_evidence_obligation = lambda *_a, **_k: None
+    effects_bridge._install_wgpu_evidence_obligation = lambda *_a, **_k: None
     effects_bridge._commit_direct_delta = lambda *_a, **_k: False
 
+    # ADR 0065 stage 2 slice C: the submit's twelve keyword arguments became
+    # one prepared transaction. The values are the same values — what changed
+    # is that the presentation owner decided them before this thread woke up.
     applied = effects_bridge._present_tile_delta(
-        None,
-        None,
-        tile_state=None,
-        base_tile_state=None,
-        tile_delta=None,
-        semantic_source=None,
-        applied_level_source=None,
-        histogram_plot_data=None,
-        first_display_commit=True,
-        explicit_auto=False,
-        requested_levels=None,
-        semantic_commit=True,
-        decision_force_auto=False,
+        _first_display_transaction(),
     )
 
     assert applied is True

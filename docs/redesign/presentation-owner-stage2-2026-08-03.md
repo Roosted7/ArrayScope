@@ -187,3 +187,92 @@ families.
   lands FIRST, so the move is measured on the axis it was diagnosed on
   (the 89 ms × 52 figure came from lock-hold instrumentation that no
   longer exists).
+
+## Slice C: what landed, and the finding that stopped the rest (2026-08-03)
+
+Landed, against the decisions above, all of it on the GUI thread:
+
+- **The four-phase split** (`window/frame_effects.py`): `_prepare_tile_layer_transaction`
+  (Qt-free) -> `_submit_prepared_transaction` -> `_acknowledge_transaction` /
+  `_acknowledge_and_publish` -> residue. `_commit_tile_layer` runs the first
+  two and is the correctness anchor. The prepare reads no Qt: residency comes
+  from `_physical_residency_inputs`, the frame-boundary probes from
+  `read_frame_boundary_inputs`, capabilities from the frozen dataclass, and
+  `getLevels()` from the last acknowledgement.
+- **Decision 2**: `FrameSession.peek_dirty_tiles` / `release_dirty_tiles`
+  replace `consume_dirty_tiles`; the release happens on the acknowledgement of
+  the accepted delta. Counting tests in
+  `tests/presentation/test_prepared_transaction.py`.
+- **Decision 3/4**: `TransactionIdentity` carries the validation tuple;
+  `_decide_direct_presentation` hoists `decide_presentation` out of
+  `_commit_direct_delta` and binds it to the `previous_frame` it was decided
+  against.
+- **Decision 5**: `_physical_resident_predicate` serves the builder's
+  `physical_resident_fn` from the residency snapshot off the GUI thread.
+- **Decision 6**: `FrameBoundaryInputs` + `read_frame_boundary_inputs` freeze
+  `presentationDrawPending` / `presentationRefreshRate` /
+  `render_entry_elapsed_ms`; `commit_feedback_ms` is redefined ONCE, in
+  `_record_commit_feedback`, to the GUI submit span for all four commit
+  channels together.
+- **Decision 8**: `AckInputs`, with `residentHistogramEvidence` probed once and
+  travelling as one frozen bool for both consumers.
+- **Decision 12**: `CommitTimings` published by one attribute swap;
+  `diagnostics_snapshot` reads it through `_commit_timing`.
+- **Map O15**: the tile-truth overlay refresh moved from between-ack to
+  post-ack. The pin is still owed (it needs a ~40-attribute session double).
+
+**Not landed, and this is the finding: preparation cannot run speculatively
+on the owner, because it is not idempotent.**
+
+The trigger was built exactly as decision 1 specifies — `request_presentation`
+posts one preparation per armed gate, the owner runs it at the tail of its
+drain batch, the gate-owner flag is the coalescing key and the single-flight
+interlock — and it was measured to break three montage geometry/hover tests
+(`tests/ui/test_montage_interactions.py`: `..._hover_uses_source_index_...`,
+`..._panned_montage_hover_...`, `..._shifted_origin_preserves_world_view_range`).
+The symptom is `geometry_matches=False` with every tile committed and the last
+commit reporting `empty-progressive-settled`: the committed montage geometry
+never converges, and the session settles believing the work is done.
+
+The bisect is unambiguous. With the owner post removed the three pass; with it
+restored they fail; and with the post kept but the **publish suppressed** —
+so the owner prepares and the GUI always re-prepares inline — two of the three
+still fail. That last arm is the one that names the cause: the damage is not
+in the take, the validation, or the mailbox. It is that **prepare ran twice**.
+
+`FrameSession.build_tile_presentation` is not a pure builder. It calls
+`release_deferred_out_of_view_invalidations`, writes
+`display_tile_payloads`, retires payloads and pending upserts for slots with
+nothing worth keeping. The level block around it advances
+`applied_level_source`, `begin_level_presentation_update` and
+`bind_payloads_to_level_generation`. Every bail has its own session writes.
+Decision 2 named `consume_dirty_tiles` as the destructive step; it is the
+*unrecoverable* one, but it is not the only one.
+
+The gate-flag interlock covers one order — GUI first, owner second, owner sees
+an unarmed gate and skips. It cannot cover the other: owner prepares, the GUI's
+take misses or fails validation, and the GUI prepares again. As long as the
+inline fallback re-prepares, the double execution is reachable by construction,
+and "a miss is a normal outcome" makes it frequent rather than rare.
+
+### What slice D owes because of this
+
+1. **Make preparation re-entrant, or make the fallback not re-prepare.** The
+   two candidates: (a) split `build_tile_presentation` into a pure planner and
+   an applier so a prepared-but-dropped transaction writes nothing, which is
+   the version the ADR's "the GUI validates and submits" actually implies; or
+   (b) let a take-miss re-arm the gate instead of preparing inline, which keeps
+   the writes single-flight but gives up the correctness anchor and needs its
+   own livelock argument. (a) is the real answer; (b) is the shortcut.
+2. **A geometry staleness layer.** `plan.geometry` and `view_state` change on a
+   pan without moving the session id, the level round, the base revision or the
+   render round, so the identity tuple of decision 3 is incomplete as written.
+   Adding it was necessary and not sufficient (the three tests still failed
+   with it in place), so it belongs in the tuple whatever else changes.
+3. **The acknowledgement post**, unchanged in ambition: `_acknowledge_and_publish`
+   already takes a frozen `AckInputs` and makes no live image-view read, which
+   was the prerequisite. What is owed is the post, the `CommitFollowup`
+   message, and the residue's currency re-checks. The `ack-refused-stale`
+   verdict and counter are in the tree ahead of the move.
+4. The render-pass **observation** (the recording half of decision 6) is still
+   GUI-side; only the decision half moved.
