@@ -604,6 +604,64 @@ def test_a_retarget_plans_while_another_thread_holds_the_order_lock(qtbot):
         win.close()
 
 
+def test_the_retargets_whole_middle_runs_while_another_thread_holds_the_lock(qtbot):
+    """Slice D2c: the swap marks and the state snapshot join the unlocked middle.
+
+    D2b's pin above covered ``ladder.plan`` alone, and D2b's own numbers said
+    that was the cheap part: ``effects.tile_states`` and
+    ``mark_ladder_swaps_for_current_demand`` were 4.0 s of the retarget's
+    per-fill hold between them, and both stayed under the lock because both
+    write the session. They plan against a private copy now, so the claim is
+    the same one and it is stated the same way — the order lock is held for the
+    whole middle by a thread that is not the planner, and the planner still
+    finishes. The mutation, as for D2a's and D2b's pins, is a
+    ``timed_order_lock`` acquire anywhere inside the middle (verified: it parks
+    the planner until this test's join timeout).
+    """
+
+    from arrayscope.render import lod as render_lod
+
+    win = _montage_window(qtbot)
+    try:
+        renderer = win.renderer
+        owner = win.presentation_owner
+        session = renderer._frame_session
+        pipeline = renderer._frame_pipeline_for_session(session)
+        intent = renderer._montage_render_intent(session)
+        scope = renderer._lod_admission_scope(session, intent)
+        staged = pipeline.stage_retarget(intent, session.lod_policy_decision.demand, scope)
+        assert staged is not None
+        staged_session = staged.staged_session
+        assert staged_session is not None, "the stage phase took no private copy"
+        assert staged_session is not session
+
+        holder, release = _hold_the_order_lock(owner, "d2c-retarget-lock-holder")
+        planned: list[object] = []
+
+        def plan() -> None:
+            render_lod.mark_ladder_swaps_for_current_demand(staged_session)
+            planned.append(pipeline.plan_retarget(staged))
+
+        planner = threading.Thread(target=plan, name="d2c-retarget-planner")
+        planner.start()
+        planner.join(20.0)
+        blocked = planner.is_alive()
+
+        release.set()
+        holder.join(10.0)
+        planner.join(10.0)
+
+        assert not blocked, (
+            "the retarget's middle blocked on the session-order lock: the swap "
+            "marks or the state snapshot still take one, which is the 4.0 s of "
+            "per-fill hold this slice removes"
+        )
+        assert len(planned) == 1
+        assert planned[0].tile_states_plan is not None
+    finally:
+        win.close()
+
+
 def test_a_plan_a_later_retarget_superseded_admits_nothing(qtbot):
     """The currency drop, counted where it happens.
 
@@ -612,7 +670,16 @@ def test_a_plan_a_later_retarget_superseded_admits_nothing(qtbot):
     the admissions; the first plan must drop rather than claim lifecycle state
     twice. Without the check the two plans both admit and the counter stays
     zero, which is the mutation.
+
+    Slice D2c widens what "admits nothing" has to mean. The superseded plan now
+    also carries the stage phase's whole session write set — the claim releases,
+    the crop-rebind seed and the swap marks — so applying it would install
+    decisions taken against a snapshot two generations old. The refusal is
+    therefore read as a session fingerprint that does not move, not only as a
+    submission count of zero.
     """
+
+    from tests.window.test_presentation_plan_split import _session_fingerprint
 
     win = _montage_window(qtbot)
     try:
@@ -626,6 +693,10 @@ def test_a_plan_a_later_retarget_superseded_admits_nothing(qtbot):
         first = pipeline.stage_retarget(intent, demand, scope)
         assert first is not None
         planned = pipeline.plan_retarget(first)
+        assert planned.tile_states_plan is not None
+        assert dict(planned.tile_states_plan.plan.staged), (
+            "the superseded plan carries no session write, so nothing is observed"
+        )
         # The successor: a whole retarget, staged and admitted, while the
         # predecessor was planning.
         second = pipeline.stage_retarget(intent, demand, scope)
@@ -633,8 +704,10 @@ def test_a_plan_a_later_retarget_superseded_admits_nothing(qtbot):
         pipeline.admit_retarget(second, pipeline.plan_retarget(second))
 
         superseded_before = int(pipeline.counters.retargets_superseded)
+        fingerprint_before = _session_fingerprint(session)
 
         assert pipeline.admit_retarget(first, planned) == 0
         assert int(pipeline.counters.retargets_superseded) == superseded_before + 1
+        assert _session_fingerprint(session) == fingerprint_before
     finally:
         win.close()

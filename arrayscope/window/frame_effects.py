@@ -377,6 +377,112 @@ class _PrepareStaging:
 
 
 @dataclass(frozen=True)
+class _TileStatesStaging:
+    """One retarget's STAGE phase, frozen so the rest of it is a computation.
+
+    ADR 0065 stage 2 slice D2c, the same shape :class:`_PrepareStaging` took in
+    D2a. D2b measured the retarget's remaining hold and named it exactly:
+    ``effects.tile_states`` (2223 ms per three fills) and
+    ``mark_ladder_swaps_for_current_demand`` (1816 ms). Neither is expensive
+    because of arithmetic — both are session **writes** (evaluation-claim
+    releases, crop-rebind seeding, dirty swap marks), so neither could leave
+    the lock by being moved. They leave it by being planned.
+
+    ``session`` is the private copy every one of those writes goes to;
+    ``live`` is here for the applier and for nothing else. The rest is what the
+    plan would otherwise have read live: the residency seam (GUI-affine), the
+    renderer's canonical-plane memo (a private copy, so the planner's
+    ``remember_canonical`` pins travel rather than leak), and the kernel's
+    liveness answer for every tile the claim release inspects.
+    """
+
+    live: object
+    #: False when ``session`` IS ``live`` — a session double with no planner
+    #: machinery. The plan then writes where it reads, and the pipeline keeps
+    #: the whole pass under the lock.
+    staged: bool
+    session: object
+    intent: object
+    demand: object
+    scope: object
+    resident_fn: object
+    committed_frame: object
+    #: Private copy of the renderer's memo; the applier installs what the plan
+    #: pinned into it.
+    canonical_planes: dict
+    rebind_enabled: bool
+    #: Tiles whose kernel task is still live or freshly completed — the one
+    #: cross-thread read ``_release_inactive_evaluation_claims`` makes.
+    live_task_tiles: frozenset
+    #: Identity signature of the containers an admission or a commit
+    #: acknowledgement writes, taken when the lock was held. The applier
+    #: compares it against the live session before installing anything.
+    conservation: tuple
+    #: Strong references keeping the signature's ``id()``s unambiguous.
+    conservation_pins: tuple
+
+
+@dataclass(frozen=True)
+class _TileStatesPlan:
+    """What the retarget's stage phase decided, and what publishing it costs.
+
+    ``plan`` is the whole session write set (harvested from the staged copy);
+    everything else is a *publication* — a renderer-facing effect that captures
+    a session in a kernel closure, or a diagnostics record — and therefore
+    cannot be planned. The seed and the publication separate cleanly, and that
+    separation is the audit slice D2c owed: deciding which slots rebind is
+    session work, while arming the semantic evidence owner and the R3 clamp's
+    downstream wakeup schedule against the LIVE session.
+    """
+
+    states: tuple
+    plan: object
+    #: ``(gate, tile_numbers, rebound, stats)`` rows for ``_record_resident_crop_rebind``.
+    seed_records: tuple
+    rebound: tuple
+    #: Whole planes the seed pinned, installed into the renderer's memo on apply.
+    canonical_pins: tuple
+    release_canonical_reason: str
+    released_claims: int
+    conservation: tuple
+    conservation_pins: tuple
+
+
+def _retarget_conservation(session) -> tuple:
+    """What an interleaved admission or acknowledgement would have written.
+
+    ADR 0065 stage 2 slice D2c. The retarget's stage phase plans against a
+    private session copy and the applier installs whole containers, so a live
+    write landing in the unlocked middle would be silently reverted — the lost
+    admission D2 measured as a 35-tile settle wedge. This is the cheapest exact
+    statement of "nothing else wrote": per-slot object identity for the two
+    payload maps, key order for the two admission queues, and the membership
+    sets the lifecycle publishes. It is compared, never merged: merging would
+    stop the applier being mechanical, and mechanical is what makes replanning
+    safe.
+
+    Returns ``(signature, pins)``. The pins are the container copies the
+    ``id()``s in the signature refer to; keeping them alive is what stops a
+    freed payload's address being reused by a different one.
+    """
+
+    payloads = dict(getattr(session, "display_tile_payloads", None) or {})
+    rendered = dict(getattr(session, "rendered_tiles", None) or {})
+    lifecycle = getattr(session, "lifecycle", None)
+    signature = (
+        tuple((int(key), id(value)) for key, value in payloads.items()),
+        tuple(int(key) for key in (getattr(session, "dirty_payloads", None) or {})),
+        tuple(int(key) for key in (getattr(session, "pending_payload_upserts", None) or {})),
+        tuple((int(key), id(value)) for key, value in rendered.items()),
+        frozenset(int(tile) for tile in (getattr(lifecycle, "presented_tiles", None) or ())),
+        frozenset(int(tile) for tile in (getattr(session, "active_tile_requests", None) or ())),
+        frozenset(int(tile) for tile in (getattr(session, "loading_tiles", None) or ())),
+        len(tuple(getattr(session, "dirty_tiles", None) or ())),
+    )
+    return signature, (payloads, rendered)
+
+
+@dataclass(frozen=True)
 class _EvaluationClaim:
     semantic_key: object
     rung: int
@@ -658,22 +764,337 @@ class FramePipelineEffects:
         return evaluate_target
 
     def tile_states(self, intent, demand, scope: LodAdmissionScope):
-        if not self._session_is_current(intent):
+        """Stage, plan and apply one ladder-state snapshot — the inline anchor.
+
+        ADR 0065 stage 2 slice D2c. The three phases below are what
+        ``FramePipeline`` drives when it can drop the lock for the middle; this
+        composition stays the anchor that keeps the two orders identical, the
+        same way ``build_tile_presentation`` anchors the commit's planner.
+        """
+
+        staging = self.stage_tile_states(intent, demand, scope)
+        if staging is None:
             return ()
-        self._release_inactive_evaluation_claims(getattr(scope, "visible_tile_numbers", ()))
-        self._seed_resident_crop_rebinds(scope)
-        states = render_effects.tile_lod_states(self.session, demand, scope=scope)
+        planned = self.plan_tile_states(staging)
+        self.apply_tile_states_plan(planned)
+        return planned.states
+
+    def stage_tile_states(self, intent, demand, scope: LodAdmissionScope):
+        """Phase 1: the private session copy and every live read the plan needs.
+
+        The only part of a ladder retarget's state snapshot that belongs under
+        the session-order lock. It reads the live session (to copy it), the
+        image view's residency seam, the renderer's canonical-plane memo and
+        the kernel's task tables; the plan that follows reads none of them.
+
+        ``_expire_canonical_plane_payloads_for_document`` runs here rather than
+        in the plan because it is a *release* of renderer-owned memory keyed on
+        the live document identity, and the memo copy below has to be taken
+        after it — a planner handed pre-expiry planes would re-slice a retired
+        generation's pixels.
+
+        Returns ``None`` when the session is not current — the snapshot is
+        empty and there is nothing to plan. A session that cannot be staged at
+        all (a unit-test double for the ladder-state snapshot itself, which is
+        the only session in the tree that is not a ``FrameSession``) returns a
+        record with ``staged=False``: the planner then writes where it reads,
+        and ``FramePipeline.stage_retarget`` keeps that whole pass inside the
+        lock rather than dropping it for an unstaged middle.
+        """
+
+        if not self._session_is_current(intent):
+            return None
+        live = self.session
+        stage_session = getattr(live, "_staged_presentation_session", None)
+        rebind_enabled = self._resident_crop_rebind_enabled()
+        if rebind_enabled:
+            self._expire_canonical_plane_payloads_for_document()
+        resident_fn, committed_frame = self._physical_residency_inputs()
+        visible = tuple(getattr(scope, "visible_tile_numbers", ()) or ())
+        active_requests = getattr(live, "active_tile_requests", None)
+        claim_scope: set[int] = set()
+        if active_requests is not None:
+            claim_scope = {int(tile) for tile in visible} or {
+                int(tile) for tile in tuple(active_requests or ())
+            }
+        live_task_tiles = frozenset(
+            tile_number
+            for tile_number in claim_scope
+            if tile_number in active_requests and self._tile_task_is_live(tile_number)
+        )
+        conservation, conservation_pins = _retarget_conservation(live)
+        return _TileStatesStaging(
+            live=live,
+            staged=callable(stage_session),
+            session=stage_session() if callable(stage_session) else live,
+            intent=intent,
+            demand=demand,
+            scope=scope,
+            resident_fn=resident_fn,
+            committed_frame=committed_frame,
+            canonical_planes=dict(self._canonical_plane_memo()) if rebind_enabled else {},
+            rebind_enabled=rebind_enabled,
+            live_task_tiles=live_task_tiles,
+            conservation=conservation,
+            conservation_pins=conservation_pins,
+        )
+
+    def plan_tile_states(self, staging: _TileStatesStaging) -> _TileStatesPlan:
+        """Phase 2: the claim releases, the rebind seed and the snapshot. **No lock.**
+
+        Every session-facing write lands on ``staging.session``, a private copy,
+        and travels back as a :class:`TilePresentationPlan`. The renderer-facing
+        publications the seed implies — arming the semantic evidence owner,
+        recording the gate verdict, pinning whole planes in the renderer memo —
+        are *decided* here and *performed* by the applier, because each of them
+        either captures a session in a kernel closure or writes state that
+        outlives the session the plan is bound to.
+
+        The one cross-thread read it would otherwise make, the kernel's
+        per-tile liveness answer, arrives frozen in ``staging``.
+        """
+
+        session = staging.session
+        scope = staging.scope
+        released = self._release_inactive_evaluation_claims(
+            getattr(scope, "visible_tile_numbers", ()),
+            session=session,
+            live_task_tiles=staging.live_task_tiles,
+        )
+        seed = self._plan_resident_crop_rebinds(staging)
+        states = render_effects.tile_lod_states(session, staging.demand, scope=scope)
         if (
-            not bool(getattr(self.session, "shader_display", False))
-            and bool(getattr(self.session, "atomic_successor_pending", False))
-            and _compatible_successor_payload_count(self.session) > 0
+            not bool(getattr(session, "shader_display", False))
+            and bool(getattr(session, "atomic_successor_pending", False))
+            and _compatible_successor_payload_count(session) > 0
         ):
             # Preserve an already-compatible predecessor (notably a one-index
             # shift) until its few cold replacements are ready. A fully cold
             # successor has no compatible pixels to preserve and streams in
             # canonical priority order instead.
-            return tuple(replace(state, allow_preview=False) for state in states)
-        return states
+            states = tuple(replace(state, allow_preview=False) for state in states)
+        plan = (
+            staging.live._harvest_presentation_plan(
+                session,
+                None,
+                None,
+                path="retarget-tile-states",
+            )
+            if staging.staged
+            else None
+        )
+        return _TileStatesPlan(
+            states=tuple(states),
+            plan=plan,
+            seed_records=seed["records"],
+            rebound=seed["rebound"],
+            canonical_pins=seed["canonical_pins"],
+            release_canonical_reason=seed["release_canonical_reason"],
+            released_claims=released,
+            conservation=staging.conservation,
+            conservation_pins=staging.conservation_pins,
+        )
+
+    def apply_tile_states_plan(self, planned: _TileStatesPlan) -> bool:
+        """Phase 3: install the plan's writes, then publish what it decided.
+
+        Returns ``False`` when the plan is refused. Two refusals, and both are
+        the existing staleness idiom rather than a new concept: a plan bound to
+        a different session generation, and a plan whose staging was overtaken
+        by a live write to the containers an admission or a commit
+        acknowledgement touches. The applier installs whole containers, so an
+        interleaved admission would otherwise be reverted — which is the lost
+        admission D2 measured as a settle wedge. The retarget is idempotent, so
+        a refusal re-requests a replan and costs one more pass.
+
+        A plan with no ``plan`` record came from an unstaged session (see
+        :meth:`stage_tile_states`): its session writes already landed, so only
+        the publications are owed.
+        """
+
+        live = self.session
+        plan = planned.plan
+        if plan is not None:
+            if getattr(plan, "session_object_id", None) != id(live) or int(
+                getattr(plan, "session_id", -1)
+            ) != int(getattr(live, "session_id", 0) or 0):
+                self._count_tile_states_refusal("generation")
+                return False
+            if _retarget_conservation(live)[0] != planned.conservation:
+                self._count_tile_states_refusal("interleaved")
+                self.renderer.request_montage_replan(live)
+                return False
+            live.apply_tile_presentation_plan(plan)
+        if planned.release_canonical_reason:
+            self._release_canonical_plane_payloads(planned.release_canonical_reason)
+        if planned.canonical_pins:
+            self._canonical_plane_memo().update(dict(planned.canonical_pins))
+        for gate, tile_numbers, rebound, stats in planned.seed_records:
+            self._record_resident_crop_rebind(
+                gate=gate,
+                tile_numbers=int(tile_numbers),
+                rebound=int(rebound),
+                stats=dict(stats or {}),
+            )
+        if planned.rebound:
+            # The publication half of the seed: the semantic evidence owner is
+            # armed against the LIVE session because it captures that session in
+            # a kernel closure, and a staged session is not the session.
+            self.renderer.rearm_crop_rebind_level_evidence(live)
+        return True
+
+    def _count_tile_states_refusal(self, reason: str) -> None:
+        renderer = self.renderer
+        counters = getattr(renderer, "_montage_retarget_stage_refusals", None)
+        if counters is None:
+            counters = {}
+            renderer._montage_retarget_stage_refusals = counters
+        counters[reason] = int(counters.get(reason, 0)) + 1
+        emit_trace(
+            "retarget_stage_refused",
+            reason=str(reason),
+            session_id=int(getattr(self.session, "session_id", 0) or 0),
+        )
+
+    def _release_inactive_evaluation_claims(
+        self, tile_numbers=(), *, session=None, live_task_tiles=None
+    ) -> int:
+        """Drop evaluation claims whose kernel task is gone.
+
+        ADR 0065 stage 2 slice D2c parameterizes the two things that used to be
+        implicit. ``session`` is where the releases land — a staged copy when
+        the retarget is planning, the live session otherwise — and
+        ``live_task_tiles`` is the kernel's liveness answer, frozen under the
+        lock by :meth:`stage_tile_states` so the plan makes no cross-thread
+        kernel read. Passing neither is the inline behaviour, unchanged.
+        """
+
+        session = self.session if session is None else session
+        active_requests = getattr(session, "active_tile_requests", None)
+        if active_requests is None:
+            return 0
+        visible = {int(tile) for tile in tuple(tile_numbers or ())}
+        scope = visible or {int(tile) for tile in tuple(active_requests or ())}
+        released = 0
+        for tile_number in sorted(scope):
+            if tile_number not in active_requests:
+                continue
+            if (
+                self._tile_task_is_live(tile_number)
+                if live_task_tiles is None
+                else tile_number in live_task_tiles
+            ):
+                continue
+            released += int(
+                self._release_evaluation_claim(tile_number, request_replan=False, session=session)
+            )
+        return released
+
+    def _plan_resident_crop_rebinds(self, staging: _TileStatesStaging) -> dict:
+        """Rebind a resident crop-window scrub before the ladder plans it.
+
+        A displayed-axis crop retarget whose new source window is already
+        physically resident under the current content identity short-circuits
+        to a pure rebind: no kernel evaluation, no display-cache miss, just a
+        resident-page rebind committed with no upload.  Running here — before
+        ``tile_lod_states`` snapshots the ladder inputs — means a rebound tile is
+        already recorded as target coverage, so it never enters ``missing_tiles``
+        and no producer is scheduled.  The residency seam is backend-owned
+        physical truth (``tiledPayloadResident``); backends without it keep the
+        ordinary per-tile evaluation.
+
+        Montage and single-slice presentations share this path.  The montage
+        gate this replaced assumed the single-tile path "composes the
+        source-anchored plane differently"; measured, it does not.  Both build
+        a crop-local payload whose ``source_anchor`` names a sub-rect of the
+        SAME canonical source plane, and ``_wgpu_payload_binding`` resolves
+        both through one ``("wgpu-source-plane", content_key)`` page identity —
+        a cropped montage tile is just as crop-local as a single-slice payload
+        (both measured at a 200x200 native shape for a 200x200 window on a
+        336x336 plane).  The non-montage anchor differs only in where its
+        content key comes from (``source_anchoring_for_view`` directly, rather
+        than the per-source-index cache), and that key folds the slider index,
+        so advancing the slice still declines.
+
+        **Seed and publication separate here** (ADR 0065 stage 2 slice D2c).
+        The seed — deciding which slots rebind, cloning their wrappers, arming
+        the R3 level clamp — is session work and lands on the staged copy. The
+        publication — the semantic evidence re-arm, the gate verdict record, the
+        renderer's whole-plane pins — is *decided* here and *performed* by the
+        applier, because each of those either schedules against a session (and
+        a staged session is not the session) or writes renderer state that
+        outlives the session the plan is bound to. The governed second-axis seam
+        (``_seed_resident_crop_rebinds_governed``) is a separate caller with its
+        own presentation gate and does not run from here.
+        """
+
+        session = staging.session
+        records: list[tuple] = []
+        result = {
+            "records": (),
+            "rebound": (),
+            "canonical_pins": (),
+            "release_canonical_reason": "",
+        }
+        if not staging.rebind_enabled:
+            # A capability the user turned off may not keep whole planes pinned:
+            # the memo holds STRONG references, so the toggle is also how the
+            # memory is handed back.
+            result["release_canonical_reason"] = "capability-disabled"
+            result["records"] = (("disabled", 0, 0, {}),)
+            return result
+        resident_fn = staging.resident_fn
+        if not callable(resident_fn):
+            result["records"] = (("no-residency-seam", 0, 0, {}),)
+            return result
+        tile_numbers = tuple(getattr(staging.scope, "visible_tile_numbers", ()) or ())
+        if not tile_numbers:
+            result["records"] = (("no-visible-tiles", 0, 0, {}),)
+            return result
+        if session.resident_crop_rebind_seeded:
+            # The governed second-axis transition already installed its
+            # complete retained fallback.  Re-seeding it on each refinement
+            # replan would overwrite newly exact tiles with the predecessor
+            # wrapper and leave the final cohort permanently unsettled.
+            return result
+        memo = dict(staging.canonical_planes)
+        # The last committed frame is the pre-scrub (predecessor-window) truth:
+        # a new session's live payload map is empty at plan time, so the
+        # committed wrappers are what a resident rebind clones from.
+        previous_by_tile = previous_tiled_payloads(staging.committed_frame)
+        rebound = session.rebind_resident_crop_tiles(
+            physical_resident_fn=resident_fn,
+            tile_numbers=tile_numbers,
+            previous_by_tile=previous_by_tile,
+            canonical_by_tile=memo,
+            remember_canonical=lambda tile_number, committed, memo=memo: (
+                self._remember_canonical_plane_payload(tile_number, committed, memo=memo)
+            ),
+        )
+        if rebound:
+            # Arm the R3 fail-safe before the asynchronous evidence producer
+            # (and therefore before its presentation wakeup).  A rebound commit
+            # can otherwise reuse the predecessor target once with the
+            # new-window wrappers and only discover their exact bounds on the
+            # following commit -- one physically clipped frame.  This half is
+            # session state and therefore plannable; the evidence re-arm it used
+            # to sit beside is a scheduling call and travels to the applier.
+            _arm_resident_crop_rebind_level_clamp(session, rebound)
+        records.append(
+            (
+                "attempted",
+                len(tile_numbers),
+                len(rebound),
+                dict(getattr(session, "resident_crop_rebind_stats", None) or {}),
+            )
+        )
+        baseline = staging.canonical_planes
+        result["records"] = tuple(records)
+        result["rebound"] = tuple(rebound)
+        result["canonical_pins"] = tuple(
+            (key, value) for key, value in memo.items() if baseline.get(key) is not value
+        )
+        return result
 
     def _resident_crop_rebind_enabled(self) -> bool:
         """Read the resident-crop-rebind capability once per session.
@@ -794,89 +1215,6 @@ class FramePipelineEffects:
         if snapshot is None:
             return None, getattr(win, "_committed_display_frame", None)
         return snapshot.physical_resident_fn(), snapshot.committed_frame
-
-    def _seed_resident_crop_rebinds(self, scope) -> None:
-        """Rebind a resident crop-window scrub before the ladder plans it.
-
-        A displayed-axis crop retarget whose new source window is already
-        physically resident under the current content identity short-circuits
-        to a pure rebind: no kernel evaluation, no display-cache miss, just a
-        resident-page rebind committed with no upload.  Running here — before
-        ``tile_lod_states`` snapshots the ladder inputs — means a rebound tile is
-        already recorded as target coverage, so it never enters ``missing_tiles``
-        and no producer is scheduled.  The residency seam is backend-owned
-        physical truth (``tiledPayloadResident``); backends without it keep the
-        ordinary per-tile evaluation.
-
-        Montage and single-slice presentations share this path.  The montage
-        gate this replaced assumed the single-tile path "composes the
-        source-anchored plane differently"; measured, it does not.  Both build
-        a crop-local payload whose ``source_anchor`` names a sub-rect of the
-        SAME canonical source plane, and ``_wgpu_payload_binding`` resolves
-        both through one ``("wgpu-source-plane", content_key)`` page identity —
-        a cropped montage tile is just as crop-local as a single-slice payload
-        (both measured at a 200x200 native shape for a 200x200 window on a
-        336x336 plane).  The non-montage anchor differs only in where its
-        content key comes from (``source_anchoring_for_view`` directly, rather
-        than the per-source-index cache), and that key folds the slider index,
-        so advancing the slice still declines.
-        """
-
-        if not self._resident_crop_rebind_enabled():
-            # A capability the user turned off may not keep whole planes pinned:
-            # the memo holds STRONG references, so the toggle is also how the
-            # memory is handed back.
-            self._release_canonical_plane_payloads("capability-disabled")
-            self._record_resident_crop_rebind(gate="disabled")
-            return
-        self._expire_canonical_plane_payloads_for_document()
-        resident_fn, committed_frame = self._physical_residency_inputs()
-        if not callable(resident_fn):
-            self._record_resident_crop_rebind(gate="no-residency-seam")
-            return
-        tile_numbers = tuple(getattr(scope, "visible_tile_numbers", ()) or ())
-        if not tile_numbers:
-            self._record_resident_crop_rebind(gate="no-visible-tiles")
-            return
-        if self.session.resident_crop_rebind_seeded:
-            # The governed second-axis transition already installed its
-            # complete retained fallback.  Re-seeding it on each refinement
-            # replan would overwrite newly exact tiles with the predecessor
-            # wrapper and leave the final cohort permanently unsettled.
-            return
-        # The last committed frame is the pre-scrub (predecessor-window) truth:
-        # a new session's live payload map is empty at plan time, so the
-        # committed wrappers are what a resident rebind clones from.
-        previous_by_tile = previous_tiled_payloads(committed_frame)
-        rebound = self.session.rebind_resident_crop_tiles(
-            physical_resident_fn=resident_fn,
-            tile_numbers=tile_numbers,
-            previous_by_tile=previous_by_tile,
-            canonical_by_tile=self._canonical_plane_memo(),
-            remember_canonical=self._remember_canonical_plane_payload,
-        )
-        if rebound:
-            # Ordinary rebinds remain on the established commit path.  Only
-            # the governed second-axis handoff below owns an explicit complete
-            # presentation gate.
-            #
-            # Arm the R3 fail-safe before the asynchronous evidence producer
-            # (and therefore before its presentation wakeup).  A rebound commit
-            # can otherwise reuse the predecessor target once with the
-            # new-window wrappers and only discover their exact bounds on the
-            # following commit -- one physically clipped frame.
-            _arm_resident_crop_rebind_level_clamp(self.session, rebound)
-            # A rebound window is presented without any evaluation sampling it,
-            # so the only producer that can anchor its levels is the semantic
-            # evidence owner.  Arm it here, at the seam that knows the window
-            # was rebound rather than computed.
-            self.renderer.rearm_crop_rebind_level_evidence(self.session)
-        self._record_resident_crop_rebind(
-            gate="attempted",
-            tile_numbers=len(tile_numbers),
-            rebound=len(rebound),
-            stats=dict(getattr(self.session, "resident_crop_rebind_stats", None) or {}),
-        )
 
     def _publish_resident_crop_rebinds(self) -> None:
         """Arm evidence and the atomic mapping handoff after all slots rebind."""
@@ -1180,8 +1518,13 @@ class FramePipelineEffects:
             self.renderer._resident_crop_canonical_planes = memo
         return memo
 
-    def _remember_canonical_plane_payload(self, tile_number: int, committed):
+    def _remember_canonical_plane_payload(self, tile_number: int, committed, *, memo=None):
         """Pin one committed payload's whole plane, or return ``None``.
+
+        ``memo`` names the map the pin lands in. The retarget's seed plans
+        against a private copy (ADR 0065 stage 2 slice D2c) so a dropped plan
+        cannot pin a plane the renderer then holds forever; the applier merges
+        what the plan pinned. Everything else pins the renderer's memo directly.
 
         A source-anchored rebind may only reuse canonical pages that some
         earlier payload uploaded WHOLE, and a whole plane is likewise the only
@@ -1202,7 +1545,7 @@ class FramePipelineEffects:
         would silently re-fill the memo the change just released.
         """
 
-        memo = self._canonical_plane_memo()
+        memo = self._canonical_plane_memo() if memo is None else memo
         if str(getattr(committed, "quality", "exact") or "exact") != "exact":
             return None
         if getattr(committed, "semantic_data", None) is None:
@@ -1588,21 +1931,6 @@ class FramePipelineEffects:
         # submit the identical native evaluation a second time.
         return bool(getattr(kernel, "has_completed_task", lambda _key: False)(task_key))
 
-    def _release_inactive_evaluation_claims(self, tile_numbers=()) -> int:
-        active_requests = getattr(self.session, "active_tile_requests", None)
-        if active_requests is None:
-            return 0
-        visible = {int(tile) for tile in tuple(tile_numbers or ())}
-        scope = visible or {int(tile) for tile in tuple(active_requests or ())}
-        released = 0
-        for tile_number in sorted(scope):
-            if tile_number not in active_requests:
-                continue
-            if self._tile_task_is_live(tile_number):
-                continue
-            released += int(self._release_evaluation_claim(tile_number, request_replan=False))
-        return released
-
     def rung_dropped(self, intent, step) -> None:
         tile = self._tile_for_step(step)
         if tile is None:
@@ -1687,10 +2015,19 @@ class FramePipelineEffects:
         return getter(stage_key) is not None
 
     def _release_evaluation_claim(
-        self, tile_number: int, *, marker=None, request_replan: bool = True
+        self, tile_number: int, *, marker=None, request_replan: bool = True, session=None
     ) -> bool:
+        """Release one tile's evaluation claim on ``session`` (live by default).
+
+        ADR 0065 stage 2 slice D2c: the retarget's claim-release pass plans
+        against a staged session copy, so the session it writes has to be an
+        argument rather than ``self.session``. Every other caller is a
+        completion-path release against the live session and passes nothing.
+        """
+
+        session = self.session if session is None else session
         tile_number = int(tile_number)
-        claim = self.session.lifecycle.evaluation_claim_for(tile_number)
+        claim = session.lifecycle.evaluation_claim_for(tile_number)
         if marker is not None:
             if isinstance(marker, _EvaluationClaim):
                 matched = (
@@ -1703,18 +2040,18 @@ class FramePipelineEffects:
                 matched = claim == marker
             if not matched:
                 return False
-        elif claim is None and tile_number not in self.session.active_tile_requests:
+        elif claim is None and tile_number not in session.active_tile_requests:
             return False
-        self.session.lifecycle.evaluation_request_cleared(tile_number)
-        self.session.loading_tiles.discard(tile_number)
-        self.session.lifecycle.task_released(tile_number, reason="dropped")
+        session.lifecycle.evaluation_request_cleared(tile_number)
+        session.loading_tiles.discard(tile_number)
+        session.lifecycle.task_released(tile_number, reason="dropped")
         if (
-            tile_number not in self.session.rendered_tiles
-            and tile_number not in self.session.display_tile_payloads
+            tile_number not in session.rendered_tiles
+            and tile_number not in session.display_tile_payloads
         ):
-            self.session.dirty_payloads.pop(tile_number, None)
-            self.session.pending_payload_upserts.pop(tile_number, None)
-        self.session.lifecycle.evaluation_declined(tile_number)
+            session.dirty_payloads.pop(tile_number, None)
+            session.pending_payload_upserts.pop(tile_number, None)
+        session.lifecycle.evaluation_declined(tile_number)
         if request_replan and self._session_is_current():
             self.renderer.request_montage_replan(self.session)
         return True

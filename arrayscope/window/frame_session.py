@@ -738,6 +738,17 @@ _PRESENTATION_PLAN_CONTAINERS: tuple[tuple[str, object], ...] = (
     # that advanced ``true_bounds`` would release the clamp against bounds no
     # commit ever presented.
     ("_shader_presented_bounds_clamp", dict),
+    # ADR 0065 stage 2 slice D2c: the retarget's STAGE phase plans against a
+    # staged session too, and the resident-crop-rebind seed
+    # (``rebind_resident_crop_tiles``) writes these three.  The first two are
+    # the rebind's own record of which slots it rebound and which fell back to
+    # a crop-local subset — ``resident_crop_fallback_is_current`` and the
+    # atomic-successor gate read them, so a dropped seed that left them behind
+    # would claim coverage no commit ever presented.  The third is the governed
+    # seed's evidence dict, mutated in place by ``admission_chunk_limit``.
+    ("resident_crop_rebound_source_ids", dict),
+    ("resident_crop_fallback_source_ids", dict),
+    ("resident_crop_governor_stats", dict),
     # Pure memos.  Their writes are idempotent for one residency epoch, so
     # sharing them would be harmless — but "harmless" is a judgement that has
     # to be re-made every time one of them grows a new writer, and the copy

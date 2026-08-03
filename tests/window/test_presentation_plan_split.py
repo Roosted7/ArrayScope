@@ -266,6 +266,16 @@ _FINGERPRINTED_ATTRS = (
     "acknowledged_source_ids",
     "lod_preview_metadata",
     "rendered_tiles",
+    # ADR 0065 stage 2 slice D2c: the retarget's stage phase plans too, and the
+    # resident-crop-rebind seed is its only writer of these.  They are in the
+    # fingerprint so a seed that escapes a dropped plan is visible here.
+    "resident_crop_rebound_source_ids",
+    "resident_crop_fallback_source_ids",
+    "resident_crop_governor_stats",
+    "resident_crop_rebind_stats",
+    "resident_crop_rebind_seeded",
+    "level_evidence_reanchor",
+    "tile_state_revision",
 )
 
 
@@ -831,3 +841,157 @@ def test_a_prepared_outcome_from_another_generation_is_refused(prepare_seam_wind
     assert effects._take_prepared_outcome(stale) is None
     assert _session_fingerprint(session) == before
     assert int(win.renderer._montage_prepare_refused_stale) == refused_before + 1
+
+
+# ------------------------------------------- the retarget seam, not the commit
+#
+# ADR 0065 stage 2 slice D2c moves the same property one seam further out.  D2b
+# measured the retarget's remaining GUI-side hold and named it exactly:
+# ``effects.tile_states`` (2223 ms per three fills) and
+# ``mark_ladder_swaps_for_current_demand`` (1816 ms), against an unlocked
+# ``ladder.plan`` of single-digit milliseconds.  Neither is arithmetic — both
+# are session WRITES (evaluation-claim releases, crop-rebind seeding, dirty swap
+# marks) — so neither could leave the lock by being moved, only by being
+# planned.
+
+
+def test_the_seeds_own_containers_travel_with_the_plan():
+    """Completeness check for the three families slice D2c added to the table.
+
+    ``rebind_resident_crop_tiles`` is the only writer of these, and building a
+    real resident rebind needs a backend residency seam and a committed
+    predecessor frame.  The property under test is not the rebind's decision but
+    the *containment* of its writes, so the writes are made directly: a family
+    missing from ``_PRESENTATION_PLAN_CONTAINERS`` is shared with the live
+    session, and the first assertion below sees it immediately.  Removing any
+    one of the three entries is the mutation check.
+    """
+
+    session = _scenario_settled()
+    before = _session_fingerprint(session)
+
+    staged = session._staged_presentation_session()
+    staged.resident_crop_rebound_source_ids[0] = ("rebound", 0)
+    staged.resident_crop_fallback_source_ids[0] = ("fallback", 0)
+    staged.resident_crop_governor_stats["seed_callbacks"] = 3
+    staged.level_evidence_reanchor = True
+    plan = session._harvest_presentation_plan(staged, None, None, path="retarget-tile-states")
+
+    assert _session_fingerprint(session) == before
+
+    session.apply_tile_presentation_plan(plan)
+
+    assert session.resident_crop_rebound_source_ids == {0: ("rebound", 0)}
+    assert session.resident_crop_fallback_source_ids == {0: ("fallback", 0)}
+    assert session.resident_crop_governor_stats["seed_callbacks"] == 3
+    assert session.level_evidence_reanchor is True
+
+
+def _retarget_seam(win):
+    renderer = win.renderer
+    session = renderer._frame_session
+    pipeline = renderer._frame_pipeline_for_session(session)
+    intent = renderer._montage_render_intent(session)
+    scope = renderer._lod_admission_scope(session, intent)
+    return session, pipeline, pipeline.effects, intent, scope
+
+
+def test_the_retarget_stage_phase_plans_without_writing_the_session(prepare_seam_window):
+    """Slice D2c's contract, at the retarget seam.
+
+    Every write the stage phase used to make under the lock — the claim
+    releases, the crop-rebind seed and the swap marks — now lands on a private
+    copy, and a plan nobody applies leaves nothing behind.  The mutation is
+    planning against the live session (which is exactly what ``staged=False``
+    selects), and it turns the fingerprint assertion red.
+    """
+
+    pytest.importorskip("pytestqt")
+    from arrayscope.render import lod as render_lod
+
+    win = prepare_seam_window
+    session, _pipeline, effects, intent, scope = _retarget_seam(win)
+    before = _session_fingerprint(session)
+    memo_before = dict(getattr(win.renderer, "_resident_crop_canonical_planes", None) or {})
+
+    staging = effects.stage_tile_states(intent, session.lod_policy_decision.demand, scope)
+    assert staging is not None, "the seam staged nothing, so nothing was observed"
+    assert staging.staged, "the session was not staged, so purity is not what ran"
+    assert staging.session is not session
+    render_lod.mark_ladder_swaps_for_current_demand(staging.session)
+    planned = effects.plan_tile_states(staging)
+
+    assert planned.states, "the plan decided no tile states, so nothing was observed"
+    assert _session_fingerprint(session) == before
+    assert dict(getattr(win.renderer, "_resident_crop_canonical_planes", None) or {}) == memo_before
+    for name, value in dict(planned.plan.staged).items():
+        assert getattr(session, name, None) is not value, name
+
+
+def test_the_retargets_applier_is_its_only_writer(prepare_seam_window):
+    """Whatever the stage phase decided, all of it lands on apply and none before."""
+
+    pytest.importorskip("pytestqt")
+    win = prepare_seam_window
+    session, _pipeline, effects, intent, scope = _retarget_seam(win)
+
+    staging = effects.stage_tile_states(intent, session.lod_policy_decision.demand, scope)
+    assert staging is not None
+    assert staging.staged
+    planned = effects.plan_tile_states(staging)
+    staged = dict(planned.plan.staged)
+    assert staged, "the stage phase decided no session write, so nothing was observed"
+    assert [name for name, value in staged.items() if getattr(session, name, None) is not value]
+
+    assert effects.apply_tile_states_plan(planned) is True
+
+    for name, value in staged.items():
+        assert getattr(session, name) is value, name
+
+
+def test_a_retarget_plan_overtaken_by_a_live_write_is_refused(prepare_seam_window):
+    """The conservation refusal, which only exists because the middle is unlocked.
+
+    The applier installs whole containers, so an admission landing between the
+    staging and the apply would be reverted — a lost admission, which is the
+    settle wedge D2 measured (35 stale tiles, nothing loading).  One is staged
+    deliberately here.  Without the check the admission's payload is gone and
+    the counter stays empty, which is the mutation.
+    """
+
+    pytest.importorskip("pytestqt")
+    win = prepare_seam_window
+    session, _pipeline, effects, intent, scope = _retarget_seam(win)
+
+    staging = effects.stage_tile_states(intent, session.lod_policy_decision.demand, scope)
+    assert staging is not None
+    assert staging.staged
+    planned = effects.plan_tile_states(staging)
+
+    # The interleaving: an admission installs a newer payload for a tile while
+    # the retarget was planning against a copy that does not have it.
+    successor = object()
+    session.display_tile_payloads[9999] = successor
+
+    assert effects.apply_tile_states_plan(planned) is False
+    assert session.display_tile_payloads.get(9999) is successor
+    assert int(win.renderer._montage_retarget_stage_refusals.get("interleaved", 0)) == 1
+
+
+def test_a_retarget_plan_from_another_generation_is_refused(prepare_seam_window):
+    """The identity gate, the same one the commit's take applies."""
+
+    pytest.importorskip("pytestqt")
+    win = prepare_seam_window
+    session, _pipeline, effects, intent, scope = _retarget_seam(win)
+
+    staging = effects.stage_tile_states(intent, session.lod_policy_decision.demand, scope)
+    assert staging is not None
+    assert staging.staged
+    planned = effects.plan_tile_states(staging)
+    object.__setattr__(planned.plan, "session_id", int(session.session_id) + 1)
+    before = _session_fingerprint(session)
+
+    assert effects.apply_tile_states_plan(planned) is False
+    assert _session_fingerprint(session) == before
+    assert int(win.renderer._montage_retarget_stage_refusals.get("generation", 0)) == 1

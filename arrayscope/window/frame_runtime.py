@@ -523,13 +523,24 @@ class FrameRuntimeMixin:
         clause three times. The phases now are:
 
         1. under the lock — the currency check, the LOD demand and the round
-           latch (a read-modify-write that stays atomic), the swap marks, the
-           intent, the admission scope, the deferred stage fan-in, and the
-           pipeline's own staging (which adopts the intent and snapshots the
-           per-tile ladder states);
-        2. without the lock — ``ladder.plan`` and the step filter;
-        3. under the lock — the admissions and their kernel submits, then the
-           trace and the commit/settle tail.
+           latch (a read-modify-write that stays atomic), the intent, the
+           admission scope, the deferred stage fan-in, and the pipeline's own
+           staging (which adopts the intent and freezes the snapshot's inputs,
+           including one private session copy);
+        2. without the lock — the swap marks, the evaluation-claim releases,
+           the crop-rebind seed, the per-tile ladder-state snapshot,
+           ``ladder.plan`` and the step filter — every one of them against the
+           private copy;
+        3. under the lock — the planned session writes, the admissions and
+           their kernel submits, then the trace and the commit/settle tail.
+
+        ADR 0065 stage 2 slice D2c moved the swap marks and the state snapshot
+        out of (1). D2b left them there and measured them as the entire
+        remaining hold: ``effects.tile_states`` 2223 ms and
+        ``mark_ladder_swaps_for_current_demand`` 1816 ms per three fills against
+        an unlocked ``ladder.plan`` of single-digit milliseconds. Neither is
+        expensive because of arithmetic; both are session **writes**, so
+        neither could leave the lock by being moved — only by being planned.
 
         The stale check on re-acquisition is the pipeline's admission
         generation (``admit_retarget`` refuses a plan a later staging
@@ -542,18 +553,6 @@ class FrameRuntimeMixin:
                 return 0
             if prepared_lod_swap_ready is None:
                 render_lod.selected_lod_factor(session)
-                # This is the final demand snapshot used by lifecycle retargeting.
-                # A preceding viewport callback may have marked swaps for an earlier
-                # camera delivery; re-mark against this exact decision so resident
-                # TARGET_READY tiles cannot be stranded with no presentation owner.
-                lod_swap_ready = render_lod.mark_ladder_swaps_for_current_demand(session)
-            else:
-                # Viewport retargets compute demand and mark swaps immediately
-                # before entering the pipeline. Carry that exact result across
-                # this boundary instead of repeating the all-visible-tile scan.
-                # Completion-driven replans omit this argument and refresh from
-                # their live residency/lifecycle epochs above.
-                lod_swap_ready = bool(prepared_lod_swap_ready)
             intent = self._montage_render_intent(session)
             scope = self._lod_admission_scope(session, intent)
             pipeline = self._frame_pipeline_for_session(session)
@@ -566,9 +565,33 @@ class FrameRuntimeMixin:
                 getattr(session, "key", None),
             )
             staged = pipeline.stage_retarget(intent, session.lod_policy_decision.demand, scope)
+            if prepared_lod_swap_ready is None and getattr(staged, "staged_session", None) is None:
+                # No planner underneath (a test double's effects, or nothing to
+                # stage): mark against the live session where it always was.
+                lod_swap_ready = render_lod.mark_ladder_swaps_for_current_demand(session)
+        if prepared_lod_swap_ready is not None:
+            # Viewport retargets compute demand and mark swaps immediately
+            # before entering the pipeline. Carry that exact result across
+            # this boundary instead of repeating the all-visible-tile scan.
+            # Completion-driven replans omit this argument and refresh from
+            # their live residency/lifecycle epochs above.
+            lod_swap_ready = bool(prepared_lod_swap_ready)
         if staged is None:
             submitted = 0
         else:
+            staged_session = getattr(staged, "staged_session", None)
+            if prepared_lod_swap_ready is None and staged_session is not None:
+                # This is the final demand snapshot used by lifecycle retargeting.
+                # A preceding viewport callback may have marked swaps for an earlier
+                # camera delivery; re-mark against this exact decision so resident
+                # TARGET_READY tiles cannot be stranded with no presentation owner.
+                #
+                # It runs against the private copy and *before* the plan, which
+                # is the order it always had: the marks it writes to
+                # ``dirty_payloads`` are read by the state snapshot two calls
+                # later, and they travel to the live session with the rest of
+                # the plan.
+                lod_swap_ready = render_lod.mark_ladder_swaps_for_current_demand(staged_session)
             planned = pipeline.plan_retarget(staged)
             with session_order_lock(self):
                 if not self._is_current_frame_session(*currency) or session is not getattr(
