@@ -161,6 +161,29 @@ def montage_completion_route(event: Any) -> bool:
     two sections hold it for 3-4 s of an 8 s fill, 630 owner acquisitions
     cannot fit between them, and no policy on this side changes that.
 
+    **Slice D2b took the submit out of the commit's section and split the
+    retarget into stage/plan/admit.** Same instrumentation, same probe, three
+    runs (9 fills, all ``272/272 within-5s``), per fill:
+
+    ===============================  =====  ========  =======
+    GUI section                      calls  total ms  max ms
+    ===============================  =====  ========  =======
+    ``commit_pending_session``       31-34    605-880   44-171
+    ``retarget_frame_pipeline``      31-33  1010-1472      193
+    ===============================  =====  ========  =======
+
+    The commit is where the slice landed: 1913 -> ~660 ms and 520 -> ~46 ms
+    typical, because the 526 ms backend submit is no longer a section. **The
+    retarget did not move**, and the sub-phase breakdown says why the D2b
+    design was aimed at the wrong statement: ``ladder.plan`` — the "expensive
+    middle" the split was built for — is 8-114 ms *per fill total*. The hold is
+    in staging, which cannot leave the lock because it writes:
+    ``effects.tile_states`` (2.1-2.2 s per 3 fills; it releases evaluation
+    claims and seeds crop rebinds) and
+    ``mark_ladder_swaps_for_current_demand`` (1.7-1.8 s, one call to 164 ms).
+    Those two are the R5 model rebuild, and getting them off the lock needs the
+    planner/applier treatment slice D1 gave the commit — not another split.
+
     Two further exclusions are deliberate rather than incidental:
 
     - Histogram and level-evidence completions (``montage:…:histogram``,

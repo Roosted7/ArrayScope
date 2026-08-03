@@ -262,7 +262,7 @@ def post_to_presentation_owner(renderer, callback) -> bool:
     return True
 
 
-def _session_order_lock(owner):
+def session_order_lock(owner):
     """Hold the GUI side of the ADR 0065 session-order lock, or nothing.
 
     ``owner`` is a renderer or anything that owns one under that name
@@ -307,10 +307,41 @@ def session_order_lock_section(method):
 
     @wraps(method)
     def section(owner, *args, **kwargs):
-        with _session_order_lock(owner):
+        with session_order_lock(owner):
             return method(owner, *args, **kwargs)
 
     return section
+
+
+@dataclass(frozen=True)
+class _SubmitWindow:
+    """What an admission could have changed while the submit ran unlocked.
+
+    ADR 0065 stage 2 slice D2b move 1. The backend submit needs no session
+    ordering, so the commit releases the order lock across it — which makes an
+    owner-side admission between the *apply* and the *ack* an ordinary
+    interleaving rather than an impossible one. Two acknowledgement steps
+    assumed apply-to-ack atomicity and are re-derived against this record
+    instead:
+
+    ``dirty_prefix``
+        ``release_dirty_tiles`` drops the peeked tiles *by value*, so an
+        admission that re-appended one of them would have its append swallowed.
+        The peeked entries are the list's prefix (the only other writer
+        appends), so the count is what makes the release exact.
+    ``payloads``
+        ``acknowledge_tile_presentation`` pops ``dirty_payloads`` /
+        ``pending_payload_upserts`` for every accepted upsert. An admission
+        that rewrote one of those tiles in the window would lose its
+        obligation; comparing the payload objects by identity says exactly
+        which tiles that happened to, and they are re-dirtied after the ack.
+
+    Both are no-ops when nothing interleaved, which is every commit the inline
+    anchor makes on a quiet GUI thread.
+    """
+
+    dirty_prefix: int
+    payloads: dict
 
 
 @dataclass(frozen=True)
@@ -412,6 +443,19 @@ class FramePipelineEffects:
         self._backend_capabilities = image_view_backend_capabilities(
             getattr(getattr(renderer, "win", None), "img_view", None)
         )
+
+    def _order_lock(self):
+        """The GUI side of the session-order lock, as an explicit span.
+
+        :func:`session_order_lock_section` is the right shape for a funnel
+        whose whole body is one section. The commit is not one of those any
+        more (ADR 0065 stage 2 slice D2b): it holds the lock for the session
+        phases and drops it for the backend submit, so its spans are written
+        out. Same lock, same counters, same null-context answers off the GUI
+        thread and without an owner.
+        """
+
+        return session_order_lock(self)
 
     def scheduling_verdict(self):
         """Read/advance the sole required-generation phase owner."""
@@ -1936,59 +1980,21 @@ class FramePipelineEffects:
             int(Qt.QtCore.Qt.EventPriority.LowEventPriority.value),
         )
 
-    @session_order_lock_section
     def _on_presentation_gate(self, owner=None) -> None:
-        live_owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
-        owner = live_owner if owner is None else owner
-        if getattr(self.renderer, "_montage_presentation_gate_owner", None) != owner:
-            # A successor session armed its own continuation while this stale
-            # callback was queued. It owns the shared gate now; this callback
-            # must neither clear nor consume that wakeup.
-            emit_trace("presentation_gate", action="fired-stale", owner_session=owner[0])
+        """One gate wakeup: decide under the lock, then commit outside it.
+
+        ADR 0065 stage 2 slice D2b. The decision half — the gate-owner
+        identity, the generation check, clearing the gate flags, the owed-draw
+        stand-down — is session ordering and stays one lock section. The
+        commit is no longer *inside* that section: it opens its own (see
+        :meth:`commit_pending_session`), which is what lets the backend submit
+        in the middle of it run with the lock down. The gate flags are cleared
+        before the commit either way, so an admission that arms the gate
+        during the submit gets its own wakeup rather than being swallowed.
+        """
+
+        if not self._gate_admits_commit(owner):
             return
-        if live_owner != owner:
-            # Index-window retargeting deliberately keeps the FrameSession and
-            # effects object alive while advancing its generation. A callback
-            # queued for the predecessor must not impersonate the successor by
-            # reading the mutable session id only when it fires.
-            self.renderer._montage_presentation_gate_owner = None
-            self.renderer._montage_presentation_gate_armed = False
-            emit_trace(
-                "presentation_gate",
-                action="fired-generation-stale",
-                owner_session=owner[0],
-                live_session=live_owner[0],
-            )
-            return
-        governor_stats = getattr(self.session, "resident_crop_governor_stats", None)
-        if isinstance(governor_stats, dict) and int(
-            governor_stats.get("presentation_gate_pending", 0)
-        ):
-            governor_stats["presentation_gate_pending"] = 0
-            governor_stats["presentation_gate_fires"] = (
-                int(governor_stats.get("presentation_gate_fires", 0)) + 1
-            )
-        self.renderer._montage_presentation_gate_owner = None
-        self.renderer._montage_presentation_gate_armed = False
-        if not self._session_is_current():
-            emit_trace("presentation_gate", action="fired-not-current", owner_session=owner[0])
-            return
-        # The paced draw and this continuation are unordered event-loop
-        # wakeups. When the display is already owed a frame, this one stands
-        # down and re-arms behind it. The resume commits directly rather than
-        # re-posting the gate: the gate's own wakeup is LowEventPriority by
-        # design and a fill keeps that queue saturated, so re-arming through it
-        # would turn a one-turn yield into the starvation
-        # `_post_visible_path_callback` documents. The gate flags are cleared
-        # above and the resume re-checks the session generation, so this is
-        # exactly the callback the gate would have run.
-        defer = getattr(self.renderer, "defer_commit_behind_presentation_draw", None)
-        if callable(defer) and defer(
-            self._commit_after_presentation_draw, interactive=interactive_active(self.renderer)
-        ):
-            emit_trace("presentation_gate", action="deferred-draw", owner_session=owner[0])
-            return
-        emit_trace("presentation_gate", action="fired-commit", owner_session=owner[0])
         try:
             self.commit_pending_session()
         except Exception as exc:
@@ -2008,17 +2014,74 @@ class FramePipelineEffects:
             emit_trace(
                 "presentation_gate",
                 action="fired-raised",
-                owner_session=owner[0],
+                owner_session=int(getattr(self.session, "session_id", 0) or 0),
                 exception_type=type(exc).__name__,
             )
             handle_ui_exception("montage presentation commit", exc)
 
     @session_order_lock_section
+    def _gate_admits_commit(self, owner=None) -> bool:
+        """The gate's own session section: whether this wakeup owns a commit."""
+
+        live_owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
+        owner = live_owner if owner is None else owner
+        if getattr(self.renderer, "_montage_presentation_gate_owner", None) != owner:
+            # A successor session armed its own continuation while this stale
+            # callback was queued. It owns the shared gate now; this callback
+            # must neither clear nor consume that wakeup.
+            emit_trace("presentation_gate", action="fired-stale", owner_session=owner[0])
+            return False
+        if live_owner != owner:
+            # Index-window retargeting deliberately keeps the FrameSession and
+            # effects object alive while advancing its generation. A callback
+            # queued for the predecessor must not impersonate the successor by
+            # reading the mutable session id only when it fires.
+            self.renderer._montage_presentation_gate_owner = None
+            self.renderer._montage_presentation_gate_armed = False
+            emit_trace(
+                "presentation_gate",
+                action="fired-generation-stale",
+                owner_session=owner[0],
+                live_session=live_owner[0],
+            )
+            return False
+        governor_stats = getattr(self.session, "resident_crop_governor_stats", None)
+        if isinstance(governor_stats, dict) and int(
+            governor_stats.get("presentation_gate_pending", 0)
+        ):
+            governor_stats["presentation_gate_pending"] = 0
+            governor_stats["presentation_gate_fires"] = (
+                int(governor_stats.get("presentation_gate_fires", 0)) + 1
+            )
+        self.renderer._montage_presentation_gate_owner = None
+        self.renderer._montage_presentation_gate_armed = False
+        if not self._session_is_current():
+            emit_trace("presentation_gate", action="fired-not-current", owner_session=owner[0])
+            return False
+        # The paced draw and this continuation are unordered event-loop
+        # wakeups. When the display is already owed a frame, this one stands
+        # down and re-arms behind it. The resume commits directly rather than
+        # re-posting the gate: the gate's own wakeup is LowEventPriority by
+        # design and a fill keeps that queue saturated, so re-arming through it
+        # would turn a one-turn yield into the starvation
+        # `_post_visible_path_callback` documents. The gate flags are cleared
+        # above and the resume re-checks the session generation, so this is
+        # exactly the callback the gate would have run.
+        defer = getattr(self.renderer, "defer_commit_behind_presentation_draw", None)
+        if callable(defer) and defer(
+            self._commit_after_presentation_draw, interactive=interactive_active(self.renderer)
+        ):
+            emit_trace("presentation_gate", action="deferred-draw", owner_session=owner[0])
+            return False
+        emit_trace("presentation_gate", action="fired-commit", owner_session=owner[0])
+        return True
+
     def _commit_after_presentation_draw(self) -> None:
         """Resume the continuation that stood down for an owed draw."""
 
-        if not self._session_is_current():
-            return
+        with self._order_lock():
+            if not self._session_is_current():
+                return
         try:
             self.commit_pending_session()
         except Exception as exc:
@@ -2029,27 +2092,40 @@ class FramePipelineEffects:
             )
             handle_ui_exception("montage presentation commit", exc)
 
-    @session_order_lock_section
     def commit_pending_session(self) -> None:
-        if not self._session_is_current():
-            return
-        owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
-        if getattr(self.renderer, "_montage_commit_failed_owner", None) == owner:
-            return
-        if bool(getattr(self.renderer, "_montage_commit_drain_active", False)):
-            self.session.final_commit_pending = True
-            self.session.flush_pending = True
-            self.request_presentation()
-            return
-        self.renderer._montage_commit_drain_active = True
+        """One presentation commit: admit, run the phases, re-arm.
+
+        ADR 0065 stage 2 slice D2b move 1. This used to be one lock section
+        end to end — 43 calls, 2350 ms, 526 ms worst, of an 8 s fill — with
+        the backend submit inside it, and the submit needs no session ordering
+        at all. It is three sections now (admit / commit phases / re-arm), and
+        :meth:`_commit_tile_layer` splits the middle again around the submit.
+
+        The re-entrancy guard spans the whole call including the unlocked
+        submit, deliberately: ``_montage_commit_drain_active`` is what makes a
+        second commit request during a commit re-arm the gate instead of
+        recursing, and the submit is exactly when a second request can now
+        arrive.
+        """
+
+        with self._order_lock():
+            if not self._session_is_current():
+                return
+            owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
+            if getattr(self.renderer, "_montage_commit_failed_owner", None) == owner:
+                return
+            if bool(getattr(self.renderer, "_montage_commit_drain_active", False)):
+                self.session.final_commit_pending = True
+                self.session.flush_pending = True
+                self.request_presentation()
+                return
+            self.renderer._montage_commit_drain_active = True
         try:
-            direct_presentation = self.direct_tile_layer_presentation()
-            if direct_presentation is None:
-                raise RuntimeError("montage presentation could not be built")
-            self._commit_tile_layer(direct_presentation, commit_start=perf_counter())
+            self._commit_tile_layer(commit_start=perf_counter())
         finally:
             self.renderer._montage_commit_drain_active = False
-        self._rearm_if_backlog()
+        with self._order_lock():
+            self._rearm_if_backlog()
 
     def _backlog_signature(self) -> tuple:
         """Everything a presentation commit can make progress on.
@@ -2546,21 +2622,48 @@ class FramePipelineEffects:
         _reset_commit_timings(renderer)
         renderer._last_montage_commit_outcome = "started"
 
-    def _commit_tile_layer(self, direct_presentation, *, commit_start: float) -> None:
-        """Prepare, submit and acknowledge one commit inline. GUI thread only."""
+    def _commit_tile_layer(self, *, commit_start: float) -> None:
+        """Prepare, submit and acknowledge one commit inline. GUI thread only.
+
+        ADR 0065 stage 2 slice D2b move 1: the phases are the same four and
+        their order is unchanged, but they are no longer one lock section.
+
+        1. under the lock — build the direct presentation, peek the dirty set,
+           begin the commit frame, prepare (which stages and then plans, D2a)
+           and *take*. Everything that reads or writes the live session is
+           here, in one span, so a plan is still applied against exactly the
+           generation it was decided against;
+        2. without the lock — :meth:`_submit_prepared_transaction`'s backend
+           submit, up to 526 ms with pool growth and needing no session
+           ordering whatever;
+        3. under the lock again — the acknowledgement.
+
+        The build joined phase 1 rather than staying with the caller: it reads
+        ``ensure_tile_states`` and the plan geometry, and a gap between it and
+        the prepare is the stale-geometry class that killed slice C.
+        """
 
         renderer = self.renderer
-        dirty_tiles = self.session.peek_dirty_tiles()
-        self._begin_commit_frame(dirty_tiles)
+        dirty_tiles: tuple[int, ...] = ()
         try:
-            outcome = self._prepare_tile_layer_transaction(
-                direct_presentation,
-                dirty_tiles=dirty_tiles,
-            )
-            transaction = self._take_prepared_outcome(outcome)
+            with self._order_lock():
+                direct_presentation = self.direct_tile_layer_presentation()
+                if direct_presentation is None:
+                    raise RuntimeError("montage presentation could not be built")
+                dirty_tiles = self.session.peek_dirty_tiles()
+                self._begin_commit_frame(dirty_tiles)
+                outcome = self._prepare_tile_layer_transaction(
+                    direct_presentation,
+                    dirty_tiles=dirty_tiles,
+                )
+                transaction = self._take_prepared_outcome(outcome)
+                window = _SubmitWindow(
+                    dirty_prefix=len(getattr(self.session, "dirty_tiles", ()) or ()),
+                    payloads=self._submit_window_payloads(transaction),
+                )
             if transaction is None:
                 return
-            self._submit_prepared_transaction(transaction, commit_start=commit_start)
+            self._submit_prepared_transaction(transaction, commit_start=commit_start, window=window)
         except BaseException as exc:
             # A throw is an early commit return that names neither its outcome
             # nor its wakeup, so it was the one commit exit invisible to the
@@ -2570,10 +2673,31 @@ class FramePipelineEffects:
             # both produced (dossier wgpu-pool-layer-leak-2026-07-26 §5a).
             # Name it like every other terminal bail and re-raise: the policy
             # decision about fatality belongs to the gate, not to this frame.
-            self._note_commit_raised(exc, dirty_tiles=dirty_tiles)
+            with self._order_lock():
+                self._note_commit_raised(exc, dirty_tiles=dirty_tiles)
             raise
         finally:
-            _finish_presentation_commit(renderer)
+            with self._order_lock():
+                _finish_presentation_commit(renderer)
+
+    def _submit_window_payloads(self, transaction) -> dict:
+        """The delta tiles' payload objects, held by reference for the ack.
+
+        By reference and compared with ``is`` rather than by ``id()``: a
+        payload replaced during the unlocked submit can be freed and its
+        address reused, and this comparison decides whether an admission's
+        obligation is about to be swallowed by the acknowledgement's pops.
+        """
+
+        if transaction is None:
+            return {}
+        session = self.session
+        payloads = getattr(session, "display_tile_payloads", None) or {}
+        rendered = getattr(session, "rendered_tiles", None) or {}
+        return {
+            int(tile): (payloads.get(int(tile)), rendered.get(int(tile)))
+            for tile in tuple(transaction.tile_delta.upserts)
+        }
 
     # --------------------------------------------------------------- prepare
 
@@ -3750,7 +3874,11 @@ class FramePipelineEffects:
     # ---------------------------------------------------------------- submit
 
     def _submit_prepared_transaction(
-        self, transaction: PreparedPresentationTransaction, *, commit_start: float
+        self,
+        transaction: PreparedPresentationTransaction,
+        *,
+        commit_start: float,
+        window: _SubmitWindow | None = None,
     ) -> None:
         """Backend apply/submit and the Qt half of one commit. GUI thread only.
 
@@ -3758,73 +3886,91 @@ class FramePipelineEffects:
         real GPU uploads (ADR 0065 "what stays GUI-side in stage 2"); the
         transaction carries ``requires_hidden_warm`` and the frozen prepared
         dict so this side needs no session walk of its own.
+
+        ADR 0065 stage 2 slice D2b move 1: three spans, and the lock is down
+        for the middle one. Everything before the submit is session state (the
+        emitted mark above all) and everything after it is the
+        acknowledgement; ``_present_tile_delta`` itself reads the frozen
+        transaction, the committed frame and per-session *configuration*
+        (window mode, frame plan, key, level key) that only a GUI-thread
+        rebirth writes, so it needs no session ordering.
+
+        ``window`` is the caller's record of what the delta's tiles looked like
+        when the lock went down; the ack re-derives against it rather than
+        assuming apply-to-ack atomicity. ``None`` means "no interleaving is
+        possible" — a caller that never let the lock go.
         """
 
         renderer = self.renderer
         session = self.session
-        self._apply_prepared_diagnostics(transaction)
-        if (
-            transaction.requires_hidden_warm
-            and bool(transaction.tile_delta.upserts)
-            and transaction.warm_levels is not None
-            and not _warm_atomic_successor_residency(
-                renderer,
-                session,
-                transaction.geometry,
-                transaction.tile_delta,
-                levels=transaction.warm_levels,
-                rgb_already_windowed=bool(
-                    getattr(transaction.display_image, "rgb_already_windowed", False)
-                ),
-                payloads=(
-                    transaction.active_payloads
-                    if transaction.atomic_successor
-                    else dict(transaction.tile_delta.upserts or {})
-                ),
-                batch_size=2,
-            )
-        ):
-            session._atomic_prepared_transaction = dict(transaction.prepared_atomic or {})
-            # Residency preparation owns its receiver-bound continuation
-            # and requests exactly one semantic replan when complete.
-            # Replanning the whole frame after every warmed holder is an
-            # O(tiles^2) event-loop starvation loop during scroll churn.
-            session.final_commit_pending = False
-            session.flush_pending = False
-            self._note_commit_bail(
-                "hidden-warm-residency-wait", wakeup="warm-residency-continuation"
-            )
-            return
-        # "Emitted" means handed across the backend boundary, not merely
-        # selected by the transaction builder. In particular, the
-        # refined-level gate in prepare may defer a complete PyQtGraph frame;
-        # marking it emitted before that decision strands the lifecycle
-        # at TARGET_EMITTED even though no scene update occurred.
-        session.lifecycle.commit_emitted(transaction.tile_delta.upserts)
+        with self._order_lock():
+            self._apply_prepared_diagnostics(transaction)
+            if (
+                transaction.requires_hidden_warm
+                and bool(transaction.tile_delta.upserts)
+                and transaction.warm_levels is not None
+                and not _warm_atomic_successor_residency(
+                    renderer,
+                    session,
+                    transaction.geometry,
+                    transaction.tile_delta,
+                    levels=transaction.warm_levels,
+                    rgb_already_windowed=bool(
+                        getattr(transaction.display_image, "rgb_already_windowed", False)
+                    ),
+                    payloads=(
+                        transaction.active_payloads
+                        if transaction.atomic_successor
+                        else dict(transaction.tile_delta.upserts or {})
+                    ),
+                    batch_size=2,
+                )
+            ):
+                session._atomic_prepared_transaction = dict(transaction.prepared_atomic or {})
+                # Residency preparation owns its receiver-bound continuation
+                # and requests exactly one semantic replan when complete.
+                # Replanning the whole frame after every warmed holder is an
+                # O(tiles^2) event-loop starvation loop during scroll churn.
+                session.final_commit_pending = False
+                session.flush_pending = False
+                self._note_commit_bail(
+                    "hidden-warm-residency-wait", wakeup="warm-residency-continuation"
+                )
+                return
+            # "Emitted" means handed across the backend boundary, not merely
+            # selected by the transaction builder. In particular, the
+            # refined-level gate in prepare may defer a complete PyQtGraph
+            # frame; marking it emitted before that decision strands the
+            # lifecycle at TARGET_EMITTED even though no scene update occurred.
+            session.lifecycle.commit_emitted(transaction.tile_delta.upserts)
         submit_started = perf_counter()
         applied = self._present_tile_delta(transaction)
         submit_span_ms = (perf_counter() - submit_started) * 1000.0
-        renderer._last_montage_submit_span_ms = float(submit_span_ms)
-        renderer._last_montage_tile_prepare_apply_ms = float(
-            transaction.prep.prepare_stats_ms
-            + transaction.prep.prepare_metadata_ms
-            + transaction.prep.prepare_source_ms
-            + transaction.prep.prepare_histogram_ms
-        )
-        if not applied:
-            self._note_commit_bail("backend-declined", wakeup="rearm-if-backlog")
-            return
-        if transaction.histogram_metadata_pending and transaction.histogram_plot_data is not None:
-            session.histogram_metadata_pending = False
-        session.backend_refresh_pending = False
-        renderer._last_montage_commit_outcome = "backend-applied"
-        session._atomic_prepared_transaction = None
-        ack = self._capture_ack_inputs(
-            transaction,
-            commit_start=commit_start,
-            submit_span_ms=submit_span_ms,
-        )
-        self._acknowledge_transaction(ack)
+        with self._order_lock():
+            renderer._last_montage_submit_span_ms = float(submit_span_ms)
+            renderer._last_montage_tile_prepare_apply_ms = float(
+                transaction.prep.prepare_stats_ms
+                + transaction.prep.prepare_metadata_ms
+                + transaction.prep.prepare_source_ms
+                + transaction.prep.prepare_histogram_ms
+            )
+            if not applied:
+                self._note_commit_bail("backend-declined", wakeup="rearm-if-backlog")
+                return
+            if (
+                transaction.histogram_metadata_pending
+                and transaction.histogram_plot_data is not None
+            ):
+                session.histogram_metadata_pending = False
+            session.backend_refresh_pending = False
+            renderer._last_montage_commit_outcome = "backend-applied"
+            session._atomic_prepared_transaction = None
+            ack = self._capture_ack_inputs(
+                transaction,
+                commit_start=commit_start,
+                submit_span_ms=submit_span_ms,
+            )
+            self._acknowledge_transaction(ack, window=window)
 
     def _apply_prepared_diagnostics(self, transaction) -> None:
         """Mirror a taken transaction's prepare-side facts onto the renderer.
@@ -3915,17 +4061,18 @@ class FramePipelineEffects:
 
     # ------------------------------------------------------- acknowledgement
 
-    def _acknowledge_transaction(self, ack: AckInputs) -> None:
+    def _acknowledge_transaction(
+        self, ack: AckInputs, *, window: _SubmitWindow | None = None
+    ) -> None:
         """The acknowledgement bookkeeping for one submitted transaction.
 
         One gate guards the whole handler: the transaction's session identity
-        against the live one, and ``report.acknowledges(delta)``. Today both
-        callers are the GUI thread microseconds after the submit, so a refusal
-        is nearly impossible — which is exactly why it is *counted* and traced.
-        When slice D posts this to the owner the refusal becomes reachable
-        (a rebirth landing between submit and ack), and a silent refusal at
-        that point is invisible: today's synchronous code never needed the
-        verdict, so it never had one.
+        against the live one, and ``report.acknowledges(delta)``. Both callers
+        are still the GUI thread, but as of slice D2b the *lock* was down for
+        the submit between them, so a refusal is no longer nearly impossible —
+        an index-window retarget on the owner advances the identity on the same
+        object. It is counted and traced, and when slice D3 posts this handler
+        to the owner nothing about the gate changes.
         """
 
         transaction = ack.transaction
@@ -3933,7 +4080,55 @@ class FramePipelineEffects:
         if not transaction.identity.matches_session(session):
             self._note_ack_refused("session-identity", ack)
             return
-        self._acknowledge_and_publish(ack)
+        self._acknowledge_and_publish(ack, window=window)
+
+    def _admissions_during_submit(self, window: _SubmitWindow | None) -> tuple[int, ...]:
+        """Which delta tiles another thread rewrote while the lock was down.
+
+        The comparison runs before the acknowledgement touches anything, so a
+        difference can only have come from outside this commit: nothing on the
+        submit path writes ``display_tile_payloads`` or ``rendered_tiles``, and
+        the acknowledgement's own removals happen after this.
+        """
+
+        if window is None or not window.payloads:
+            return ()
+        session = self.session
+        payloads = getattr(session, "display_tile_payloads", None) or {}
+        rendered = getattr(session, "rendered_tiles", None) or {}
+        return tuple(
+            tile
+            for tile, (payload, rendered_tile) in window.payloads.items()
+            if payloads.get(tile) is not payload or rendered.get(tile) is not rendered_tile
+        )
+
+    def _rearm_interleaved_admissions(self, tiles: tuple[int, ...]) -> None:
+        """Re-dirty the tiles the acknowledgement's pops would have swallowed.
+
+        ``acknowledge_tile_presentation`` pops ``dirty_payloads`` and
+        ``pending_payload_upserts`` for every accepted upsert — correct for the
+        payload this commit presented, wrong for a *newer* one an admission
+        installed while the submit ran unlocked. Re-arming them here is the
+        ack's re-derivation of the atomicity it no longer has; the counter
+        exists because a silent re-arm would be indistinguishable from a commit
+        that simply did less.
+        """
+
+        if not tiles:
+            return
+        session = self.session
+        for tile in tiles:
+            session.dirty_payloads[int(tile)] = None
+        session.flush_pending = True
+        session.final_commit_pending = True
+        self.renderer._montage_commit_interleaved_admissions = int(
+            getattr(self.renderer, "_montage_commit_interleaved_admissions", 0) or 0
+        ) + len(tiles)
+        emit_trace(
+            "commit_interleaved_admission",
+            session_id=int(getattr(session, "session_id", 0) or 0),
+            tiles=tuple(sorted(int(tile) for tile in tiles)),
+        )
 
     def _note_ack_refused(self, reason: str, ack: AckInputs) -> None:
         renderer = self.renderer
@@ -4160,7 +4355,9 @@ class FramePipelineEffects:
         renderer.win.img_view.setImageStale(False)
         return True
 
-    def _acknowledge_and_publish(self, ack: AckInputs) -> None:
+    def _acknowledge_and_publish(
+        self, ack: AckInputs, *, window: _SubmitWindow | None = None
+    ) -> None:
         """Everything the backend report unlocks, in the order it unlocks it.
 
         Driven entirely by :class:`AckInputs` — the report, the committed
@@ -4168,10 +4365,16 @@ class FramePipelineEffects:
         image-view read survives in here, which is what lets slice D post this
         whole method to the presentation owner without changing a line of its
         ordering.
+
+        ``window`` (slice D2b) names what an admission could have changed while
+        the submit ran with the order lock down. It is read *before* the
+        acknowledgement's own pops and applied after them, so what it re-arms
+        is only what another thread wrote — never this commit's own effects.
         """
 
         renderer = self.renderer
         session = self.session
+        interleaved = self._admissions_during_submit(window)
         transaction = ack.transaction
         tile_delta = transaction.tile_delta
         tile_state = transaction.tile_state
@@ -4232,8 +4435,14 @@ class FramePipelineEffects:
         # critical between prepare and take) therefore leaves every tile in it
         # dirty, and the next prepare presents them again. Exactly the peeked
         # tiles go, so anything dirtied since the peek survives for the next
-        # transaction.
-        session.release_dirty_tiles(transaction.dirty_tiles)
+        # transaction — by *prefix* when the submit ran with the lock down,
+        # because an admission can have re-appended a tile the peek already
+        # named and releasing that by value would swallow the new append.
+        session.release_dirty_tiles(
+            transaction.dirty_tiles,
+            prefix=None if window is None else int(window.dirty_prefix),
+        )
+        self._rearm_interleaved_admissions(interleaved)
         renderer._last_montage_tile_acknowledge_ms = (perf_counter() - acknowledge_start) * 1000.0
         retained_start = perf_counter()
         accepted_payloads = accepted_tiled_payloads(acknowledged.payloads, tile_delta, report)

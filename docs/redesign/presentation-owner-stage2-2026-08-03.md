@@ -528,3 +528,113 @@ While two sections hold the bridge for 3-4 s of an 8 s fill, 630 owner
 acquisitions cannot fit between them, and no policy on the owner's side changes
 that. Next: finish decision 10's retarget items, and take the backend submit
 out of the commit's lock section.
+
+## Slice D2b: the commit's hold collapses, the retarget's does not (2026-08-03)
+
+Three moves, and they separate as cleanly as D2a's two: the first is a pure
+win, the second is structurally right and measurably beside the point, the
+third is half refused by a test.
+
+### Move 1 landed: the backend submit is not a lock section
+
+`commit_pending_session` held the lock for its whole body, and so did every
+funnel above it (`_on_presentation_gate`, `_commit_after_presentation_draw`).
+The commit is now spans rather than a section — `_gate_admits_commit` is the
+gate's own section; the commit takes one for [build + peek + prepare + take],
+releases across `_present_tile_delta`, and takes another for the ack and the
+backlog re-arm. Nesting still works: reached through `commit_frame_session_presentation`
+or `update_image_view` (the rebirth spine, deliberately atomic) the enclosing
+section holds the re-entrant lock and the release in the middle is a no-op.
+
+**The audit the move owed — what the ack assumes about apply-to-ack
+atomicity — found two reads, and both are re-derived rather than moved.**
+`_SubmitWindow` is taken when the lock goes down:
+
+- `release_dirty_tiles(transaction.dirty_tiles)` drops the peeked tiles **by
+  value**, so an admission that re-appended one of them (`_admit_evaluation_result`
+  is the only other writer, and it appends) would have its append swallowed.
+  The peeked entries are the list's prefix, so the release takes a `prefix`
+  count and is exact under a concurrent append.
+- `acknowledge_tile_presentation` pops `dirty_payloads` / `pending_payload_upserts`
+  for every accepted upsert — right for the payload this commit presented,
+  wrong for a newer one an admission installed in the window. The window holds
+  the delta tiles' payload objects by reference; tiles whose
+  `display_tile_payloads` / `rendered_tiles` entry changed are re-dirtied after
+  the ack, with a counter and a `commit_interleaved_admission` trace.
+
+Everything else in the ack re-derives live under its own lock (`note_committed`
+and `_finish_commit`'s `upload_backlog` recompute the flush flags from the live
+containers, so an admission on a tile *outside* the delta was always safe). The
+re-entrancy guard `_montage_commit_drain_active` deliberately spans the unlocked
+middle — it is what turns a second commit request during the submit into a gate
+re-arm — and the gate flags are cleared before the commit, so an admission that
+arms the gate mid-submit gets its own wakeup.
+
+### Move 2 landed structurally, and the numbers refuse its premise
+
+`FramePipeline.retarget` is now the composition of `stage_retarget` (adopt the
+intent, snapshot the ladder states) -> `plan_retarget` (no lock) ->
+`admit_retarget` (claims, kernel submits), and `retarget_frame_pipeline` drives
+those three with its own spans, dropping the lock for the middle. The staleness
+rule is the pipeline's own admission generation plus a session-currency re-read:
+a plan whose staging was superseded admits nothing and counts
+`retargets_superseded`.
+
+It works and it buys almost nothing, because **the expensive middle was not the
+plan**. Sub-phase timings, same probe, 3 fills:
+
+| phase | calls | total ms | max ms |
+|---|---:|---:|---:|
+| `retarget.stage.pipeline` (`effects.tile_states`) | 97 | 2223.6 | 50.9 |
+| `retarget.stage.mark-swaps` | 88 | 1815.7 | 163.1 |
+| `retarget.stage.intent+scope` | 97 | 53.5 | 2.6 |
+| `retarget.admit` | 97 | 96.1 | 17.7 |
+| `retarget.tail` | 97 | 62.2 | 2.6 |
+| `retarget.plan-unlocked` (the middle) | 97 | *not held* | — |
+
+`ladder.plan` is single-digit milliseconds per fill. The hold is
+`effects.tile_states` (which releases evaluation claims and seeds crop rebinds
+— session **writes**) and `mark_ladder_swaps_for_current_demand` (a write of
+the lifecycle's swap marks). Neither can leave the lock by being moved; they
+need the planner/applier treatment D1 gave the commit seam.
+
+### Move 3: the hover caller posts, the index-window caller cannot
+
+`apply_montage_priority_retarget`'s tail is now `post_frame_pipeline_retarget`.
+`_maybe_retarget_frame_session`'s tail was converted too and **reverted**:
+`tests/ui/test_montage_scroll_settling.py::test_wgpu_shed_index_scrub_moves_the_montage_and_still_completes`
+reds with `ShedLevel.RETAIN_ONLY, streak=2` against a demanded `NONE`.
+R6's shed release lives in the retarget's tail and belongs to the round the
+index-window rebuild's own retarget opens; deferring it by one owner hop lets
+the next scrub step supersede the post and the round is never released. The
+dependent is real and it is not in the callback body — it is the
+rebuild-then-replan pair. The replan gate's `fire()` was not touched (slice B).
+
+### Holds, before and after (per fill, 272-tile wgpu probe)
+
+| GUI section | D2a control | D2b |
+|---|---|---|
+| `commit_pending_session` | 34 / 1913.4 / 520.6 | 31-34 / 605-880 / 44-171 |
+| `retarget_frame_pipeline` | 28 / 1334.9 / 196.3 | 31-33 / 1010-1472 / 193 |
+| `_on_presentation_gate` | 32 / 1353.7 / 154.6 | 29-37 / 604-870 / 44-171 |
+
+So the slice's target — max holds under ~16 ms — is **not met**. The commit is
+where it moved (total -65%, worst case -91% except for outliers to 171 ms,
+which are the prepare, not the submit); the retarget is unchanged.
+
+### What the next slice owes, named by the measurement
+
+1. **The retarget's staging is the remaining hold**, and it is two calls:
+   `effects.tile_states` and `mark_ladder_swaps_for_current_demand`. Both write
+   the lifecycle. Plan/apply them the way D1 planned the commit, or move the
+   whole retarget to the owner and leave the GUI none of it (decision 10's
+   items 3-5, which the index-window finding above now blocks: that caller
+   needs its rebuild and its replan on the *same* thread, whichever thread it
+   is).
+2. **The commit's remaining 44-171 ms is the prepare**, still under the lock
+   inline. D2a made it lock-free by construction, but releasing the lock across
+   it here needs the backlog-conservation validation D2 built and removed
+   (`TransactionIdentity.backlog_key`): the plan carries private copies of the
+   admission containers, so applying one prepared before an admission deletes
+   that admission.
+3. `frame:` routing was not re-attempted, per the slice's scope.

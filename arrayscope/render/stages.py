@@ -155,6 +155,11 @@ class PipelineCounters:
     ladder_plans: int = 0
     tasks_submitted: int = 0
     interactive_native_deferred: int = 0
+    #: Plans dropped because a later retarget staged while this one was
+    #: planning with the session-order lock released (ADR 0065 slice D2b).
+    #: A non-zero value is the split working, not a fault; a value that
+    #: tracks the retarget count would mean the middle is too long.
+    retargets_superseded: int = 0
     commit_batches: int = 0
     acks_confirmed: int = 0
     acks_rejected_stale: int = 0

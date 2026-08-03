@@ -6065,14 +6065,26 @@ class FrameSession:
 
         return tuple(dict.fromkeys(int(tile) for tile in self.dirty_tiles))
 
-    def release_dirty_tiles(self, tiles) -> int:
+    def release_dirty_tiles(self, tiles, *, prefix: int | None = None) -> int:
         """Drop exactly ``tiles`` from the dirty set; return how many went.
 
         Exactly, not wholesale: tiles dirtied *after* the peek belong to the
         next transaction and a `clear()` here would swallow them — the same
         stranding in the other direction.
+
+        ``prefix`` is the list's length at peek time, and it is what makes
+        "exactly" survive a concurrent append of a tile the peek already
+        named (ADR 0065 stage 2 slice D2b: the commit releases the order lock
+        across its backend submit, and the only other writer of this list —
+        the evaluation admission — appends). By value, that re-append would be
+        removed with the peeked one and the tile would never present again; by
+        prefix, the peeked entries go and everything appended since stays.
         """
 
+        if prefix is not None:
+            released = max(0, min(int(prefix), len(self.dirty_tiles)))
+            del self.dirty_tiles[:released]
+            return released
         wanted = {int(tile) for tile in tuple(tiles or ())}
         if not wanted:
             return 0

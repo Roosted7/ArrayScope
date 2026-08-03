@@ -166,15 +166,21 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
         ),
     )
     effects = SimpleNamespace()
+    # ADR 0065 slice D2b: the retarget drives the pipeline's three phases, so
+    # the double answers them rather than the composed `retarget`.
     pipeline = SimpleNamespace(
         effects=effects,
         ladder=SimpleNamespace(policy=LadderPolicy()),
-        retarget=lambda _intent, _demand, _scope: 0,
+        stage_retarget=lambda _intent, _demand, _scope: object(),
+        plan_retarget=lambda _staged: object(),
+        admit_retarget=lambda _staged, _planned: 0,
         last_plan_states=(),
         last_plan_steps=(),
     )
     runtime = SimpleNamespace()
     runtime._frame_session_is_current = lambda candidate: candidate is session
+    runtime._is_current_frame_session = lambda _session_id, _key: True
+    runtime._frame_session = session
     runtime._montage_render_intent = lambda _session: object()
     runtime._lod_admission_scope = lambda _session, _intent: object()
     runtime._frame_pipeline_for_session = lambda _session: pipeline

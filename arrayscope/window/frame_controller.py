@@ -1475,6 +1475,20 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # the successor target.  They produce no ``missing_tiles`` entry, so
         # index-window retargeting must always give the ladder one chance to
         # admit the exact/desired follow-up for any unsettled target.
+        #
+        # ADR 0065 stage 2 slice D2b move 3 tried to POST this one — it is the
+        # last statement of the funnel and `update_image_view` returns on the
+        # True below, so it passes the syntactic fire-and-forget test — and
+        # measurement refused it. `test_wgpu_shed_index_scrub_moves_the_montage_
+        # and_still_completes` reds with `ShedLevel.RETAIN_ONLY, streak=2` where
+        # it demands NONE: R6's shed release lives in the retarget's tail, and
+        # the round it belongs to is opened by the retarget that this index-
+        # window rebuild owes. Deferring it by one owner hop lets the next
+        # scrub step supersede the post, and the round is never released.
+        #
+        # So the dependent is real and it is not in this callback's body: it is
+        # the rebuild-then-replan pair itself. This caller stays inline, and
+        # what shrinks its hold is the retarget's own three spans above.
         self.retarget_frame_pipeline(session)
         return True
 

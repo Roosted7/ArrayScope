@@ -388,3 +388,253 @@ def test_a_prepare_plans_while_another_thread_holds_the_order_lock(qtbot):
         assert len(planned) == 1
     finally:
         win.close()
+
+
+# ------------------------------------- slice D2b: the GUI's own hold shrinks
+
+
+def _prepared_commit(qtbot, win):
+    """Drive the window to a real prepared transaction, and take it.
+
+    Both D2b move-1 pins need a commit that genuinely reaches the backend, so
+    neither may settle for "nothing to submit" — a skip here would be the
+    silent pass that makes an assertion meaningless. The wait is on the
+    session's own obligation state, and once it returns no further Qt event
+    runs, so the gate cannot commit the transaction out from under the test.
+    """
+
+    effects = win.renderer._frame_pipeline.effects
+    session = effects.session
+    _wait(qtbot, lambda: bool(session.dirty_payloads or session.pending_payload_upserts))
+    session.flush_pending = True
+    session.final_commit_pending = True
+    direct_presentation = effects.direct_tile_layer_presentation()
+    dirty_tiles = session.peek_dirty_tiles()
+    effects._begin_commit_frame(dirty_tiles)
+    outcome = effects._prepare_tile_layer_transaction(direct_presentation, dirty_tiles=dirty_tiles)
+    transaction = effects._take_prepared_outcome(outcome)
+    assert transaction is not None, f"the prepare bailed instead of building a delta: {outcome}"
+    assert transaction.tile_delta.upserts, "the prepared delta carries no upserts to submit"
+    return effects, session, transaction
+
+
+def _hold_the_order_lock(owner, name: str):
+    """Hold the order lock from another thread until the returned event is set."""
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with owner.timed_order_lock("owner"):
+            held.set()
+            release.wait(30.0)
+
+    holder = threading.Thread(target=hold, name=name)
+    holder.start()
+    assert held.wait(10.0), "the holder never took the order lock"
+    return holder, release
+
+
+def test_a_commit_lets_another_thread_in_across_its_backend_submit(qtbot):
+    """ADR 0065 stage 2 slice D2b move 1: the backend submit is not a section.
+
+    ``commit_pending_session`` held the lock across the whole commit — 43
+    calls, 2350 ms, 526 ms worst on the 272-tile probe — and the submit inside
+    it needs no session ordering at all.
+
+    The claim is about lock *availability* during that span, so it is read from
+    the other side: while the GUI thread is inside ``_present_tile_delta``,
+    another thread tries to take the session-order lock, and it must get it.
+    The commit then finishes and acknowledges normally. Put the submit back
+    inside the enclosing section and that acquire times out — the whole test,
+    not one assertion, is the mutation check.
+    """
+
+    win = _montage_window(qtbot)
+    try:
+        owner = win.presentation_owner
+        effects = win.renderer._frame_pipeline.effects
+        session = effects.session
+        _wait(qtbot, lambda: bool(session.dirty_payloads or session.pending_payload_upserts))
+        session.flush_pending = True
+        session.final_commit_pending = True
+
+        acquired: list[bool] = []
+        submits: list[bool] = []
+        original = type(effects)._present_tile_delta
+
+        def contended_submit(self, transaction):
+            held = threading.Event()
+            release = threading.Event()
+
+            def take_the_lock() -> None:
+                got = owner.order_lock.acquire(timeout=5.0)
+                acquired.append(bool(got))
+                held.set()
+                if got:
+                    release.wait(20.0)
+                    owner.order_lock.release()
+
+            other = threading.Thread(target=take_the_lock, name="d2b-submit-window")
+            other.start()
+            assert held.wait(15.0), "the contending thread never reported"
+            try:
+                applied = original(self, transaction)
+            finally:
+                release.set()
+                other.join(10.0)
+            submits.append(bool(applied))
+            return applied
+
+        effects._present_tile_delta = contended_submit.__get__(effects, type(effects))
+        try:
+            effects.commit_pending_session()
+        finally:
+            del effects._present_tile_delta
+
+        assert submits, "the commit never reached the backend, so nothing was observed"
+        assert acquired == [True] * len(submits), (
+            "another thread could not take the session-order lock while the "
+            "commit was inside its backend submit: the submit is a section "
+            "again, which is the 526 ms hold slice D2b removes"
+        )
+        assert submits == [True] * len(submits)
+        assert bool(win.renderer._last_montage_report_acknowledges)
+    finally:
+        win.close()
+
+
+def test_an_admission_inside_the_submit_window_is_not_acknowledged_away(qtbot):
+    """The audit's answer, as a counting test rather than a claim.
+
+    With the lock down across the submit, an admission can land between the
+    plan's *apply* and the *ack* — and the ack pops ``dirty_payloads`` /
+    ``pending_payload_upserts`` for every accepted upsert and releases the
+    peeked dirty tiles. Both would swallow that admission's obligation.
+
+    So one is staged deliberately: a delta tile is re-dirtied and re-appended
+    while the window is open, exactly as ``_admit_evaluation_result`` does, and
+    the tile must still be owed a presentation afterwards. The mutation is
+    dropping either half of the re-derivation (the payload comparison or the
+    prefix release), which leaves the tile clean and the session settled on a
+    payload no commit presented.
+    """
+
+    win = _montage_window(qtbot)
+    try:
+        renderer = win.renderer
+        effects, session, transaction = _prepared_commit(qtbot, win)
+
+        from arrayscope.window.frame_effects import _SubmitWindow
+
+        window = _SubmitWindow(
+            dirty_prefix=len(session.dirty_tiles),
+            payloads=effects._submit_window_payloads(transaction),
+        )
+        tile = int(next(iter(transaction.tile_delta.upserts)))
+
+        # The interleaving: a completion admits a NEWER payload for a tile this
+        # commit is already submitting, and marks it dirty both ways.
+        successor = object()
+        session.display_tile_payloads[tile] = successor
+        session.dirty_payloads[tile] = None
+        session.dirty_tiles.append(tile)
+
+        assert effects._present_tile_delta(transaction) is True
+        ack = effects._capture_ack_inputs(transaction, commit_start=0.0, submit_span_ms=0.0)
+        effects._acknowledge_transaction(ack, window=window)
+
+        # Without this the rest is vacuous: a report that acknowledges nothing
+        # pops nothing, so an unguarded ack would keep the tile dirty too.
+        assert bool(renderer._last_montage_report_acknowledges)
+        assert session.display_tile_payloads.get(tile) is successor
+        assert tile in session.dirty_payloads, (
+            "the acknowledgement popped an obligation an admission created "
+            "while the submit ran with the order lock down"
+        )
+        assert tile in set(session.dirty_tiles)
+        assert bool(session.flush_pending)
+        assert int(getattr(renderer, "_montage_commit_interleaved_admissions", 0)) >= 1
+    finally:
+        win.close()
+
+
+def test_a_retarget_plans_while_another_thread_holds_the_order_lock(qtbot):
+    """Slice D2b move 2: ``ladder.plan`` is a computation, not a section.
+
+    Same shape as D2a's prepare pin and for the same reason —
+    ``retarget_frame_pipeline`` was one lock section 28-38 times a fill at
+    ~50 ms mean and ~195 ms worst, and no owner-side policy can fit 630
+    acquisitions between holds like that. The mutation is planning inside the
+    staging section again.
+    """
+
+    win = _montage_window(qtbot)
+    try:
+        renderer = win.renderer
+        owner = win.presentation_owner
+        session = renderer._frame_session
+        pipeline = renderer._frame_pipeline_for_session(session)
+        intent = renderer._montage_render_intent(session)
+        scope = renderer._lod_admission_scope(session, intent)
+        staged = pipeline.stage_retarget(intent, session.lod_policy_decision.demand, scope)
+        assert staged is not None
+
+        holder, release = _hold_the_order_lock(owner, "d2b-retarget-lock-holder")
+        planned: list[object] = []
+
+        planner = threading.Thread(
+            target=lambda: planned.append(pipeline.plan_retarget(staged)),
+            name="d2b-retarget-planner",
+        )
+        planner.start()
+        planner.join(20.0)
+        blocked = planner.is_alive()
+
+        release.set()
+        holder.join(10.0)
+        planner.join(10.0)
+
+        assert not blocked, (
+            "the ladder plan blocked on the session-order lock: it acquires "
+            "one somewhere, which is the hold this slice removes"
+        )
+        assert len(planned) == 1
+    finally:
+        win.close()
+
+
+def test_a_plan_a_later_retarget_superseded_admits_nothing(qtbot):
+    """The currency drop, counted where it happens.
+
+    The middle runs unlocked, so a second retarget can stage while the first
+    is still planning. Its staging bumped the admission generation and it owns
+    the admissions; the first plan must drop rather than claim lifecycle state
+    twice. Without the check the two plans both admit and the counter stays
+    zero, which is the mutation.
+    """
+
+    win = _montage_window(qtbot)
+    try:
+        renderer = win.renderer
+        session = renderer._frame_session
+        pipeline = renderer._frame_pipeline_for_session(session)
+        intent = renderer._montage_render_intent(session)
+        scope = renderer._lod_admission_scope(session, intent)
+        demand = session.lod_policy_decision.demand
+
+        first = pipeline.stage_retarget(intent, demand, scope)
+        assert first is not None
+        planned = pipeline.plan_retarget(first)
+        # The successor: a whole retarget, staged and admitted, while the
+        # predecessor was planning.
+        second = pipeline.stage_retarget(intent, demand, scope)
+        assert second is not None
+        pipeline.admit_retarget(second, pipeline.plan_retarget(second))
+
+        superseded_before = int(pipeline.counters.retargets_superseded)
+
+        assert pipeline.admit_retarget(first, planned) == 0
+        assert int(pipeline.counters.retargets_superseded) == superseded_before + 1
+    finally:
+        win.close()
