@@ -1,3 +1,5 @@
+import sys
+import threading
 from dataclasses import replace
 
 from arrayscope.app.settings_state import AppSettingsState
@@ -1219,3 +1221,181 @@ def test_render_pass_decision_reports_the_frame_it_was_priced_against():
         refresh_hz=0.0,
     )
     assert any("refresh=60.0Hz frame-budget=16.67ms" in row for row in unknown.details)
+
+
+def _drain_observation(index: int) -> GuiCallbackObservation:
+    """One presentation-owner drain observation, submitted off the GUI thread."""
+
+    return GuiCallbackObservation(
+        channel="presentation_owner_drain",
+        work_class="completion_body",
+        backend="wgpu",
+        target_ms=8.0,
+        warning_ms=16.0,
+        item_cap=4,
+        byte_cap=0,
+        elapsed_ms=1.0 + float(index % 5),
+        processed_items=1 + index % 3,
+        processed_bytes=0,
+    )
+
+
+def test_owner_and_gui_families_run_concurrently_without_losing_observations():
+    """ADR 0065 stage 1: two threads call this object, and both keep their work.
+
+    The owner thread records its own drain observations and drives the
+    render-pass family while the GUI thread keeps lanes, pressure, telemetry,
+    and the diagnostics read.  Those families walk the same deques and dicts --
+    ``decide_render_pass`` scans the observation deque the drain thread is
+    appending to, and ``diagnostics`` iterates the lane decisions the lane
+    thread is writing -- so the failure this pins is unsynchronized structural
+    corruption, not slowness.  Bounded by iteration count; nothing here reads a
+    clock.
+
+    The switch interval is the lever that makes this a detector rather than a
+    coincidence: at the 5 ms default the interpreter almost never changes
+    thread inside one of these walks, and the unguarded governor survived every
+    trial.  At 1 us it raised ``deque mutated during iteration`` in 3 of 3
+    trials of the same loop.  It is restored either way -- it is process-wide.
+    """
+
+    governor = ResourceGovernor(
+        _policy(), profile=MemoryProfileChoice.BALANCED, min_worker_update_interval_ms=0
+    )
+    governor.update_telemetry(_snapshot(_memory()), _memory())
+    epoch = governor.begin_ui_observation_epoch()
+
+    drain_iterations = 400
+    decision_iterations = 200
+    drain_threads = 2
+    failures: list[BaseException] = []
+    # The deque holds 4096; the submitted total stays well inside it so the
+    # count below is a closed equation rather than a bound.
+    assert drain_threads * drain_iterations < 4096
+
+    def drain() -> None:
+        for index in range(drain_iterations):
+            governor.record_gui_callback_observation(_drain_observation(index))
+
+    def render_pass(pass_kind: str):
+        def body() -> None:
+            for index in range(decision_iterations):
+                # One round, many decisions -- the real shape, and the one that
+                # exposes the deque: a decision scans the observation ring back
+                # to the marker its round began at, so every drain recorded
+                # since then is walked while the drain threads keep appending.
+                if index % 8 == 0:
+                    governor.begin_render_pass((pass_kind, index // 8), pass_kind=pass_kind)
+                governor.decide_render_pass(
+                    interactive=index % 2 == 0,
+                    pass_kind=pass_kind,
+                    remaining_items=64,
+                )
+
+        return body
+
+    def gui_family() -> None:
+        for index in range(decision_iterations):
+            governor.decide_lane_workers(
+                ComputeLane.MONTAGE_TILE,
+                interactive=index % 2 == 0,
+                busy_state=SchedulerBusyState(montage_busy=True, result_backlog=index % 8),
+            )
+            governor.decide_bridge_drain(interactive=False)
+            governor.decide_commit_batch(interactive=True)
+            governor.update_telemetry(_snapshot(_memory()), _memory())
+
+    def read_diagnostics() -> None:
+        for _ in range(decision_iterations):
+            snapshot = governor.diagnostics()
+            assert len(snapshot.recent_ui_work_observations) <= 64
+
+    bodies = [
+        drain,
+        drain,
+        render_pass("preview"),
+        render_pass("target"),
+        gui_family,
+        read_diagnostics,
+    ]
+    start = threading.Barrier(len(bodies), timeout=60.0)
+
+    def guarded(body):
+        def run() -> None:
+            try:
+                start.wait()
+                body()
+            except BaseException as error:  # reported from the main thread
+                failures.append(error)
+
+        return run
+
+    threads = [
+        threading.Thread(target=guarded(body), name=f"governor-hammer-{index}", daemon=True)
+        for index, body in enumerate(bodies)
+    ]
+    previous_switch_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=120.0)
+    finally:
+        sys.setswitchinterval(previous_switch_interval)
+
+    assert [thread.name for thread in threads if thread.is_alive()] == []
+    assert failures == []
+    observations = tuple(governor._recent_ui_work_observations)
+    assert len(observations) == drain_threads * drain_iterations
+    assert {observation.channel for observation in observations} == {"presentation_owner_drain"}
+    count, _, epoch_is_current = governor.ui_observation_epoch_evidence(epoch)
+    assert epoch_is_current
+    assert count == drain_threads * drain_iterations
+    assert governor.ui_observation_epoch_max(epoch).channel == "presentation_owner_drain"
+    assert ComputeLane.MONTAGE_TILE in {
+        decision.lane for decision in governor.diagnostics().lane_decisions
+    }
+
+
+def test_one_caller_section_may_span_several_governor_entry_points():
+    """The governor's lock is re-entrant, which is what makes a section legal.
+
+    ADR 0065's migration bridge serializes owner pipeline sections against GUI
+    session sections, so a caller holds a section across several entry points --
+    each of which acquires the same lock again.  A non-re-entrant lock does not
+    fail that with an exception, it deadlocks, so the section runs on a worker
+    joined with a bounded wait and the verdict is whether it finished at all.
+    """
+
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.update_telemetry(_snapshot(_memory()), _memory())
+    results: dict[str, object] = {}
+    failures: list[BaseException] = []
+
+    def section() -> None:
+        try:
+            with governor._lock:
+                governor.begin_render_pass(("owner-section",))
+                governor.record_gui_callback_observation(_drain_observation(0))
+                with governor._lock:
+                    results["decision"] = governor.decide_render_pass(
+                        interactive=False, remaining_items=32
+                    )
+                results["diagnostics"] = governor.diagnostics()
+        except BaseException as error:  # reported from the main thread
+            failures.append(error)
+
+    # Daemon: a lock that is not re-entrant deadlocks this worker, and a
+    # deadlocked non-daemon thread would hold the whole suite at interpreter
+    # exit instead of failing the one test that asked the question.
+    worker = threading.Thread(target=section, name="governor-reentrant-section", daemon=True)
+    worker.start()
+    worker.join(timeout=60.0)
+
+    assert not worker.is_alive()
+    assert failures == []
+    assert results["decision"].channel == "montage_render_pass_preview"
+    assert results["diagnostics"].recent_ui_work_observations[-1].channel == (
+        "presentation_owner_drain"
+    )

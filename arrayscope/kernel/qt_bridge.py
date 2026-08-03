@@ -11,7 +11,11 @@ Everything Qt about the kernel lives here. The bridge:
   `fallback_event_polls` observability is preserved so a busy fallback is a
   visible bug report;
 - fires capacity waiters after any processed completion (the ADR 0051
-  lost-wakeup rule: a declined admission must always leave a wakeup armed).
+  lost-wakeup rule: a declined admission must always leave a wakeup armed);
+- holds an injected session-order lock across each dispatch when the embedder
+  has one (ADR 0065's migration bridge). The kernel knows nothing about that
+  lock: it arrives as a context-manager factory, and without one the drain is
+  byte-for-byte what it was.
 
 The app composes exactly one bridge per kernel; per-purpose controllers are
 gone (redesign plan R1).
@@ -19,6 +23,7 @@ gone (redesign plan R1).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from time import perf_counter
 
@@ -38,6 +43,14 @@ import pyqtgraph.Qt as Qt
 
 class QtKernelBridge(Qt.QtCore.QObject):
     eventsReady = Qt.QtCore.Signal()
+    #: Emitted (from any thread) after a routed consumer dispatched completion
+    #: bodies the bridge never saw. The drain-borne reconciliations — the
+    #: rate-limited governor reapply and the capacity waiters — historically
+    #: piggybacked on the GUI drain every completion used to cause. A routed
+    #: completion frees quota without causing one, and a task parked on that
+    #: quota then waits forever (observed: a `histogram-plot` submission parked
+    #: through a whole demo scenario, dropped only at teardown).
+    routedEventsDispatched = Qt.QtCore.Signal()
 
     def __init__(
         self,
@@ -47,9 +60,16 @@ class QtKernelBridge(Qt.QtCore.QObject):
         max_items_per_drain: int = 8,
         max_events_per_drain: int = 64,
         budget_ms: float | None = None,
+        order_lock_factory: Callable[[], contextlib.AbstractContextManager] | None = None,
     ) -> None:
         super().__init__(parent)
         self.kernel = kernel
+        # A factory, not a lock: the embedder decides what a GUI-side session
+        # section costs and who counts it. `nullcontext` is the no-embedder
+        # case and the one every non-montage host keeps.
+        self._order_lock_factory = (
+            contextlib.nullcontext if order_lock_factory is None else order_lock_factory
+        )
         self._max_items_per_drain = max(1, int(max_items_per_drain))
         self._max_events_per_drain = max(1, int(max_events_per_drain))
         self._budget_ms = budget_ms
@@ -67,6 +87,10 @@ class QtKernelBridge(Qt.QtCore.QObject):
         self._fallback_timer.setInterval(self._fallback_interval_ms)
         self._fallback_timer.timeout.connect(self._on_fallback)
         self.eventsReady.connect(self._drain, Qt.QtCore.Qt.ConnectionType.QueuedConnection)
+        self.routedEventsDispatched.connect(
+            self._reconcile_after_routed_dispatch,
+            Qt.QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         kernel.completions.set_notify(self._notify_from_worker)
 
     # ------------------------------------------------------------- wiring
@@ -118,7 +142,12 @@ class QtKernelBridge(Qt.QtCore.QObject):
                 break
             processed += 1
             event_start = perf_counter()
-            outcome = self.kernel.dispatch_event(event)
+            # Per event, never around the loop: the owner thread competes for
+            # this lock, and a batch held whole is the multi-frame stall the
+            # split exists to remove. The wait lands inside `event_ms` on
+            # purpose — a GUI drain that waited is GUI time, whoever caused it.
+            with self._order_lock_factory():
+                outcome = self.kernel.dispatch_event(event)
             event_ms = (perf_counter() - event_start) * 1000.0
             if event_ms > worst_event_ms:
                 worst_event_ms = float(event_ms)
@@ -170,6 +199,17 @@ class QtKernelBridge(Qt.QtCore.QObject):
             self._fallback_timer.stop()
         if processed:
             self._fire_capacity_waiters()
+
+    def _reconcile_after_routed_dispatch(self) -> None:
+        # The `if processed:` gates in `_drain` are correct for the bridge's
+        # own path — an idle poll must not reapply anything — but they are
+        # exactly why a routed dispatch needs this separate entry.
+        if self._closed:
+            return
+        notifier = getattr(self.parent(), "_note_kernel_completion_drain", None)
+        if callable(notifier):
+            notifier()
+        self._fire_capacity_waiters()
 
     def _fire_capacity_waiters(self) -> None:
         if not self._capacity_waiters:

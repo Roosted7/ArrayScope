@@ -47,7 +47,7 @@ from arrayscope.render.stages import RenderIntent
 from arrayscope.ui.toasts import show_status_message
 from arrayscope.window import frame_effects as montage_commit
 from arrayscope.window.display_presenter import tile_residency_budget_bytes
-from arrayscope.window.frame_effects import FramePipelineEffects
+from arrayscope.window.frame_effects import FramePipelineEffects, session_order_lock_section
 from arrayscope.window.frame_runtime import (
     FrameRuntimeMixin,
 )
@@ -525,6 +525,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._remap_montage_rois_for_layout_reflow(previous_plan, viewport_plan.plan)
         return viewport_plan
 
+    @session_order_lock_section
     def _retarget_montage_resize_payloads(self, viewport_plan: MontageViewportPlan) -> bool:
         session = getattr(self, "_frame_session", None)
         if not self._frame_session_is_current(session):
@@ -603,6 +604,12 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self._publish_montage_content_extent(plan)
         return True
 
+    # The session-rebirth funnel: it closes the dying pipeline, releases its
+    # LOD claims, inherits the backend identity mirror and swaps
+    # ``_frame_session``. One span for the whole entry, because a rebirth
+    # observed half-done by the owner thread is exactly the state no currency
+    # check can describe.
+    @session_order_lock_section
     def update_image_view(self, *, force_autolevel: bool = False, defer_side_panels: bool = False):
         for attribute in (
             "_last_montage_viewport_plan_ms",
@@ -1574,6 +1581,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             ) + len(cached_tiles)
         return cached_tiles, missing_tiles
 
+    @session_order_lock_section
     def _try_update_montage_viewport_only(self) -> bool:
         """Retarget a persistent tiled session without restarting evaluation."""
 
@@ -1829,6 +1837,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         self.retarget_frame_pipeline(session)
         return True
 
+    @session_order_lock_section
     def _prune_stale_montage_tile_work(self, session: FrameSession) -> None:
         if not _viewport_interaction_active(self):
             return
@@ -1978,6 +1987,9 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         if callable(schedule_refresh):
             schedule_refresh("montage-layout-reflow")
 
+    # Also reached from outside this module (the level-update presenter), so
+    # the span lives on the funnel rather than on that caller.
+    @session_order_lock_section
     def apply_montage_presentation(self, session) -> None:
         if not self._frame_session_is_current(session):
             return
@@ -1995,6 +2007,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             self.win.img_view.setImageStale(True)
             self.win.img_view.setEvaluationOverlay(True, "Updating image frame...")
 
+    @session_order_lock_section
     def commit_frame_session_presentation(self, session) -> None:
         if not self._frame_session_is_current(session):
             return
@@ -2008,6 +2021,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         effects = pipeline.effects if pipeline is not None else FramePipelineEffects(self, session)
         effects.commit_pending_session()
 
+    @session_order_lock_section
     def apply_ready_montage_display(self, session) -> None:
         if not self._frame_session_is_current(session):
             return

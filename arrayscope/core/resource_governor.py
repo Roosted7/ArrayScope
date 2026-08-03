@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import os
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
+from functools import wraps
 from math import ceil, exp, log2, log10
 from statistics import median
+from threading import RLock
 from time import monotonic
+from typing import TypeVar
 
 from arrayscope.core.compute_policy import ComputeLane, ComputePolicy
 from arrayscope.core.gui_callback_budget import WARNING_THRESHOLD_MS, GuiCallbackObservation
@@ -210,6 +214,36 @@ def _deque_tail(values: deque, limit: int) -> tuple:
     return tuple(values)[-limit:]
 
 
+_R = TypeVar("_R")
+
+
+def _governed(method: Callable[..., _R]) -> Callable[..., _R]:
+    """Serialize one public governor entry point against the other callers.
+
+    ADR 0065 gives the presentation-owner thread the render-pass family and its
+    own drain observations, while the GUI thread keeps the lane, pressure, and
+    telemetry families.  Both families walk the same dicts and deques, so every
+    public entry point that mutates state -- or copies a collection out of it --
+    takes the object's one lock.
+
+    The lock is re-entrant because the guard sits on the entry points rather
+    than inside them: a caller that takes several decisions as one section (the
+    owner's begin/decide/record run), or any future entry point that reaches
+    another one, would otherwise deadlock on its own acquisition.
+
+    One acquire per call, never per item inside one: these are per-commit and
+    per-drain paths, and an uncontended acquire is ~100 ns against callbacks
+    measured in milliseconds.
+    """
+
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return guarded
+
+
 @dataclass
 class ResourceGovernor:
     compute_policy: ComputePolicy
@@ -263,6 +297,17 @@ class ResourceGovernor:
     _render_pass_observation_markers: dict[str, GuiCallbackObservation | None] = field(
         default_factory=dict
     )
+    # Never a constructor argument and never part of identity: two governors
+    # are the same governor by their policy and telemetry, not by which lock
+    # object they happen to hold.
+    #
+    # Outside callers that read a plain scalar attribute -- `profile`,
+    # `responsiveness_weight` -- stay lock-free: a single attribute load is
+    # already atomic and the reader gets one side of a write, never a torn
+    # value.  `latency_feedback` is the exception in kind: the reference load
+    # is atomic, but `window/main.py` aliases the controller itself and the
+    # GUI then calls it directly, outside this lock (see ADR 0065's audit).
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.profile = normalize_memory_profile_choice(self.profile)
@@ -273,11 +318,13 @@ class ResourceGovernor:
         for lane in ComputeLane:
             self._lane_targets[lane] = self.compute_policy.workers_for_lane(lane)
 
+    @_governed
     def set_responsiveness_weight(self, value: float) -> None:
         """Move the legal render-pass optimum without changing the R5 requirement."""
 
         self.responsiveness_weight = max(0.0, float(value))
 
+    @_governed
     def update_policy(
         self, compute_policy: ComputePolicy, *, profile: MemoryProfileChoice | str | None = None
     ) -> None:
@@ -301,11 +348,13 @@ class ResourceGovernor:
             max_batch=tuning.max_batch,
         )
 
+    @_governed
     def update_telemetry(self, snapshot: ResourceSnapshot, memory_policy: MemoryPolicy) -> None:
         self._telemetry = snapshot
         self._memory_policy = memory_policy
         self._pressure = self._compute_pressure(snapshot, memory_policy)
 
+    @_governed
     def record_ui_observation(
         self,
         channel: str,
@@ -350,6 +399,7 @@ class ResourceGovernor:
             self._recent_over_warning_callbacks.append(observation)
         self._pressure = self._pressure_with_ui(channel)
 
+    @_governed
     def record_gui_callback_observation(self, observation: GuiCallbackObservation) -> None:
         diagnostics_only = _diagnostics_only_ui_observation(observation)
         self._recent_ui_work_observations.append(observation)
@@ -367,6 +417,7 @@ class ResourceGovernor:
         )
         self._pressure = self._pressure_with_ui(observation.channel)
 
+    @_governed
     def begin_ui_observation_epoch(self) -> int:
         """Start constant-memory timing evidence for one diagnostic phase."""
 
@@ -377,6 +428,7 @@ class ResourceGovernor:
         self._ui_observation_epoch_max = None
         return int(self._ui_observation_epoch_active)
 
+    @_governed
     def ui_observation_epoch_evidence(self, epoch: int) -> tuple[int, float, bool]:
         current = int(epoch) == int(self._ui_observation_epoch_active)
         return (
@@ -385,6 +437,7 @@ class ResourceGovernor:
             bool(current),
         )
 
+    @_governed
     def ui_observation_epoch_max(self, epoch: int) -> GuiCallbackObservation | None:
         """Return the observation the epoch maximum came from, or ``None``.
 
@@ -410,6 +463,7 @@ class ResourceGovernor:
             self._ui_observation_epoch_max_ms = elapsed_ms
             self._ui_observation_epoch_max = observation
 
+    @_governed
     def decide_lane_workers(
         self, lane: ComputeLane, *, interactive: bool, busy_state: SchedulerBusyState
     ) -> LaneWorkerDecision:
@@ -486,11 +540,13 @@ class ResourceGovernor:
         self._lane_decisions[lane] = decision
         return decision
 
+    @_governed
     def decide_bridge_drain(self, *, interactive: bool) -> UiWorkDecision:
         """Return the bridge-drain knob: item cap plus elapsed budget."""
 
         return self._decide_budget("kernel_bridge_drain", interactive=interactive, byte_cap=0)
 
+    @_governed
     def decide_commit_batch(self, *, interactive: bool) -> UiWorkDecision:
         """Return the shared presentation-commit knob: item and byte bounds."""
 
@@ -505,7 +561,13 @@ class ResourceGovernor:
         default_limit: int,
         retained_fallback_refinement: bool,
     ) -> int:
-        """Bound GUI-side task admission behind an already-visible fallback."""
+        """Bound GUI-side task admission behind an already-visible fallback.
+
+        Unguarded on purpose, like ``decide_resident_crop_rebind`` below: both
+        are named policies over their arguments and module constants and touch
+        no governor state, so a lock here would only cost callers contention
+        against the threads that do.
+        """
 
         limit = max(1, int(default_limit))
         return (
@@ -530,6 +592,7 @@ class ResourceGovernor:
             (f"retained crop rebind cap={_RETAINED_FALLBACK_REBIND_BATCH_LIMIT}",),
         )
 
+    @_governed
     def decide_render_pass(
         self,
         *,
@@ -883,6 +946,7 @@ class ResourceGovernor:
             ),
         )
 
+    @_governed
     def begin_render_pass(
         self,
         token: object,
@@ -1022,6 +1086,7 @@ class ResourceGovernor:
         )
         return decision
 
+    @_governed
     def diagnostics(self, *, channels: tuple[str, ...] = ()) -> ResourceGovernorDiagnostics:
         channel_names = tuple(
             dict.fromkeys(

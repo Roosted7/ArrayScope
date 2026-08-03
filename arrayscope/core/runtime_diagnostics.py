@@ -459,6 +459,11 @@ class WindowRuntimeDiagnostics:
     montage_timing: MontageTimingDiagnostics = field(default_factory=MontageTimingDiagnostics)
     render_coalescer: RenderCoalescerDiagnostics = field(default_factory=RenderCoalescerDiagnostics)
     kernel: object | None = None
+    #: ADR 0065's presentation-owner counters, as the owner publishes them.
+    #: ``None`` for a window without one. Kept as an opaque mapping rather than
+    #: a dataclass because its exit condition is a counter trending to zero,
+    #: not a shape anything formats: the JSONL is where it is read.
+    presentation_owner: object | None = None
     stage_materialization: object | None = None
     montage_prefetch: tuple[object, ...] = ()
     resource_governor: ResourceGovernorDiagnostics | None = None

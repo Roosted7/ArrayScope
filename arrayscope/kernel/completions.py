@@ -65,4 +65,56 @@ class CompletionQueue:
         return len(self) == 0
 
 
-__all__ = ["CompletionEvent", "CompletionQueue"]
+class RoutedCompletionQueue(CompletionQueue):
+    """A completion queue with a second consumer, chosen per event.
+
+    ADR 0065 stage 1: montage-scoped completion *bodies* stop running on the
+    GUI thread. The split is made here, at the one fan-in, because this is the
+    only place that sees every event before a consumer does.
+
+    ``put`` runs inside ``Kernel._deliver_locked`` — under the kernel lock, on
+    a worker thread. That is the whole constraint on this class:
+
+    - the predicate must be a pure, cheap test of already-computed fields (the
+      shipped one is two ``str.startswith`` calls) — never a session lookup,
+      never anything that allocates per event;
+    - routing takes no lock beyond the sink's own ``deque.append``, which is
+      atomic. Acquiring a session or presentation lock here would invert ADR
+      0065's ordering (order lock → kernel lock) and deadlock the pool.
+
+    The sink is duck-typed — ``append(event)`` then ``wake()`` — so the owner
+    thread is not an import dependency of ``arrayscope.kernel``, which stays
+    montage-ignorant and numpy-free. The scope predicate lives with the owner.
+
+    ``wake`` inherits the base class's exception discipline: a dying consumer
+    must not corrupt workers, and a swallowed wake still leaves the event in
+    the sink for the consumer's next pass. ``pop`` deliberately drains only the
+    base deque: routed events are the sink's, and a fallback drain must not
+    reach past their owner and run them on the GUI thread after all.
+
+    Wiring note (the cycle is real): the owner needs the kernel, the kernel
+    needs its queue, and the queue needs the owner. Break it after
+    construction — ``kernel.completions = RoutedCompletionQueue(...)`` — while
+    no worker is running, rather than by making any of the three late-bound.
+    """
+
+    def __init__(
+        self,
+        route_predicate: Callable[[CompletionEvent], bool],
+        route_sink: Any,
+        notify: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(notify)
+        self._route_predicate = route_predicate
+        self._route_sink = route_sink
+
+    def put(self, event: CompletionEvent) -> None:
+        if self._route_predicate(event):
+            self._route_sink.append(event)
+            with contextlib.suppress(Exception):
+                self._route_sink.wake()
+            return
+        super().put(event)
+
+
+__all__ = ["CompletionEvent", "CompletionQueue", "RoutedCompletionQueue"]

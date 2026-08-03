@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, replace
+from functools import wraps
 from time import perf_counter, thread_time
 
 import numpy as np
@@ -135,7 +137,20 @@ def canonical_plane_memo_bytes(memo) -> int:
 def _presentation_gate_receiver(renderer) -> _PresentationGateReceiver:
     receiver = getattr(renderer, "_montage_presentation_gate_receiver", None)
     if receiver is None:
-        receiver = _PresentationGateReceiver(renderer)
+        if on_gui_thread():
+            receiver = _PresentationGateReceiver(renderer)
+        else:
+            # ADR 0065 stage 1: the first arm of this gate can now come from
+            # the presentation owner (``apply_commit`` → ``request_presentation``
+            # before any GUI path armed it). A QObject constructed there is
+            # parented to a foreign thread and lives on one with no event
+            # loop, so every event posted to it would be delivered never.
+            # Construct it parentless and hand its affinity to the GUI thread
+            # instead; the attribute below is what keeps it alive without a
+            # parent, and both creation sites run inside the session-order
+            # lock, so there is exactly one receiver.
+            receiver = _PresentationGateReceiver()
+            receiver.moveToThread(Qt.QtCore.QCoreApplication.instance().thread())
         renderer._montage_presentation_gate_receiver = receiver
     return receiver
 
@@ -164,6 +179,94 @@ def _post_visible_path_callback(renderer, callback) -> None:
         _presentation_gate_receiver(renderer),
         _LowPriorityCallbackEvent(callback),
     )
+
+
+def on_gui_thread() -> bool:
+    """Whether the caller is the thread running the Qt event loop.
+
+    ADR 0065 stage 1 is what makes this question real: montage completion
+    bodies dispatch on the presentation-owner thread now, and the Qt half of
+    what they reach — timers above all — is correct only on the GUI thread.
+    With no QCoreApplication there is no other thread to be on; that is the
+    bare-renderer unit-test case and it answers True.
+    """
+
+    app = Qt.QtCore.QCoreApplication.instance()
+    if app is None:
+        return True
+    return Qt.QtCore.QThread.currentThread() == app.thread()
+
+
+def run_on_gui_thread(renderer, callback) -> None:
+    """Run a GUI-affine continuation on the GUI thread, from wherever we are.
+
+    ``postEvent`` is the crossing: it is documented thread-safe and the
+    receiver is the one the presentation gate already owns, so a body running
+    on the presentation owner pays one queued event rather than a whole
+    posting mechanism of its own. Called *on* the GUI thread it is a plain
+    call, which keeps the ordering every existing GUI path already has.
+
+    Normal event priority, not low: these continuations sit on the visible
+    critical path (a replan arm, a stage plan's retarget), and
+    ``_post_visible_path_callback`` documents what LowEventPriority does to
+    one of those during a completion-drain storm.
+    """
+
+    if on_gui_thread():
+        callback()
+        return
+    _post_visible_path_callback(renderer, callback)
+
+
+def _session_order_lock(owner):
+    """Hold the GUI side of the ADR 0065 session-order lock, or nothing.
+
+    ``owner`` is a renderer or anything that owns one under that name
+    (``FramePipelineEffects.renderer``, ``MainWindow.renderer``). A missing
+    presentation owner is the ordinary answer, not a degraded one: renderers
+    built without a MainWindow have no second writer of session state, so a
+    null context is the correct lock rather than an absent one.
+
+    Off the GUI thread this is a null context too, and that is not a hole.
+    The only other thread that reaches these funnels is the presentation
+    owner, which already holds the same re-entrant lock for the whole of the
+    body that called in; taking it again would be free but would charge a
+    *GUI* acquisition, and ``gui_lock_acquisitions`` is the one number that
+    says how far the migration has got. It must count GUI sections, not the
+    owner's own re-entries.
+    """
+
+    renderer = getattr(owner, "renderer", owner)
+    presentation_owner = getattr(getattr(renderer, "win", None), "presentation_owner", None)
+    if presentation_owner is None or not on_gui_thread():
+        return contextlib.nullcontext()
+    return presentation_owner.timed_order_lock("gui")
+
+
+def session_order_lock_section(method):
+    """Mark one GUI-thread entry funnel as a session-order lock section.
+
+    A decorator rather than an inline ``with`` for a mechanical reason: these
+    funnels run from twenty to nearly five hundred lines and are under
+    constant churn, and re-indenting one whole to add a lock buries the single
+    line that matters in a diff nobody can review. The span is the entire
+    call, which is what the ADR asks for — one acquisition per logical
+    operation, never per line. The lock is re-entrant, so funnels that nest
+    (a retarget inside a render entry, a commit inside a retarget) cost one
+    extra uncontended acquire and no deadlock.
+
+    Ordering, from the owner's module docstring: order lock → kernel lock,
+    never the reverse. Everything decorated here submits to the kernel while
+    holding this lock and nothing waits on a kernel completion, which is the
+    whole of what keeps that direction true on the GUI side.
+    """
+
+    @wraps(method)
+    def section(owner, *args, **kwargs):
+        with _session_order_lock(owner):
+            return method(owner, *args, **kwargs)
+
+    return section
 
 
 @dataclass(frozen=True)
@@ -1514,7 +1617,21 @@ class FramePipelineEffects:
         # not the whole dirty set: a payload stays dirty across many governed
         # chunks, and re-offering it every drain repeats work already published.
         lifecycle = session.lifecycle
-        payload_resident = getattr(view, "tiledPayloadResident", None)
+        # Session-side residency, not `view.tiledPayloadResident`. ADR 0065
+        # stage 1 runs this body on the presentation owner, and both backends'
+        # probes are live GUI/backend reads there — wgpu walks the executor's
+        # page table, pyqtgraph the tile layer. What they answer for an
+        # already-presented payload is what the lifecycle mirror records at
+        # acknowledgement: this tile's slot holds this payload's ack identity
+        # (the same pairing `FrameSession` uses at frame_session.py:2551).
+        # The mirror can be one acknowledgement stale, and both directions of
+        # that staleness are already-designed-for outcomes: a stale-resident
+        # answer skips a preparation and the commit takes its inline path, a
+        # stale-absent answer prepares a buffer the commit then finds resident
+        # and drops as a mailbox miss. "A miss is a normal outcome."
+        # Read, never copied: the mirror is maintained incrementally precisely
+        # so per-tile callers do not rebuild it, and this loop only asks.
+        backend_identities = getattr(lifecycle, "backend_presented_identities", None) or {}
         payloads = {}
         resident_skips = 0
         for row in tuple(upserts or ()):
@@ -1528,7 +1645,8 @@ class FramePipelineEffects:
                 payload = session.display_tile_payloads.get(int(tile))
             if payload is None:
                 continue
-            if callable(payload_resident) and bool(payload_resident(payload)):
+            ack_identity = tile_ack_identity(payload)
+            if ack_identity is not None and backend_identities.get(int(tile)) == ack_identity:
                 resident_skips += 1
                 continue
             payloads[int(tile)] = payload
@@ -1638,9 +1756,23 @@ class FramePipelineEffects:
         self.renderer._montage_presentation_gate_armed = True
         self.renderer._montage_presentation_gate_owner = owner
         receiver = _presentation_gate_receiver(self.renderer)
-        if not bool(
-            image_view_backend_capabilities(self.renderer.win.img_view).shader_windowing
-        ) and bool(getattr(self.session, "display_committed", False)):
+        # The timer branch below is GUI-thread-only, and the guard is first so
+        # the backend-capability read (a live image-view probe) is not made
+        # from the presentation owner either. ADR 0065 stage 1: a QTimer
+        # started on the owner thread lives where no event loop runs, so it
+        # would not fire late — it would never fire, and the gate it owns is
+        # the only wakeup for this session's backlog. The posted gate below is
+        # the correct form for that thread: `postEvent` is thread-safe, and
+        # coalescing is already owned by the gate-owner flags above, not by
+        # the 4 ms window, so the owner loses one scene-rebuild optimisation
+        # and nothing else.
+        if (
+            on_gui_thread()
+            and not bool(
+                image_view_backend_capabilities(self.renderer.win.img_view).shader_windowing
+            )
+            and bool(getattr(self.session, "display_committed", False))
+        ):
             # Timer category: UI cosmetic. A short one-shot coalescer lets
             # several completed CPU-windowed tiles share one scene rebuild.
             # Without it, one worker completion caused one whole-frame commit
@@ -1664,6 +1796,7 @@ class FramePipelineEffects:
             int(Qt.QtCore.Qt.EventPriority.LowEventPriority.value),
         )
 
+    @session_order_lock_section
     def _on_presentation_gate(self, owner=None) -> None:
         live_owner = (int(getattr(self.session, "session_id", 0) or 0), id(self.session))
         owner = live_owner if owner is None else owner
@@ -1740,6 +1873,7 @@ class FramePipelineEffects:
             )
             handle_ui_exception("montage presentation commit", exc)
 
+    @session_order_lock_section
     def _commit_after_presentation_draw(self) -> None:
         """Resume the continuation that stood down for an owed draw."""
 
@@ -1755,6 +1889,7 @@ class FramePipelineEffects:
             )
             handle_ui_exception("montage presentation commit", exc)
 
+    @session_order_lock_section
     def commit_pending_session(self) -> None:
         if not self._session_is_current():
             return
@@ -4531,28 +4666,49 @@ def submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles) -> bool:
         )
         merge_stage_fan_in_plan(current, stage_plan)
         submit_stage_tasks(renderer, current, stage_plan["stage_requests"])
-        # A stage-plan completion is one kernel-bridge callback.  Running the
-        # complete 272-tile ladder retarget inline here made that single
-        # callback 320-330 ms on the field crop.  Seed backend-proven retained
-        # pixels first; their physical ACK owns the refinement replan.  When
-        # no rebind is available, preserve the ordinary inline retarget.
-        pipeline = renderer._frame_pipeline_for_session(current)
-        scope = renderer._lod_admission_scope(
-            current,
-            renderer._montage_render_intent(current),
-        )
-        governed_rebind = bool(
-            pipeline.effects._needs_governed_crop_local_subset_rebind(scope)
-            and pipeline.effects._seed_resident_crop_rebinds_governed(scope)
-        )
-        if governed_rebind:
-            # Preview work admitted before the async stage answer is now
-            # superseded by physically complete retained pixels.  Close that
-            # intent so its late completions cannot publish partial preview
-            # cohorts between the governed rebind chunks.
-            pipeline.close()
-        else:
-            renderer.retarget_frame_pipeline(current)
+
+        def retarget_on_gui(session_id=session_id, session_key=session_key) -> None:
+            # ADR 0065 stage 1 dispatches this completion on the presentation
+            # owner, and everything from here down is GUI-affine: the retarget
+            # arms the montage watchdog's QTimer, and its ready-display commit
+            # reaches setImageStale/setEvaluationOverlay and the tile overlays.
+            # Plan/merge/submit above are pure session bookkeeping and stay on
+            # the owner — that is the 4.4 s/session this stage moves. This
+            # continuation is the same GUI-thread work the drain used to run.
+            #
+            # It re-checks currency because a posted continuation can land
+            # after a rebirth: the identity pair is the same one this callback
+            # is gated on, and `retarget_frame_pipeline` validates again.
+            with _session_order_lock(renderer):
+                live = getattr(renderer, "_frame_session", None)
+                if live is None or not renderer._is_current_frame_session(session_id, session_key):
+                    return
+                # A stage-plan completion is one kernel-bridge callback.
+                # Running the complete 272-tile ladder retarget inline here
+                # made that single callback 320-330 ms on the field crop.  Seed
+                # backend-proven retained pixels first; their physical ACK owns
+                # the refinement replan.  When no rebind is available, preserve
+                # the ordinary inline retarget.
+                pipeline = renderer._frame_pipeline_for_session(live)
+                scope = renderer._lod_admission_scope(
+                    live,
+                    renderer._montage_render_intent(live),
+                )
+                governed_rebind = bool(
+                    pipeline.effects._needs_governed_crop_local_subset_rebind(scope)
+                    and pipeline.effects._seed_resident_crop_rebinds_governed(scope)
+                )
+                if governed_rebind:
+                    # Preview work admitted before the async stage answer is
+                    # now superseded by physically complete retained pixels.
+                    # Close that intent so its late completions cannot publish
+                    # partial preview cohorts between the governed rebind
+                    # chunks.
+                    pipeline.close()
+                else:
+                    renderer.retarget_frame_pipeline(live)
+
+        run_on_gui_thread(renderer, retarget_on_gui)
 
     def stale(session_id=session.session_id, session_key=session.key):
         current = getattr(renderer, "_frame_session", None)

@@ -30,6 +30,7 @@ from arrayscope.profiles.model import profile_y_range
 from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.window.display_presenter import DisplayPresentationMixin
 from arrayscope.window.frame_controller import FrameControllerMixin
+from arrayscope.window.frame_effects import session_order_lock_section
 from arrayscope.window.interaction_mode import InteractionMode
 from arrayscope.window.panels import PanelLocation
 from arrayscope.window.render_contract import RenderGeneration, generation_is_current
@@ -945,6 +946,11 @@ class RenderOrchestrator(
                 timeout=5000,
             )
 
+    # The render entry's montage work is `update_image_view`, which carries its
+    # own span; this is the other GUI-thread session writer in this module —
+    # a user gesture writing `force_auto`/`user_levels_override` straight onto
+    # the live session while the owner thread admits into it.
+    @session_order_lock_section
     def _revert_auto_window_levels(self, levels) -> None:
         levels = normalize_bounds(levels)
         if levels is None:

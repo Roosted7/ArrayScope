@@ -27,9 +27,11 @@ from arrayscope.core.view_state import ChannelMode, ViewState
 from arrayscope.display.backend_contract import image_view_backend_capabilities
 from arrayscope.export.workflow import ExportWorkflowMixin
 from arrayscope.kernel import Kernel, Lane, Priority, ThreadWorkerBackend
+from arrayscope.kernel.completions import RoutedCompletionQueue
 from arrayscope.kernel.eval_adapter import KernelEvaluationController
 from arrayscope.kernel.qt_bridge import QtKernelBridge
 from arrayscope.operations.coordinator import OperationCoordinator
+from arrayscope.presentation.owner import PresentationOwner, montage_completion_route
 from arrayscope.profiles.coordinator import ProfileCoordinator
 from arrayscope.ui.dimension_controls import DimensionControlMixin
 from arrayscope.ui.display_controls import DisplayControlBuildMixin
@@ -168,7 +170,33 @@ class ArrayScopeWindow(
             _kernel_worker_backend(self.app_settings),
             handler_error_hook=handle_ui_exception,
         )
-        self.kernel_bridge = QtKernelBridge(self.kernel, self)
+        # ADR 0065 stage 1. The cycle — the owner needs the kernel, the kernel
+        # needs its queue, the queue needs the owner — is broken here, in this
+        # order and nowhere else: the routed queue replaces the kernel's own
+        # while the backend's threads have nothing to deliver (no submit has
+        # happened yet), and before the bridge below takes `set_notify` on it.
+        # Installing it after the bridge would leave the bridge notifying a
+        # queue the kernel no longer publishes to.
+        self.presentation_owner = PresentationOwner(
+            self.kernel,
+            error_hook=lambda exc: handle_ui_exception("presentation owner", exc),
+        )
+        self.kernel.completions = RoutedCompletionQueue(
+            montage_completion_route,
+            self.presentation_owner,
+        )
+        self.presentation_owner.start()
+        self.kernel_bridge = QtKernelBridge(
+            self.kernel,
+            self,
+            order_lock_factory=lambda: self.presentation_owner.timed_order_lock("gui"),
+        )
+        # A routed completion frees quota and fires no GUI drain, so the
+        # drain-borne reconciliations (capacity waiters, the rate-limited
+        # governor reapply) need this wakeup or a parked task waits forever.
+        # Not `eventsReady`: an empty drain skips both reconciliations by
+        # design, which is how the wedge was found.
+        self.presentation_owner.after_dispatch = self.kernel_bridge.routedEventsDispatched.emit
         self.visible_evaluation_controller = KernelEvaluationController(
             self.kernel,
             self.kernel_bridge,
@@ -799,6 +827,14 @@ class ArrayScopeWindow(
             controller = getattr(self, name, None)
             if controller is not None:
                 controller.shutdown_for_close()
+        # Before the kernel: the owner dispatches *into* it, so stopping the
+        # consumer first is what keeps a montage body from running against a
+        # kernel that is already refusing work. Idempotent, and one join per
+        # window — a leaked "presentation-owner" thread per window would
+        # accumulate silently across a session (and across a suite).
+        owner = getattr(self, "presentation_owner", None)
+        if owner is not None:
+            owner.shutdown(timeout=5.0)
         bridge = getattr(self, "kernel_bridge", None)
         if bridge is not None:
             bridge.close()

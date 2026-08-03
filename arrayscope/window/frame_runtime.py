@@ -41,7 +41,12 @@ from arrayscope.render.pipeline import FramePipeline
 from arrayscope.render.stages import LodAdmissionScope, RenderIntent
 from arrayscope.ui.toasts import show_revert_action, show_status_message
 from arrayscope.window import frame_effects as montage_commit
-from arrayscope.window.frame_effects import FramePipelineEffects
+from arrayscope.window.frame_effects import (
+    FramePipelineEffects,
+    on_gui_thread,
+    run_on_gui_thread,
+    session_order_lock_section,
+)
 from arrayscope.window.montage_viewport import (
     montage_priority_focus as _montage_priority_focus,
 )
@@ -149,7 +154,11 @@ class FrameRuntimeMixin:
             return
         self._show_frame_session_loading_overlay(session)
 
+    @session_order_lock_section
     def _show_frame_session_loading_overlay(self, session):
+        # Locked for the live `session.tile_states` read below: the overlay
+        # walk publishes per-tile chrome from the same list the owner thread's
+        # admissions write (ADR 0065 stage 3 converts it to a snapshot).
         if not self._frame_session_is_current(session):
             return
         if session.visible_plan_complete():
@@ -327,6 +336,7 @@ class FrameRuntimeMixin:
         self._frame_pipeline = pipeline
         return pipeline
 
+    @session_order_lock_section
     def request_montage_replan(self, session) -> None:
         """Coalesced ladder replan: at most one per event-loop turn.
 
@@ -370,8 +380,17 @@ class FrameRuntimeMixin:
         # continuously ready and outrun Qt's input/heartbeat timers. One
         # millisecond preserves event-turn coalescing while forcing a real
         # dispatcher opportunity between replans.
-        Qt.QtCore.QTimer.singleShot(1, self, fire)
+        #
+        # ADR 0065 stage 1: `apply_commit` and the stage-plan body call this
+        # from the presentation owner, and a QTimer started there lives on a
+        # thread with no event loop — it never fires, so the replan is lost
+        # rather than late (the lost-wakeup class the watchdog asserts on).
+        # Only the *arming* crosses back; the flag above stays where the
+        # caller is, under the order lock, so coalescing still counts every
+        # request exactly once wherever it came from.
+        run_on_gui_thread(self, lambda: Qt.QtCore.QTimer.singleShot(1, self, fire))
 
+    @session_order_lock_section
     def retarget_frame_pipeline(
         self,
         session,
@@ -462,6 +481,7 @@ class FrameRuntimeMixin:
             self._ensure_montage_watchdog()
         return int(submitted)
 
+    @session_order_lock_section
     def replan_deferred_interactive_native_quality(self) -> bool:
         """Admit native-quality rungs deferred while an interaction was active."""
 
@@ -550,6 +570,18 @@ class FrameRuntimeMixin:
     # is evidence to expose, not state the watchdog is allowed to repair.
 
     def _ensure_montage_watchdog(self) -> None:
+        # ADR 0065 stage 1: routed completion bodies reach this arm from the
+        # presentation owner. A QTimer *constructed* there is parented across
+        # threads ("Cannot create children for a parent that is in a different
+        # thread") and started against a dispatcher that does not exist, which
+        # is how a montage transition came back with `QObject::startTimer:
+        # current thread's event dispatcher has already been destroyed` and no
+        # watchdog at all. The timer belongs to the GUI thread; arming it one
+        # posted event later costs an anti-hang fallback nothing. First
+        # statement in the body so the trace-bus arming below is GUI-side too.
+        if not on_gui_thread():
+            run_on_gui_thread(self, self._ensure_montage_watchdog)
+            return
         if not TRACE.enabled:
             # V3 keeps only the bounded in-memory tail when no JSONL sink was
             # requested, so a production stall always has evidence to dump.
@@ -580,6 +612,12 @@ class FrameRuntimeMixin:
             timer.start()
 
     def _montage_watchdog_stop(self) -> None:
+        # Same thread rule as the arm above: `QTimer.stop` is a Qt call on a
+        # GUI-owned object, and the routed bodies that can arm the watchdog can
+        # also settle the session that disarms it.
+        if not on_gui_thread():
+            run_on_gui_thread(self, self._montage_watchdog_stop)
+            return
         timer = getattr(self, "_montage_watchdog_timer", None)
         if timer is not None:
             timer.stop()
@@ -983,6 +1021,7 @@ class FrameRuntimeMixin:
             view_range=view_range,
         )
 
+    @session_order_lock_section
     def apply_montage_priority_retarget(self) -> None:
         self._montage_priority_retarget_pending = False
         if getattr(self.win, "_closing", False):

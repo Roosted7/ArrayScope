@@ -1105,7 +1105,13 @@ def test_backend_upload_preparation_accounts_for_synchronous_kernel_execution():
 
 
 def test_backend_upload_preparation_skips_physically_resident_payload():
-    """A resident rebind needs no producer and must not inflate visible work."""
+    """A resident rebind needs no producer and must not inflate visible work.
+
+    Residency is read from the lifecycle's backend-identity mirror, not from
+    the view: ADR 0065 stage 1 runs this body on the presentation owner, where
+    ``tiledPayloadResident`` is a live GUI/backend probe. The mirror answers
+    the same question one acknowledgement behind at worst.
+    """
 
     from arrayscope.window.frame_effects import FramePipelineEffects
 
@@ -1113,7 +1119,6 @@ def test_backend_upload_preparation_skips_physically_resident_payload():
     payload = SimpleNamespace(tile_number=2, tile_identity="identity", source_id="source")
     view = SimpleNamespace(
         preparedTiledUploads=PreparedUploadMailbox(),
-        tiledPayloadResident=lambda candidate: candidate is payload,
         tiledUploadPreparations=lambda *_args, **_kwargs: pytest.fail(
             "resident payload must be filtered before preparation planning"
         ),
@@ -1122,7 +1127,10 @@ def test_backend_upload_preparation_skips_physically_resident_payload():
         session_id=7,
         shader_display=True,
         level_generation=SimpleNamespace(target_levels=(0.0, 1.0)),
-        lifecycle=SimpleNamespace(current_presentable_payload=lambda tile: payload),
+        lifecycle=SimpleNamespace(
+            current_presentable_payload=lambda tile: payload,
+            backend_presented_identities={2: "identity"},
+        ),
         display_tile_payloads={},
     )
     effects_bridge = FramePipelineEffects(

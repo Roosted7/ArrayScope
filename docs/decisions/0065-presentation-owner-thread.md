@@ -153,16 +153,39 @@ Any stage may be reverted independently while the lock holds the invariant.
 ### Stages
 
 1. **Infrastructure + completion routing.** Owner thread, routed completion
-   queue, session-order lock, governor lock. Montage-scoped completion bodies
-   (admission, stage-plan, prefetch admits, frame-admission continuation) run
-   on the owner under the lock; the GUI commit path takes the same lock.
-   Bridge-drain GUI time for montage events → ~0 by construction. Behaviour
-   pins: admission counters and presented output byte-identical on the probe;
-   contention counters published.
+   queue, session-order lock, governor lock. Behaviour pins: admission
+   counters and presented output byte-identical on the probe; contention
+   counters published.
+
+   **Shipped scope, corrected by measurement (2026-08-03).** Stage 1 routes
+   only the `montage-stage-plan:` bodies — the single worst drain offender
+   (p50 13.7 ms, over half a frame in 199 of 269 live observations,
+   4.4 s/session), a family that runs ~6 times per fill and therefore cannot
+   contend the migration lock. Routing the per-tile `frame:` completions too
+   — the plan as first written — censored the 272-tile probe fill 3/3
+   (33–196/272 against HEAD's 3/3 within 5 s), and the cause survived two
+   stand-aside policies (strict GUI priority, then one-turn alternation —
+   structurally identical timelines): the admission stream serializes under
+   the one lock against GUI sections dominated by `retarget_frame_pipeline`,
+   ~89 ms × 52 calls = 4.6 s of an 8.6 s fill, 65 % of GUI-side hold against
+   1.3 s of owner work, with a feedback loop (late admissions → replans,
+   retargets 31 → 52). That retarget is the R5 model rebuild stage 2 moves to
+   the owner; the `frame:` routing clause follows it there. What did need
+   fixing at any scope, and is fixed: lock *barging* (a Python lock hands off
+   by race, so the owner's per-event release/re-acquire starved GUI waiters
+   p50 55 ms / max 550 ms — the announce-and-stand-aside alternation in the
+   owner is the repair), and the drain-borne reconciliations (capacity
+   waiters, the rate-limited governor reapply) which only ran when the GUI
+   bridge itself drained — a routed completion now wakes them through the
+   bridge's `routedEventsDispatched`, without which a task parked on quota
+   that a routed completion freed waits forever.
 2. **Transaction preparation on the owner.** The gate takes prepared
    transactions from the mailbox; validate → apply → submit → residue on the
    GUI; AckInputs posted back; acknowledge/mark_presented/state-publish on the
    owner. The GUI montage callback shrinks to backend apply + Qt residue.
+   The index-window retarget becomes an owner message in this stage (measured
+   prerequisite, not an option — see stage 1's correction), and the `frame:`
+   completion families route once the GUI sections have shrunk.
 3. **Snapshot conversions.** Residency snapshot replaces both live
    `tiledPayloadResident` probes; the one live `tile_states` read converts;
    diagnostics snapshots read owner-published copies; GUI-side writers

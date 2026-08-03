@@ -42,7 +42,7 @@ from arrayscope.render.lod import (
     page_set_key_for_rendered,
     page_set_key_for_tile,
 )
-from arrayscope.window.frame_effects import interactive_active
+from arrayscope.window.frame_effects import interactive_active, session_order_lock_section
 
 # One idle turn's share of deferred out-of-view removals.  Sized against the
 # per-commit removal cost rather than the montage: the drain is re-invited
@@ -80,6 +80,12 @@ class _MontagePrefetchWorkerResult:
     preview_pages: tuple[MaterializedLodPage, ...] = ()
 
 
+# One span on the funnel rather than one per invitation: this is reached from
+# a posted walk continuation, from the commit followup, from the viewport
+# retarget and from the settle edge, and only some of those already sit inside
+# a GUI section. The lock is re-entrant, so the ones that do pay an
+# uncontended re-acquire; the timer-driven ones are the reason it is here.
+@session_order_lock_section
 def schedule_near_viewport_montage_prefetch(
     window, session, *, max_tiles: int | None = None
 ) -> tuple[MontagePrefetchDecision, ...]:

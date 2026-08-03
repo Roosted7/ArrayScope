@@ -515,6 +515,11 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         render=render,
         montage=montage,
         kernel=None if getattr(window, "kernel", None) is None else window.kernel.diagnostics(),
+        presentation_owner=(
+            None
+            if getattr(window, "presentation_owner", None) is None
+            else window.presentation_owner.snapshot()
+        ),
         canvas_preserve=(
             window.layout_manager.canvas_preserver.diagnostics()
             if hasattr(getattr(window, "layout_manager", None), "canvas_preserver")
