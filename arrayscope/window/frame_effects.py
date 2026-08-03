@@ -314,6 +314,38 @@ def session_order_lock_section(method):
 
 
 @dataclass(frozen=True)
+class _PrepareStaging:
+    """Everything one prepare reads outside itself, frozen in one lock section.
+
+    ADR 0065 stage 2 slice D2a. The plan that consumes this is a computation
+    over ``session`` (a private copy) and these values; it reads no live
+    session, no renderer store, no governor and no widget, and therefore needs
+    no lock. Built by :meth:`FramePipelineEffects._stage_prepare_inputs`.
+
+    ``live`` is here for exactly two purposes — the transaction identity, whose
+    whole job is to name the live generation the plan is bound to, and the two
+    renderer-facing *scheduling* calls that capture a session in a kernel
+    closure (a staged session is not the session). Nothing else in the plan may
+    touch it.
+    """
+
+    live: object
+    session: object
+    selected_lod_factor: int
+    reuse_any_lod: bool
+    resident_fn: object
+    committed_frame: object
+    #: ``None`` when the seed branch will not run, so the store is not walked.
+    retained_payloads: dict | None
+    capabilities: object
+    boundary: object
+    limits: dict
+    fast_drain: bool
+    committed_display_levels: object
+    eviction_stamp: object
+
+
+@dataclass(frozen=True)
 class _EvaluationClaim:
     semantic_key: object
     rung: int
@@ -2612,7 +2644,84 @@ class FramePipelineEffects:
     def _prepare_tile_layer_transaction(
         self, direct_presentation, *, dirty_tiles
     ) -> PreparedPresentationTransaction | PreparedCommitBail | None:
-        """Everything a commit decides before the backend is touched.
+        """One prepare: stage under the lock, plan without it, return.
+
+        ADR 0065 stage 2 slice D2a. The three phases are separate methods and
+        this is their only composition, so the inline anchor and (next slice)
+        the owner run the *same* code path rather than two:
+
+        1. :meth:`_stage_prepare_inputs` — the session-order lock's business.
+           It builds the private session copy and freezes every live, renderer
+           or backend read the plan will need. Measured at ~0.6 ms, dominated
+           by the 272-record lifecycle clone.
+        2. :meth:`_plan_prepared_outcome` — the ~900-line plan, against the
+           staged copy and the frozen inputs, and it acquires **no lock**.
+           That is the property D2 needed and did not have: its owner-side
+           prepare was one lock section spanning the montage build, and a
+           faulthandler caught the owner inside ``shader_mapping.__eq__``
+           while the GUI waited on the same lock.
+        3. the return — a frozen record, published without a lock.
+
+        On the GUI thread the middle is still *covered* by the enclosing
+        commit section's lock (``commit_pending_session`` holds it, and it is
+        re-entrant), so nothing about the inline path's ordering changes. The
+        structure is what matters: phase 2 takes no lock, so a caller that
+        holds none does not have to.
+        """
+
+        staging = self._stage_prepare_inputs()
+        return self._plan_prepared_outcome(
+            staging,
+            direct_presentation,
+            dirty_tiles=dirty_tiles,
+        )
+
+    def _stage_prepare_inputs(self) -> _PrepareStaging:
+        """Phase 1: the private session copy, and every live read the plan needs.
+
+        This is the only part of a prepare that belongs under the session-order
+        lock. It reads the live session (to copy it), the renderer's stores, the
+        governor, and the image view; the plan that follows reads none of them.
+
+        Every field here was previously read from inside the plan body, which
+        is what made the plan a lock section rather than a computation. Two of
+        them also stop being read twice per commit: ``_physical_residency_inputs``
+        was probed once for the seed and again for the hidden-warm decision, and
+        the retained payload store was walked inside the seed branch.
+        """
+
+        renderer = self.renderer
+        live = self.session
+        session = live._staged_presentation_session()
+        selected_lod_factor = int(session._selected_lod_factor())
+        reuse_any_lod = bool(getattr(session, "_resident_lod_active", lambda: False)())
+        resident_fn, committed_frame = self._physical_residency_inputs()
+        retained_payloads = None
+        if not session.lifecycle.presented_tiles:
+            retained_payloads = renderer._retained_tiled_payload_store().payloads_by_base_source(
+                lod_factor=None if reuse_any_lod else selected_lod_factor
+            )
+        boundary = read_frame_boundary_inputs(renderer, session)
+        return _PrepareStaging(
+            live=live,
+            session=session,
+            selected_lod_factor=selected_lod_factor,
+            reuse_any_lod=reuse_any_lod,
+            resident_fn=resident_fn,
+            committed_frame=committed_frame,
+            retained_payloads=retained_payloads,
+            capabilities=image_view_backend_capabilities(renderer.win.img_view),
+            boundary=boundary,
+            limits=dict(tile_layer_upsert_limits(renderer, session, boundary=boundary) or {}),
+            fast_drain=bool(persistent_tile_layer_fast_drain_enabled(renderer, session)),
+            committed_display_levels=self._committed_display_levels(),
+            eviction_stamp=self._residency_eviction_stamp(),
+        )
+
+    def _plan_prepared_outcome(
+        self, staging: _PrepareStaging, direct_presentation, *, dirty_tiles
+    ) -> PreparedPresentationTransaction | PreparedCommitBail | None:
+        """Phase 2: everything a commit decides before the backend is touched.
 
         Runs on the presentation owner when the owner drives it and on the GUI
         thread when the inline anchor does, so **nothing in here may touch
@@ -2620,7 +2729,15 @@ class FramePipelineEffects:
         ``physical_resident_fn`` and the committed frame come from
         ``_physical_residency_inputs`` (decision 5), the frame-boundary probes
         come from ``read_frame_boundary_inputs`` (decision 6), and the backend
-        capabilities are a frozen dataclass rather than a widget call.
+        capabilities are a frozen dataclass rather than a widget call — and as
+        of slice D2a all of them are read in phase 1 and arrive frozen in
+        ``staging`` rather than being read from here.
+
+        **It acquires no lock**, which is what phase 1 exists to make true.
+        The two calls that still reach the LIVE session are the deliberate
+        exceptions documented below; both are renderer-facing scheduling calls
+        whose session writes are additive and deduped, and neither takes the
+        order lock.
 
         **It also writes nothing** (slice D). Every session write it makes goes
         to ``staged``, a private shallow copy, and travels back as the
@@ -2657,15 +2774,15 @@ class FramePipelineEffects:
         """
 
         renderer = self.renderer
-        live = self.session
-        session = live._staged_presentation_session()
+        live = staging.live
+        session = staging.session
         display_image, rendered_geometry = direct_presentation
         tile_source_ids = renderer._montage_tile_source_ids(session)
         forget_admission_verdict(session)
         payload_start = perf_counter()
-        selected_lod_factor = int(session._selected_lod_factor())
-        reuse_any_lod = bool(getattr(session, "_resident_lod_active", lambda: False)())
-        _resident_fn, seed_committed_frame = self._physical_residency_inputs()
+        selected_lod_factor = staging.selected_lod_factor
+        reuse_any_lod = staging.reuse_any_lod
+        seed_committed_frame = staging.committed_frame
         if not session.lifecycle.presented_tiles:
             previous_payloads = {
                 key: payload
@@ -2674,9 +2791,7 @@ class FramePipelineEffects:
                 ).items()
                 if reuse_any_lod or payload_lod_matches(payload, selected_lod_factor)
             }
-            retained_payloads = renderer._retained_tiled_payload_store().payloads_by_base_source(
-                lod_factor=None if reuse_any_lod else selected_lod_factor
-            )
+            retained_payloads = staging.retained_payloads
             if retained_payloads:
                 previous_payloads.update(retained_payloads)
             if previous_payloads:
@@ -2695,15 +2810,15 @@ class FramePipelineEffects:
         payload_seed_done = perf_counter()
         base_tile_state = session.tile_presentation_state
         base_revision = int(getattr(base_tile_state, "revision", 0) or 0)
-        fast_drain = persistent_tile_layer_fast_drain_enabled(renderer, session)
-        capabilities = image_view_backend_capabilities(renderer.win.img_view)
+        fast_drain = staging.fast_drain
+        capabilities = staging.capabilities
         atomic_successor_pending = _atomic_successor_handoff_pending(session)
         cpu_atomic_successor, shader_atomic_successor = _atomic_successor_commit_modes(
             capabilities,
             pending=atomic_successor_pending,
         )
-        boundary = read_frame_boundary_inputs(renderer, session)
-        limits = tile_layer_upsert_limits(renderer, session, boundary=boundary)
+        boundary = staging.boundary
+        limits = dict(staging.limits)
         if cpu_atomic_successor or shader_atomic_successor:
             # Hidden warming bounds GPU uploads; the eventual source-slot
             # handoff itself is one complete transaction and must not be
@@ -2932,8 +3047,7 @@ class FramePipelineEffects:
             session.final_commit_pending = False
             session.flush_pending = False
             return self._prepared_bail(
-                live,
-                session,
+                staging,
                 "atomic-successor-wait",
                 wakeup="replan",
                 prep=prep_partial,
@@ -2971,8 +3085,7 @@ class FramePipelineEffects:
             session.final_commit_pending = False
             session.flush_pending = False
             return self._prepared_bail(
-                live,
-                session,
+                staging,
                 "empty-first-commit-wait",
                 wakeup="replan",
                 prep=prep_partial,
@@ -3084,8 +3197,7 @@ class FramePipelineEffects:
             # retarget/acknowledge events.
             session.lifecycle.note_retained_satisfaction(session.required_tile_numbers())
             return self._prepared_bail(
-                live,
-                session,
+                staging,
                 "empty-progressive-settled",
                 wakeup="noop-finish",
                 prep=prep_partial,
@@ -3170,8 +3282,7 @@ class FramePipelineEffects:
                 # like every other bail flag.
                 renderer._mark_montage_level_scan_pending(session)
             return self._prepared_bail(
-                live,
-                session,
+                staging,
                 "level-evidence-wait",
                 wakeup="level-scan",
                 prep=prep,
@@ -3183,10 +3294,10 @@ class FramePipelineEffects:
         if warm_levels is None and semantic_source is not None:
             warm_levels = normalize_bounds(getattr(semantic_source, "levels", None))
         if warm_levels is None:
-            warm_levels = normalize_bounds(self._committed_display_levels())
+            warm_levels = normalize_bounds(staging.committed_display_levels)
         cpu_backend = not bool(capabilities.shader_windowing)
         atomic_successor = bool(cpu_atomic_successor or shader_atomic_successor)
-        resident_predicate, previous_frame = self._physical_residency_inputs()
+        resident_predicate, previous_frame = staging.resident_fn, staging.committed_frame
         cold_gpu_successor = _cold_gpu_successor_requires_hidden_warm(
             session=session,
             cpu_backend=cpu_backend,
@@ -3202,8 +3313,7 @@ class FramePipelineEffects:
             session.final_commit_pending = False
             session.flush_pending = False
             return self._prepared_bail(
-                live,
-                session,
+                staging,
                 "interactive-residency-deferred",
                 wakeup="interaction-stop-edge",
                 prep=prep,
@@ -3261,8 +3371,7 @@ class FramePipelineEffects:
             self._wgpu_evidence_obligation_decision(session, boundary)
         )
         identity = self._transaction_identity(
-            live,
-            session,
+            staging,
             base_revision=base_revision,
             capabilities=capabilities,
             scope=frozenset(int(tile) for tile in active_payloads),
@@ -3353,8 +3462,7 @@ class FramePipelineEffects:
 
     def _transaction_identity(
         self,
-        live,
-        staged,
+        staging: _PrepareStaging,
         *,
         base_revision: int,
         capabilities,
@@ -3367,8 +3475,15 @@ class FramePipelineEffects:
         to", so every one of its fields is the live session's — the staged copy
         is an implementation detail of *planning* and has an ``id()`` no take
         could ever match.
+
+        The eviction stamp comes from ``staging`` rather than from a fresh
+        probe: it names the page-table generation the residency inputs of the
+        *same* staging were taken against, and a stamp read later would claim
+        currency for a probe that never saw it.
         """
 
+        live = staging.live
+        staged = staging.session
         return TransactionIdentity(
             session_id=int(getattr(live, "session_id", 0) or 0),
             session_object_id=id(live),
@@ -3380,14 +3495,13 @@ class FramePipelineEffects:
             render_round_id=str(getattr(staged, "render_round_id", "") or ""),
             scope=frozenset(int(tile) for tile in scope),
             capabilities_id=id(capabilities),
-            eviction_stamp=self._residency_eviction_stamp(),
+            eviction_stamp=staging.eviction_stamp,
             payload_markers=dict(payload_markers or {}),
         )
 
     def _prepared_bail(
         self,
-        live,
-        staged,
+        staging: _PrepareStaging,
         outcome: str,
         *,
         wakeup: str,
@@ -3401,11 +3515,12 @@ class FramePipelineEffects:
     ) -> PreparedCommitBail:
         """Freeze one early commit return so the take can decide it happened."""
 
+        live = staging.live
+        staged = staging.session
         return PreparedCommitBail(
             plan=live._harvest_presentation_plan(staged, None, None, path=f"bail:{outcome}"),
             identity=self._transaction_identity(
-                live,
-                staged,
+                staging,
                 base_revision=int(
                     getattr(getattr(staged, "tile_presentation_state", None), "revision", 0) or 0
                 ),

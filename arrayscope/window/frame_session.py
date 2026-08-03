@@ -4273,9 +4273,21 @@ class FrameSession:
         keyed by a residency-epoch guard that is re-checked immediately before
         the store, so a value written from staged state equals the value the
         live session would compute.
+
+        ADR 0065 stage 2 slice D2a: the staged session also carries the LIVE
+        ``__dict__`` **as it was at staging time**.  That snapshot, not the live
+        session at harvest time, is what :meth:`_harvest_presentation_plan`
+        diffs against.  The difference only shows once planning runs outside
+        the session-order lock: a live write landing mid-plan would otherwise
+        make the harvest's identity diff read the planner's *unchanged* value
+        as a write, and the applier would then revert a live write no planner
+        ever saw.  Diffing against the baseline means a plan carries exactly
+        what its own planner changed, and nothing else.
         """
 
+        baseline = dict(self.__dict__)
         staged = copy.copy(self)
+        staged._presentation_plan_baseline = baseline
         for name, factory in _PRESENTATION_PLAN_CONTAINERS:
             current = getattr(self, name, None)
             if current is not None:
@@ -4311,9 +4323,16 @@ class FrameSession:
         set of ``is``-different entries.  Deriving the field list rather than
         writing it down is what keeps the record honest when the builder grows
         a new write.
+
+        The comparison is against the baseline ``_staged_presentation_session``
+        froze, falling back to the live ``__dict__`` only for a staged session
+        built some other way.  See that method for why the distinction is
+        load-bearing once planning runs unlocked.
         """
 
-        live = self.__dict__
+        live = staged.__dict__.pop("_presentation_plan_baseline", None)
+        if live is None:
+            live = self.__dict__
         missing = object()
         staged_writes = {
             name: value

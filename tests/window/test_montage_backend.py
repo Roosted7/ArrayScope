@@ -7014,7 +7014,12 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
         def __init__(self):
             self.win = self
             self.img_view = SimpleNamespace(
-                rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph")
+                rendering_capabilities=ImageViewBackendCapabilities(name="pyqtgraph"),
+                # ADR 0065 stage 2 slice D2a: the commit's prepare freezes its
+                # widget reads in one staging section instead of making them
+                # mid-plan, so `getLevels` is now read on every commit rather
+                # than only on the hidden-warm fallback path.
+                getLevels=lambda: None,
             )
             self.commits = 0
 

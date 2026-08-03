@@ -311,3 +311,80 @@ def test_settle_chrome_decided_on_the_owner_still_lands_on_the_gui_thread(qtbot)
         assert win.operation_evaluator.last_status.status is CacheStatus.READY
     finally:
         win.close()
+
+
+# ------------------------------------------- the prepare seam's three phases
+
+
+def test_a_prepare_plans_while_another_thread_holds_the_order_lock(qtbot):
+    """ADR 0065 stage 2 slice D2a: the plan phase acquires no lock.
+
+    D2's refutation was that the owner's prepare was ONE lock section spanning
+    the montage build — a faulthandler caught the owner inside
+    ``shader_mapping.__eq__`` while the GUI waited on the same lock. The answer
+    is structural: ``_stage_prepare_inputs`` is the lock's business (the
+    private session copy plus every live, renderer and widget read the plan
+    needs) and ``_plan_prepared_outcome`` is a computation over what it froze.
+
+    The claim is therefore about *lock acquisition*, not about speed, and it is
+    stated the only way that cannot pass vacuously: the session-order lock is
+    held for the whole of the middle phase by a thread that is not the planner,
+    and the planner still finishes. The mutation is re-adding a
+    ``timed_order_lock`` anywhere inside ``_plan_prepared_outcome``, which parks
+    the planner until this test's join timeout and reds it.
+
+    The prepared outcome is deliberately dropped rather than taken. That is
+    exactly what slice D1 bought: a plan that is never applied writes nothing.
+    """
+
+    win = _montage_window(qtbot)
+    try:
+        renderer = win.renderer
+        owner = win.presentation_owner
+        effects = renderer._frame_pipeline.effects
+        _wait(qtbot, lambda: effects.direct_tile_layer_presentation() is not None)
+        direct_presentation = effects.direct_tile_layer_presentation()
+        dirty_tiles = effects.session.peek_dirty_tiles()
+
+        # Phase 1 on the GUI thread, exactly as the inline anchor runs it.
+        staging = effects._stage_prepare_inputs()
+
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_the_lock() -> None:
+            with owner.timed_order_lock("owner"):
+                held.set()
+                release.wait(30.0)
+
+        holder = threading.Thread(target=hold_the_lock, name="d2a-lock-holder")
+        holder.start()
+        assert held.wait(10.0), "the holder never took the order lock"
+
+        planned: list[object] = []
+
+        def plan() -> None:
+            planned.append(
+                effects._plan_prepared_outcome(
+                    staging,
+                    direct_presentation,
+                    dirty_tiles=dirty_tiles,
+                )
+            )
+
+        planner = threading.Thread(target=plan, name="d2a-planner")
+        planner.start()
+        planner.join(20.0)
+        blocked = planner.is_alive()
+
+        release.set()
+        holder.join(10.0)
+        planner.join(10.0)
+
+        assert not blocked, (
+            "the plan phase blocked on the session-order lock: it acquires one "
+            "somewhere, which is the shape that refuted D2"
+        )
+        assert len(planned) == 1
+    finally:
+        win.close()

@@ -121,6 +121,46 @@ def montage_completion_route(event: Any) -> bool:
     one line). Only when the per-tile admissions arrive *here* is there a batch
     whose tail is a real barrier. So the two land together, or neither does.
 
+    **Stage 2 slice D2a tried exactly that pair and the probe refused it a
+    third time**, and this time the counters say precisely which precondition
+    is still missing. Widening this clause (with the ``fire()`` conversion, and
+    also with it reverted — both arms measured) censored the 272-tile wgpu
+    probe: 90/78/49, 186/272-late-106, 122/271/264 of 272 across three runs
+    against 3/3 ``272/272 within-5s`` on the same tree with only this line
+    narrowed. What did *not* happen is the stage-1 signature: commit cohorts
+    stayed healthy (104, 91, 55 tiles) rather than collapsing to ~10, and the
+    GUI was never starved — ``gui_lock_wait_ms_total`` was 10-37 ms for a whole
+    fill and ``owner_yields_to_gui`` fired six times. The owner starved instead:
+    ``owner_lock_wait_ms_total`` 1.8-1.9 s of an ~8 s fill, single waits to
+    289 ms, across 631 acquisitions.
+
+    Instrumented GUI-side lock **holds** for one such fill name the two
+    remaining owners, and neither is preparation:
+
+    ==============================  =====  ========  =======
+    GUI section                     calls  total ms  max ms
+    ==============================  =====  ========  =======
+    ``commit_pending_session``         43    2350.2    526.2
+    ``retarget_frame_pipeline``        38    2009.1    193.7
+    ``_on_presentation_gate``          41    1784.7    278.1
+    ==============================  =====  ========  =======
+
+    (the gate encloses the commit, so the two nest). The control arm holds the
+    same shape — 1913 ms / 1335 ms — so this is the GUI's steady state, not
+    something routing caused. ``retarget_frame_pipeline`` is still a GUI-side
+    section 28-38 times per fill at ~50 ms mean: slice B moved the
+    *fire-and-forget* callers (``post_frame_pipeline_retarget``), and decision
+    10's items 2-5 — the stage-plan tail, the index-window rebuild, the
+    resize/viewport callers, the viewport-only latch — are still owed.
+    ``commit_pending_session`` holds the lock across the whole commit including
+    the backend submit, which needs no session ordering at all.
+
+    So the condition to re-test this clause under is not "the prepare is
+    cheaper" (slice D2a made it a computation with no lock inside, and the
+    probe still refused): it is **GUI-side hold under roughly a frame**. While
+    two sections hold it for 3-4 s of an 8 s fill, 630 owner acquisitions
+    cannot fit between them, and no policy on this side changes that.
+
     Two further exclusions are deliberate rather than incidental:
 
     - Histogram and level-evidence completions (``montage:…:histogram``,

@@ -413,3 +413,118 @@ here), because the inline path is the correctness anchor and re-prepares.
    `prepared-transaction` hit-rate column are all *removed from the tree* with
    D2 — they are recorded here rather than left as dead code, and the shape
    above is what to rebuild.
+
+## Slice D2a: the prepare stops being a lock section; the routing is refused a third time (2026-08-03)
+
+Two moves were attempted, and they separate cleanly. The first landed and is a
+pure win. The second is refuted again, and this time the counters name the
+precondition instead of only the symptom.
+
+### Move 1 landed: prepare is stage-then-plan, and the plan takes no lock
+
+D2's faulthandler caught the owner inside `shader_mapping.__eq__` under
+`_prepare_tile_layer_transaction` while the GUI waited: the owner's prepare was
+ONE lock section spanning the montage build. `_prepare_tile_layer_transaction`
+is now the composition of three phases and nothing else:
+
+1. `_stage_prepare_inputs` (`window/frame_effects.py`) — the lock's business.
+   The private session copy plus **every** live, renderer, governor and widget
+   read the plan needs, frozen into `_PrepareStaging`: residency inputs and the
+   committed frame, the retained payload store's map, backend capabilities,
+   `read_frame_boundary_inputs`, `tile_layer_upsert_limits`, the fast-drain
+   flag, `getLevels()` and the page-table eviction stamp.
+2. `_plan_prepared_outcome` — the ~900-line plan, over the staged copy and
+   those frozen values, acquiring no lock.
+3. the return — a frozen record, published lock-free.
+
+Two reads that were made **twice** per commit collapse into one:
+`_physical_residency_inputs` (the seed probe and the hidden-warm decision) and
+the eviction stamp (which now names the generation the residency inputs were
+actually taken against, rather than a later one).
+
+`_staged_presentation_session` additionally freezes the live `__dict__` as the
+harvest's baseline. Diffing against the live session *at harvest time* is only
+correct while nothing writes it mid-plan; against the baseline, a plan carries
+exactly what its own planner changed, and the applier cannot revert a live
+write no planner ever saw.
+
+The audit Move 1 owed found the plan is **not** free of live reads, and the two
+that remain are the ones D1 documented as deliberate:
+`_queue_montage_level_stats_for_payloads(live, …)` and
+`_montage_histogram_plot_data_for_session(live, …)`. Both are renderer-facing
+*scheduling* calls that capture a session in a kernel closure; both take no
+order lock; the first also probes `img_view.residentHistogramEvidence`, which
+is the one genuinely GPU-affine call left inside a prepare and is the debt the
+owner trigger still owes. Everything else audited clean:
+`image_view_backend_capabilities` is a frozen-dataclass attribute read,
+`tiledUploadPreparations` is numpy plus a self-locking mailbox, and the level
+trackers are renderer-owned dictionaries.
+
+Pinned by `test_a_prepare_plans_while_another_thread_holds_the_order_lock`
+(`tests/window/test_presentation_owner_wiring.py`): the order lock is held for
+the whole middle phase by a third thread and the planner still completes;
+mutation-checked by re-adding an acquire inside the plan.
+
+Verification: `tests/window` + `tests/presentation` + `tests/render` +
+`tests/core` + `tests/display` 2310 passed; the GPU ring
+(`test_montage_interactions`, `test_montage_scroll_settling`) 54 passed twice;
+probe `--backend wgpu --tiles 272 --repeat 3` **3/3 `272/272 within-5s`**,
+target settle 4.2-4.5 s, cohorts 128/68/55.
+
+### Move 2 refuted: routing `frame:` still censors, and the GUI's holds say why
+
+Both halves were built as specified — `montage_completion_route` widened to
+`("frame:", "montage-stage-plan:")`, and `request_montage_replan`'s `fire()`
+converted from `run_on_gui_thread` + `singleShot(1)` to `post_to_presentation_owner`.
+Measured on the 272-tile wgpu probe:
+
+| arm | run 0 | run 1 | run 2 |
+|---|---|---|---|
+| Move 1 only (control) | 272/272 within-5s | 272/272 | 272/272 |
+| Move 1 + both halves | 90/272 censored | 78/272 censored | 49/272 censored |
+| Move 1 + routing only (`fire()` on the timer) | 186/272 censored | 272/272 **late** | 106/272 censored |
+| Move 1 + routing only, repeat | 122/272 censored | 271/272 censored | 264/272 censored |
+
+So the coupling claim is *not* what fails: routing alone is refused, with the
+`fire()` conversion reverted. And the stage-1 signature is **absent** — commit
+cohorts stayed healthy (104, 91, 55 tiles) rather than collapsing to ~10.
+
+The owner counters at teardown, routing-only arm, one fill each:
+
+| counter | run 0 | run 1 | run 2 |
+|---|---:|---:|---:|
+| `events_dispatched` | 632 | 641 | 651 |
+| `owner_lock_wait_ms_total` | 1920.6 | 1897.6 | 1808.8 |
+| `owner_lock_wait_ms_max` | 197.8 | 288.9 | 226.2 |
+| `gui_lock_wait_ms_total` | 37.5 | 19.0 | 10.0 |
+| `owner_yields_to_gui` | 6 | 6 | 6 |
+
+The GUI is never starved — 10-37 ms of waiting across a whole fill, and the
+stand-aside fires six times. The **owner** starves: 1.8-1.9 s of an ~8 s fill
+spent waiting, across 631 acquisitions.
+
+Instrumented GUI-side lock *holds* for one such fill, against the control arm:
+
+| GUI section | routing arm calls / total ms / max ms | control arm |
+|---|---|---|
+| `commit_pending_session` | 43 / 2350.2 / 526.2 | 34 / 1913.4 / 520.6 |
+| `retarget_frame_pipeline` | 38 / 2009.1 / 193.7 | 28 / 1334.9 / 196.3 |
+| `_on_presentation_gate` (encloses the commit) | 41 / 1784.7 / 278.1 | 32 / 1353.7 / 154.6 |
+
+That is the finding. Stage 1 blamed `retarget_frame_pipeline` at ~89 ms × 52,
+and **it is still a GUI-side section**, 28-38 times a fill at ~50 ms mean and
+~195 ms worst. Slice B moved only the fire-and-forget callers
+(`post_frame_pipeline_retarget`); decision 10's items 2-5 — the stage-plan
+tail, the index-window model rebuild, the resize/viewport callers, the
+viewport-only latch — are all still owed, and the replan gate's own fire is a
+fourth caller. Beside it, `commit_pending_session` holds the lock across the
+*whole* commit including the backend submit (max 526 ms), which needs no
+session ordering at all.
+
+The condition to re-test the `frame:` clause under is therefore not "the
+prepare is cheaper" — Move 1 made the prepare a computation with no lock inside
+and the probe still refused. It is **GUI-side hold under roughly a frame**.
+While two sections hold the bridge for 3-4 s of an 8 s fill, 630 owner
+acquisitions cannot fit between them, and no policy on the owner's side changes
+that. Next: finish decision 10's retarget items, and take the backend submit
+out of the commit's lock section.
