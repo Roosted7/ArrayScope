@@ -5590,6 +5590,52 @@ def test_r2b_round_floors_latch_across_replans_and_changing_tile_population():
     assert (session.round_preview_level, session.round_target_level) != first_floors
 
 
+def test_round_commit_counter_is_monotonic_and_read_against_its_watermark():
+    """R6 asks "did the predecessor deliver" as a delta, never as a reset.
+
+    ``open_round`` used to read ``render_round_commits > 0`` and then zero the
+    counter; a commit landing between those two steps reads as never having
+    happened, and exactly one such loss is a whole shed escalation
+    (``TARGET_PASS_AFTER = 1``).  ADR 0065 stage 2 decision 11 makes the
+    counter monotonic and stores a watermark at every round open, so the
+    round's own count is growth since that watermark and there is nothing to
+    lose.  Counting, not timing: every number below is closed.
+    """
+
+    from arrayscope.render.progressive_scheduling import ShedLevel
+
+    def zoom(session) -> None:
+        session.view_range = tuple((float(lo), float(hi) * 2.0) for lo, hi in session.view_range)
+
+    session = _session(pyramid=LodPageCache(max_bytes=1 << 20), count=2, preview_level=4)
+
+    render_lod.selected_lod_factor(session)
+    assert (session.render_round_commits, session.render_round_commits_watermark) == (0, 0)
+
+    session.note_committed()
+    assert session.render_round_commits == 1
+
+    # The round that delivered once hands its successor an unshed verdict, and
+    # the commit itself survives the rotation: only the watermark moves.
+    zoom(session)
+    render_lod.selected_lod_factor(session)
+    assert session.round_load_shedding.verdict.level is ShedLevel.NONE
+    assert (session.render_round_commits, session.render_round_commits_watermark) == (1, 1)
+
+    # A round that reached the backend not once is the one R6 sheds for, and
+    # the stale count from the round before it does not rescue it.
+    zoom(session)
+    render_lod.selected_lod_factor(session)
+    assert session.round_load_shedding.verdict.level is ShedLevel.TARGET_PASS
+    assert (session.render_round_commits, session.render_round_commits_watermark) == (1, 1)
+
+    session.note_committed()
+    zoom(session)
+    render_lod.selected_lod_factor(session)
+    assert session.round_load_shedding.verdict.level is ShedLevel.NONE
+    assert (session.render_round_commits, session.render_round_commits_watermark) == (2, 2)
+
+
 def test_progressive_round_identity_names_target_inputs_not_work_population():
     session = _session(
         pyramid=LodPageCache(max_bytes=1 << 20),

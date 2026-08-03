@@ -687,15 +687,20 @@ def selected_lod_factor(session) -> int:
         # did it reach the backend at all?  Presentation predicates cannot
         # answer it here — a retarget swaps ``session.plan`` before this runs,
         # so every payload reads as belonging to the wrong window.
+        commits = int(getattr(session, "render_round_commits", 0) or 0)
         predecessor_delivered = bool(
-            session.render_round_key is None or session.render_round_commits > 0
+            session.render_round_key is None
+            or commits > int(getattr(session, "render_round_commits_watermark", 0) or 0)
         )
         session.round_load_shedding.open_round(
             round_id=round_id,
             predecessor_delivered=predecessor_delivered,
             session_id=int(getattr(session, "session_id", 0) or 0),
         )
-        session.render_round_commits = 0
+        # The counter is monotonic; the round's own count is the delta from
+        # here.  Zeroing it instead loses any commit that lands between this
+        # read and the write (ADR 0065 stage 2, decision 11).
+        session.render_round_commits_watermark = commits
         session.render_round_key = round_key
         session.render_round_id = round_id
         session.render_round_demand = decision.demand

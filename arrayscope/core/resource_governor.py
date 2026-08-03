@@ -162,6 +162,12 @@ class _RenderPassCostModel:
         )
 
 
+# Channels whose cost is evidence, not a symptom of a busy UI. Each one is a
+# bounded unit of presentation work whose duration is set by how much it was
+# asked to do; feeding them to the pressure model would let a big-but-healthy
+# commit or replan cut lane workers. `montage_retarget` joins them for exactly
+# that reason: ADR 0065 stage 2 added it to measure the funnel it is about to
+# move, and a measurement channel that steers scheduling is not a measurement.
 _PRESSURE_TELEMETRY_ONLY_CHANNELS = frozenset(
     {
         "montage_cold_commit",
@@ -170,6 +176,7 @@ _PRESSURE_TELEMETRY_ONLY_CHANNELS = frozenset(
         "montage_level_refinement",
         "montage_present_total",
         "montage_priority_retarget",
+        "montage_retarget",
         "tile_layer_commit",
     }
 )
@@ -304,9 +311,10 @@ class ResourceGovernor:
     # Outside callers that read a plain scalar attribute -- `profile`,
     # `responsiveness_weight` -- stay lock-free: a single attribute load is
     # already atomic and the reader gets one side of a write, never a torn
-    # value.  `latency_feedback` is the exception in kind: the reference load
-    # is atomic, but `window/main.py` aliases the controller itself and the
-    # GUI then calls it directly, outside this lock (see ADR 0065's audit).
+    # value.  `latency_feedback` is not such an attribute: the controller has
+    # no lock of its own, so every call into it belongs to a guarded method
+    # here.  The window alias that let the presentation path call it directly
+    # is gone (ADR 0065 stage 2, decision 7) -- do not reintroduce one.
     _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -416,6 +424,25 @@ class ResourceGovernor:
             observation.channel, feedback_elapsed_ms, count=count, byte_count=byte_count
         )
         self._pressure = self._pressure_with_ui(observation.channel)
+
+    @_governed
+    def observe_latency(
+        self, channel: str, elapsed_ms: float, *, count: int = 1, byte_count: int = 0
+    ) -> None:
+        """Feed one raw timing into the channel model, under this lock.
+
+        The fallback sink for callers with no ``_record_ui_work`` window. It
+        deliberately skips the observation deque and the pressure recompute:
+        those describe GUI callbacks, and a caller that reaches here has no
+        GUI callback to describe.
+        """
+
+        self.latency_feedback.observe(
+            str(channel),
+            max(0.0, float(elapsed_ms)),
+            count=max(1, int(count)),
+            byte_count=max(0, int(byte_count)),
+        )
 
     @_governed
     def begin_ui_observation_epoch(self) -> int:
@@ -555,6 +582,28 @@ class ResourceGovernor:
             "montage_present_total", interactive=interactive, byte_cap=byte_cap
         )
 
+    @_governed
+    def batch_limit_for(self, channel: str, *, interactive: bool) -> int:
+        """Return one channel's feedback batch limit, under this lock.
+
+        The presentation path used to read the controller through a window
+        alias with no lock at all (ADR 0065 stage 2, decision 7). Callers that
+        want the whole knob still ask ``decide_commit_batch``; this is the
+        floor they fall back to when a decision yields no limit.
+        """
+
+        return int(self.latency_feedback.batch_limit(str(channel), interactive=bool(interactive)))
+
+    @_governed
+    def latency_tuning(self) -> LatencyFeedbackTuning:
+        """Return the current feedback tuning, under this lock.
+
+        Frozen, so the caller may hold and read it after the lock is released;
+        a profile change replaces the object rather than mutating it.
+        """
+
+        return self.latency_feedback.tuning
+
     def decide_ladder_admission(
         self,
         *,
@@ -567,6 +616,11 @@ class ResourceGovernor:
         are named policies over their arguments and module constants and touch
         no governor state, so a lock here would only cost callers contention
         against the threads that do.
+
+        That proof, re-verified 2026-08-03, is also what keeps them unguarded
+        when ADR 0065 stage 2 slice B moves their callers onto the presentation
+        owner: neither body names ``self`` at all, so it is already thread-safe
+        and the lock would buy nothing. Decorate the moment either one does.
         """
 
         limit = max(1, int(default_limit))

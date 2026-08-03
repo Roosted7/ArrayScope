@@ -327,6 +327,15 @@ class FramePipelineEffects:
     def __init__(self, renderer, session) -> None:
         self.renderer = renderer
         self.session = session
+        # Capabilities are a property of the backend surface, which is built
+        # once with the window and never replaced, so one snapshot serves this
+        # session's whole life.  Taken here because ADR 0065 stage 2 runs the
+        # rung evaluation on the presentation owner, and the image view is a
+        # Qt object the owner thread must not touch -- per-step probing was
+        # also a per-step attribute walk on the hottest planning path.
+        self._backend_capabilities = image_view_backend_capabilities(
+            getattr(getattr(renderer, "win", None), "img_view", None)
+        )
 
     def scheduling_verdict(self):
         """Read/advance the sole required-generation phase owner."""
@@ -616,9 +625,9 @@ class FramePipelineEffects:
     def _canonical_plane_warm_enabled(self) -> bool:
         """Whether target work may establish a backend's canonical pages."""
 
-        capabilities = image_view_backend_capabilities(self.renderer.win.img_view)
         return bool(
-            self._resident_crop_rebind_enabled() and capabilities.canonical_source_plane_residency
+            self._resident_crop_rebind_enabled()
+            and self._backend_capabilities.canonical_source_plane_residency
         )
 
     def invalidate_resident_crop_rebind_flag(self) -> None:
@@ -3967,8 +3976,7 @@ class FramePipelineEffects:
 
     def _record_commit_feedback(self, report) -> None:
         renderer = self.renderer
-        feedback = latency_feedback(renderer)
-        if feedback is None and not hasattr(renderer.win, "_record_ui_work"):
+        if not _observes_ui_work(renderer):
             return
         cold_count = int(getattr(report, "cold_count", 0) or 0)
         processed_count = tile_layer_commit_processed_count(report)
@@ -5746,11 +5754,8 @@ def tile_layer_upsert_limits(window, session) -> dict[str, object]:
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
     if batch_limit <= 0:
-        feedback = latency_feedback(window)
-        batch_limit = (
-            8
-            if feedback is None
-            else int(feedback.batch_limit("tile_layer_commit", interactive=interactive))
+        batch_limit = _governed_batch_limit(
+            window, "tile_layer_commit", interactive=interactive, default=8
         )
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
@@ -5772,10 +5777,11 @@ def presentation_upload_control_budget_ms(
     window, channel: str, decision, *, interactive: bool
 ) -> float:
     budget = float(getattr(decision, "budget_ms", 0.0) or 0.0)
-    feedback = latency_feedback(window)
+    governor = getattr(getattr(window, "win", None), "resource_governor", None)
+    latency_tuning = getattr(governor, "latency_tuning", None)
     target = 4.0 if interactive else 8.0
-    if feedback is not None:
-        tuning = getattr(feedback, "tuning", None)
+    if callable(latency_tuning):
+        tuning = latency_tuning()
         target = float(
             getattr(tuning, "target_interactive_ms" if interactive else "target_idle_ms", target)
         )
@@ -5976,8 +5982,28 @@ def _identity_rejected_delta_signature(tile_delta, report):
     )
 
 
-def latency_feedback(window):
-    return getattr(window.win, "latency_feedback", None)
+def _governed_batch_limit(window, channel: str, *, interactive: bool, default: int) -> int:
+    """The governor's floor batch limit for a channel, asked under its lock.
+
+    These callers used to reach the ``LatencyFeedbackController`` through a
+    window alias, which has no lock of its own; ADR 0065 stage 2 puts them on
+    the presentation owner thread, so the read goes through the governor.
+    """
+
+    governor = getattr(getattr(window, "win", None), "resource_governor", None)
+    batch_limit_for = getattr(governor, "batch_limit_for", None)
+    if not callable(batch_limit_for):
+        return int(default)
+    return int(batch_limit_for(str(channel), interactive=bool(interactive)))
+
+
+def _observes_ui_work(renderer) -> bool:
+    """Whether any sink will record this commit's timing observations."""
+
+    win = getattr(renderer, "win", None)
+    if hasattr(win, "_record_ui_work"):
+        return True
+    return callable(getattr(getattr(win, "resource_governor", None), "observe_latency", None))
 
 
 def pyqtgraph_payload_upload_nbytes(payload) -> int:
@@ -6084,11 +6110,8 @@ def _persistent_tile_upsert_limits(window, session) -> dict[str, object]:
     batch_limit = int(getattr(decision, "batch_limit", 0) or 0)
     byte_cap = int(getattr(decision, "byte_cap", 0) or 0)
     if batch_limit <= 0:
-        feedback = latency_feedback(window)
-        batch_limit = (
-            4
-            if feedback is None
-            else int(feedback.batch_limit("montage_present_total", interactive=interactive))
+        batch_limit = _governed_batch_limit(
+            window, "montage_present_total", interactive=interactive, default=4
         )
     if byte_cap <= 0:
         byte_cap = 8 * 1024 * 1024 if interactive else 32 * 1024 * 1024
@@ -6333,9 +6356,9 @@ def _observe_ui(
             kwargs["details"] = details
         renderer.win._record_ui_work(channel, ms, count=count, byte_count=byte_count, **kwargs)
         return
-    feedback = latency_feedback(renderer)
-    if feedback is not None:
-        feedback.observe(channel, ms, count=count, byte_count=byte_count)
+    observe = getattr(getattr(renderer.win, "resource_governor", None), "observe_latency", None)
+    if callable(observe):
+        observe(channel, ms, count=count, byte_count=byte_count)
 
 
 def _looks_like_shared_preview_rows(payload) -> bool:

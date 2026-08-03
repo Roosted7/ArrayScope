@@ -223,6 +223,45 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     assert calls.count("commit") == 1
 
 
+def test_montage_retarget_channel_records_the_calls_that_cost_a_frame(monkeypatch):
+    """ADR 0065 stage 2 measures the retarget move on the axis it was diagnosed on.
+
+    The prerequisite for moving this funnel to the presentation owner was a
+    lock-hold figure (~89 ms x 52 calls) from instrumentation that no longer
+    exists, so the channel lands first. The clock is scripted rather than read:
+    what is pinned is which calls reach the sink and what they carry, and a
+    superseded session's microsecond bail must not be one of them -- it is the
+    commonest call and would price the channel on replans that cost nothing.
+    """
+
+    from arrayscope.window import frame_runtime
+
+    # (entry, return) per call: one 89 ms replan, then one that bails.
+    ticks = iter([0.0, 0.089, 5.0, 5.0002])
+    monkeypatch.setattr(frame_runtime, "perf_counter", lambda: next(ticks))
+
+    observations = []
+    owner = SimpleNamespace(
+        win=SimpleNamespace(
+            _record_ui_work=lambda channel, ms, **kwargs: observations.append((channel, ms, kwargs))
+        )
+    )
+
+    @frame_runtime.timed_montage_retarget
+    def retarget(_owner, submitted):
+        return submitted
+
+    assert retarget(owner, 7) == 7
+    assert retarget(owner, 0) == 0
+
+    assert len(observations) == 1
+    channel, elapsed_ms, kwargs = observations[0]
+    assert channel == "montage_retarget"
+    assert elapsed_ms == pytest.approx(89.0)
+    assert kwargs["count"] == 1
+    assert kwargs["details"] == ("submitted=7",)
+
+
 def test_backend_refresh_obligation_crosses_clean_presentation_gate():
     from arrayscope.window.frame_controller import FrameControllerMixin
 

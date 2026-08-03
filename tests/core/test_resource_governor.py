@@ -91,6 +91,46 @@ def test_commit_batch_knob_covers_last_observed_bytes_per_item():
     assert decision.model == "ewma"
 
 
+def test_latency_accessors_serve_the_presentation_path_under_the_governor_lock():
+    """ADR 0065 stage 2 decision 7: the feedback controller is reached only here.
+
+    The presentation path used to alias ``latency_feedback`` off the window and
+    call the unlocked controller directly for its batch floor, its target
+    tuning, and its fallback observation. Each of those is an accessor now, and
+    each must answer exactly what the direct call answered -- otherwise the
+    conversion changed a commit bound while claiming to move a lock.
+    """
+
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    controller = governor.latency_feedback
+
+    assert governor.latency_tuning() is controller.tuning
+    assert governor.batch_limit_for("tile_layer_commit", interactive=False) == int(
+        controller.batch_limit("tile_layer_commit", interactive=False)
+    )
+
+    governor.observe_latency("tile_layer_commit", 40.0, count=2, byte_count=4096)
+    snapshot = controller.channel_snapshot("tile_layer_commit")
+
+    assert snapshot.last_elapsed_ms == 40.0
+    assert (snapshot.last_count, snapshot.last_byte_count) == (2, 4096)
+    # Expensive items shrink the floor, and the accessor is what says so.
+    assert governor.batch_limit_for("tile_layer_commit", interactive=False) == int(
+        controller.batch_limit("tile_layer_commit", interactive=False)
+    )
+    assert governor.batch_limit_for(
+        "tile_layer_commit", interactive=True
+    ) <= governor.batch_limit_for("tile_layer_commit", interactive=False)
+    # A fallback observation is not a GUI callback: it must not appear as one.
+    assert tuple(governor._recent_ui_work_observations) == ()
+
+    aggressive = ResourceGovernor(
+        _policy(MemoryProfileChoice.AGGRESSIVE), profile=MemoryProfileChoice.AGGRESSIVE
+    )
+
+    assert aggressive.latency_tuning().target_idle_ms != governor.latency_tuning().target_idle_ms
+
+
 def test_render_pass_knob_owns_r5_target_and_adapts_per_item_work():
     governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
 
@@ -1310,6 +1350,19 @@ def test_owner_and_gui_families_run_concurrently_without_losing_observations():
             snapshot = governor.diagnostics()
             assert len(snapshot.recent_ui_work_observations) <= 64
 
+    def latency_family() -> None:
+        # The presentation path's own three entry points (ADR 0065 stage 2
+        # decision 7). They write and walk the controller's channel dict, which
+        # ``diagnostics`` iterates in sorted order at the same time -- so this
+        # row asks the dict-mutated-during-iteration question the deque rows
+        # above ask of the observation ring.
+        for index in range(decision_iterations):
+            governor.observe_latency(
+                f"presentation_prepare_{index % 16}", 1.0 + index % 4, count=1 + index % 3
+            )
+            governor.batch_limit_for("tile_layer_commit", interactive=index % 2 == 0)
+            governor.latency_tuning()
+
     bodies = [
         drain,
         drain,
@@ -1317,6 +1370,7 @@ def test_owner_and_gui_families_run_concurrently_without_losing_observations():
         render_pass("target"),
         gui_family,
         read_diagnostics,
+        latency_family,
     ]
     start = threading.Barrier(len(bodies), timeout=60.0)
 

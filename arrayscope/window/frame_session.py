@@ -768,9 +768,16 @@ class FrameSession:
     render_round_demand: object = None
     round_preview_level: int = 0
     round_target_level: int = 0
-    # Backend commits this round has landed.  The R6 owner reads it when the
-    # next round opens: zero means the round never reached the screen.
+    # Backend commits this session has landed, monotonic for its whole life.
+    # The R6 owner reads it when the next round opens: no growth since the
+    # watermark below means the round it is replacing never reached the screen.
+    #
+    # Monotonic rather than reset per round (ADR 0065 stage 2, decision 11):
+    # a read-then-zero loses any commit that lands between the two, and one
+    # lost commit is enough to trip R6 shed escalation on its own.
     render_round_commits: int = 0
+    # The counter's value when the current round opened.
+    render_round_commits_watermark: int = 0
     first_pass_quality: str | None = None
     first_pass_histogram_published: bool = False
     pending_refined_level_tiles: deque[RenderedTile] = field(default_factory=deque)

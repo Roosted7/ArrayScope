@@ -160,7 +160,6 @@ class ArrayScopeWindow(
             profile=self.app_settings.memory_profile,
             responsiveness_weight=self.app_settings.render_responsiveness.weight,
         )
-        self.latency_feedback = self.resource_governor.latency_feedback
         self.resource_governor.update_telemetry(
             sample_resource_snapshot(),
             self.renderer._memory_policy(),
@@ -698,21 +697,21 @@ class ArrayScopeWindow(
         backend: str = "",
         details: tuple[str, ...] = (),
     ) -> None:
+        # The governor is the only sink: it owns the lock the feedback
+        # controller lacks (ADR 0065 stage 2, decision 7).  A window built
+        # without one records nothing rather than reaching past that lock.
         governor = getattr(self, "resource_governor", None)
-        if governor is not None:
-            governor.record_ui_observation(
-                channel,
-                elapsed_ms,
-                item_count=count,
-                byte_count=byte_count,
-                work_class=work_class,
-                backend=backend,
-                details=tuple(details),
-            )
+        if governor is None:
             return
-        feedback = getattr(self, "latency_feedback", None)
-        if feedback is not None:
-            feedback.observe(channel, elapsed_ms, count=count, byte_count=byte_count)
+        governor.record_ui_observation(
+            channel,
+            elapsed_ms,
+            item_count=count,
+            byte_count=byte_count,
+            work_class=work_class,
+            backend=backend,
+            details=tuple(details),
+        )
 
     def _gui_callback_budget_decision(self, channel: str, *, interactive: bool = False):
         return default_gui_callback_budget_decision(channel, interactive=interactive)

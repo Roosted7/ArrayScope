@@ -746,11 +746,12 @@ def test_wgpu_shed_index_scrub_moves_the_montage_and_still_completes(qtbot, monk
     the contract's "freezes every tile until idle".
 
     The load is stated rather than raced.  ``render_round_commits`` is the
-    counter the R6 owner reads, so zeroing it says "the round that just ended
-    reached the backend not once"; two of those escalate to ``RETAIN_ONLY``.
-    The first scrub below leaves it alone and is the control arm: without it
-    the branch assertion could not fail, because a montage this size never
-    arms the handoff for a reason of its own.
+    monotonic counter the R6 owner reads against the watermark it stored when
+    the round opened, so raising the watermark to the counter says "the round
+    that just ended reached the backend not once"; two of those escalate to
+    ``RETAIN_ONLY``.  The first scrub below leaves it alone and is the control
+    arm: without it the branch assertion could not fail, because a montage this
+    size never arms the handoff for a reason of its own.
     """
 
     from arrayscope.render.progressive_scheduling import ShedLevel
@@ -830,14 +831,14 @@ def test_wgpu_shed_index_scrub_moves_the_montage_and_still_completes(qtbot, monk
 
         # One round that reached the backend not once: R6 gives up the target
         # pass first and still owes one whole frame.
-        session.render_round_commits = 0
+        session.render_round_commits_watermark = session.render_round_commits
         win._set_view_state(montage_state(2))
         win.update_image_view()
         assert rounds[-1] == (ShedLevel.TARGET_PASS, True)
 
         # A second one: now the handoff itself goes, and the remap presents as
         # it stands instead of waiting for a complete successor.
-        session.render_round_commits = 0
+        session.render_round_commits_watermark = session.render_round_commits
         win._set_view_state(montage_state(3))
         win.update_image_view()
         assert rounds[-1] == (ShedLevel.RETAIN_ONLY, False)

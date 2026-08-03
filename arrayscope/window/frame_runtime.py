@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from functools import wraps
 from pathlib import Path
 from time import perf_counter
 
@@ -62,6 +63,47 @@ from arrayscope.window.render_contract import (
 
 MONTAGE_AUTOFIT_VISIBLE_FRACTION = 0.80
 MONTAGE_AUTOFIT_RESCUE_VISIBLE_FRACTION = 0.35
+
+
+def timed_montage_retarget(method):
+    """Record one pipeline retarget as a unit of GUI-thread work.
+
+    ADR 0065 stage 2 moves this funnel to the presentation owner, and the
+    measurement that made it a prerequisite rather than an option -- ~89 ms x
+    52 calls, 65 % of the GUI side's order-lock hold across one fill -- came
+    from lock instrumentation that no longer exists. The channel lands before
+    the move so the move is adjudicated on the axis it was diagnosed on.
+
+    A decorator for the reason ``session_order_lock_section`` is one: the span
+    is the whole call including its early exits, and re-indenting a funnel
+    under constant churn to get that buries the change in the diff. Applied
+    beneath the lock decorator, so what it measures is hold, not wait.
+    """
+
+    @wraps(method)
+    def timed(owner, *args, **kwargs):
+        started = perf_counter()
+        submitted = 0
+        try:
+            submitted = method(owner, *args, **kwargs)
+            return submitted
+        finally:
+            elapsed_ms = (perf_counter() - started) * 1000.0
+            # A retarget against a superseded session bails in microseconds and
+            # is by far the commonest call; recording those would price the
+            # channel on the replans that never cost a frame.
+            if elapsed_ms >= 4.0:
+                record = getattr(getattr(owner, "win", None), "_record_ui_work", None)
+                if callable(record):
+                    record(
+                        "montage_retarget",
+                        elapsed_ms,
+                        count=1,
+                        work_class="presentation_plan",
+                        details=(f"submitted={int(submitted or 0)}",),
+                    )
+
+    return timed
 
 
 def _reduced_input_coarse_rung_available(session, seed_tile) -> bool:
@@ -391,6 +433,7 @@ class FrameRuntimeMixin:
         run_on_gui_thread(self, lambda: Qt.QtCore.QTimer.singleShot(1, self, fire))
 
     @session_order_lock_section
+    @timed_montage_retarget
     def retarget_frame_pipeline(
         self,
         session,
