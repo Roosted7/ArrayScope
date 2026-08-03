@@ -48,6 +48,7 @@ from arrayscope.operations.regions import region_contains, region_is_full
 from arrayscope.operations.slabs import plan_slab, request_for_image, stage_key_for_candidate
 from arrayscope.operations.stage_fanin import StageFanInState
 from arrayscope.presentation import payload_ref_from_display_payload
+from arrayscope.presentation.residency import capture_residency_snapshot
 from arrayscope.render import effects as render_effects
 from arrayscope.render import lod as render_lod
 from arrayscope.render.ladder import Rung
@@ -216,6 +217,40 @@ def run_on_gui_thread(renderer, callback) -> None:
         callback()
         return
     _post_visible_path_callback(renderer, callback)
+
+
+def _presentation_owner(renderer):
+    """The window's presentation owner, or ``None``.
+
+    ``None`` is the ordinary answer for a renderer built without a MainWindow
+    (unit tests, teardown), not a degraded one: with no owner thread there is
+    no second writer, so "run it here" is the correct owner-side placement.
+    """
+
+    renderer = getattr(renderer, "renderer", renderer)
+    return getattr(getattr(renderer, "win", None), "presentation_owner", None)
+
+
+def post_to_presentation_owner(renderer, callback) -> bool:
+    """Queue ``callback`` for the presentation owner; say whether it took it.
+
+    ADR 0065 stage 2 slice B. Unconditionally *deferring* — this never runs
+    ``callback`` inline, even when called from the owner thread itself. The
+    ladder retarget is the caller, and a retarget run inline from a completion
+    body is the O(N²) replan storm ``request_montage_replan`` documents; the
+    owner's drain runs posted messages at the tail of a batch, which is the
+    barrier that keeps a completion streak to one retarget.
+
+    Returns ``False`` when there is no owner to take it, so the caller can
+    fall back to its GUI-thread form rather than lose the wakeup. A dropped
+    post is a lost wakeup, which is the one failure a retarget may not have.
+    """
+
+    owner = _presentation_owner(renderer)
+    if owner is None or not owner.accepts_posts():
+        return False
+    owner.post(callback)
+    return True
 
 
 def _session_order_lock(owner):
@@ -642,6 +677,39 @@ class FramePipelineEffects:
 
         self._resident_crop_rebind_flag = None
 
+    def _physical_residency_inputs(self):
+        """``(physical_resident_fn, committed_frame)`` for the rebind seam.
+
+        ADR 0065 stage 2 slice B. On the GUI thread these are the live probe
+        and the live attribute — byte-for-byte what this seam always read. Off
+        it (the ladder retarget runs on the presentation owner now) the probe
+        would be a cross-thread walk of the page table the GUI mutates, so both
+        come from the snapshot the last acknowledgement froze
+        (``presentation/residency.py``). No snapshot, or eviction has moved
+        since it was taken, means no probe: the seam's existing
+        ``no-residency-seam`` / logical-remap branch answers instead, which is
+        the behaviour a pyqtgraph backend has always had here.
+
+        ``_committed_display_frame`` is still read live when no snapshot
+        exists. It is a whole-object republication (``_set_committed_display_frame``),
+        so the read is a plain attribute load of an immutable frame — one
+        retarget of staleness at worst, and the seed re-validates session
+        currency around it anyway.
+        """
+
+        renderer = self.renderer
+        win = getattr(renderer, "win", None)
+        if on_gui_thread():
+            img_view = getattr(win, "img_view", None)
+            return (
+                getattr(img_view, "tiledPayloadResident", None),
+                getattr(win, "_committed_display_frame", None),
+            )
+        snapshot = getattr(renderer, "_presentation_residency_snapshot", None)
+        if snapshot is None:
+            return None, getattr(win, "_committed_display_frame", None)
+        return snapshot.physical_resident_fn(), snapshot.committed_frame
+
     def _seed_resident_crop_rebinds(self, scope) -> None:
         """Rebind a resident crop-window scrub before the ladder plans it.
 
@@ -677,9 +745,7 @@ class FramePipelineEffects:
             self._record_resident_crop_rebind(gate="disabled")
             return
         self._expire_canonical_plane_payloads_for_document()
-        win = getattr(self.renderer, "win", None)
-        img_view = getattr(win, "img_view", None)
-        resident_fn = getattr(img_view, "tiledPayloadResident", None)
+        resident_fn, committed_frame = self._physical_residency_inputs()
         if not callable(resident_fn):
             self._record_resident_crop_rebind(gate="no-residency-seam")
             return
@@ -696,7 +762,7 @@ class FramePipelineEffects:
         # The last committed frame is the pre-scrub (predecessor-window) truth:
         # a new session's live payload map is empty at plan time, so the
         # committed wrappers are what a resident rebind clones from.
-        previous_by_tile = previous_tiled_payloads(getattr(win, "_committed_display_frame", None))
+        previous_by_tile = previous_tiled_payloads(committed_frame)
         rebound = self.session.rebind_resident_crop_tiles(
             physical_resident_fn=resident_fn,
             tile_numbers=tile_numbers,
@@ -766,8 +832,7 @@ class FramePipelineEffects:
 
         if not self._resident_crop_rebind_enabled():
             return False
-        win = getattr(self.renderer, "win", None)
-        resident_fn = getattr(getattr(win, "img_view", None), "tiledPayloadResident", None)
+        resident_fn, committed_frame = self._physical_residency_inputs()
         tile_numbers = tuple(getattr(scope, "visible_tile_numbers", ()) or ())
         if (
             not callable(resident_fn)
@@ -793,7 +858,7 @@ class FramePipelineEffects:
         # chunks; the final chunk owns the one complete atomic handoff.
         self.renderer._montage_presentation_gate_owner = None
         self.renderer._montage_presentation_gate_armed = False
-        previous_by_tile = previous_tiled_payloads(getattr(win, "_committed_display_frame", None))
+        previous_by_tile = previous_tiled_payloads(committed_frame)
         canonical_by_tile = self._canonical_plane_memo()
         chunks = tuple(
             tile_numbers[start : start + max(1, int(batch_size))]
@@ -804,10 +869,20 @@ class FramePipelineEffects:
         def run_chunk(index: int) -> None:
             if not self.renderer._frame_session_is_current(self.session):
                 return
+            # Re-derived per chunk, not captured: chunk 0 can be seeded from
+            # the presentation owner (a frozen residency snapshot) while the
+            # posted continuations run on the GUI thread (the live probe).
+            # Carrying a frozen probe across to the GUI thread would make it
+            # optimistic about evictions it cannot see, and carrying a live one
+            # the other way is the cross-thread read the snapshot exists to
+            # remove.
+            chunk_resident_fn, _committed = self._physical_residency_inputs()
+            if not callable(chunk_resident_fn):
+                return
             chunk = chunks[index]
             started = perf_counter()
             rebound = self.session.rebind_resident_crop_tiles(
-                physical_resident_fn=resident_fn,
+                physical_resident_fn=chunk_resident_fn,
                 tile_numbers=chunk,
                 previous_by_tile={
                     tile: previous_by_tile[tile] for tile in chunk if tile in previous_by_tile
@@ -847,9 +922,18 @@ class FramePipelineEffects:
             )
             next_index = index + 1
             if next_index < len(chunks):
+                # The continuation is a GUI-thread session section and must be
+                # counted as one. It was not before ADR 0065 stage 2 slice B —
+                # only the first chunk inherited a lock, from the caller — and
+                # the gap mattered less while every chunk ran on the GUI
+                # thread anyway. Now the first can be seeded from the owner,
+                # so the chunks' shared session writes need the bridge that
+                # orders them against it.
                 _post_visible_path_callback(
                     self.renderer,
-                    lambda next_index=next_index: run_chunk(next_index),
+                    lambda next_index=next_index: self._run_locked_rebind_chunk(
+                        run_chunk, next_index
+                    ),
                 )
                 return
             self.session.resident_crop_rebind_stats = aggregate
@@ -861,11 +945,17 @@ class FramePipelineEffects:
         run_chunk(0)
         return True
 
+    @session_order_lock_section
+    def _run_locked_rebind_chunk(self, run_chunk, index: int) -> None:
+        """One posted governed-rebind chunk, as a counted GUI section."""
+
+        run_chunk(int(index))
+
     def _needs_governed_crop_local_subset_rebind(self, scope) -> bool:
         """Whether this transition is the retained sharpened-crop case."""
 
-        win = getattr(self.renderer, "win", None)
-        previous_by_tile = previous_tiled_payloads(getattr(win, "_committed_display_frame", None))
+        _resident_fn, committed_frame = self._physical_residency_inputs()
+        previous_by_tile = previous_tiled_payloads(committed_frame)
         plan_tiles = {
             int(tile.montage_index): tile
             for tile in tuple(getattr(getattr(self.session, "plan", None), "tiles", ()) or ())
@@ -3624,6 +3714,14 @@ class FramePipelineEffects:
             session.plan, tuple(session.tile_states), rect
         )
         renderer._last_montage_overlay_update_ms = (perf_counter() - overlay_start) * 1000.0
+        # ADR 0065 stage 2 decision 5, the capture point. Here and not earlier:
+        # the page table stopped moving when the submit returned, and
+        # `_sync_committed_montage_geometry` above has just republished
+        # `_committed_display_frame`, so this is the one instant in the commit
+        # where the two halves the crop-rebind seed reads describe the same
+        # transaction. Under the order lock by construction — every caller of
+        # this is inside a `session_order_lock_section` commit funnel.
+        renderer._presentation_residency_snapshot = capture_residency_snapshot(renderer.win)
         self._finish_commit(
             report,
             tile_state,
@@ -4675,48 +4773,39 @@ def submit_deferred_stage_fan_in_plan(renderer, session, missing_tiles) -> bool:
         merge_stage_fan_in_plan(current, stage_plan)
         submit_stage_tasks(renderer, current, stage_plan["stage_requests"])
 
-        def retarget_on_gui(session_id=session_id, session_key=session_key) -> None:
-            # ADR 0065 stage 1 dispatches this completion on the presentation
-            # owner, and everything from here down is GUI-affine: the retarget
-            # arms the montage watchdog's QTimer, and its ready-display commit
-            # reaches setImageStale/setEvaluationOverlay and the tile overlays.
-            # Plan/merge/submit above are pure session bookkeeping and stay on
-            # the owner — that is the 4.4 s/session this stage moves. This
-            # continuation is the same GUI-thread work the drain used to run.
-            #
-            # It re-checks currency because a posted continuation can land
-            # after a rebirth: the identity pair is the same one this callback
-            # is gated on, and `retarget_frame_pipeline` validates again.
-            with _session_order_lock(renderer):
-                live = getattr(renderer, "_frame_session", None)
-                if live is None or not renderer._is_current_frame_session(session_id, session_key):
-                    return
-                # A stage-plan completion is one kernel-bridge callback.
-                # Running the complete 272-tile ladder retarget inline here
-                # made that single callback 320-330 ms on the field crop.  Seed
-                # backend-proven retained pixels first; their physical ACK owns
-                # the refinement replan.  When no rebind is available, preserve
-                # the ordinary inline retarget.
-                pipeline = renderer._frame_pipeline_for_session(live)
-                scope = renderer._lod_admission_scope(
-                    live,
-                    renderer._montage_render_intent(live),
-                )
-                governed_rebind = bool(
-                    pipeline.effects._needs_governed_crop_local_subset_rebind(scope)
-                    and pipeline.effects._seed_resident_crop_rebinds_governed(scope)
-                )
-                if governed_rebind:
-                    # Preview work admitted before the async stage answer is
-                    # now superseded by physically complete retained pixels.
-                    # Close that intent so its late completions cannot publish
-                    # partial preview cohorts between the governed rebind
-                    # chunks.
-                    pipeline.close()
-                else:
-                    renderer.retarget_frame_pipeline(live)
-
-        run_on_gui_thread(renderer, retarget_on_gui)
+        # ADR 0065 stage 2 slice B: this tail runs inline, on whichever thread
+        # dispatched the completion. Stage 1 posted it to the GUI thread and
+        # said why — "everything from here down is GUI-affine" — and that
+        # reason no longer holds: the ladder retarget is an owner operation
+        # now, the watchdog arm posts its own QTimer, and the ready-display
+        # commit's staleness/overlay chrome posts from
+        # `apply_montage_presentation`. What is left here is session
+        # bookkeeping, so it belongs beside the plan/merge/submit above rather
+        # than one queued event later. Currency was checked at the top of this
+        # callback and `retarget_frame_pipeline` validates again.
+        #
+        # A stage-plan completion is one kernel-bridge callback. Running the
+        # complete 272-tile ladder retarget inline here made that single
+        # callback 320-330 ms on the field crop.  Seed backend-proven retained
+        # pixels first; their physical ACK owns the refinement replan.  When no
+        # rebind is available, preserve the ordinary inline retarget.
+        pipeline = renderer._frame_pipeline_for_session(current)
+        scope = renderer._lod_admission_scope(
+            current,
+            renderer._montage_render_intent(current),
+        )
+        governed_rebind = bool(
+            pipeline.effects._needs_governed_crop_local_subset_rebind(scope)
+            and pipeline.effects._seed_resident_crop_rebinds_governed(scope)
+        )
+        if governed_rebind:
+            # Preview work admitted before the async stage answer is now
+            # superseded by physically complete retained pixels. Close that
+            # intent so its late completions cannot publish partial preview
+            # cohorts between the governed rebind chunks.
+            pipeline.close()
+        else:
+            renderer.retarget_frame_pipeline(current)
 
     def stale(session_id=session.session_id, session_key=session.key):
         current = getattr(renderer, "_frame_session", None)
@@ -4850,6 +4939,17 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
     # One read of the GUI-owned compute/memory policy for the whole batch, on
     # the submitting thread; the closures only swap in their own token. Built
     # on first use so a batch with nothing to submit still touches nothing.
+    #
+    # ADR 0065 stage 2 slice B, affinity verdict: `_evaluation_context` reads
+    # `win.compute_policy` and `renderer._memory_policy()`, and BOTH are frozen
+    # dataclasses replaced wholesale (`_apply_compute_policy` rebinds the
+    # attribute; `_refresh_memory_policy` rebinds `_current_memory_policy`).
+    # A read from the presentation owner therefore sees one policy or the
+    # other, never a half-updated one, and the order lock the retarget holds
+    # gives it a consistent pair. No snapshot needed. The first-use lazy build
+    # inside `_memory_policy` is the one caveat: it touches RLock-guarded
+    # caches, and by the time any retarget runs the window build has already
+    # populated it.
     stage_context = None
     for request, plan in tuple(stage_requests):
         if request is None or request.key in session.stage_fan_in.active_requests:
@@ -4908,7 +5008,15 @@ def submit_stage_tasks(renderer, session, stage_requests) -> None:
                     current.stage_fan_in.tile_stage_keys.pop(tile_number, None)
                     current.mark_skipped(current.plan.tiles[tile_number])
             current.stage_fan_in.fail(key)
-            show_status_message(renderer.win, f"Montage stage update failed: {exc}", timeout=4000)
+            # Toast: a Qt widget. The session bookkeeping above and the
+            # retarget below run where this callback runs (stage 2 slice B);
+            # only the message crosses.
+            run_on_gui_thread(
+                renderer,
+                lambda message=f"Montage stage update failed: {exc}": show_status_message(
+                    renderer.win, message, timeout=4000
+                ),
+            )
             renderer.retarget_frame_pipeline(current, force_commit=True)
 
         handle = renderer.win.kernel.submit(

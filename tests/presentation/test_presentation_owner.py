@@ -439,6 +439,107 @@ def test_events_still_queued_at_shutdown_are_dropped_not_run():
     assert owner.snapshot()["pending_events"] == 0
 
 
+# -------------------------------------------------------------- posted work
+
+
+def test_a_posted_callback_runs_on_the_owner_under_the_order_lock(owned_kernel):
+    """ADR 0065 stage 2 slice B: ``post`` is the ladder retarget's entry.
+
+    Two claims in one, because either alone would pass with the other broken:
+    the callback runs on the *owner* thread (not the poster's), and it runs
+    inside an owner-side lock section — which is what makes a posted retarget
+    serialize against GUI session sections the same way a dispatched
+    completion does.
+    """
+
+    _kernel, owner = owned_kernel()
+    recorder = _ThreadRecorder()
+    held: list[bool] = []
+
+    def body() -> None:
+        # `acquire(blocking=False)` from the owner's own thread would succeed
+        # on a re-entrant lock regardless, so the claim is checked from a
+        # foreign thread: it must NOT be able to take the lock right now.
+        probe = threading.Thread(target=lambda: held.append(owner.order_lock.acquire(False)))
+        probe.start()
+        probe.join(OWNER_WAIT_S)
+        recorder()
+
+    owner.post(body)
+
+    assert recorder.ran.wait(OWNER_WAIT_S)
+    assert recorder.thread_name == "presentation-owner"
+    assert recorder.thread_ident != threading.get_ident()
+    assert held == [False]
+    snapshot = owner.snapshot()
+    assert snapshot["messages_posted"] == 1
+    assert snapshot["messages_dispatched"] == 1
+    assert snapshot["pending_messages"] == 0
+    assert snapshot["owner_lock_acquisitions"] >= 1
+
+
+def test_a_raising_posted_callback_is_counted_and_the_thread_keeps_draining(owned_kernel):
+    failures: list[BaseException] = []
+    _kernel, owner = owned_kernel(error_hook=failures.append)
+    recorder = _ThreadRecorder()
+
+    def boom() -> None:
+        raise RuntimeError("posted body failed")
+
+    owner.post(boom)
+    owner.post(recorder)
+
+    assert recorder.ran.wait(OWNER_WAIT_S)
+    snapshot = owner.snapshot()
+    assert snapshot["errors"] == 1
+    assert snapshot["messages_dispatched"] == 2
+    assert [type(exc).__name__ for exc in failures] == ["RuntimeError"]
+
+
+def test_posted_messages_drain_after_the_events_of_the_batch():
+    """The barrier the replan gate needs, expressed as an order.
+
+    Not a preference: a message interleaved between events fires one full
+    ladder retarget per completion, which is the O(N^2) storm
+    ``request_montage_replan`` exists to prevent. Draining messages once the
+    event deque is empty is stage 2 decision 1's "tail of the drain batch",
+    and it is only observable as an order — hence the sequence, not a count.
+    """
+
+    owner = PresentationOwner(_NullKernel())
+    order: list[str] = []
+    done = threading.Event()
+
+    for index in range(3):
+        owner.append(_dispatchable(lambda index=index: order.append(f"event-{index}")))
+    owner.post(lambda: order.append("message"))
+    owner.post(lambda: (order.append("message"), done.set()))
+
+    owner.start()
+    try:
+        assert done.wait(OWNER_WAIT_S)
+    finally:
+        owner.shutdown(timeout=OWNER_WAIT_S)
+
+    assert order == ["event-0", "event-1", "event-2", "message", "message"]
+
+
+def test_posted_messages_still_queued_at_shutdown_are_dropped_not_run():
+    owner = PresentationOwner(_NullKernel())
+    recorder = _ThreadRecorder()
+    owner.post(recorder)
+
+    assert owner.shutdown(timeout=OWNER_WAIT_S) is True
+
+    assert not recorder.ran.is_set()
+    snapshot = owner.snapshot()
+    assert snapshot["messages_dropped_at_stop"] == 1
+    assert snapshot["pending_messages"] == 0
+    # And a stopped owner says so, so a caller runs its work inline instead of
+    # handing it to a queue nothing drains.
+    assert owner.accepts_posts() is False
+
+
 def _owner_threads() -> int:
     return sum(1 for thread in threading.enumerate() if thread.name == "presentation-owner")
 
@@ -456,8 +557,12 @@ def test_the_snapshot_carries_every_counter(owned_kernel):
     assert set(snapshot) == {
         "running",
         "pending_events",
+        "pending_messages",
         "events_dispatched",
         "events_dropped_at_stop",
+        "messages_posted",
+        "messages_dispatched",
+        "messages_dropped_at_stop",
         "worst_event_ms",
         "worst_event_key_head",
         "owner_lock_acquisitions",

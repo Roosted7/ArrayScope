@@ -18,7 +18,10 @@ stage-2 condition for widening it.
 What this module owns:
 
 - the thread, and the only loop that calls ``kernel.dispatch_event`` off the
-  GUI thread;
+  GUI thread — and, from stage 2 slice B, the loop that runs **posted
+  operations** (:meth:`PresentationOwner.post`) as well: the ladder retarget's
+  fire-and-forget callers hand it work the same way the kernel hands it
+  completions;
 - the **session-order lock** (:attr:`PresentationOwner.order_lock`), the ADR's
   migration bridge. Until the last GUI-side session writer becomes a posted
   message, this one ``RLock`` serializes owner pipeline sections against GUI
@@ -105,6 +108,19 @@ def montage_completion_route(event: Any) -> bool:
     belongs with it: when stage 2 has shrunk the GUI sections, routing the
     admissions costs what the ADR predicted instead of the fill.
 
+    Stage 2 slice B measured a second, tighter coupling in the same direction,
+    and it reorders the plan. The replan gate's ``fire()`` cannot become a
+    posted operation *before* this clause opens. Its coalescing has never come
+    from the armed flag — that only counts requests — but from the GUI event
+    loop's own occupancy: a ``singleShot(1)`` fire cannot run until the current
+    20-45 ms commit ends, so every completion that landed inside it folds into
+    one gate. The owner has no equivalent while its event deque holds only the
+    ~6 stage-plan bodies a fill produces: ``_drain``'s tail-of-batch rule fires
+    immediately, one retarget per completion, and the 272-tile probe measured
+    exactly that (5, 140, 21 of 272 presented, 3/3 censored, bisected to that
+    one line). Only when the per-tile admissions arrive *here* is there a batch
+    whose tail is a real barrier. So the two land together, or neither does.
+
     Two further exclusions are deliberate rather than incidental:
 
     - Histogram and level-evidence completions (``montage:…:histogram``,
@@ -146,12 +162,20 @@ class PresentationOwner:
         #: section may call into another one; owner sections never nest.
         self.order_lock = threading.RLock()
         self._events: deque = deque()
+        #: Posted operations (:meth:`post`). A second deque rather than a tag
+        #: on the event deque because ``append`` runs under the kernel lock and
+        #: must stay a bare ``deque.append`` — see the module docstring — and
+        #: because the two are drained at different points (see :meth:`_drain`).
+        self._messages: deque = deque()
         self._wake = threading.Event()
         self._stop = False
         self._thread: threading.Thread | None = None
         self._lifecycle = threading.Lock()
         self.events_dispatched = 0
         self.events_dropped_at_stop = 0
+        self.messages_posted = 0
+        self.messages_dispatched = 0
+        self.messages_dropped_at_stop = 0
         self.worst_event_ms = 0.0
         self.worst_event_key_head = ""
         self.owner_lock_acquisitions = 0
@@ -195,7 +219,48 @@ class PresentationOwner:
 
         self._wake.set()
 
+    # ---------------------------------------------------------- posted work
+
+    def post(self, callback: Callable[[], None]) -> None:
+        """Queue one owner-thread operation. Callable from any thread.
+
+        ADR 0065 stage 2 slice B. The completion deque carries work the kernel
+        produced; this carries work a *caller* wants run under the owner's
+        order-lock section — the ladder retarget above all. Both end up in the
+        same drain, and each posted callback gets its own
+        :meth:`timed_order_lock` section and its own stand-aside turn, exactly
+        like a dispatched event: the alternation the fill depends on knows
+        nothing about where an item came from.
+
+        A posted callback owns its own currency re-check. The owner cannot do
+        it — it has no idea which session identity the closure was built
+        against — and a message that ran against a superseded session would
+        reintroduce the staleness class the ADR refuses to add. Every caller in
+        the tree captures ``(session_id, session.key)`` at post time and
+        re-checks with ``_is_current_frame_session`` inside.
+
+        ``deque.append`` is atomic and the wake is an ``Event.set``, so this
+        takes no lock and is safe to call from a GUI section that already holds
+        the order lock — posting must never be able to deadlock against the
+        drain it is feeding.
+        """
+
+        self._messages.append(callback)
+        self.messages_posted += 1
+        self._wake.set()
+
     # ------------------------------------------------------------- lifecycle
+
+    def accepts_posts(self) -> bool:
+        """Whether :meth:`post` will actually be drained.
+
+        Asked before posting, never after: a callback handed to a stopped
+        owner is dropped, and for the retarget that means a lost wakeup rather
+        than a late one. Callers run it inline instead.
+        """
+
+        thread = self._thread
+        return not self._stop and thread is not None and thread.is_alive()
 
     def start(self) -> None:
         with self._lifecycle:
@@ -233,10 +298,14 @@ class PresentationOwner:
         while not self._stop:
             self._wake.wait()
             self._wake.clear()
-            before = self.events_dispatched
+            before = self.events_dispatched + self.messages_dispatched
             self._drain()
             hook = self.after_dispatch
-            if hook is not None and self.events_dispatched > before and not self._stop:
+            if (
+                hook is not None
+                and (self.events_dispatched + self.messages_dispatched) > before
+                and not self._stop
+            ):
                 try:
                     hook()
                 except Exception:
@@ -244,13 +313,45 @@ class PresentationOwner:
         self._drop_pending()
 
     def _drain(self) -> None:
+        """Events first, posted messages at the tail of the batch.
+
+        Not a priority statement — a coalescing one, and the reason is the
+        replan gate. Its arm/fire pair is coalesced by a flag that ``fire()``
+        clears on entry, so the number of retargets a completion streak causes
+        is exactly the number of times ``fire()`` runs between arms. The
+        GUI-thread predecessor got its coalescing from Qt: the 1 ms timer could
+        not fire until the event loop turned, and every admission that landed
+        in that window folded into the one armed gate. Interleaving posted
+        messages between events reproduces the O(N²) replan storm
+        ``request_montage_replan`` exists to prevent — one full ladder retarget
+        per admission. Draining them once the event deque is empty is the same
+        barrier the timer was, expressed in the owner's own units, and it is
+        where stage 2's decision 1 puts transaction preparation as well.
+
+        A message dispatched at the tail can post another message or admit work
+        that produces events; the loop re-checks both deques, so the batch ends
+        only when there is genuinely nothing left. The starvation this trades
+        for is a message behind an event stream that never drains — bounded in
+        practice by the fill being finite, and visible as ``pending_messages``
+        in :meth:`snapshot` rather than assumed away.
+        """
+
         events = self._events
+        messages = self._messages
         while not self._stop:
             try:
                 event = events.popleft()
             except IndexError:
+                event = None
+            if event is not None:
+                self._dispatch(event)
+                self._yield_to_gui()
+                continue
+            try:
+                message = messages.popleft()
+            except IndexError:
                 return
-            self._dispatch(event)
+            self._dispatch_message(message)
             self._yield_to_gui()
 
     def _yield_to_gui(self) -> None:
@@ -308,8 +409,18 @@ class PresentationOwner:
             try:
                 events.popleft()
             except IndexError:
-                return
+                break
             self.events_dropped_at_stop += 1
+        messages = self._messages
+        while True:
+            try:
+                messages.popleft()
+            except IndexError:
+                return
+            # Counted, not silent: a retarget dropped at teardown is correct
+            # (the window is unwinding) but a *non-zero* count outside teardown
+            # would be a lost wakeup, and only the counter can say which.
+            self.messages_dropped_at_stop += 1
 
     def _dispatch(self, event: Any) -> None:
         failure: BaseException | None = None
@@ -328,6 +439,29 @@ class PresentationOwner:
                 self.worst_event_key_head = _key_head(getattr(event.spec, "key", None))
         if failure is not None and self._error_hook is not None:
             # A hook that raises would kill the one thread that reports it.
+            try:
+                self._error_hook(failure)
+            except Exception:
+                self.last_error = traceback.format_exc()
+
+    def _dispatch_message(self, callback: Callable[[], None]) -> None:
+        """Run one posted callback under its own order-lock section."""
+
+        failure: BaseException | None = None
+        with self.timed_order_lock(_OWNER):
+            started = perf_counter()
+            try:
+                callback()
+            except BaseException as exc:  # the owner thread must outlive its bodies
+                failure = exc
+                self.errors += 1
+                self.last_error = traceback.format_exc()
+            event_ms = (perf_counter() - started) * 1000.0
+            self.messages_dispatched += 1
+            if event_ms > self.worst_event_ms:
+                self.worst_event_ms = event_ms
+                self.worst_event_key_head = _key_head(getattr(callback, "owner_key", None))
+        if failure is not None and self._error_hook is not None:
             try:
                 self._error_hook(failure)
             except Exception:
@@ -400,8 +534,12 @@ class PresentationOwner:
         return {
             "running": self._thread is not None and self._thread.is_alive(),
             "pending_events": len(self._events),
+            "pending_messages": len(self._messages),
             "events_dispatched": int(self.events_dispatched),
             "events_dropped_at_stop": int(self.events_dropped_at_stop),
+            "messages_posted": int(self.messages_posted),
+            "messages_dispatched": int(self.messages_dispatched),
+            "messages_dropped_at_stop": int(self.messages_dropped_at_stop),
             "worst_event_ms": float(self.worst_event_ms),
             "worst_event_key_head": str(self.worst_event_key_head),
             "owner_lock_acquisitions": int(self.owner_lock_acquisitions),

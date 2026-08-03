@@ -45,6 +45,7 @@ from arrayscope.window import frame_effects as montage_commit
 from arrayscope.window.frame_effects import (
     FramePipelineEffects,
     on_gui_thread,
+    post_to_presentation_owner,
     run_on_gui_thread,
     session_order_lock_section,
 )
@@ -104,6 +105,47 @@ def timed_montage_retarget(method):
                     )
 
     return timed
+
+
+def post_frame_pipeline_retarget(renderer, session, **kwargs) -> None:
+    """Run one ladder retarget on the presentation owner; do not wait.
+
+    ADR 0065 stage 2 slice B, for the callers that already ignore the return
+    value. The measured motivation is in
+    ``presentation/owner.montage_completion_route``: ``retarget_frame_pipeline``
+    held the GUI side of the session-order lock ~89 ms x 52 calls in one fill,
+    65 % of all GUI-side hold, and that is what made routing the per-tile
+    completion stream censor the 272-tile probe.
+
+    The closure captures the identity pair and re-checks it, like every other
+    posted continuation in this tree: a viewport or resize retarget names one
+    session generation, and if a rebirth superseded it the successor arrived
+    with a retarget of its own. That is the opposite of the replan gate's rule
+    (``fire()`` deliberately replans whatever is current), and deliberately so
+    — the gate is a *standing* "there is work" signal with no session of its
+    own, while these calls are the tail of one session's viewport change.
+
+    A module function rather than a mixin method so the fallback is reachable
+    for a renderer that is only a stub of one: with no owner to take the post
+    the retarget runs inline, exactly as before, and nothing in the closure is
+    evaluated.
+    """
+
+    if session is None:
+        return
+
+    session_id = int(getattr(session, "session_id", 0) or 0)
+    session_key = session.key
+
+    def retarget() -> None:
+        current = getattr(renderer, "_frame_session", None)
+        if current is None or not renderer._is_current_frame_session(session_id, session_key):
+            return
+        renderer.retarget_frame_pipeline(current, **kwargs)
+
+    if post_to_presentation_owner(renderer, retarget):
+        return
+    renderer.retarget_frame_pipeline(session, **kwargs)
 
 
 def _reduced_input_coarse_rung_available(session, seed_tile) -> bool:
@@ -416,6 +458,36 @@ class FrameRuntimeMixin:
                 return
             self.retarget_frame_pipeline(current)
 
+        # ADR 0065 stage 2 slice B set out to make this fire an owner-thread
+        # operation — decision 10 puts it FIRST, as the highest-count caller
+        # with no dependents — and measurement refused it. Written, then
+        # reverted: `post_to_presentation_owner(self, fire)` in place of the
+        # timer below censored the 272-tile wgpu probe 3/3
+        # (5, 140, 21 of 272 presented) against 272/272 with everything else
+        # in slice B landed and only this line back on the timer, on the same
+        # box within minutes. Bisected to this line alone.
+        #
+        # The cause is what the 1 ms timer actually buys, which is not the
+        # 1 ms. The gate's coalescing has TWO terms: the armed flag, which
+        # counts requests, and the barrier, which decides how many completions
+        # fold into one fire. The barrier here has never been the flag — it is
+        # the GUI event loop's own occupancy. During a fill the loop is inside
+        # 20-45 ms commits, so a singleShot(1) fire cannot run until a commit
+        # ends, and every completion that landed during that commit folds into
+        # the one armed gate. The presentation owner has no equivalent: its
+        # event deque holds only the ~6 `montage-stage-plan` bodies a fill
+        # produces, so `_drain`'s tail-of-batch rule (which IS the right
+        # barrier, and is what stage 2 decision 1 asks for) fires essentially
+        # immediately. One retarget per completion is the O(N²) storm the
+        # docstring above exists to prevent, and the probe measured it.
+        #
+        # So this conversion is not first in the order — it is LAST, coupled to
+        # re-enabling `frame:` routing in `montage_completion_route`. Only when
+        # the per-tile admissions arrive on the owner does the owner have a
+        # batch whose tail is a real barrier, and at that point the flag and
+        # the drain shape together reproduce what the event loop was doing by
+        # accident. Slice D owns both, together.
+        #
         # Timer category: UI cosmetic. Event-turn barrier for coalescing a
         # current-session replan; kernel completion still owns work delivery.
         # A zero timer re-armed by completion/presentation callbacks can stay
@@ -600,8 +672,16 @@ class FrameRuntimeMixin:
                 )
                 or {}
             )
+            # Stays GUI-side (ADR 0065 stage 2 slice B): this queue seam probes
+            # `img_view.residentHistogramEvidence` /
+            # `acceptResidentHistogramEvidence`, which read live backend state.
+            # This whole funnel is reached only from the GUI-thread
+            # interaction-stop edge (`MainWindow._note_interaction_edge`), so
+            # the probe is already where it belongs and only the retarget below
+            # crosses.
             self._queue_montage_level_stats_for_payloads(session, acknowledged)
-        self.retarget_frame_pipeline(
+        post_frame_pipeline_retarget(
+            self,
             session,
             force_commit=bool(residency_deferred or histogram_deferred),
         )
@@ -1551,6 +1631,20 @@ def _stall_tile_probe_row_actionable(row: dict[str, object]) -> bool:
 
 
 def _interactive_active(window) -> bool:
+    """Whether a gesture is in flight. Torn reads are tolerated by design.
+
+    ADR 0065 stage 2 slice B: the ladder retarget reads this from the
+    presentation owner while the GUI thread writes it (an input handler sets
+    ``render_coordinator.interactive_active`` and
+    ``win._viewport_interaction_active``). Both are plain ``bool`` attribute
+    loads, so the worst outcome is one retarget planned against the previous
+    answer — the same one-event staleness the owner's own counters accept, and
+    self-correcting because the edge that flips the flag has its own replan
+    (``replan_deferred_interactive_native_quality`` on the stop edge, a
+    viewport retarget on the start edge). A snapshot here would be a lie with a
+    longer lifetime, not a fix.
+    """
+
     coordinator = getattr(window.win, "render_coordinator", None)
     return bool(
         (coordinator is not None and getattr(coordinator, "interactive_active", False))

@@ -2503,6 +2503,65 @@ def test_atomic_warm_batches_reserve_the_complete_successor(qt_app):
         view.close()
 
 
+def test_the_residency_snapshot_answers_exactly_what_the_live_probe_does(qt_app):
+    """ADR 0065 stage 2 decision 5: the frozen probe is not an approximation.
+
+    The ladder retarget moved to the presentation owner, where walking the
+    page table is a cross-thread read of a dict the GUI thread mutates --
+    ``tuple(dict)`` racing a ``bind`` raises rather than tears. So residency is
+    frozen at the commit's acknowledgement instead, and this is the byte-identity
+    pin for that substitution: every payload the live predicate answers, the
+    snapshot answers the same way, resident and not-resident alike.
+    """
+
+    resident = _payload(0, np.arange(64, dtype=np.float32).reshape(8, 8), source_id=("snap", 0))
+    absent = _payload(1, np.ones((8, 8), dtype=np.float32), source_id=("snap", "never-committed"))
+    view = _shown_view(qt_app)
+    try:
+        _commit(view, _montage_geometry((8, 8), 1, 1, loaded=1), {0: resident}, levels=(0.0, 64.0))
+        probe = view.tiledResidencySnapshot()
+        assert probe is not None
+        assert probe.valid() is True
+
+        for payload in (resident, absent):
+            assert probe(payload) is view.tiledPayloadResident(payload)
+        # ...and the pair is not vacuously equal: one of them is True and the
+        # other False, so an always-False probe would fail this.
+        assert probe(resident) is True
+        assert probe(absent) is False
+    finally:
+        view.close()
+
+
+def test_an_evicted_page_invalidates_the_snapshot_instead_of_being_claimed(qt_app):
+    """A stale snapshot must decline, never over-report.
+
+    ``bind`` only adds coverage, so an unchanged eviction stamp proves nothing
+    the snapshot trusted was lost. The converse is what this pins: once
+    ``unbind`` bumps the stamp the snapshot stops answering at all, and the
+    crop-rebind seed takes the logical branch it already had for backends with
+    no residency seam.
+    """
+
+    from arrayscope.presentation.residency import ResidencySnapshot
+
+    payload = _payload(0, np.arange(64, dtype=np.float32).reshape(8, 8), source_id=("evict", 0))
+    view = _shown_view(qt_app)
+    try:
+        _commit(view, _montage_geometry((8, 8), 1, 1, loaded=1), {0: payload}, levels=(0.0, 64.0))
+        probe = view.tiledResidencySnapshot()
+        snapshot = ResidencySnapshot(committed_frame=None, probe=probe)
+        assert snapshot.physical_resident_fn() is probe
+
+        page_table = view._wgpu_executor.page_table
+        page_table.unbind(next(iter(page_table.resident_keys())))
+
+        assert probe.valid() is False
+        assert snapshot.physical_resident_fn() is None
+    finally:
+        view.close()
+
+
 def test_residency_predicate_reuses_binding_within_page_table_generation(
     qt_app,
     monkeypatch,

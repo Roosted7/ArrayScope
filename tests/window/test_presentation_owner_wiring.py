@@ -165,3 +165,149 @@ def test_the_diagnostics_snapshot_publishes_the_owners_counters(window, qtbot):
     # A lower bound, not an equality: the window's own montage work dispatches
     # through the same owner, and this test does not own that traffic.
     assert after["events_dispatched"] - before["events_dispatched"] >= 3
+
+
+# ------------------------------------------- the retarget as an owner operation
+
+
+def _montage_window(qtbot):
+    from arrayscope.window import ArrayScopeWindow
+
+    win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
+    qtbot.addWidget(win)
+    win._set_view_state(
+        win.view_state.with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text="0:4")
+    )
+    win.update_image_view()
+    return win
+
+
+def test_a_posted_retarget_runs_the_ladder_on_the_owner_thread(qtbot):
+    """ADR 0065 stage 2 slice B's counting pin, at the composition level.
+
+    ``post_frame_pipeline_retarget`` is what the resize and viewport-only
+    tails call now. The claim is not "a retarget happened" -- that would pass
+    with the post reverted to a direct call, which is exactly the mutation
+    this is checked against -- but *which thread ran the ladder*.
+
+    Membership rather than equality, and deliberately: a live window retargets
+    on its own schedule from the GUI thread, and this test owns one of those
+    calls, not the traffic around it. The owner thread's name can appear in
+    that list only if a ladder retarget ran off the GUI thread.
+    """
+
+    from arrayscope.window.frame_runtime import post_frame_pipeline_retarget
+
+    win = _montage_window(qtbot)
+    try:
+        renderer = win.renderer
+        owner = win.presentation_owner
+        session = renderer._frame_session
+        assert session is not None
+        threads: list[str] = []
+        original = type(renderer).retarget_frame_pipeline
+
+        def spy(self, target, **kwargs):
+            threads.append(threading.current_thread().name)
+            return original(self, target, **kwargs)
+
+        renderer.retarget_frame_pipeline = spy.__get__(renderer, type(renderer))
+        assert OWNER_THREAD_NAME not in threads
+
+        before = owner.snapshot()["messages_dispatched"]
+        post_frame_pipeline_retarget(renderer, session)
+
+        _wait(qtbot, lambda: owner.snapshot()["messages_dispatched"] > before)
+        assert OWNER_THREAD_NAME in threads
+    finally:
+        win.close()
+
+
+def test_a_posted_retarget_for_a_superseded_session_does_not_run(qtbot):
+    """The re-check inside the closure, not merely its presence.
+
+    A posted operation can land after a rebirth. Slice B's rule is that the
+    closure carries the identity pair it was built with and drops itself; the
+    mutation is deleting that check, which this test fails. The evidence is
+    again the owner thread's absence from the retarget log, because the GUI
+    thread keeps retargeting this window for reasons of its own.
+    """
+
+    from arrayscope.window.frame_runtime import post_frame_pipeline_retarget
+
+    win = _montage_window(qtbot)
+    try:
+        renderer = win.renderer
+        owner = win.presentation_owner
+        session = renderer._frame_session
+        assert session is not None
+        threads: list[str] = []
+        renderer.retarget_frame_pipeline = lambda *_args, **_kwargs: threads.append(
+            threading.current_thread().name
+        )
+
+        # Post and supersede inside ONE order-lock section, so the closure
+        # cannot be dispatched between the two: without this the test would be
+        # racing the owner for its own precondition.
+        with owner.timed_order_lock("gui"):
+            before = owner.snapshot()["messages_dispatched"]
+            # Advance the generation the way an index-window retarget does:
+            # same object, new id. The post names the OLD one.
+            session_id = int(session.session_id)
+            post_frame_pipeline_retarget(renderer, session)
+            session.session_id = session_id + 1
+
+        _wait(qtbot, lambda: owner.snapshot()["messages_dispatched"] > before)
+        assert OWNER_THREAD_NAME not in threads
+    finally:
+        win.close()
+
+
+def test_settle_chrome_decided_on_the_owner_still_lands_on_the_gui_thread(qtbot):
+    """The chrome half of slice B's split, pinned as a thread, not an effect.
+
+    ``_settle_montage_visible_plan_if_complete`` decides from session state --
+    which evaluates wherever the retarget runs -- and then publishes overlay
+    chrome, which is Qt and must not. Asserting only that the overlay went away
+    would pass with the split deleted, so what is recorded here is the thread
+    the setters ran on, taken from inside them, while the decision itself is
+    made on the owner.
+    """
+
+    from arrayscope.core.cache_status import CacheStatus
+
+    win = _montage_window(qtbot)
+    try:
+        renderer = win.renderer
+        owner = win.presentation_owner
+        _wait(qtbot, lambda: renderer._frame_session.visible_plan_complete())
+        session = renderer._frame_session
+
+        # Put the chrome back into its "still working" state so the settle has
+        # something to undo.
+        win.img_view.setEvaluationOverlay(True, "Updating image frame...")
+        setter_threads: list[str] = []
+        original = win.img_view.setEvaluationOverlay
+
+        def spy(visible, text=""):
+            setter_threads.append(threading.current_thread().name)
+            return original(visible, text)
+
+        win.img_view.setEvaluationOverlay = spy
+
+        before = owner.snapshot()["messages_dispatched"]
+        decided: list[str] = []
+
+        def settle():
+            decided.append(threading.current_thread().name)
+            renderer._settle_montage_visible_plan_if_complete(session)
+
+        owner.post(settle)
+        _wait(qtbot, lambda: owner.snapshot()["messages_dispatched"] > before)
+        _wait(qtbot, lambda: bool(setter_threads))
+
+        assert decided == [OWNER_THREAD_NAME]
+        assert set(setter_threads) == {threading.current_thread().name}
+        assert win.operation_evaluator.last_status.status is CacheStatus.READY
+    finally:
+        win.close()

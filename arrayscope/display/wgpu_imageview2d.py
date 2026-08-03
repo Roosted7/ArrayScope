@@ -498,6 +498,10 @@ class WgpuImageView2D(ImageViewShell):
         ] = {}
         self._wgpu_residency_binding_cache_hits = 0
         self._wgpu_residency_binding_cache_misses = 0
+        # ``tiledResidencySnapshot``'s memo, keyed the same way and for the
+        # same reason: a commit that bound nothing must not re-hash the whole
+        # resident population just to hand out an identical frozen set.
+        self._wgpu_residency_snapshot_cache: tuple[int, object] | None = None
         # Hidden atomic successors are warmed across bounded GUI turns. Their
         # pages need a physical owner until the presentation submit transfers
         # ownership to the executor's bound-plane pin set.
@@ -3145,10 +3149,19 @@ class WgpuImageView2D(ImageViewShell):
         )
         return self.tiledPayloadResident(payload)
 
-    def tiledPayloadResident(self, payload) -> bool:
-        executor = self._wgpu_executor
-        if executor is None:
-            return False
+    def _wgpu_residency_representation(self, payload):
+        """``(texture, representation, mapping_mode)`` for a residency probe.
+
+        Split out of :meth:`tiledPayloadResident` so the live probe and the
+        frozen snapshot probe derive the binding key the *same* way rather
+        than twice. Reads nothing off ``self``: ``_wgpu_commit_plan`` validates
+        its arguments and returns uniforms derived from them, which is what
+        makes the snapshot probe safe to evaluate off the GUI thread.
+
+        ``None`` means "this payload has no binding the commit path would
+        accept" — a cold fallback, never an error (see the ``except`` below).
+        """
+
         kind = _wgpu_payload_kind(payload)
         texture_data = np.asarray(
             payload.texture_data if payload.texture_data is not None else payload.image
@@ -3171,13 +3184,82 @@ class WgpuImageView2D(ImageViewShell):
             # representations. A payload the current commit path cannot bind
             # is not resident for that transaction; probing it must not turn a
             # normal cold fallback into a swallowed presentation exception.
+            return None
+        return texture_data, representation, mapping_mode
+
+    def tiledPayloadResident(self, payload) -> bool:
+        executor = self._wgpu_executor
+        if executor is None:
             return False
+        derived = self._wgpu_residency_representation(payload)
+        if derived is None:
+            return False
+        _texture_data, representation, mapping_mode = derived
         binding = self._cached_wgpu_residency_binding(
             payload,
             representation=representation,
             mapping_mode=mapping_mode,
         )
         return all(key in executor.page_table for key in binding.page_keys)
+
+    def tiledResidencySnapshot(self):
+        """Freeze physical residency so an off-GUI reader can ask about it.
+
+        ADR 0065 stage 2 decision 5. The frozen half is the resident key set —
+        copied here, on the thread that owns the page table, because
+        ``tuple(dict)`` racing a ``bind`` raises rather than tears. The live
+        half is the eviction stamp, and the probe re-reads it to decide whether
+        the copy still describes the backend.
+
+        Memoised on ``page_table.generation``, which advances on every binding
+        change: a commit that moved no residency reuses the previous set
+        instead of re-hashing a montage-sized key population, so the price of
+        capturing per acknowledgement is paid only when residency actually
+        moved.
+        """
+
+        from arrayscope.presentation.residency import PhysicalResidencyProbe
+
+        executor = self._wgpu_executor
+        if executor is None:
+            return None
+        page_table = executor.page_table
+        generation = int(page_table.generation)
+        cached = self._wgpu_residency_snapshot_cache
+        if cached is not None and cached[0] == generation:
+            return cached[1]
+        probe = PhysicalResidencyProbe(
+            resident_keys=frozenset(page_table.resident_keys()),
+            eviction_stamp=page_table.eviction_stamp,
+            binding=self._wgpu_frozen_residency_binding,
+            live_stamp=lambda executor=executor: executor.page_table.eviction_stamp,
+        )
+        self._wgpu_residency_snapshot_cache = (generation, probe)
+        return probe
+
+    def _wgpu_frozen_residency_binding(self, payload, resident_keys):
+        """Binding geometry for ``payload`` against a captured key set.
+
+        The uncached twin of :meth:`_cached_wgpu_residency_binding`: that cache
+        is a plain dict written by whichever thread probes, and it keys its
+        entries on the *live* page-table generation, so a snapshot reader must
+        not share it. Sharing it would also be wrong rather than merely
+        unsafe — ``_wgpu_payload_binding`` chooses between a source-anchored
+        and a local binding using ``resident_keys``, so a binding built against
+        live residency does not answer the snapshot's question.
+        """
+
+        derived = self._wgpu_residency_representation(payload)
+        if derived is None:
+            return None
+        texture_data, representation, mapping_mode = derived
+        return _wgpu_payload_binding(
+            payload,
+            texture_data,
+            representation=representation,
+            mapping_mode=mapping_mode,
+            resident_keys=resident_keys,
+        )
 
     def _cached_wgpu_residency_binding(
         self,
