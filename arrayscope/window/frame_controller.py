@@ -66,6 +66,7 @@ from arrayscope.window.montage_payload_cache import (
 )
 from arrayscope.window.montage_prefetch import (
     drain_deferred_out_of_view_invalidation,
+    drain_out_of_view_upgrade,
     schedule_near_viewport_montage_prefetch,
 )
 from arrayscope.window.montage_viewport import (
@@ -2083,6 +2084,10 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         # a montage that stops committing (nothing left to converge) still
         # drains instead of holding its queue until the next user action.
         drain_deferred_out_of_view_invalidation(self, session)
+        # The parked out-of-view quality upgrades share that edge and those
+        # gates; removals go first because a removal is owed to correctness
+        # and an upgrade is not.
+        drain_out_of_view_upgrade(self, session)
         # NOT invited here: the halo warm.  This is the moment the product rule
         # names for it — visible work done, session idle — and prefetch has no
         # invitation of its own at that moment (every other one hangs off a

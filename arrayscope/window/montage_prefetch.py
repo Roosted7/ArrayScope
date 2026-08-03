@@ -118,6 +118,7 @@ def schedule_near_viewport_montage_prefetch(
     # GUI turn on something the user is not looking at" is the same one, and
     # a second copy of it would be a second thing to keep in step.
     drain_deferred_out_of_view_invalidation(window, session)
+    drain_out_of_view_upgrade(window, session)
     # A document with no operations used to be rejected outright here
     # (``blocked_no_stage``): the original prefetch was built around reusing an
     # already-materialized operation stage, and without one there was nothing to
@@ -515,6 +516,33 @@ def drain_deferred_out_of_view_invalidation(window, session) -> int:
     # The removals now need a commit to reach the backend.  The coalesced
     # replan is the standing "there is presentation work" signal; going
     # through it keeps this off the direct-commit path entirely.
+    window.request_montage_replan(session)
+    return len(drained)
+
+
+def drain_out_of_view_upgrade(window, session) -> int:
+    """Release a bounded batch of parked out-of-view quality upgrades.
+
+    The sibling of the removal drain above, and deliberately the same three
+    gates: no interaction, the session is current, and the visible plan is
+    complete.  An out-of-view tile whose payload was superseded while the
+    camera was elsewhere keeps drawing what it has — nothing about those pixels
+    is wrong — so its upgrade is the definition of work that must be fully
+    behind every visible obligation.
+
+    The removal queue drains first, in the caller's order, because a removal is
+    owed to correctness and an upgrade is not.
+    """
+
+    if not getattr(session, "out_of_view_upgrade_pending", None):
+        return 0
+    if _interaction_active(window) or not window._frame_session_is_current(session):
+        return 0
+    if not session.visible_plan_complete():
+        return 0
+    drained = session.drain_out_of_view_upgrade(DEFERRED_OUT_OF_VIEW_DRAIN_BATCH)
+    if not drained:
+        return 0
     window.request_montage_replan(session)
     return len(drained)
 

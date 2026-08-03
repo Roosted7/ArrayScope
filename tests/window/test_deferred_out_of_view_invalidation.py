@@ -77,7 +77,7 @@ def test_deferring_the_same_tile_twice_queues_it_once():
     assert session.deferred_out_of_view_deferred == 1
 
 
-def test_one_drain_is_bounded_and_takes_the_lowest_tiles_first():
+def test_one_drain_is_bounded_and_deterministic():
     session = _session()
     for tile in range(4, 16):
         session.defer_out_of_view_invalidation(tile)
@@ -86,9 +86,40 @@ def test_one_drain_is_bounded_and_takes_the_lowest_tiles_first():
     assert len(session.deferred_out_of_view_invalidations) == 7
     # Deterministic order matters for reproducing a partially drained montage;
     # a set iteration would make the same fixture drain differently per run.
+    # With no view range and no focus the priority context has no spatial
+    # anchor, so every tile scores equally and the tile-number tie-break decides
+    # — which is what makes this fixture's order stable and readable.
     assert session.drain_deferred_out_of_view_invalidation(5) == (9, 10, 11, 12, 13)
     assert session.drain_deferred_out_of_view_invalidation(0) == ()
     assert session.deferred_out_of_view_invalidations == {14, 15}
+
+
+def test_the_drain_takes_the_nearest_tiles_first():
+    """A partially drained montage should have retired what a pan will expose.
+
+    Lowest-tile-number first is only a tie-break.  The queue is drained through
+    the same distance-ordered priority the fill and the prefetch already use,
+    so a bounded batch retires the slots nearest the viewport rather than the
+    slots at the top-left corner of the plan — which on a 4x4 grid viewed from
+    the bottom row is the far side of the montage.
+    """
+
+    session = _session()
+    session.visible_tiles = session.plan.tiles[12:16]
+    session.visible_tile_numbers = frozenset({12, 13, 14, 15})
+    session.retarget_tile_priority(
+        active_tiles=(12, 13, 14, 15),
+        view_range=((0.0, 16.0), (12.0, 16.0)),
+    )
+    for tile in range(12):
+        session.defer_out_of_view_invalidation(tile)
+
+    batch = session.drain_deferred_out_of_view_invalidation(4)
+
+    # Row 2 (tiles 8-11) is the row adjacent to the viewport; row 0 is furthest.
+    assert set(batch) == {8, 9, 10, 11}
+    assert set(session.drain_deferred_out_of_view_invalidation(4)) == {4, 5, 6, 7}
+    assert set(session.drain_deferred_out_of_view_invalidation(4)) == {0, 1, 2, 3}
 
 
 def test_a_tile_back_in_scope_leaves_the_queue_instead_of_being_removed():

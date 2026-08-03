@@ -100,6 +100,15 @@ class MontageRuntimeDiagnostics:
     retained_out_of_view_tiles: int = 0
     retained_out_of_view_bytes: int = 0
     retained_out_of_view_evictions: int = 0
+    # Per-reason attribution for retention refusals, and the parked-upgrade
+    # queue that camera-only divergence now feeds.  Without the first, "the
+    # presentation scope churned during a pan" can only be attributed to a
+    # clause of the predicate by inference; with it, the refusal says which
+    # clause refused it.
+    retained_out_of_view_refusals: dict[str, int] = field(default_factory=dict)
+    out_of_view_upgrades_pending: int = 0
+    out_of_view_upgrades_parked: int = 0
+    out_of_view_upgrades_drained: int = 0
     pending_level_tiles: int = 0
     level_scan_remaining_tiles: int = 0
     histogram_aggregate_inflight: bool = False

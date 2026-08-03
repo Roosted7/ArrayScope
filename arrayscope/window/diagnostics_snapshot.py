@@ -125,6 +125,18 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         retained_out_of_view_evictions=0
         if session is None
         else int(getattr(session, "retained_out_of_view_evictions", 0) or 0),
+        retained_out_of_view_refusals={}
+        if session is None
+        else dict(session.retention_refusal_counts),
+        out_of_view_upgrades_pending=0
+        if session is None
+        else len(getattr(session, "out_of_view_upgrade_pending", ()) or ()),
+        out_of_view_upgrades_parked=0
+        if session is None
+        else int(getattr(session, "out_of_view_upgrades_parked", 0) or 0),
+        out_of_view_upgrades_drained=0
+        if session is None
+        else int(getattr(session, "out_of_view_upgrades_drained", 0) or 0),
         pending_level_tiles=0
         if session is None
         else len(getattr(session, "pending_level_tiles", ())),

@@ -124,12 +124,20 @@ def test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope(qtbot):
         assert_wgpu_frame_matches_cpu_reference(win)
 
         # Then the whole up/down cycle, against the property that actually
-        # generalises: a pan must not cost one whole-montage republication per
-        # leg.  Retention can still shrink between legs — background work
-        # supersedes an out-of-view wrapper and the tile steps out of the scope
-        # — and a shrink does republish.  Interleaved in-process A/B measured
-        # 4-6 republications per four-leg cycle without retention and 0-2 with
-        # it, so this bound separates the two without pinning the exact count.
+        # generalises: **a pan costs no republication at all**.
+        #
+        # This bound was ``< len(legs)`` until 2026-08-03, on the reading that
+        # "retention can still shrink between legs — background work supersedes
+        # an out-of-view wrapper and the tile steps out of the scope — and a
+        # shrink does republish", measured at 0-2 per four-leg cycle against
+        # 4-6 with retention off.  That shrink was the defect, not a tolerance:
+        # a *better* payload arriving for a tile nobody is looking at un-drew
+        # the tile and broke the executor's
+        # ``previous_commit["tiles"] <= payloads`` precondition.  With the
+        # retention predicate judging the payload the backend is DRAWING
+        # (``FrameSession._may_retain_out_of_view``) this cycle measured 0, 0, 0
+        # over three runs, so the bound is the number rather than a band around
+        # it — a band here cannot fail for the reason it names.
         legs = (away_y, home, away_x, home)
         before = _republications(win)
         for leg in legs:
@@ -138,7 +146,7 @@ def test_wgpu_pan_away_and_back_reuses_the_retained_presentation_scope(qtbot):
             session = win.renderer._frame_session
             # The presentation scope never collapses back to the viewport.
             assert set(session.visible_tile_numbers) < set(session._last_active_tiles)
-        assert _republications(win) - before < len(legs)
+        assert _republications(win) - before == 0
 
         # Completion, not merely retention: the R2 pathology this program has
         # already met keeps the retained tiles visible forever and never
