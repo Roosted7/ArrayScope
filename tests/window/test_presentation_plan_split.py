@@ -680,3 +680,154 @@ def test_dropping_the_lifecycle_install_is_visible():
         setattr(session, name, value)
 
     assert _session_fingerprint(session) != _session_fingerprint(reference)
+
+
+# ------------------------------------------------- the seam, not the builder
+#
+# Everything above is the *builder's* contract.  Slice D moves the property one
+# level out: the whole prepare seam — level decisions, the atomic-successor
+# block, the metadata publication decision, every bail's flags — plans against
+# a staged session too, and `_take_prepared_outcome` is the only writer.  That
+# needs a live window, because the seam is where the renderer-facing calls are
+# and the whole point of the separation is which session each of them gets.
+
+
+@pytest.fixture
+def prepare_seam_window(qtbot):
+    import numpy as np
+
+    from arrayscope.window import ArrayScopeWindow
+    from tests.settle import deliver_posted_events, settle_window
+
+    win = ArrayScopeWindow(np.arange(8 * 8 * 4, dtype=np.float32).reshape(8, 8, 4))
+    qtbot.addWidget(win)
+    win._set_view_state(
+        win.view_state.with_montage_axis(2, columns=2, indices=(0, 1, 2, 3), text=":")
+    )
+    win.render(reason="test-prepare-seam-purity")
+    settle_window(win, lambda: getattr(win.renderer, "_frame_session", None) is not None)
+    session = win.renderer._frame_session
+    settle_window(win, lambda: session.visible_plan_complete())
+    deliver_posted_events()
+    try:
+        yield win
+    finally:
+        win.close()
+
+
+def _seam_effects(win):
+    from arrayscope.window.frame_effects import FramePipelineEffects
+
+    session = win.renderer._frame_session
+    pipeline = getattr(session, "pipeline", None)
+    return session, (
+        pipeline.effects if pipeline is not None else FramePipelineEffects(win.renderer, session)
+    )
+
+
+def _prepare_once(effects, session):
+    direct = effects.direct_tile_layer_presentation()
+    return effects._prepare_tile_layer_transaction(direct, dirty_tiles=session.peek_dirty_tiles())
+
+
+def test_the_prepare_seam_writes_nothing_when_its_outcome_is_dropped(prepare_seam_window):
+    """Slice D's contract, at the seam.
+
+    A dropped prepare is the ordinary outcome of a take-miss, and slice C's
+    bisect proved it is the *second* prepare that corrupts: it plans against
+    the first one's writes.  So the first one must leave none.
+    """
+
+    pytest.importorskip("pytestqt")
+    session, effects = _seam_effects(prepare_seam_window)
+    before = _session_fingerprint(session)
+
+    outcome = _prepare_once(effects, session)
+
+    assert outcome is not None, "the seam decided nothing, so nothing was observed"
+    assert outcome.plan is not None
+    assert _session_fingerprint(session) == before
+    # And per attribute, because the fingerprint covers what the *builder*
+    # owns: a settled window's seam legitimately decides a bail whose whole
+    # staged set is bookkeeping the fingerprint never looks at, and against
+    # that scenario the fingerprint alone cannot fail. Removing the staging
+    # makes exactly this loop red.
+    staged = dict(outcome.plan.staged)
+    assert staged, "the seam decided no session write, so nothing was observed"
+    for name, value in staged.items():
+        assert getattr(session, name, None) is not value, name
+
+
+def test_preparing_twice_and_dropping_the_first_decides_the_same_transaction(
+    prepare_seam_window,
+):
+    """Property 2 at the seam: the second prepare cannot see the first."""
+
+    pytest.importorskip("pytestqt")
+    session, effects = _seam_effects(prepare_seam_window)
+
+    first = _prepare_once(effects, session)
+    second = _prepare_once(effects, session)
+
+    assert first is not None
+    assert second is not None
+    assert type(first) is type(second)
+    assert _canonical(getattr(first, "outcome", None)) == _canonical(
+        getattr(second, "outcome", None)
+    )
+    first_delta = getattr(first, "tile_delta", None)
+    second_delta = getattr(second, "tile_delta", None)
+    if first_delta is not None:
+        assert _delta_fingerprint(first_delta) == _delta_fingerprint(second_delta)
+
+
+def test_the_take_is_the_seams_only_writer(prepare_seam_window):
+    """Read per attribute, not by fingerprint.
+
+    The fingerprint answers "did anything the *builder* owns move", and a
+    settled window's seam legitimately decides a bail whose whole staged set is
+    bookkeeping the fingerprint does not cover (commit counters, the applied
+    level source). Asking the plan itself which attributes it carries makes the
+    claim exact and keeps it honest on every scenario: whatever the seam
+    decided this time, none of it was installed before the take and all of it
+    was installed after.
+    """
+
+    pytest.importorskip("pytestqt")
+    session, effects = _seam_effects(prepare_seam_window)
+
+    outcome = _prepare_once(effects, session)
+    staged = dict(outcome.plan.staged)
+    assert staged, "the seam decided no session write, so nothing was observed"
+    unwritten = [
+        name for name, value in staged.items() if getattr(session, name, None) is not value
+    ]
+    assert unwritten, "prepare installed every write it planned"
+
+    effects._take_prepared_outcome(outcome)
+
+    for name, value in staged.items():
+        assert getattr(session, name) is value, name
+
+
+def test_a_prepared_outcome_from_another_generation_is_refused(prepare_seam_window):
+    """The identity gate, which only becomes reachable once prepare is posted."""
+
+    pytest.importorskip("pytestqt")
+    from dataclasses import replace as _replace
+
+    win = prepare_seam_window
+    session, effects = _seam_effects(win)
+    outcome = _prepare_once(effects, session)
+    assert outcome is not None
+
+    stale = _replace(
+        outcome,
+        identity=_replace(outcome.identity, session_id=int(outcome.identity.session_id) + 1),
+    )
+    before = _session_fingerprint(session)
+    refused_before = int(getattr(win.renderer, "_montage_prepare_refused_stale", 0) or 0)
+
+    assert effects._take_prepared_outcome(stale) is None
+    assert _session_fingerprint(session) == before
+    assert int(win.renderer._montage_prepare_refused_stale) == refused_before + 1

@@ -1238,6 +1238,11 @@ def _first_display_transaction():
             capabilities_id=0,
             eviction_stamp=None,
         ),
+        # ADR 0065 stage 2 slice D: the plan is the seam's whole session write
+        # and the take is what applies it. These pins are about the *submit*
+        # declining, which happens after the take, so there is nothing to
+        # apply and `None` is the honest value rather than a stub plan.
+        plan=None,
         display_image=None,
         geometry=None,
         tile_state=None,

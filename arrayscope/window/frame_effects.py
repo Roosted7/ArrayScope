@@ -51,6 +51,7 @@ from arrayscope.presentation import payload_ref_from_display_payload
 from arrayscope.presentation.prepared_transaction import (
     AckInputs,
     CommitTimings,
+    PreparedCommitBail,
     PreparedPresentationTransaction,
     PrepTimings,
     SubmitTimings,
@@ -2520,10 +2521,11 @@ class FramePipelineEffects:
         dirty_tiles = self.session.peek_dirty_tiles()
         self._begin_commit_frame(dirty_tiles)
         try:
-            transaction = self._prepare_tile_layer_transaction(
+            outcome = self._prepare_tile_layer_transaction(
                 direct_presentation,
                 dirty_tiles=dirty_tiles,
             )
+            transaction = self._take_prepared_outcome(outcome)
             if transaction is None:
                 return
             self._submit_prepared_transaction(transaction, commit_start=commit_start)
@@ -2543,9 +2545,73 @@ class FramePipelineEffects:
 
     # --------------------------------------------------------------- prepare
 
+    def _take_prepared_outcome(self, outcome):
+        """Bind one prepare's result to the live session. GUI thread only.
+
+        ADR 0065 stage 2 slice D. The prepare seam decides against a *staged*
+        session and writes nothing; this is where its decision becomes real.
+        Applying the plan is the whole session mutation of a commit, and it is
+        the only one, which is what makes dropping a prepared outcome free —
+        slice C's three-arm bisect put the corruption in a prepare that ran
+        twice, and a plan that was never applied cannot be planned against.
+
+        Returns the transaction to submit, or ``None`` when the outcome was a
+        bail (whose session writes have then landed and whose wakeups are
+        armed) or when the plan does not belong to this session.
+        """
+
+        if outcome is None:
+            return None
+        session = self.session
+        if not outcome.identity.matches_session(session):
+            # The plan was decided against a different session generation.
+            # `apply_tile_presentation_plan` refuses it too; refusing here
+            # keeps the refusal countable rather than fatal.
+            self._note_prepare_refused(outcome)
+            return None
+        session.apply_tile_presentation_plan(outcome.plan)
+        if isinstance(outcome, PreparedCommitBail):
+            self._run_prepared_bail(outcome)
+            return None
+        return outcome
+
+    def _note_prepare_refused(self, outcome) -> None:
+        renderer = self.renderer
+        renderer._montage_prepare_refused_stale = (
+            int(getattr(renderer, "_montage_prepare_refused_stale", 0) or 0) + 1
+        )
+        emit_trace(
+            "presentation_gate",
+            action="prepare-refused-stale",
+            owner_session=int(outcome.identity.session_id),
+            live_session=int(getattr(self.session, "session_id", 0) or 0),
+        )
+
+    def _run_prepared_bail(self, bail: PreparedCommitBail) -> None:
+        """Publish one bail's diagnostics and arm its renderer-side wakeup.
+
+        Order matters and it is the inline order: the plan is already applied
+        (so the trace reads the flags the bail set), timings publish, the bail
+        is named, then the wakeup is armed.
+        """
+
+        renderer = self.renderer
+        session = self.session
+        self._publish_prepare_timings(bail.prep, level_decision=bail.level_decision)
+        if bail.rough_histogram is not None:
+            semantic_source, histogram_plot_data = bail.rough_histogram
+            self._post_rough_histogram_publication(semantic_source, histogram_plot_data)
+        if bail.schedule_cached_level_stats:
+            renderer._schedule_montage_cached_level_stats(session)
+        self._note_commit_bail(bail.outcome, wakeup=bail.wakeup, **dict(bail.details))
+        if bail.finish_after_noop:
+            self._finish_after_noop_commit()
+        if bail.replan:
+            renderer.request_montage_replan(session)
+
     def _prepare_tile_layer_transaction(
         self, direct_presentation, *, dirty_tiles
-    ) -> PreparedPresentationTransaction | None:
+    ) -> PreparedPresentationTransaction | PreparedCommitBail | None:
         """Everything a commit decides before the backend is touched.
 
         Runs on the presentation owner when the owner drives it and on the GUI
@@ -2556,10 +2622,33 @@ class FramePipelineEffects:
         come from ``read_frame_boundary_inputs`` (decision 6), and the backend
         capabilities are a frozen dataclass rather than a widget call.
 
-        Returns ``None`` when the commit bailed. Every bail names its outcome
-        and its armed wakeup exactly as before; the only one that reaches Qt
-        posts instead (``level-evidence-wait``'s rough-histogram publication,
-        decision 9).
+        **It also writes nothing** (slice D). Every session write it makes goes
+        to ``staged``, a private shallow copy, and travels back as the
+        ``TilePresentationPlan`` on the returned record; ``_take_prepared_outcome``
+        is the only writer. That is the seam separation slice D owes: session-
+        facing work is planned, renderer-facing calls keep the LIVE session.
+
+        The two kinds of renderer-facing call are told apart by what they do
+        with the session, not by what they read from it:
+
+        - a call that only *reads* (level source, level stats, evidence
+          completeness) may be handed ``staged`` — it keeps no reference, and
+          reading staged state is what preserves the inline ordering;
+        - a call that *schedules* (level-stats queueing, histogram aggregates,
+          replans) is handed the LIVE session, because it captures that session
+          in a kernel closure and a staged session is not the session. Its own
+          session writes are additive evidence bookkeeping — the pending-level
+          queue and its rehydration cursor — deduped by
+          ``queued_sources``/``has_source_quality``, so a prepare that is
+          dropped and re-run merges the same evidence once. That is the one
+          deliberate exception to "prepare writes nothing", and it is an
+          exception because deferring it would move this commit's level
+          evidence into the *next* commit's metadata decision.
+
+        Returns a :class:`PreparedCommitBail` when the commit bailed. Every
+        bail names its outcome and its armed wakeup exactly as before; the only
+        one that reaches Qt posts instead (``level-evidence-wait``'s
+        rough-histogram publication, decision 9).
 
         **This must not consume the dirty set** (decision 2). It is handed the
         peeked tiles; ``release_dirty_tiles`` runs on the acknowledgement of
@@ -2568,7 +2657,8 @@ class FramePipelineEffects:
         """
 
         renderer = self.renderer
-        session = self.session
+        live = self.session
+        session = live._staged_presentation_session()
         display_image, rendered_geometry = direct_presentation
         tile_source_ids = renderer._montage_tile_source_ids(session)
         forget_admission_verdict(session)
@@ -2767,15 +2857,15 @@ class FramePipelineEffects:
             tile_delta = prepared_atomic["tile_delta"]
         else:
             session._atomic_prepared_transaction = None
-            # ADR 0065 stage 2 slice D's prerequisite: both of these are now
-            # ``plan_*`` followed by ``apply_tile_presentation_plan`` — the
-            # delta is decided against a staged session and the writes land in
-            # one mechanical pass afterwards. This seam still runs both halves,
-            # here, in this order, on this thread, which is what makes the
-            # split behaviour-preserving. What it buys is that the *planning*
-            # half is now safe to run speculatively: when the seam moves to the
-            # owner it keeps the plan and the take applies it, so a prepared
-            # transaction the GUI drops writes nothing (slice C's finding).
+            # Both of these are ``plan_*`` + ``apply_tile_presentation_plan``,
+            # and here they apply onto ``session`` — which is itself the seam's
+            # staged copy, not the live session. So the builder's writes land
+            # exactly where the seam's own do, and the whole lot travels back
+            # as one plan for the take to apply. The composition is kept rather
+            # than calling the private builder body directly because it is the
+            # inline anchor every other caller wants; the price is one extra
+            # shallow session clone per commit (measured 0.6 ms per 272-record
+            # lifecycle clone) on a path that is leaving the GUI thread anyway.
             fast_atomic = (
                 session.build_atomic_successor_presentation()
                 if cpu_atomic_successor or shader_atomic_successor
@@ -2841,15 +2931,18 @@ class FramePipelineEffects:
             # authorize the backend swap.
             session.final_commit_pending = False
             session.flush_pending = False
-            self._publish_prepare_timings(prep_partial)
-            self._note_commit_bail(
+            return self._prepared_bail(
+                live,
+                session,
                 "atomic-successor-wait",
                 wakeup="replan",
-                active_payloads=len(atomic_current_tiles),
-                active_tiles=len(atomic_required_tiles),
+                prep=prep_partial,
+                replan=True,
+                details={
+                    "active_payloads": len(atomic_current_tiles),
+                    "active_tiles": len(atomic_required_tiles),
+                },
             )
-            renderer.request_montage_replan(session)
-            return None
         explicit_auto = bool(getattr(session, "force_auto", False) and requested_levels is None)
         level_key = getattr(session, "level_key", None)
         existing_level_stats = (
@@ -2864,16 +2957,27 @@ class FramePipelineEffects:
             else dict(tile_delta.upserts)
         )
         if level_payloads:
-            renderer._queue_montage_level_stats_for_payloads(session, level_payloads)
+            # LIVE, and deliberately not deferred: it merges this delta's
+            # evidence into the renderer's tracker, and `level_stats` two lines
+            # below is that tracker's answer. Deferring it to the take would
+            # move this commit's evidence into the *next* commit's metadata
+            # decision. Its session writes are the additive pending-level queue,
+            # deduped by `queued_sources`/`has_source_quality`, so a dropped
+            # prepare that re-runs merges the same evidence once.
+            renderer._queue_montage_level_stats_for_payloads(live, level_payloads)
         if self._empty_first_commit_can_wait(
-            first_display_commit, explicit_auto, active_payloads, tile_delta
+            session, first_display_commit, explicit_auto, active_payloads, tile_delta
         ):
             session.final_commit_pending = False
             session.flush_pending = False
-            self._publish_prepare_timings(prep_partial)
-            self._note_commit_bail("empty-first-commit-wait", wakeup="replan")
-            renderer.request_montage_replan(session)
-            return None
+            return self._prepared_bail(
+                live,
+                session,
+                "empty-first-commit-wait",
+                wakeup="replan",
+                prep=prep_partial,
+                replan=True,
+            )
         prepare_stats_start = perf_counter()
         level_stats = renderer._montage_level_stats_for_session(session)
         prepare_stats_ms = (perf_counter() - prepare_stats_start) * 1000.0
@@ -2902,7 +3006,7 @@ class FramePipelineEffects:
                 bool(getattr(session, "shader_display", False))
                 and not bool(getattr(session, "first_pass_histogram_published", False))
             )
-            or self._side_work_visible_settled()
+            or self._side_work_visible_settled(session)
         )
         level_metadata_improved = bool(
             metadata_can_advance
@@ -2964,12 +3068,13 @@ class FramePipelineEffects:
         )
         prepare_metadata_ms = (perf_counter() - prepare_metadata_start) * 1000.0
         if (
-            self._empty_progressive_commit_settled(first_display_commit, explicit_auto, tile_delta)
+            self._empty_progressive_commit_settled(
+                session, first_display_commit, explicit_auto, tile_delta
+            )
             and not publish_metadata
         ):
             session.final_commit_pending = False
             session.flush_pending = False
-            self._publish_prepare_timings(prep_partial, level_decision=level_decision)
             session.note_committed()
             # The required scope is settled with nothing to upsert, so no
             # backend acknowledgement will follow this cycle.  Re-affirm
@@ -2978,9 +3083,15 @@ class FramePipelineEffects:
             # for presentation state restored outside the ordinary
             # retarget/acknowledge events.
             session.lifecycle.note_retained_satisfaction(session.required_tile_numbers())
-            self._note_commit_bail("empty-progressive-settled", wakeup="noop-finish")
-            self._finish_after_noop_commit()
-            return None
+            return self._prepared_bail(
+                live,
+                session,
+                "empty-progressive-settled",
+                wakeup="noop-finish",
+                prep=prep_partial,
+                level_decision=level_decision,
+                finish_after_noop=True,
+            )
         tile_states = session.ensure_tile_states()
         rendered_geometry = replace(rendered_geometry, montage_tile_states=tile_states)
         prepare_source_start = perf_counter()
@@ -3013,9 +3124,11 @@ class FramePipelineEffects:
         prepare_source_ms = (perf_counter() - prepare_source_start) * 1000.0
         prepare_histogram_start = perf_counter()
         histogram_plot_data = (
-            renderer._montage_histogram_plot_data_for_session(
-                session, allow_partial=publish_metadata
-            )
+            # LIVE: `_schedule_montage_histogram_aggregate` submits a kernel
+            # task whose closure holds the session, and a staged session is not
+            # the session. Everything it reads is renderer-owned (the tracker)
+            # or unwritten by this seam.
+            renderer._montage_histogram_plot_data_for_session(live, allow_partial=publish_metadata)
             if publish_histogram_plot
             else None
         )
@@ -3037,27 +3150,35 @@ class FramePipelineEffects:
             first_display_commit,
             level_stats,
         ):
-            self._publish_prepare_timings(prep, level_decision=level_decision)
+            rough_histogram = None
             if (
                 not bool(capabilities.shader_windowing)
                 and semantic_source is not None
                 and histogram_plot_data is not None
             ):
-                # Decision 9: the one Qt call inside a prepare bail. On the
-                # GUI thread this is the plain call it always was; from the
-                # owner it becomes the posted residue, with the ordinary
-                # currency re-check every posted continuation carries.
-                self._post_rough_histogram_publication(semantic_source, histogram_plot_data)
+                # Decision 9: the one Qt call inside a prepare bail. It travels
+                # in the bail record and the take posts it, so a dropped
+                # prepare publishes nothing.
+                rough_histogram = (semantic_source, histogram_plot_data)
             session.final_commit_pending = True
             session.flush_pending = True
             if (
                 not getattr(session, "pending_level_tiles", None)
                 and int(getattr(session, "level_scan_remaining_tiles", 0) or 0) <= 0
             ):
+                # A pure session write (`level_scan_remaining_tiles`); staged
+                # like every other bail flag.
                 renderer._mark_montage_level_scan_pending(session)
-            renderer._schedule_montage_cached_level_stats(session)
-            self._note_commit_bail("level-evidence-wait", wakeup="level-scan")
-            return None
+            return self._prepared_bail(
+                live,
+                session,
+                "level-evidence-wait",
+                wakeup="level-scan",
+                prep=prep,
+                level_decision=level_decision,
+                schedule_cached_level_stats=True,
+                rough_histogram=rough_histogram,
+            )
         warm_levels = normalize_bounds(requested_levels)
         if warm_levels is None and semantic_source is not None:
             warm_levels = normalize_bounds(getattr(semantic_source, "levels", None))
@@ -3080,9 +3201,14 @@ class FramePipelineEffects:
             session._interactive_residency_deferred = True
             session.final_commit_pending = False
             session.flush_pending = False
-            self._publish_prepare_timings(prep, level_decision=level_decision)
-            self._note_commit_bail("interactive-residency-deferred", wakeup="interaction-stop-edge")
-            return None
+            return self._prepared_bail(
+                live,
+                session,
+                "interactive-residency-deferred",
+                wakeup="interaction-stop-edge",
+                prep=prep,
+                level_decision=level_decision,
+            )
         rebound_source_ids = dict(getattr(session, "resident_crop_fallback_source_ids", None) or {})
         rebound_scope = (
             frozenset(int(tile) for tile in session.atomic_successor_required_scope())
@@ -3132,23 +3258,18 @@ class FramePipelineEffects:
             },
         }
         evidence_required, evidence_deferred, evidence_obligation = (
-            self._wgpu_evidence_obligation_decision(boundary)
+            self._wgpu_evidence_obligation_decision(session, boundary)
         )
-        identity = TransactionIdentity(
-            session_id=int(getattr(session, "session_id", 0) or 0),
-            session_object_id=id(session),
-            session_key=session.key,
-            level_revision=int(
-                getattr(getattr(session, "level_generation", None), "revision", 0) or 0
-            ),
+        identity = self._transaction_identity(
+            live,
+            session,
             base_revision=base_revision,
-            render_round_id=str(getattr(session, "render_round_id", "") or ""),
+            capabilities=capabilities,
             scope=frozenset(int(tile) for tile in active_payloads),
-            capabilities_id=id(capabilities),
-            eviction_stamp=self._residency_eviction_stamp(),
             payload_markers=dict(prepared_atomic_record["payload_markers"]),
         )
         presentation_decision, render_context, direct_eligible = self._decide_direct_presentation(
+            session,
             display_image,
             rendered_geometry,
             previous_frame=previous_frame,
@@ -3164,6 +3285,7 @@ class FramePipelineEffects:
         )
         return PreparedPresentationTransaction(
             identity=identity,
+            plan=live._harvest_presentation_plan(session, None, None, path="prepare"),
             display_image=display_image,
             geometry=rendered_geometry,
             tile_state=tile_state,
@@ -3229,6 +3351,78 @@ class FramePipelineEffects:
 
     # ------------------------------------------------- prepare-side helpers
 
+    def _transaction_identity(
+        self,
+        live,
+        staged,
+        *,
+        base_revision: int,
+        capabilities,
+        scope=frozenset(),
+        payload_markers=None,
+    ) -> TransactionIdentity:
+        """Decision 3's validation tuple, taken from the LIVE session.
+
+        The identity answers "which session generation is this record bound
+        to", so every one of its fields is the live session's — the staged copy
+        is an implementation detail of *planning* and has an ``id()`` no take
+        could ever match.
+        """
+
+        return TransactionIdentity(
+            session_id=int(getattr(live, "session_id", 0) or 0),
+            session_object_id=id(live),
+            session_key=live.key,
+            level_revision=int(
+                getattr(getattr(staged, "level_generation", None), "revision", 0) or 0
+            ),
+            base_revision=int(base_revision),
+            render_round_id=str(getattr(staged, "render_round_id", "") or ""),
+            scope=frozenset(int(tile) for tile in scope),
+            capabilities_id=id(capabilities),
+            eviction_stamp=self._residency_eviction_stamp(),
+            payload_markers=dict(payload_markers or {}),
+        )
+
+    def _prepared_bail(
+        self,
+        live,
+        staged,
+        outcome: str,
+        *,
+        wakeup: str,
+        prep: PrepTimings,
+        level_decision=None,
+        details: dict | None = None,
+        replan: bool = False,
+        finish_after_noop: bool = False,
+        schedule_cached_level_stats: bool = False,
+        rough_histogram: tuple | None = None,
+    ) -> PreparedCommitBail:
+        """Freeze one early commit return so the take can decide it happened."""
+
+        return PreparedCommitBail(
+            plan=live._harvest_presentation_plan(staged, None, None, path=f"bail:{outcome}"),
+            identity=self._transaction_identity(
+                live,
+                staged,
+                base_revision=int(
+                    getattr(getattr(staged, "tile_presentation_state", None), "revision", 0) or 0
+                ),
+                capabilities=None,
+            ),
+            outcome=str(outcome),
+            wakeup=str(wakeup),
+            details=dict(details or {}),
+            prep=prep,
+            level_decision=level_decision,
+            replan=bool(replan),
+            finish_after_noop=bool(finish_after_noop),
+            schedule_cached_level_stats=bool(schedule_cached_level_stats),
+            rough_histogram=rough_histogram,
+            prepared_off_thread=not on_gui_thread(),
+        )
+
     def _publish_prepare_timings(self, prep: PrepTimings, *, level_decision=None) -> None:
         """Mirror one prepare block onto the renderer, for a bail or a take.
 
@@ -3277,7 +3471,7 @@ class FramePipelineEffects:
         probe = None if snapshot is None else snapshot.probe
         return None if probe is None else tuple(probe.eviction_stamp)
 
-    def _wgpu_evidence_obligation_decision(self, boundary):
+    def _wgpu_evidence_obligation_decision(self, session, boundary):
         """Decide the phase-1 resident-histogram obligation; do not install it.
 
         The decision is session state and evaluates anywhere; the install is
@@ -3285,9 +3479,16 @@ class FramePipelineEffects:
         makes. Splitting them is what lets the whole prepare leave the GUI
         thread. Returns ``(required, deferred, obligation)`` — the obligation
         tuple travels in the transaction and is what the GUI installs.
+
+        ``session`` is the prepare seam's staged copy: the obligation's own
+        session writes (``_wgpu_histogram_evidence_deferred``) travel with the
+        plan. The scheduling policy's evidence barrier is the exception — the
+        policy object is shared, so ``set_coverage_evidence_pending`` lands
+        live. That is deliberate and unchanged in effect: the barrier is set
+        under a condition a re-prepare re-evaluates identically, and released
+        by the acknowledgement's publication transition.
         """
 
-        session = self.session
         if not bool(boundary.supports_resident_evidence):
             return False, False, None
         gpu_evidence_required = bool(
@@ -3347,6 +3548,7 @@ class FramePipelineEffects:
 
     def _decide_direct_presentation(
         self,
+        session,
         display_image,
         geometry,
         *,
@@ -3376,7 +3578,6 @@ class FramePipelineEffects:
         """
 
         renderer = self.renderer
-        session = self.session
         if not direct_montage_tile_delta_commit_enabled(
             renderer,
             session,
@@ -3779,6 +3980,7 @@ class FramePipelineEffects:
             # honest for the one caller that can reach it — a frame republished
             # between prepare and submit inside the same callback.
             decision, context, eligible = self._decide_direct_presentation(
+                session,
                 transaction.display_image,
                 geometry,
                 previous_frame=previous_frame,
@@ -4605,8 +4807,8 @@ class FramePipelineEffects:
             details=details,
         )
 
-    def _side_work_visible_settled(self) -> bool:
-        session = self.session
+    def _side_work_visible_settled(self, session=None) -> bool:
+        session = self.session if session is None else session
         from arrayscope.window.frame_runtime import _interactive_active
 
         required_settled = getattr(session, "required_target_settled", None)
@@ -4621,9 +4823,8 @@ class FramePipelineEffects:
         )
 
     def _empty_first_commit_can_wait(
-        self, first_display_commit, explicit_auto, active_payloads, tile_delta
+        self, session, first_display_commit, explicit_auto, active_payloads, tile_delta
     ) -> bool:
-        session = self.session
         return bool(
             first_display_commit
             and not active_payloads
@@ -4633,9 +4834,8 @@ class FramePipelineEffects:
         )
 
     def _empty_progressive_commit_settled(
-        self, first_display_commit, explicit_auto, tile_delta
+        self, session, first_display_commit, explicit_auto, tile_delta
     ) -> bool:
-        session = self.session
         return bool(
             not first_display_commit
             and not explicit_auto

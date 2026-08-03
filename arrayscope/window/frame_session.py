@@ -730,6 +730,14 @@ _PRESENTATION_PLAN_CONTAINERS: tuple[tuple[str, object], ...] = (
     ("deferred_out_of_view_invalidations", set),
     ("acknowledged_source_ids", set),
     ("lod_preview_metadata", dict),
+    # ADR 0065 stage 2 slice D: the prepare seam plans against a staged session
+    # too, and ``shader_commit_level_source`` mutates the R3 clamp record in
+    # place (``true_bounds``/``published_bounds``) rather than rebinding it.
+    # An in-place write to a shared dict is exactly the leak the harvest's
+    # identity diff cannot see, and this one is load-bearing: a dropped plan
+    # that advanced ``true_bounds`` would release the clamp against bounds no
+    # commit ever presented.
+    ("_shader_presented_bounds_clamp", dict),
     # Pure memos.  Their writes are idempotent for one residency epoch, so
     # sharing them would be harmless — but "harmless" is a judgement that has
     # to be re-made every time one of them grows a new writer, and the copy

@@ -1,23 +1,21 @@
-"""The prepared presentation transaction and its keep-latest mailbox.
+"""One montage commit, decided and frozen before the backend is touched.
 
-ADR 0065 stage 2 slice C. The GUI thread's montage commit becomes: take a
-prepared transaction, validate it, submit it, run the Qt residue, post the
+ADR 0065 stage 2. The GUI thread's montage commit becomes: take a prepared
+outcome, validate it, apply its plan, submit it, run the Qt residue, post the
 acknowledgement inputs back. Everything the take needs — the delta, the level
 decisions, the governor's render-pass verdict, the presentation decision, the
-snapshots the residue reads — is frozen here by the presentation owner before
-the GUI ever wakes up.
+snapshots the residue reads — is frozen here.
 
-Three things are load-bearing and none of them is the dataclass:
+Two things are load-bearing and neither of them is the dataclass:
 
-- **Keep-latest by generation, exact-key take.** Same contract as
-  :class:`~arrayscope.presentation.prepared_uploads.PreparedUploadMailbox`, and
-  correct here for the same reason: two transactions under one key supersede
-  each other, and only the newest can pass the take's validation anyway. A key
-  that is not present simply was not prepared, and the caller's inline path
-  covers it. *A miss is a normal outcome.*
-- **Closed counter equations.** ``published == taken + replaced + discarded +
-  cleared + pending``. A slice that always falls back inline is a no-op wearing
-  a success face, and only the hit/miss/inline split can say which one shipped.
+- **A prepare is a *result*, never a side effect.** Both records carry a
+  :class:`~arrayscope.window.frame_session.TilePresentationPlan`, and applying
+  that plan is the whole session mutation of a commit. A prepare that is
+  dropped therefore costs exactly the work it did and nothing else — the
+  property slice C's three-arm bisect proved was missing, when a second
+  prepare planned against the first one's writes and the montage geometry
+  never converged. A **bail** is a result too (:class:`PreparedCommitBail`):
+  its flags ride in the plan and its renderer-side wakeups ride in the record.
 - **Validation is identity, never content.** The tuple in
   :class:`TransactionIdentity` generalises ``_prepared_atomic_transaction_current``
   to every transaction. Both ``session_id`` *and* ``id(session)`` are in it:
@@ -26,8 +24,8 @@ Three things are load-bearing and none of them is the dataclass:
   — which is ``fired-generation-stale`` re-expressed as a wrong-transaction
   take.
 
-Nothing in this module imports Qt, and nothing in it may: the owner thread
-builds every value here.
+Nothing in this module imports Qt, and nothing in it may: the prepare seam is
+built to run on the presentation owner.
 """
 
 from __future__ import annotations
@@ -167,6 +165,14 @@ class PreparedPresentationTransaction:
     """
 
     identity: TransactionIdentity
+    #: ADR 0065 stage 2 slice D. The :class:`TilePresentationPlan` the whole
+    #: prepare seam decided against a staged session — not just the builder's.
+    #: Nothing in it has been written to the live session yet: the *take* calls
+    #: ``apply_tile_presentation_plan`` and that is the transaction's one
+    #: session mutation. This is what makes a dropped transaction free (slice
+    #: C's finding: the damage was never in the take, it was that prepare ran
+    #: twice and the second run planned against the first one's writes).
+    plan: Any
     display_image: Any
     geometry: Any
     tile_state: Any
@@ -256,6 +262,54 @@ class PreparedPresentationTransaction:
 
 
 @dataclass(frozen=True)
+class PreparedCommitBail:
+    """A prepare that decided *not* to commit, frozen the same way a take is.
+
+    ADR 0065 stage 2 slice D. Every early return in the prepare seam writes
+    session state (disarm the flush, arm a different wakeup) and schedules a
+    renderer-side continuation. Both used to happen inline, which meant a
+    speculative prepare that bailed had already spent its decision — the same
+    class of defect as slice C's prepare-twice corruption, one branch over.
+
+    So a bail is a *result* too: its session writes ride in ``plan`` and its
+    renderer-side continuations ride in the flags below. Apply the plan and run
+    the flags, in that order, and the bail happened; drop the record and it
+    never did.
+
+    The flags are an enumeration rather than closures on purpose. A closure
+    would capture the session it was built against, and the whole point of the
+    record is that the applier binds it to the *live* session at take time.
+    """
+
+    plan: Any
+    identity: TransactionIdentity
+    outcome: str
+    wakeup: str
+    details: dict = field(default_factory=dict)
+    prep: PrepTimings = PrepTimings()
+    level_decision: dict | None = None
+
+    #: ``renderer.request_montage_replan(session)``.
+    replan: bool = False
+    #: ``FramePipelineEffects._finish_after_noop_commit()``.
+    finish_after_noop: bool = False
+    #: ``renderer._schedule_montage_cached_level_stats(session)``.
+    schedule_cached_level_stats: bool = False
+    #: ``(semantic_source, histogram_plot_data)`` for the level-evidence-wait
+    #: bail's rough publication — decision 9's one Qt call inside a prepare.
+    rough_histogram: tuple | None = None
+    prepared_off_thread: bool = False
+
+    @property
+    def key(self):
+        return (
+            int(self.identity.session_id),
+            int(self.identity.session_object_id),
+            int(self.identity.level_revision),
+        )
+
+
+@dataclass(frozen=True)
 class AckInputs:
     """What the GUI observed at submit, frozen for the owner's ack handler.
 
@@ -285,6 +339,7 @@ __all__ = [
     "AckInputs",
     "CommitTimings",
     "PrepTimings",
+    "PreparedCommitBail",
     "PreparedPresentationTransaction",
     "SubmitTimings",
     "TransactionIdentity",

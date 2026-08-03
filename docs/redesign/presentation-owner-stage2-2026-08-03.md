@@ -276,3 +276,140 @@ and "a miss is a normal outcome" makes it frequent rather than rare.
    verdict and counter are in the tree ahead of the move.
 4. The render-pass **observation** (the recording half of decision 6) is still
    GUI-side; only the decision half moved.
+
+## Slice D: the seam is a planner, and the trigger is refuted a second time (2026-08-03)
+
+### D1 landed: the prepare seam plans, the take writes
+
+Slice C's finding was that `build_tile_presentation` is not a pure builder.
+D-prep fixed that for the *builder*. D1 does the same one level out, for the
+whole `_prepare_tile_layer_transaction` seam, which is where the level
+decisions, the atomic-successor block, the metadata publication decision and
+every bail's flags live.
+
+- `_prepare_tile_layer_transaction` opens with `live._staged_presentation_session()`
+  and does every session-facing thing against that copy. It returns either a
+  `PreparedPresentationTransaction` or a `PreparedCommitBail`, and **both carry
+  the `TilePresentationPlan`**. `_take_prepared_outcome` applies it. That is a
+  commit's only session mutation.
+- A bail is a result too: its renderer-side continuations (`request_montage_replan`,
+  `_finish_after_noop_commit`, `_schedule_montage_cached_level_stats`, the
+  rough-histogram publication) travel as enumerated flags on `PreparedCommitBail`
+  and run *after* the plan is applied, in the inline order. Closures were
+  rejected: a closure captures the session it was built against, and the point
+  of the record is that the applier binds it to the live session at take time.
+- The seam separation the D-prep report demanded is decided by **what a
+  renderer call does with the session, not what it reads**. A call that only
+  reads (`_montage_level_source_for_session`, `_montage_level_stats_for_session`,
+  `_first_pass_level_evidence_complete`) is handed the staged session, which is
+  what preserves the inline ordering. A call that *schedules* — and therefore
+  captures the session in a kernel closure — is handed the LIVE one:
+  `_queue_montage_level_stats_for_payloads` and
+  `_montage_histogram_plot_data_for_session`.
+- **One deliberate exception to "prepare writes nothing"**:
+  `_queue_montage_level_stats_for_payloads` runs live and inline rather than
+  deferred, because it merges this delta's evidence into the tracker that
+  `_montage_level_stats_for_session` reads two statements later. Deferring it
+  moves this commit's evidence into the *next* commit's metadata decision. Its
+  session writes are the additive pending-level queue, deduped by
+  `queued_sources` / `has_source_quality`.
+- `_shader_presented_bounds_clamp` joins `_PRESENTATION_PLAN_CONTAINERS`:
+  `shader_commit_level_source` mutates `true_bounds` / `published_bounds` **in
+  place**, which is exactly the write the harvest's identity diff cannot see,
+  and a dropped plan that advanced `true_bounds` would release the R3 clamp
+  against bounds no commit ever presented.
+- Cost: the seam keeps calling the composed `build_tile_presentation` (which
+  stages again internally) rather than the private builder body, so the anchor
+  keeps its production caller. One extra shallow session clone per commit
+  (~0.6 ms per 272-record lifecycle clone).
+
+Verification: `tests/window` + `tests/presentation` + `tests/ui` — 1373 passed
+against a baseline of 1369, **identical failure list** (the four pre-existing
+reds: two `test_resource_governor_integration` session doubles missing `key`,
+two load-sensitive `test_session_order_lock` cases). Probe `--backend wgpu
+--tiles 272 --repeat 3`, three times: **9/9 `272/272 within-5s`**, target
+settle 3.8–4.6 s.
+
+### D2 refuted in the designed form: prepare on the owner starves the GUI
+
+The trigger was built exactly as decision 1 specifies — `request_presentation`
+posts one preparation per armed gate, the owner runs it at its drain-batch
+tail, the gate-owner flag is the coalescing key and the single-flight
+interlock — with the D1 planner underneath, so the prepare-twice corruption
+that killed slice C is structurally gone. It still does not ship.
+
+**A new validation layer was required first, and it is not a staleness rule.**
+The plan carries private copies of `dirty_payloads`, `pending_payload_upserts`
+and `pending_removals`, so applying a plan prepared before an admission
+*deletes that admission*. Measured immediately as a settle wedge — 35 stale
+tiles, `flush_pending=False`, nothing loading, which is what a lost admission
+looks like from outside. `TransactionIdentity.backlog_key` makes an admission
+in the prepare→take window a **miss**, not a merge: merging would stop the
+applier being mechanical, and mechanical is what makes replaying a plan safe.
+
+With that in place the mechanism works and is measurably used:
+
+| probe run / pass | takes | taken | missed | refused | inline | hit rate |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 preview | 12 | 5 | 2 | 5 | 7 | 42% |
+| 0 target  | 32 | 22 | 2 | 8 | 10 | 69% |
+| 1 preview | 13 | 9 | 2 | 2 | 4 | 69% |
+| 1 target  | 29 | 20 | 2 | 7 | 9 | 69% |
+| 2 preview | 9 | 5 | 2 | 2 | 4 | 56% |
+| 2 target  | 29 | 20 | 2 | 7 | 9 | 69% |
+
+Every refusal was `backlog`; no other validation layer fired once. The probe
+itself stayed **3/3 `272/272 within-5s`**, and the owner's GUI-side lock waits
+stayed small (`gui_lock_wait_ms_max` 3–28 ms).
+
+**The suite is where it fails.** `tests/ui` went from 2 pre-existing reds to
+12, and `tests/window` gained one, all of them settle wedges / lost-wakeup
+timeouts:
+
+```
+test_resident_crop_rebind: test_crop_scrub_without_the_capability_still_evaluates
+test_resident_crop_rebind: test_rebind_and_evaluation_paths_settle_identical_levels
+test_resident_crop_rebind: test_operation_pipeline_rebind_..._settle_identical_levels
+test_montage_interactions: ..._complex_montage_tile_layer_rewindows_rgb_from_histogram_levels
+test_montage_data_change_invalidation: test_cpu_item_data_change_leaves_no_out_of_view_tile_drawn
+test_montage_data_change_invalidation: test_data_change_serves_the_visible_set_...[pyqtgraph]
+test_montage_scroll_settling: test_cropped_display_axis_scroll_keeps_complete_montage[pyqtgraph]
+test_montage_settled_quiescence: ..._owes_no_bookkeeping[pyqtgraph, wgpu]
+test_window_shift_live_path: test_fixed_index_scroll_forward_hits_warm_wgpu_residency
+test_frame_paced_commits: test_a_montage_fill_interleaves_its_draws_with_its_commit_batches
+```
+
+A faulthandler dump caught the owner thread **inside the montage build**
+(`shader_mapping.__eq__`, under `_prepare_tile_layer_transaction`) while the
+GUI waited. That is the stage-1 refutation happening from the other side: the
+migration bridge is one lock, and the owner's prepare is a long section under
+it — the same shape as the 89 ms `retarget_frame_pipeline` holds that censored
+the fill when `frame:` was routed. Preparation is not cheap bookkeeping like
+the stage-plan bodies; it is the montage build.
+
+The prepare also runs **twice** whenever the take misses (31–58% of commits
+here), because the inline path is the correctness anchor and re-prepares.
+
+### What slice D leaves for the next attempt
+
+1. **The owner's prepare cannot be one lock section against a GUI that still
+   holds its own.** Either the migration bridge stops being a single lock for
+   this seam, or the prepare has to be interruptible/chunked, or D5's coupled
+   pair (per-tile `frame:` routing) has to land *first* so the owner's batches
+   are real barriers and the GUI's sections have already shrunk. The stage-1
+   note that "the two land together, or neither does" may be stronger than
+   written: the trigger may need the admissions routed *before* it, not with it.
+2. **The double prepare on a miss is not affordable at this cost.** Either the
+   miss must re-arm the gate instead of preparing inline (slice C's option (b),
+   which gives up the anchor and needs a livelock argument), or the backlog
+   conservation refusal has to become cheap enough to avoid — which means the
+   plan must stop carrying whole copies of the admission containers.
+3. D3 (ack on the owner), D4 and D5 were not reached. `_acknowledge_and_publish`
+   remains AckInputs-driven and free of live image-view reads, so the post is
+   still the only thing owed there.
+4. `TransactionIdentity`'s extra fields (`state_revision`, `geometry_key`,
+   `backlog_key`), `presentation_geometry_key`, `presentation_backlog_key`, the
+   `PreparedTransactionMailbox` with its closed counters, and the probe's
+   `prepared-transaction` hit-rate column are all *removed from the tree* with
+   D2 — they are recorded here rather than left as dead code, and the shape
+   above is what to rebuild.

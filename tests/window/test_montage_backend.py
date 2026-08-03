@@ -2972,7 +2972,9 @@ def test_deferred_cold_histogram_obligation_holds_coverage_and_dispatches_on_qui
         from arrayscope.window import frame_effects as montage_commit
 
         boundary = montage_commit.read_frame_boundary_inputs(renderer, session)
-        required, deferred, obligation = effects._wgpu_evidence_obligation_decision(boundary)
+        required, deferred, obligation = effects._wgpu_evidence_obligation_decision(
+            session, boundary
+        )
         effects._install_wgpu_evidence_obligation(
             SimpleNamespace(
                 evidence_required=required,
@@ -7046,6 +7048,8 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
         planned_tiles=(0,),
     )
     session = SimpleNamespace(
+        session_id=1,
+        key=("frame",),
         scheduling_policy=_refine_scheduling_policy(),
         display_committed=False,
         atomic_successor_pending=False,
@@ -7070,6 +7074,14 @@ def test_initial_loading_only_tile_layer_commit_is_skipped(qt_app):
             snapshot=lambda: SimpleNamespace(counts={}),
         ),
     )
+    # ADR 0065 stage 2 slice D: the prepare seam plans against a staged session
+    # and the take applies the plan. This double is about the commit *gate* —
+    # a loading-only first commit must not reach the backend — so it stages as
+    # the identity and applies as a no-op, which puts the bail's own writes
+    # exactly where a real session's applier would put them.
+    session._staged_presentation_session = lambda: session
+    session._harvest_presentation_plan = lambda _staged, _state, _delta, *, path: path
+    session.apply_tile_presentation_plan = lambda _plan: (None, None)
 
     win = _Window()
     win.commit_frame_session_presentation(session)
