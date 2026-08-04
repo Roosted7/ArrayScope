@@ -606,6 +606,9 @@ class LifecycleRungMaterializations:
             self.release(request)
             return False
         self._lifecycle.materialization_resident(request)
+        render_lod.remember_resident_floor(
+            self._session, int(request.tile_number), getattr(request, "key", None)
+        )
         return True
 
     def release(self, request) -> tuple[ReleaseClaim, ...]:
@@ -996,6 +999,12 @@ class FrameSession:
     # anisotropic page key is ever minted for it.
     lod_anisotropic_pages: bool = True
     lod_page_cache: object | None = None
+    # Window-scoped index of page-set keys that have reached RESIDENT, born
+    # beside ``lod_page_cache`` and describing exactly its contents.  A session
+    # rebirth empties ``lifecycle.record.levels`` while those pages survive, so
+    # without this the successor stands on floors it cannot name and re-produces
+    # every one of them (``render.lod.ResidentFloorIndex``).
+    lod_floor_index: object | None = None
     # Immutable canonical routes are reused across viewport retargets. Physical
     # residency has its own cache revision; changing it must not rebuild page
     # geometry for every floor query.
@@ -3696,6 +3705,7 @@ class FrameSession:
                 int(tile_number), key, ClaimOwner.PREVIEW, request=("preview-floor", key)
             )
         self.lifecycle.level_resident(int(tile_number), key)
+        render_lod.remember_resident_floor(self, int(tile_number), key)
         return True
 
     def _lod_preview_floor_first_fill_active(self, planned_numbers) -> bool:

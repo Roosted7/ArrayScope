@@ -1220,6 +1220,7 @@ class FramePipelineEffects:
                 return False, "materialization-in-flight"
             if render_lod._page_set_exact(pyramid, level_key):
                 self.session.lifecycle.level_resident(tile_number, level_key)
+                render_lod.remember_resident_floor(self.session, tile_number, level_key)
                 return False, "level-resident"
             request = self.session._lod_materialization_request(
                 rendered,

@@ -7822,3 +7822,215 @@ def test_capped_level_generation_bind_cohort_is_priority_ordered():
     # An uncapped cohort keeps caller order -- nothing is discarded, so there
     # is no choice to make and no sort to pay for.
     assert session.bind_payloads_to_level_generation(corner_first) == 8
+
+
+# --------------------------------------------------------------------------
+# Window-scoped floor index: what a reborn session may adopt, and what it
+# must refuse.  (ADR 0050 / progressive-render contract R2.)
+# --------------------------------------------------------------------------
+
+
+def _reborn(session, *, key=None, plan=None):
+    """A successor FrameSession over the same window-scoped caches.
+
+    Models the montage -> slice -> montage transition, whose only surviving
+    state is window-scoped: the ``LodPageCache`` and the ``ResidentFloorIndex``
+    beside it.  Everything session-scoped -- the whole ``TileLifecycle`` with
+    its ``record.levels``, ``display_tile_payloads``, ``lod_preview_metadata``
+    -- starts empty, exactly as ``_build_montage_frame_session`` leaves it.
+    """
+
+    successor = _session(
+        mode=session.lod_policy_mode,
+        pyramid=session.lod_page_cache,
+        view_range=session.view_range,
+        count=len(session.plan.tiles),
+    )
+    successor.session_id = int(session.session_id) + 1
+    successor.key = session.key if key is None else key
+    successor.lod_floor_index = session.lod_floor_index
+    if plan is not None:
+        successor.plan = plan
+        successor.visible_tiles = plan.tiles
+    # The production seam that publishes tile -> source targets, so a repointed
+    # slot is repointed the way ``retarget_index_window`` repoints it.
+    successor.sync_lifecycle_scope()
+    return successor
+
+
+def _publish_floors(session, level=2):
+    """Admit one page set per tile and publish it through the real seam."""
+
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    published = {}
+    for rendered in session.rendered_tiles.values():
+        tile_number = int(rendered.tile.montage_index)
+        key = page_set_key_for_rendered(
+            rendered,
+            demand=demand,
+            level=level,
+            semantic_source_id=session.tile_semantic_source_id(rendered.tile.source_index),
+        )
+        _admit_page_set(session.lod_page_cache, key, np.asarray(rendered.image))
+        session.lifecycle.level_resident(tile_number, key)
+        render_lod.remember_resident_floor(session, tile_number, key)
+        published[tile_number] = key
+    return published
+
+
+def test_a_reborn_session_adopts_the_floors_its_pyramid_still_holds():
+    """The positive case, stated on identity rather than on timing.
+
+    The successor's lifecycle is empty, so the lifecycle path of
+    ``best_floor_key`` finds nothing.  The pages are still in the pyramid and
+    the index still names them, so the successor resolves the SAME key its
+    predecessor published -- which is what lets ``LodLadder.plan_tile`` take
+    its presentation-only branch instead of scheduling a producer.
+    """
+
+    session = _session(pyramid=LodPageCache(max_bytes=1 << 24), count=2)
+    index = render_lod.ResidentFloorIndex()
+    session.lod_floor_index = index
+    published = _publish_floors(session)
+    assert index.remembered == len(published) == 2
+
+    successor = _reborn(session)
+    assert successor.lifecycle.peek(0) is not None
+    assert not successor.lifecycle.peek(0).levels, "a rebirth must start with no level evidence"
+
+    adopted = successor._best_floor_key(0, tile_number=0)
+    assert adopted is not None, "the successor cannot name a floor its pyramid still holds"
+    key, _coarsest, _cache = adopted
+    assert key == published[0]
+    # It is the INDEX that answered, not some other path finding it anyway.
+    assert index.adopted >= 1
+    # The two positive proofs the invariant names, asserted rather than assumed.
+    assert key.source_id == successor.tile_semantic_source_id(0)
+    assert int(key.tile_id) == 0
+    assert render_lod._page_set_resolution(successor.lod_page_cache, key) is not None
+
+
+def test_a_reborn_session_refuses_floors_from_another_document_or_operation():
+    """Negative arm: a content change renames every tile's texels.
+
+    ``montage_tile_semantic_key`` folds the document key, and
+    ``_document_key`` folds ``document.revision`` AND ``document.steps`` -- so
+    loading another array and adding an operation are the same event here: the
+    successor computes a different ``tile_semantic_source_id`` and the index,
+    which is filed under the page set's own ``source_id``, has nothing under
+    it.  The assertion is on that identity, not on how much work followed.
+    """
+
+    session = _session(pyramid=LodPageCache(max_bytes=1 << 24), count=2)
+    session.lod_floor_index = render_lod.ResidentFloorIndex()
+    published = _publish_floors(session)
+
+    successor = _reborn(session, key=("test", "operation-added"))
+
+    assert successor.tile_semantic_source_id(0) != session.tile_semantic_source_id(0)
+    assert published[0].source_id != successor.tile_semantic_source_id(0)
+    assert successor._best_floor_key(0, tile_number=0) is None
+    # And the refusal is the identity, not an empty index: the pages are still
+    # there, and the predecessor's own identity still resolves them.
+    assert render_lod._page_set_resolution(session.lod_page_cache, published[0]) is not None
+    assert session._best_floor_key(0, tile_number=0) is not None
+
+
+def test_a_reborn_session_refuses_a_floor_belonging_to_another_source():
+    """Negative arm: an index-window retarget repoints slots at new sources.
+
+    Reuse across index windows is deliberate -- ``tile_semantic_source_id`` is
+    window-agnostic precisely so a floor computed for source 1 presents
+    instantly wherever source 1 lands next.  What must never happen is a slot
+    adopting the floor of the source it *used* to show.  So the assertion is
+    that the key offered for a repointed slot names the slot's CURRENT source.
+    """
+
+    session = _session(pyramid=LodPageCache(max_bytes=1 << 24), count=2)
+    session.lod_floor_index = render_lod.ResidentFloorIndex()
+    published = _publish_floors(session)
+
+    # Slot 0 now shows source 1, and slot 1 shows source 0.
+    swapped = replace(
+        session.plan,
+        tiles=tuple(
+            replace(tile, source_index=1 - int(tile.source_index)) for tile in session.plan.tiles
+        ),
+    )
+    successor = _reborn(session, plan=swapped)
+
+    for slot, source in ((0, 1), (1, 0)):
+        adopted = successor._best_floor_key(source, tile_number=slot)
+        assert adopted is not None
+        key, _coarsest, _cache = adopted
+        assert int(key.tile_id) == source, (
+            f"slot {slot} adopted a floor for source {key.tile_id}, not its own {source}"
+        )
+        assert key == published[source]
+
+
+def test_the_floor_index_drops_a_key_whose_pages_are_gone():
+    """The eviction discipline, exercised rather than asserted in prose.
+
+    A window-scoped index outliving sessions needs one, or it becomes a
+    register of things that no longer exist.  The bound is a COUNT (it stores
+    no pixels); the discipline is that a read re-probes the cache and deletes
+    what it cannot resolve, so the index can never outlive its pixels in
+    effect.
+    """
+
+    session = _session(pyramid=LodPageCache(max_bytes=1 << 24), count=2)
+    index = render_lod.ResidentFloorIndex()
+    session.lod_floor_index = index
+    _publish_floors(session)
+    assert len(index) == 2
+
+    session.lod_page_cache.clear()
+    successor = _reborn(session)
+
+    assert successor._best_floor_key(0, tile_number=0) is None
+    assert index.pruned >= 1
+    # Pruning is on READ, so slot 1 is still filed: nothing has asked about it.
+    # That is the point -- the index never walks itself looking for corpses, it
+    # just cannot hand one out.
+    assert len(index) == 1
+    assert successor._best_floor_key(1, tile_number=1) is None
+    assert len(index) == 0
+
+
+def test_the_floor_index_bound_is_a_slot_count_and_it_holds():
+    """The oldest slot identity is the one recycled, and nothing grows past it.
+
+    The bound has to be exercised on the axis it actually bounds.  Each
+    document/operation/view-state generation mints fresh semantic ids, so an
+    unbounded index would accumulate one slot per generation per tile forever
+    — which is the leak shape a window-scoped store outliving sessions has.
+    """
+
+    index = render_lod.ResidentFloorIndex(max_slots=2, keys_per_slot=1)
+    session = _session(pyramid=LodPageCache(max_bytes=1 << 24), count=2)
+    session.lod_floor_index = index
+    demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
+    rendered = session.rendered_tiles[0]
+    keys = []
+    for generation in range(3):
+        key = page_set_key_for_rendered(
+            rendered,
+            demand=demand,
+            level=2,
+            semantic_source_id=("generation", generation, 0),
+        )
+        keys.append(key)
+        index.remember(key)
+
+    assert index.remembered == 3
+    assert len(index) == 2
+
+    def resolve_all(_key):
+        # Membership is what this test is about, so every key "resolves".
+        return object()
+
+    assert index.candidates_for(("generation", 0, 0), 0, resolve=resolve_all) == ()
+    assert [
+        key for key, _owner in index.candidates_for(("generation", 2, 0), 0, resolve=resolve_all)
+    ] == [keys[2]]

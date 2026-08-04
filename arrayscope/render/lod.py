@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import numpy as np
@@ -70,6 +71,176 @@ PREVIEW_FLOOR_MIN_LEVEL = 4
 PREVIEW_MIN_LEVEL_DELTA = 2
 PREVIEW_MIN_SCREEN_PIXELS_PER_TEXEL = 3.0
 PREVIEW_MAX_SCREEN_PIXELS_PER_TEXEL = 6.0
+
+#: How many ``(source_id, tile_id)`` slots the window-scoped floor index keeps.
+#:
+#: The bound is a COUNT, not a byte budget, and that is deliberate: this index
+#: stores no pixels.  It stores ``LodPageSetKey`` objects the pyramid is already
+#: holding while their pages are resident, so its marginal footprint is one
+#: dict slot per slot-identity — the pixels stay bounded by ``LodPageCache``'s
+#: own byte budget, which is the only owner that should have one.  A byte
+#: ceiling here would bound the wrong resource (the 2026-08-03 retention work
+#: needed both a byte ceiling and a count ceiling precisely because it held
+#: payload wrappers; this holds none).
+#:
+#: 1024 slots is ~3.7 full 272-tile montages' worth of distinct slot
+#: identities.  A document, operation or view-state change mints new semantic
+#: ids, so the superseded ones simply age out by LRU rather than being hunted
+#: down.  The real discipline is the read-time prune below: a key whose pages
+#: the pyramid has evicted is dropped the moment it is asked for, so the index
+#: can never outlive its pixels *in effect*, only in bounded memory.
+RESIDENT_FLOOR_INDEX_MAX_SLOTS = 1024
+
+#: Page-set keys kept per slot, most recently published first.  One slot
+#: legitimately owns several levels at once (a retained level 0, this round's
+#: preview level, a coarse retained rung — the contract's "free-reuse rung"
+#: explicitly allows three or more), and the reader ranks them.  Beyond a
+#: handful they are superseded rounds, not choices.
+RESIDENT_FLOOR_INDEX_KEYS_PER_SLOT = 4
+
+
+class ResidentFloorIndex:
+    """Window-scoped map from a tile's semantic source identity to its floors.
+
+    A ``FrameSession`` dies on every montage/slice toggle, and with it the
+    ``TileLifecycle`` whose ``record.levels`` is the ONLY record of which
+    ``LodPageSetKey`` names the reduced pages a tile already has.  The pages
+    themselves survive — they live in the window-scoped ``LodPageCache`` — so
+    the successor holds every pixel it needs and no way to name them.
+    ``best_floor_key`` then returns ``None``, ``TileLodState.floor_available``
+    is False, and ``LodLadder.plan_tile`` takes its ``cold_floor`` branch and
+    schedules a producer for a tile that needs none.
+
+    Measured, 2026-08-04, montage -> single slice -> montage with no reload:
+    63 of 64 tiles planned ``FLOOR ... presentation_only=False, reason="cold
+    floor fill"`` on the returning session's first plan, with
+    ``resident_levels=()`` and ``floor_available=False`` on every one of them.
+    In the field trace (272 tiles) the same shape is 200 producer tasks,
+    15.9 s of worker CPU, and — the tell — ``wgpu_uploads_total`` flat at 4892
+    and ``tile_lod_pyramid_entries`` flat at 2281 across the whole 2.6 s.  The
+    work produced nothing that was not already there.
+
+    This index is that missing name, kept where the pages are kept.  It is
+    evidence, never authority: every read re-proves both halves of the
+    adoption invariant against live state (see ``candidates_for``).
+    """
+
+    def __init__(
+        self,
+        *,
+        max_slots: int = RESIDENT_FLOOR_INDEX_MAX_SLOTS,
+        keys_per_slot: int = RESIDENT_FLOOR_INDEX_KEYS_PER_SLOT,
+    ) -> None:
+        self._slots: OrderedDict[tuple[object, int], OrderedDict[object, object]] = OrderedDict()
+        self._max_slots = max(1, int(max_slots))
+        self._keys_per_slot = max(1, int(keys_per_slot))
+        self.remembered = 0
+        self.adopted = 0
+        self.pruned = 0
+
+    def __len__(self) -> int:
+        return len(self._slots)
+
+    def remember(self, key, owner=None) -> None:
+        """Record that ``key``'s pages reached RESIDENT.
+
+        Keyed by the page set's OWN ``source_id``/``tile_id`` rather than by
+        anything the caller passes alongside it, so a lookup can only ever
+        return keys that already agree with the identity they were filed
+        under.  That makes the identity half of the invariant structural; the
+        reader still re-checks it, because "structural" is an argument and the
+        invariant asks for a proof.
+        """
+
+        try:
+            slot = (key.source_id, int(key.tile_id))
+        except (AttributeError, TypeError, ValueError):
+            return
+        try:
+            hash(slot)
+        except TypeError:
+            # Custom operations can mint an unhashable content key.  Reuse is
+            # an optimisation; failing to index one is not a correctness event.
+            return
+        keys = self._slots.get(slot)
+        if keys is None:
+            keys = OrderedDict()
+            self._slots[slot] = keys
+        keys[key] = owner
+        keys.move_to_end(key, last=False)
+        while len(keys) > self._keys_per_slot:
+            keys.popitem(last=True)
+        self._slots.move_to_end(slot, last=False)
+        while len(self._slots) > self._max_slots:
+            self._slots.popitem(last=True)
+        self.remembered += 1
+
+    def candidates_for(
+        self, source_id, tile_id: int, *, resolve
+    ) -> tuple[tuple[object, object], ...]:
+        """Floors still physically backed for one slot identity, best-effort.
+
+        ``resolve(key)`` is the caller's live probe of the page cache.  A key
+        it cannot resolve is **dropped here**, not merely skipped: the pages
+        are gone, and an index that keeps offering them would grow into a
+        register of things that no longer exist.
+        """
+
+        try:
+            slot = (source_id, int(tile_id))
+            hash(slot)
+        except (TypeError, ValueError):
+            return ()
+        keys = self._slots.get(slot)
+        if not keys:
+            return ()
+        alive: list[tuple[object, object]] = []
+        for key in tuple(keys):
+            if resolve(key) is None:
+                del keys[key]
+                self.pruned += 1
+                continue
+            alive.append((key, keys[key]))
+        if not keys:
+            self._slots.pop(slot, None)
+            return ()
+        self._slots.move_to_end(slot, last=False)
+        return tuple(alive)
+
+
+def remember_resident_floor(session, tile_number: int, key) -> None:
+    """Mirror one lifecycle RESIDENT verdict into the window-scoped index.
+
+    Deliberately reads the verdict back out of the lifecycle instead of
+    trusting its caller: the lifecycle is the only owner of "resident", and an
+    index that could disagree with it would be a second, quieter authority.
+    Call sites therefore cannot file anything the lifecycle has not published.
+    """
+
+    index = getattr(session, "lod_floor_index", None)
+    if not isinstance(index, ResidentFloorIndex) or not isinstance(key, LodPageSetKey):
+        return
+    lifecycle = getattr(session, "lifecycle", None)
+    rec = None if lifecycle is None else lifecycle.peek(int(tile_number))
+    entry = None if rec is None else rec.levels.get(key)
+    if entry is None or entry.phase is not LevelPhase.RESIDENT:
+        return
+    index.remember(key, entry.owner)
+
+
+def resident_floor_index_for_renderer(renderer) -> ResidentFloorIndex:
+    """The one floor index per renderer, born beside the pyramid it names.
+
+    Same owner and same lifetime as ``lod_page_cache_for_renderer``: an index
+    of keys into a cache is meaningless without that cache, and two objects
+    with different lifetimes would be two things to keep in step.
+    """
+
+    index = getattr(renderer, "_lod_floor_index_store", None)
+    if not isinstance(index, ResidentFloorIndex):
+        index = ResidentFloorIndex()
+        renderer._lod_floor_index_store = index
+    return index
 
 
 def progressive_render_round_key(session) -> tuple[object, ...]:
@@ -1363,6 +1534,47 @@ def _compute_best_floor_key(
             resolved = _page_set_resolution(pyramid, key)
             if resolved is not None:
                 add_candidate(key, resolved, owner=entry.owner)
+
+    floor_index = getattr(session, "lod_floor_index", None)
+    if tile is not None and isinstance(floor_index, ResidentFloorIndex):
+        # The window-scoped half of the same question the lifecycle answered
+        # above.  A session rebirth empties ``rec.levels`` while the pyramid
+        # keeps the pages, so without this the successor cannot name floors it
+        # is standing on (see ``ResidentFloorIndex``).
+        #
+        # Both halves of the adoption invariant are PROVED here, at the point
+        # of use, and neither defaults to true:
+        #
+        # 1. Semantic identity — the key's own ``source_id`` must equal the
+        #    identity THIS session computes for the slot's current source, and
+        #    its ``tile_id`` must be that source.  A document change, an
+        #    operation change (``_document_key`` folds ``document.steps``) or a
+        #    view-state change mints a different ``montage_tile_semantic_key``,
+        #    so a superseded key cannot match.  An index-window retarget
+        #    repoints the slot at another source, and the lookup then asks
+        #    about THAT source — which is the reuse this identity was designed
+        #    for, not staleness — while ``page_set_matches_tile_source``
+        #    refuses a key whose source rect is not the one this slot needs.
+        # 2. Physical backing — ``_page_set_resolution`` is a live probe of the
+        #    page cache, not a remembered verdict, and it is the same call the
+        #    lifecycle path above makes.  It cannot over-report: it resolves
+        #    the actual pages or returns None, and a None prunes the entry.
+        for key, owner in floor_index.candidates_for(
+            semantic_id,
+            int(source_index),
+            resolve=lambda candidate: _page_set_resolution(pyramid, candidate),
+        ):
+            if key in seen:
+                continue
+            if key.source_id != semantic_id or int(key.tile_id) != int(source_index):
+                continue
+            if not page_set_matches_tile_source(session, tile, key):
+                continue
+            resolved = _page_set_resolution(pyramid, key)
+            if resolved is None:
+                continue
+            floor_index.adopted += 1
+            add_candidate(key, resolved, owner=owner)
 
     if tile is not None:
         preview_level = int(getattr(session, "lod_preview_level", 0) or 0)

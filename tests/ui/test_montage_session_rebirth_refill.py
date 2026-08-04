@@ -16,24 +16,25 @@ nothing back.  What moves in lockstep with the ramp is
 producer tasks**) and `tile_lod_preview_presentations` (0 -> 22 -> 63 -> 97 ->
 180 -> 200).  The refill is PRODUCTION-bound, not admission-bound.
 
-The two tests below separate the fact from the defect:
+The two tests below hold the two halves apart, because a fix can satisfy either
+one alone and be wrong:
 
-* the return leg uploads nothing — so whatever those producers computed, the
-  backend already had.  That is the evidence the work is redundant, and it must
-  not regress into "we fixed the drip by uploading everything again";
-* the return leg re-produces a preview for nearly every tile, which is the
-  defect itself and is therefore an expected failure until it is fixed.
+* the return leg uploads nothing — the evidence that the CPU production was
+  redundant, and the guard against "we fixed the drip by uploading everything
+  again";
+* the return leg does not re-produce what it is about to show.
 
 The 72-of-272 asymmetry in the field is the same statement from the other side:
 the tiles whose native ``RenderedTile`` survived in the window-scoped display
 cache came back in ONE commit (71 of them at t=60.1); only the tiles whose
-wrapper died with the session dripped.
+naming died with the session dripped.  ``render.lod.ResidentFloorIndex``
+(2026-08-04) gives the reduced floors the same window-scoped survival the
+native results already had.
 """
 
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from tests.settle import settle_window
 from tests.ui.helpers import (
@@ -129,25 +130,26 @@ def test_a_montage_return_costs_no_gpu_upload(qtbot):
     assert back["upload_bytes"] == away["upload_bytes"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Session rebirth discards the LOD residency evidence and the floor payload "
-        "wrappers, so the returning montage plans a producing FLOOR rung ('cold "
-        "floor fill', presentation_only=False) for every tile whose native "
-        "RenderedTile did not survive in the window-scoped display cache.  "
-        "Measured at the returning session's first ladder plan: resident_levels=() "
-        "and floor_available=False on 64 of 64 tiles."
-    ),
-)
 def test_a_montage_return_re_presents_instead_of_re_producing(qtbot):
-    """The property a fix has to establish, stated where it can be measured.
+    """The property the fix establishes, stated where it can be measured.
 
     A montage returning to an unchanged document, operation chain and index
     window must re-present what it already showed.  Re-producing it is forbidden
     work under R2 ("a tile that already meets the floor is skipped in that
     pass — never re-produced"), and the trace shows the re-production is not
     only forbidden but *inert*: it uploads nothing.
+
+    This was ``xfail(strict=True)`` until 2026-08-04.  What it pinned:
+    ``FrameSession`` rebirth empties the ``TileLifecycle`` whose
+    ``record.levels`` was the only record of WHICH ``LodPageSetKey`` names the
+    reduced pages a tile already owns — while the pages themselves live on in
+    the window-scoped ``LodPageCache``.  ``best_floor_key`` therefore returned
+    None, ``TileLodState.floor_available`` was False, and ``LodLadder.plan_tile``
+    took its ``cold_floor`` branch: measured at the returning session's first
+    ladder plan, ``resident_levels=()`` and ``floor_available=False`` on 64 of
+    64 tiles, and 63 of 64 planned ``FLOOR ... presentation_only=False,
+    reason="cold floor fill"``.  ``render.lod.ResidentFloorIndex`` is that
+    missing name, kept beside the pages it names.
 
     The bound is deliberately loose (a handful of tiles, not zero).  The claim
     is "the return is not a refill", and a fix that leaves a few genuinely

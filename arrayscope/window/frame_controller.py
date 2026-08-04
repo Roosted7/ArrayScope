@@ -908,6 +908,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             lod_page_cache=(
                 self._lod_page_cache() if lod_policy_mode == LOD_POLICY_RESIDENT else None
             ),
+            # Handed over together with the pyramid, always: an index of keys
+            # into a cache the session does not have would name nothing.
+            lod_floor_index=(
+                self._lod_floor_index() if lod_policy_mode == LOD_POLICY_RESIDENT else None
+            ),
         )
         stage_planning_deferred = bool(
             defer_stage_planning or (missing_tiles and not native_target_required)

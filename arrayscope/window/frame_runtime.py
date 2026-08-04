@@ -263,6 +263,9 @@ class FrameRuntimeMixin:
     def _lod_page_cache(self) -> LodPageCache:
         return render_lod.lod_page_cache_for_renderer(self)
 
+    def _lod_floor_index(self) -> render_lod.ResidentFloorIndex:
+        return render_lod.resident_floor_index_for_renderer(self)
+
     def _montage_render_intent(self, session) -> RenderIntent:
         return RenderIntent(
             semantic_key=session.key,
