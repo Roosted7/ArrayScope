@@ -34,6 +34,35 @@ from arrayscope.operations.cancellation import EvaluationCancelled
 # N worker processes with uncapped native thread teams is an oversubscription
 # bomb (numba kernels here are `parallel=True`). One team each; raising a cap
 # is a measured decision, not a default.
+#
+# `OMP_NUM_THREADS=1` IS A FLOOR, NOT A POLICY, AND IT IS A LANDMINE FOR ANY
+# FUTURE FFT-BEARING FAMILY. Measured 2026-08-04 inside a real pool child:
+# it CAPS `scipy.fft`'s own `workers=` argument, because scipy now dispatches
+# to ducc, whose binary carries the string "by the `OMP_NUM_THREADS`
+# environment variable". `fft(..., workers=8)` on (336,336,272) complex64 ran
+# 145.6 ms at 1.00x parallelism pinned, against 47.6 ms at 6.84x unpinned --
+# 3.06x slower. Bisected against all five names: OMP alone does it, the other
+# four are innocent, and "all except OMP" is clean.
+#
+# Latent today, because no routed family runs an FFT: the four `RemoteCall`
+# entries are histogram plot, histogram aggregate, preview page fan-out and
+# image snapshot, none of which touch scipy.fft. It stops being latent the
+# moment stage materialization or tile evaluation routes -- a 600 ms
+# whole-volume stage would become ~1.8 s and adding an operation would get
+# VISIBLY WORSE. A whole-volume transform that nothing else waits behind wants
+# many threads, which is the opposite of what this dict says; the shape the
+# product already uses in-process (`stage_workers=1, fft_workers_stage=8`) is
+# the correct one and must survive any such move.
+#
+# So: before routing an FFT-bearing family, this must become a per-family
+# thread budget rather than a constant. It is not fixed here because it is not
+# adjudicable until such a family routes, and a blind change would trade a
+# measured oversubscription bomb for an unmeasured one.
+#
+# TRAP for anyone A/B-ing this: patching `CHILD_ENVIRONMENT` in the PARENT is
+# inert. `_worker_main` reads the module global in the child, which re-imports
+# this module under `spawn`, so the parent's mutation is never seen -- an
+# intended A/B silently runs A/A. Change the tracked source.
 CHILD_ENVIRONMENT = {
     "OMP_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
