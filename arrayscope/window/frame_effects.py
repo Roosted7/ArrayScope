@@ -5532,7 +5532,7 @@ def _warm_atomic_successor_residency(
     }
     session._atomic_warm_job = job
 
-    def continue_warm() -> None:
+    def warm_step() -> None:
         if getattr(session, "_atomic_warm_job", None) is not job:
             return
         if not renderer._frame_session_is_current(session):
@@ -5612,6 +5612,22 @@ def _warm_atomic_successor_residency(
         session.final_commit_pending = True
         session.flush_pending = True
         renderer.request_montage_replan(session)
+
+    def continue_warm() -> None:
+        # ADR 0065 stage 1 left the presentation owner writing session state
+        # under the order lock, and this receiver-posted callback writes the
+        # same fields (`_atomic_warm_job`, `final_commit_pending`,
+        # `flush_pending`). An unlocked writer racing a locked one is not
+        # ordered by that lock, so the section must be taken here — the same
+        # treatment the posted governed-rebind chunk gets.
+        #
+        # A wrapper rather than an indented body for two reasons: the diff
+        # stays one hunk in a file three other seams are moving in, and the
+        # `is job` identity guard (680a8da1) keeps its exact semantics —
+        # nothing containerises or re-binds the job, which is what stalled ten
+        # wgpu tests when it was tried (dde88c56).
+        with _session_order_lock(renderer):
+            warm_step()
 
     _post_visible_path_callback(renderer, continue_warm)
     return False
@@ -6262,6 +6278,17 @@ def _render_pass_cost_context(window, session) -> tuple[object, object]:
     return structural_key, representation_key
 
 
+# The two terms `_commit_feedback_details` reports that have a SECOND writer.
+# `_last_set_image_ms` is also written by the single-image presenter
+# (`window/display_presenter.py`) — which is also this commit's own fallback
+# when the direct tile-delta path declines — and `_last_montage_overlay_update_ms`
+# by `window/frame_runtime.py`. Zeroing either inside the montage commit would
+# destroy that owner's instrument, which is why `6aad591b` left them off the
+# reset list; but leaving them alone is what lets a commit that never reached
+# its own write label the PREVIOUS commit's number as its own.
+_SHARED_COMMIT_TIMINGS = ("_last_set_image_ms", "_last_montage_overlay_update_ms")
+
+
 def _reset_commit_timings(renderer) -> None:
     renderer._last_montage_atomic_prepared_reused = False
     renderer._last_montage_atomic_fast_built = False
@@ -6269,15 +6296,31 @@ def _reset_commit_timings(renderer) -> None:
     renderer._last_montage_decision_levels = None
     renderer._last_montage_decision_source_rank = 0
     renderer._last_montage_physical_levels = None
+    # Snapshot rather than reset for the shared pair: the formatter compares
+    # against the value this commit INHERITED and reports the term only when
+    # something moved it during the commit. Both owners keep their attribute
+    # untouched, neither lends the other its credibility, and the fallback
+    # presenter's write still counts as this commit's set-image cost because
+    # it happens between this snapshot and the read.
+    renderer._commit_entry_shared_timings = {
+        name: getattr(renderer, name, None) for name in _SHARED_COMMIT_TIMINGS
+    }
     for name in (
         # Written only by _commit_tile_layer, which is also the only caller of
         # this reset — so a commit that bails before writing one used to
-        # report the PREVIOUS commit's number as its own.  Two other timings
-        # _commit_feedback_details reads deliberately stay off this list:
-        # _last_set_image_ms and _last_montage_overlay_update_ms are also
-        # written by the single-image presenter and by frame_runtime, so
-        # zeroing them here would destroy a different owner's instrument.
+        # report the PREVIOUS commit's number as its own.
         "_last_montage_tile_payload_build_ms",
+        # The payload breakdown `6aad591b` recorded as "same class, left
+        # alone". Re-checked: unlike the pair above these have exactly one
+        # writer — the block in `_commit_tile_layer` that produces all six
+        # together — so they belong on the list and nothing else can lose a
+        # value by their being here.
+        "_last_montage_tile_payload_seed_ms",
+        "_last_montage_tile_payload_level_ms",
+        "_last_montage_tile_payload_state_ms",
+        "_last_montage_tile_payload_build_call_ms",
+        "_last_montage_tile_payload_priority_ms",
+        "_last_montage_tile_payload_active_ms",
         "_last_montage_tile_prepare_apply_ms",
         "_last_montage_tile_prepare_stats_ms",
         "_last_montage_tile_prepare_metadata_ms",
@@ -6292,6 +6335,23 @@ def _reset_commit_timings(renderer) -> None:
         "_last_montage_tile_followup_ms",
     ):
         setattr(renderer, name, 0.0)
+
+
+def _shared_commit_timing_text(renderer, name: str) -> str:
+    """One shared timing, reported only if THIS commit produced it.
+
+    ``-`` rather than ``0.000`` when it did not: a zero reads as a measured
+    zero, and every misreading this branch has paid for was a term that was
+    true of something other than what it labelled.
+    """
+
+    entry = getattr(renderer, "_commit_entry_shared_timings", None)
+    if not isinstance(entry, dict) or name not in entry:
+        return "-"
+    current = getattr(renderer, name, None)
+    if current is None or current == entry[name]:
+        return "-"
+    return f"{float(current):.3f}"
 
 
 def _commit_feedback_details(renderer) -> tuple[str, ...]:
@@ -6311,12 +6371,12 @@ def _commit_feedback_details(renderer) -> tuple[str, ...]:
         f"prep_source={float(getattr(renderer, '_last_montage_tile_prepare_source_ms', 0.0) or 0.0):.3f}",
         f"prep_hist={float(getattr(renderer, '_last_montage_tile_prepare_histogram_ms', 0.0) or 0.0):.3f}",
         f"apply={float(getattr(renderer, '_last_montage_tile_layer_apply_ms', 0.0) or 0.0):.3f}",
-        f"set_image={float(getattr(renderer, '_last_set_image_ms', 0.0) or 0.0):.3f}",
+        f"set_image={_shared_commit_timing_text(renderer, '_last_set_image_ms')}",
         f"ack={float(getattr(renderer, '_last_montage_tile_acknowledge_ms', 0.0) or 0.0):.3f}",
         f"retain={float(getattr(renderer, '_last_montage_tile_retained_store_ms', 0.0) or 0.0):.3f}",
         f"state={float(getattr(renderer, '_last_montage_tile_state_publish_ms', 0.0) or 0.0):.3f}",
         f"geometry={float(getattr(renderer, '_last_montage_tile_geometry_sync_ms', 0.0) or 0.0):.3f}",
-        f"overlay={float(getattr(renderer, '_last_montage_overlay_update_ms', 0.0) or 0.0):.3f}",
+        f"overlay={_shared_commit_timing_text(renderer, '_last_montage_overlay_update_ms')}",
         f"identity={float(getattr(renderer, '_last_montage_tile_identity_check_ms', 0.0) or 0.0):.3f}",
         f"followup={float(getattr(renderer, '_last_montage_tile_followup_ms', 0.0) or 0.0):.3f}",
     )

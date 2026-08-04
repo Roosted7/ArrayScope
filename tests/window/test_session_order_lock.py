@@ -223,6 +223,168 @@ def test_request_montage_replan_off_the_gui_thread_still_disarms_its_gate(montag
     settle_window(win, lambda: renderer._montage_replan_gate_armed is False)
 
 
+# --- claim 2b: the atomic warm continuation is a locked section --------------
+
+
+def _foreign_thread_can_take(lock) -> bool:
+    """Whether a thread that is not this one could take ``lock`` right now.
+
+    ``RLock.acquire(False)`` answers True to its own owner, so asking from
+    here would say "free" no matter what. The probe has to run somewhere else.
+    """
+
+    answer: list[bool] = []
+
+    def probe() -> None:
+        got = lock.acquire(False)
+        answer.append(got)
+        if got:
+            lock.release()
+
+    thread = threading.Thread(target=probe, name="foreign-lock-probe")
+    thread.start()
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    return answer[0]
+
+
+def _atomic_warm_fixture(owner):
+    """The seams ``_warm_atomic_successor_residency`` actually reaches.
+
+    Deliberately not a window: the claim is about the callback's own span, and
+    a live montage would put a dozen other lock sections around it.
+    """
+
+    payload = SimpleNamespace(source_id=("tile", 0, "exact"))
+    warm_calls: list[dict] = []
+    state = {"resident": False}
+
+    def warm_tiled_residency(**kwargs):
+        warm_calls.append(
+            {
+                "held": owner.order_lock._is_owned(),
+                "foreign_blocked": not _foreign_thread_can_take(owner.order_lock),
+            }
+        )
+        state["resident"] = True
+
+    view = SimpleNamespace(
+        warmTiledResidency=warm_tiled_residency,
+        tiledPayloadResident=lambda _payload: state["resident"],
+    )
+    replans: list[bool] = []
+    renderer = SimpleNamespace(
+        win=SimpleNamespace(img_view=view, presentation_owner=owner),
+        _frame_session_is_current=lambda _session: True,
+        _memory_policy=lambda: SimpleNamespace(
+            visible_render_budget_bytes=1 << 30,
+            display_cache_budget_bytes=1 << 30,
+            user_render_cap_bytes=1 << 30,
+        ),
+        request_montage_replan=lambda _session: replans.append(owner.order_lock._is_owned()),
+    )
+    session = SimpleNamespace(session_id=1, key="key", viewport_revision=0)
+    tile_delta = SimpleNamespace(upserts={0: payload}, atomic_handoff=True)
+    return renderer, session, tile_delta, payload, warm_calls, replans
+
+
+def test_the_atomic_warm_continuation_writes_session_state_under_the_order_lock(monkeypatch):
+    """The posted continuation, not the funnel that posted it.
+
+    ``continue_warm`` writes ``_atomic_warm_job``, ``final_commit_pending``
+    and ``flush_pending`` from a bare receiver callback. The presentation
+    owner writes session state under the order lock, and an unlocked writer
+    racing a locked one is not ordered by that lock — so the callback itself
+    has to be a section. Read from inside the backend call the callback makes
+    and from beside the writes, with a foreign-thread probe because an RLock
+    answers True to its own owner.
+    """
+
+    import arrayscope.window.frame_effects as frame_effects
+
+    owner = PresentationOwner(None)
+    renderer, session, tile_delta, payload, warm_calls, replans = _atomic_warm_fixture(owner)
+
+    posted: list = []
+    monkeypatch.setattr(
+        frame_effects,
+        "_post_visible_path_callback",
+        lambda _renderer, callback: posted.append(callback),
+    )
+
+    warm_complete = frame_effects._warm_atomic_successor_residency(
+        renderer,
+        session,
+        geometry=None,
+        tile_delta=tile_delta,
+        levels=(0.0, 1.0),
+        rgb_already_windowed=False,
+        payloads={0: payload},
+        batch_size=1,
+    )
+
+    assert warm_complete is False, "a cold payload should have armed a continuation"
+    assert len(posted) == 1
+    job = session._atomic_warm_job
+    assert job is not None
+
+    before = owner.gui_lock_acquisitions
+
+    posted[0]()
+
+    # The three session writes happen after the loop, so sample the lock where
+    # they land: the replan call that immediately follows them, plus the
+    # backend call inside the loop. Both must see the section held.
+    assert warm_calls, "the continuation never reached the backend, so nothing was observed"
+    assert all(call["held"] for call in warm_calls)
+    assert all(call["foreign_blocked"] for call in warm_calls)
+    assert replans == [True]
+    assert session._atomic_warm_job is None
+    assert session.final_commit_pending is True
+    assert session.flush_pending is True
+    assert owner.gui_lock_acquisitions > before
+
+
+def test_the_atomic_warm_continuation_keeps_its_job_identity_guard(monkeypatch):
+    """The mutation guard for the fix above.
+
+    ``_atomic_warm_job`` is an ``is``-identity latch: a superseding job must
+    make the queued callback a no-op. Wrapping the callback in a lock section
+    must not change that, and containerising the job (tried and reverted) is
+    exactly what would.
+    """
+
+    import arrayscope.window.frame_effects as frame_effects
+
+    owner = PresentationOwner(None)
+    renderer, session, tile_delta, payload, warm_calls, _replans = _atomic_warm_fixture(owner)
+
+    posted: list = []
+    monkeypatch.setattr(
+        frame_effects,
+        "_post_visible_path_callback",
+        lambda _renderer, callback: posted.append(callback),
+    )
+    frame_effects._warm_atomic_successor_residency(
+        renderer,
+        session,
+        geometry=None,
+        tile_delta=tile_delta,
+        levels=(0.0, 1.0),
+        rgb_already_windowed=False,
+        payloads={0: payload},
+        batch_size=1,
+    )
+
+    superseding = {"signature": ("other",), "pending": [], "payloads": {}}
+    session._atomic_warm_job = superseding
+
+    posted[0]()
+
+    assert warm_calls == [], "a superseded continuation still warmed"
+    assert session._atomic_warm_job is superseding
+
+
 # --- claim 3: session-side residency ----------------------------------------
 
 

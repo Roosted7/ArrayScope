@@ -4442,6 +4442,54 @@ def test_tile_layer_commit_feedback_counts_acknowledged_level_upserts():
     assert montage_commit.tile_layer_commit_processed_count(report) == 3
 
 
+def test_a_commit_that_never_wrote_a_shared_timing_does_not_report_the_last_one():
+    """The two commit-feedback terms with a second writer.
+
+    `_last_set_image_ms` is also written by the single-image presenter and
+    `_last_montage_overlay_update_ms` by `frame_runtime`, so neither can be
+    zeroed on commit entry without destroying that owner's instrument — which
+    is why they were left off `_reset_commit_timings` and why a commit that
+    bailed before its own write labelled the previous commit's number as its
+    own. Three of this branch's wrong turns were a term that was true of
+    something other than what it labelled; that is what this pins.
+    """
+
+    from arrayscope.window import frame_effects as montage_commit
+
+    renderer = SimpleNamespace(
+        _last_set_image_ms=7.5,
+        _last_montage_overlay_update_ms=3.25,
+    )
+
+    montage_commit._reset_commit_timings(renderer)
+
+    # The other owner's reading survives the reset untouched: this is the
+    # invariant that makes the fix not a list edit.
+    assert renderer._last_set_image_ms == 7.5
+    assert renderer._last_montage_overlay_update_ms == 3.25
+
+    # ...and yet neither is claimed by a commit that has written nothing.
+    bailed = montage_commit._commit_feedback_details(renderer)
+    assert "set_image=-" in bailed
+    assert "overlay=-" in bailed
+    # A single-owner term is still reported as a measured zero, because the
+    # reset genuinely measured it as unwritten.
+    assert "payload=0.000" in bailed
+
+    # A commit that does reach its own write reports it, and only it.
+    renderer._last_set_image_ms = 1.5
+    written = montage_commit._commit_feedback_details(renderer)
+    assert "set_image=1.500" in written
+    assert "overlay=-" in written
+
+    # The fallback presenter's write lands between commit entry and this read,
+    # so it counts as this commit's set-image cost — under-claiming would be
+    # its own kind of lie.
+    renderer._last_montage_overlay_update_ms = 0.75
+    both = montage_commit._commit_feedback_details(renderer)
+    assert "overlay=0.750" in both
+
+
 def test_render_pass_feedback_excludes_one_time_pool_growth_but_keeps_total():
     from arrayscope.display.model.frame import TileCommitReport
     from arrayscope.window.frame_effects import FramePipelineEffects

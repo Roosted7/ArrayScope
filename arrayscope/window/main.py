@@ -76,6 +76,10 @@ def _kernel_worker_backend(settings):
 # of the truth at 60 Hz.
 _RESOURCE_TELEMETRY_REFRESH_SECONDS = 0.25
 
+# How long after the last viewport input the interaction policy stays applied.
+# It is a deadline, not a timer duration: see `_viewport_interaction_active`.
+_VIEWPORT_INTERACTION_QUIET_SECONDS = 0.120
+
 
 class ArrayScopeWindow(
     WindowMenuMixin,
@@ -752,12 +756,49 @@ class ArrayScopeWindow(
     def _gui_callback_budget_decision(self, channel: str, *, interactive: bool = False):
         return default_gui_callback_budget_decision(channel, interactive=interactive)
 
+    @property
+    def _viewport_interaction_active(self) -> bool:
+        """Whether viewport input is recent enough to still apply interaction policy.
+
+        Derived from a monotonic deadline, not latched by the quiet timer's
+        ability to get scheduled. The distinction is the whole point: this flag
+        zeroes the `DISPLAY_PREPARATION` lane quota and gates several deferral
+        paths, and the GUI thread it used to be released on runs at a p95
+        schedule slip of 215 ms (trace 7). A timer release is a *wakeup* for
+        the edge work below; it was never a fit measure of "the gesture is
+        still happening", and every millisecond the wakeup ran late was a
+        millisecond of interactive policy applied to a window nobody was
+        touching. Readers now ask the deadline and get the answer the gesture
+        justifies whether or not the timer has managed to run.
+
+        Shortening the timer would not have helped: a shorter timer on a
+        starved thread fires just as late.
+
+        The setter keeps the plain-attribute contract for the callers that
+        pin the flag directly (fixtures, and the explicit hold below): True is
+        an unbounded deadline, False clears it.
+        """
+
+        deadline = getattr(self, "_viewport_interaction_deadline", None)
+        if deadline is None:
+            return False
+        return perf_counter() < float(deadline)
+
+    @_viewport_interaction_active.setter
+    def _viewport_interaction_active(self, value) -> None:
+        self._viewport_interaction_deadline = float("inf") if value else None
+
     def _note_viewport_interaction(self, reason: str = "viewport") -> None:
         if str(reason) == "range-programmatic":
             return
         if str(reason) == "range-pointer":
             self._release_viewport_continuity()
-        self._viewport_interaction_active = True
+        now = perf_counter()
+        if not self._viewport_interaction_active:
+            # A fresh episode: the previous one either was released or expired.
+            self._viewport_latch_episode_start = now
+        self._viewport_latch_last_input = now
+        self._viewport_interaction_deadline = now + _VIEWPORT_INTERACTION_QUIET_SECONDS
         timer = getattr(self, "_viewport_interaction_quiet_timer", None)
         if timer is None:
             # Timer category: UI cosmetic. User-interaction quiet detector for side-panel refresh and
@@ -767,11 +808,51 @@ class ArrayScopeWindow(
             timer.setSingleShot(True)
             timer.timeout.connect(self._on_viewport_interaction_quiet)
             self._viewport_interaction_quiet_timer = timer
-        timer.start(120)
+        timer.start(int(_VIEWPORT_INTERACTION_QUIET_SECONDS * 1000.0))
         self._note_interaction_state_changed()
 
+    def _record_viewport_latch_episode(self, fired_at: float) -> None:
+        """The measurement the deadline exists for: latch span vs gesture span.
+
+        Recorded on the release wakeup because that is the only instant that
+        knows all three edges. `slip_ms` is the interval the flag used to stay
+        applied purely because the timer had not been scheduled yet; it is now
+        the interval readers see the flag already down. Keeping it recorded is
+        what lets a later trace say whether the mechanism regressed rather
+        than re-deriving it from a constant.
+        """
+
+        started = getattr(self, "_viewport_latch_episode_start", None)
+        last_input = getattr(self, "_viewport_latch_last_input", None)
+        if started is None or last_input is None:
+            return
+        self._viewport_latch_episode_start = None
+        self._viewport_latch_last_input = None
+        gesture_ms = max(0.0, (float(last_input) - float(started)) * 1000.0)
+        latch_ms = gesture_ms + _VIEWPORT_INTERACTION_QUIET_SECONDS * 1000.0
+        wakeup_ms = max(0.0, (float(fired_at) - float(started)) * 1000.0)
+        episode = {
+            "gesture_ms": gesture_ms,
+            "latch_ms": latch_ms,
+            "wakeup_ms": wakeup_ms,
+            "slip_ms": max(0.0, wakeup_ms - latch_ms),
+        }
+        self._last_viewport_latch_episode = episode
+        self._record_ui_work(
+            "viewport_interaction_latch",
+            latch_ms,
+            count=1,
+            work_class="viewport_input",
+            details=(
+                f"gesture_ms={gesture_ms:.1f}",
+                f"wakeup_ms={wakeup_ms:.1f}",
+                f"slip_ms={episode['slip_ms']:.1f}",
+            ),
+        )
+
     def _on_viewport_interaction_quiet(self) -> None:
-        self._viewport_interaction_active = False
+        self._record_viewport_latch_episode(perf_counter())
+        self._viewport_interaction_deadline = None
         self._note_interaction_state_changed()
         if (
             getattr(self, "_montage_viewport_update_pending", False)

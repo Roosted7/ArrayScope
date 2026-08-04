@@ -20,6 +20,7 @@ progress-denominated wait cannot express one.
 """
 
 import numpy as np
+import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_MS
 from tests.ui.helpers import clear_arrayscope_settings as _clear_arrayscope_settings
@@ -227,6 +228,120 @@ def test_montage_side_panels_defer_while_viewport_interaction_active():
     assert _defer(interacting=True, session_defers=False)
     assert _defer(interacting=False, session_defers=True)
     assert not _defer(interacting=False, session_defers=False)
+
+
+def _drive_gesture(win, clock, *, steps: int, step_ms: float) -> None:
+    """One gesture as the product sees it: a burst of viewport input edges."""
+
+    for _ in range(int(steps)):
+        win._note_viewport_interaction("range-pointer")
+        clock["now"] += float(step_ms) / 1000.0
+
+
+def test_the_interaction_latch_tracks_the_gesture_not_the_quiet_timer(qtbot, monkeypatch):
+    """A gesture of known duration must produce a latch of comparable duration.
+
+    ``_viewport_interaction_active`` zeroes the ``DISPLAY_PREPARATION`` lane
+    quota and gates several deferral paths, and it used to be released only by
+    a 120 ms single-shot timer on a GUI thread whose p95 schedule slip is
+    215 ms (trace 7). A late timer is not a late release of one flag: it is
+    interactive policy applied to a window nobody is touching, for as long as
+    the thread stays busy.
+
+    Driven by simulated input edges against a controllable clock, never by
+    sleeping (``docs/testing/strategy.md``): the claim is about a *time
+    window*, and a stopwatch cannot distinguish "released on the gesture" from
+    "released when the machine got round to it".
+    """
+
+    _clear_arrayscope_settings()
+    import arrayscope.window.main as window_main
+    from arrayscope.window import ArrayScopeWindow
+
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(window_main, "perf_counter", lambda: clock["now"])
+
+    win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=float).reshape(4, 5, 8))
+    qtbot.addWidget(win)
+    try:
+        # A 200 ms gesture: eight input edges 25 ms apart.
+        _drive_gesture(win, clock, steps=8, step_ms=25.0)
+        gesture_end = clock["now"] - 0.025
+        assert win._viewport_interaction_active, "the gesture itself must latch"
+
+        # The quiet timer is armed and has NOT run: this is the starved-thread
+        # case, expressed exactly, with no dependence on how long a real
+        # thread would have taken to get to it.
+        timer = win._viewport_interaction_quiet_timer
+        timer.stop()
+
+        clock["now"] = gesture_end + 0.119
+        assert win._viewport_interaction_active, "released before the quiet window elapsed"
+
+        clock["now"] = gesture_end + 0.121
+        assert not win._viewport_interaction_active, (
+            "the flag outlived the gesture window while waiting for its timer"
+        )
+
+        # Every reader is fixed, not just the one above: this is the funnel the
+        # governor asks, and the montage/level-stats readers below it.
+        assert not win._interaction_active_now()
+        from arrayscope.window.frame_runtime import _viewport_interaction_active
+
+        assert not _viewport_interaction_active(_SimpleWin(win))
+
+        # The wakeup still arrives — very late — and is still the edge that
+        # runs the release work. No lost wakeup, and the episode it records
+        # says how late it was rather than hiding it in the latch.
+        clock["now"] = gesture_end + 0.500
+        win._on_viewport_interaction_quiet()
+
+        episode = win._last_viewport_latch_episode
+        assert episode["gesture_ms"] == pytest.approx(175.0, abs=1.0)
+        assert episode["latch_ms"] == pytest.approx(295.0, abs=1.0)
+        assert episode["wakeup_ms"] == pytest.approx(675.0, abs=1.0)
+        assert episode["slip_ms"] == pytest.approx(380.0, abs=1.0)
+        # The deliverable in one line: the latch is the gesture plus the quiet
+        # window, and nothing the timer does can add to it.
+        assert episode["latch_ms"] - episode["gesture_ms"] == pytest.approx(120.0, abs=0.01)
+    finally:
+        win.close()
+
+
+def test_an_explicitly_pinned_interaction_flag_still_holds(qtbot, monkeypatch):
+    """The mutation guard: the deadline must not break the direct pin.
+
+    Fixtures across this suite hold the edge open with
+    ``win._viewport_interaction_active = True`` and a stopped timer. A deadline
+    that expired on them would silently turn every one of those into a
+    non-interactive assertion.
+    """
+
+    _clear_arrayscope_settings()
+    import arrayscope.window.main as window_main
+    from arrayscope.window import ArrayScopeWindow
+
+    clock = {"now": 5_000.0}
+    monkeypatch.setattr(window_main, "perf_counter", lambda: clock["now"])
+
+    win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=float).reshape(4, 5, 8))
+    qtbot.addWidget(win)
+    try:
+        win._viewport_interaction_active = True
+        clock["now"] += 3600.0
+        assert win._viewport_interaction_active
+
+        win._viewport_interaction_active = False
+        assert not win._viewport_interaction_active
+    finally:
+        win.close()
+
+
+class _SimpleWin:
+    """The ``renderer.win`` shape the montage-side readers reach through."""
+
+    def __init__(self, win) -> None:
+        self.win = win
 
 
 def test_operation_dock_identical_refresh_does_not_rebuild_rows(qtbot, monkeypatch):
