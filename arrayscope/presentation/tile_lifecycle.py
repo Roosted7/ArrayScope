@@ -316,6 +316,40 @@ class TileRecord:
     #: ``target_satisfied_retained`` edge).  Reset when a new requirement is
     #: adopted, so every requirement gets exactly one closure statement.
     satisfaction_traced: bool = False
+    #: ``payload_ref_from_display_payload`` memo, ``{slot key: (payload, ref)}``.
+    #:
+    #: Not record VALUE and deliberately not a tracked container: it is a pure
+    #: derivation of ``presentable_payloads``, so writing it must not move the
+    #: mutation epoch the viewport latch reads.  Kept per record rather than
+    #: globally because the entry is dropped with the record.
+    #:
+    #: Keyed by the payload OBJECT, not by the clock. ``DisplayTilePayload``
+    #: and ``TilePayloadRef`` are both frozen, and every attribute the
+    #: conversion reads (including the ``page_backing`` chain behind
+    #: ``conservative_actual_lod_level``) is frozen too, so the ref is a
+    #: function of that object's identity alone and cannot age.  A clock key
+    #: would be sound as well and far weaker: the ledger's clock moves on any
+    #: tile's mutation, so during a fill it would miss on every call -- which
+    #: is the only regime this exists for.
+    #:
+    #: Declared BEFORE ``mutation_clock`` so the generated ``__init__``
+    #: assigns it while ``__setattr__`` still sees no clock: a memo field is
+    #: not a mutation and must not be counted as one.
+    #:
+    #: ``metadata={"derived": True}`` is what tells the mutation-revision walk
+    #: (``tests/presentation/test_tile_lifecycle_mutation_revision.py``) that
+    #: filling this is not a ledger mutation.  It is a declared, auditable
+    #: marker rather than a name the test exempts, and it is only sound for a
+    #: field that is a pure function of the record's other fields AND cannot
+    #: outlive their agreement -- which the identity key below is what
+    #: guarantees.
+    payload_ref_memo: dict = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+        hash=False,
+        metadata={"derived": True},
+    )
     #: The owning lifecycle's mutation clock.  Attached by
     #: ``TileLifecycle.record``; never part of the record's value.
     mutation_clock: _MutationClock = field(
@@ -371,38 +405,102 @@ class TileRecord:
     def backend_payload(self) -> TilePayloadRef | None:
         return self._payload_for_identity(self.backend_source_id)
 
+    def _payload_ref(self, key, payload) -> TilePayloadRef:
+        """One memoised conversion.  See :meth:`presentable_payload_refs`."""
+
+        memo = self.payload_ref_memo
+        cached = memo.get(key)
+        if cached is not None and cached[0] is payload:
+            return cached[1]
+        ref = payload_ref_from_display_payload(payload)
+        memo[key] = (payload, ref)
+        return ref
+
+    def presentable_payload_refs(self) -> tuple[TilePayloadRef, ...]:
+        """Every presentable payload as a ref, converting each one once.
+
+        The conversion is a pure function of a FROZEN payload object, so the
+        memo is keyed on that object's identity and needs no epoch: a slot
+        whose payload has not been replaced cannot have a different ref.  The
+        entry is superseded the moment the slot holds a different object and
+        the whole memo dies with the record.
+
+        This exists because the conversion was the planner's single largest
+        cost.  ``render.effects.tile_lod_states`` reads ``target_payload`` and
+        ``fallback_payload`` for every tile in scope and each property
+        rebuilt every ref from scratch, so one 272-tile ladder snapshot ran
+        ``payload_ref_from_display_payload`` ~1090 times: profiled at 41 % of
+        the whole pass, recomputed identically on every one of the ~1850
+        ``retarget_frame_pipeline`` calls a field session makes.
+        """
+
+        payloads = self.presentable_payloads
+        if not payloads:
+            return ()
+        memo = self.payload_ref_memo
+        refs = []
+        for key, payload in payloads.items():
+            cached = memo.get(key)
+            if cached is not None and cached[0] is payload:
+                refs.append(cached[1])
+                continue
+            ref = payload_ref_from_display_payload(payload)
+            memo[key] = (payload, ref)
+            refs.append(ref)
+        if len(memo) > len(payloads):
+            # Slots pruned by ``retarget``.  Bounded rather than eager: the
+            # memo is read by identity, so a stale entry can never be
+            # returned -- it only costs the dict slot.
+            for key in tuple(memo):
+                if key not in payloads:
+                    del memo[key]
+        return tuple(refs)
+
+    def target_and_fallback_payloads(
+        self,
+    ) -> tuple[TilePayloadRef | None, TilePayloadRef | None]:
+        """Both ladder inputs from ONE walk of the presentable payloads.
+
+        ``target_payload`` and ``fallback_payload`` partition the same
+        candidate list by the same predicate, so asking for them separately
+        walked and re-tested it twice.  Every caller that wants both should
+        come here; the two properties remain for the callers that want one.
+        """
+
+        target = self.target
+        if target is None:
+            return None, None
+        best_target: TilePayloadRef | None = None
+        target_ties: list[TilePayloadRef] = []
+        best_fallback: TilePayloadRef | None = None
+        best_fallback_key: tuple[int, int] | None = None
+        for ref in self.presentable_payload_refs():
+            if ref.satisfies_target(target):
+                if best_target is None or ref.lod_level < best_target.lod_level:
+                    best_target = ref
+                    target_ties = [ref]
+                elif ref.lod_level == best_target.lod_level:
+                    target_ties.append(ref)
+            elif ref.source_index == target.source_index:
+                key = (0 if ref.quality == "exact" else 1, ref.lod_level)
+                if best_fallback_key is None or key < best_fallback_key:
+                    best_fallback_key = key
+                    best_fallback = ref
+        if len(target_ties) > 1:
+            # ``repr`` of a semantic source id walks the whole content graph
+            # and was 13 % of the ladder snapshot on its own, paid once per
+            # tile even though the tie it breaks is rare.  Same total order,
+            # evaluated only where it decides something.
+            best_target = min(target_ties, key=lambda ref: repr(ref.source_id))
+        return best_target, best_fallback
+
     @property
     def target_payload(self) -> TilePayloadRef | None:
-        if self.target is None:
-            return None
-        candidates = (
-            ref
-            for ref in (
-                payload_ref_from_display_payload(value)
-                for value in self.presentable_payloads.values()
-            )
-            if ref.satisfies_target(self.target)
-        )
-        return min(candidates, key=lambda ref: (ref.lod_level, repr(ref.source_id)), default=None)
+        return self.target_and_fallback_payloads()[0]
 
     @property
     def fallback_payload(self) -> TilePayloadRef | None:
-        if self.target is None:
-            return None
-        candidates = (
-            ref
-            for ref in (
-                payload_ref_from_display_payload(value)
-                for value in self.presentable_payloads.values()
-            )
-            if ref.source_index == self.target.source_index
-            and not ref.satisfies_target(self.target)
-        )
-        return min(
-            candidates,
-            key=lambda ref: (0 if ref.quality == "exact" else 1, ref.lod_level),
-            default=None,
-        )
+        return self.target_and_fallback_payloads()[1]
 
     @property
     def target_payload_satisfies(self) -> bool:
@@ -488,9 +586,8 @@ class TileRecord:
             return None
         payload = self.presentable_payloads.get(source_id)
         if payload is not None:
-            return payload_ref_from_display_payload(payload)
-        for candidate in self.presentable_payloads.values():
-            ref = payload_ref_from_display_payload(candidate)
+            return self._payload_ref(source_id, payload)
+        for ref in self.presentable_payload_refs():
             if ref.acknowledged_identity == source_id:
                 return ref
         if self.target is None:

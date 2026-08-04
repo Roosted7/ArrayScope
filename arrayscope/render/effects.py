@@ -693,8 +693,12 @@ def tile_lod_states(
             )
         if not payload_current:
             payload = None
-        target_ref = None if record is None else record.target_payload
-        fallback_ref = None if record is None else record.fallback_payload
+        # One walk of the record's presentable payloads for both refs: the
+        # two properties partition the same candidate list by the same
+        # predicate, and this loop is the hottest consumer of either.
+        target_ref, fallback_ref = (
+            (None, None) if record is None else record.target_and_fallback_payloads()
+        )
         if (
             fallback_ref is not None
             and fallback_ref.identity is not None

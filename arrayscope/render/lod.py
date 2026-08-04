@@ -687,8 +687,85 @@ def page_plans_for_rendered(
     )
 
 
+#: Bound on the per-session ``tile_source_rect`` memo.  A montage plan has one
+#: entry per tile; the cap only stops an unbounded walk of superseded tiles
+#: between two guard changes.
+_TILE_SOURCE_RECT_CACHE_LIMIT = 4096
+
+
+def _tile_source_rect_guard(session) -> tuple[object, ...] | None:
+    """Everything :func:`tile_source_rect` reads that is not the tile itself.
+
+    Held by OBJECT rather than by ``id()``: a recycled address is exactly how
+    a memo ages into a false positive, and the retained reference is also what
+    makes the ``id(tile)`` key below sound.  ``None`` means "do not memoise",
+    which is the fail-open answer for a session this cannot read.
+    """
+
+    try:
+        return (
+            session.plan,
+            session.view_state,
+            session.source_anchoring,
+            bool(session.canonical_orientation),
+            session.montage_axis,
+        )
+    except Exception:
+        return None
+
+
 def tile_source_rect(session, tile) -> tuple[int, int, int, int]:
-    """Native-source window required by one immutable plan tile."""
+    """Native-source window required by one immutable plan tile.
+
+    Memoised per (session guard, tile) because it is pure and it was the
+    planner's second-largest cost: ``render.effects.tile_lod_states`` asks for
+    it once per tile it touches (measured 1.00 per touch -- the second call,
+    inside ``_floor_available``, is already absorbed by the ``best_floor_key``
+    residency memo), profiled at 44 % of that pass once the combined
+    payload-ref walk landed.  The whole
+    body below is derivation -- a canonical tile shape and a window start --
+    over inputs that a camera move does not touch, so a full montage replan
+    recomputed 272 identical answers on each of the ~1850
+    ``retarget_frame_pipeline`` calls a field session makes.
+
+    The tile is keyed by ``id`` with the tile OBJECT retained beside the
+    value, so a recycled address cannot return another tile's rect: the entry
+    is only used when the caller passed the very object it was computed for.
+    That matters here because callers pass tiles from several plans (a
+    ``RenderedTile`` carries the immutable snapshot it was evaluated under,
+    not the session's current plan tile), so a ``montage_index`` key would be
+    wrong rather than merely stale.
+    """
+
+    guard = _tile_source_rect_guard(session)
+    cache = None
+    if guard is not None:
+        state = getattr(session, "_tile_source_rect_memo", None)
+        if state is None or any(
+            left is not right for left, right in zip(state[0], guard, strict=True)
+        ):
+            state = (guard, {})
+            # Through ``object`` deliberately: a pure derivation must not move
+            # the session mutation epoch, which the viewport convergence latch
+            # reads as "did anything change since I last looked".  The value
+            # is a tuple, so nothing here depends on the tracking wrapper the
+            # ordinary path would have skipped anyway.
+            object.__setattr__(session, "_tile_source_rect_memo", state)
+        cache = state[1]
+        cached = cache.get(id(tile))
+        if cached is not None and cached[0] is tile:
+            return cached[1]
+
+    rect = _compute_tile_source_rect(session, tile)
+    if cache is not None:
+        if len(cache) >= _TILE_SOURCE_RECT_CACHE_LIMIT:
+            cache.clear()
+        cache[id(tile)] = (tile, rect)
+    return rect
+
+
+def _compute_tile_source_rect(session, tile) -> tuple[int, int, int, int]:
+    """One uncached answer.  See :func:`tile_source_rect`."""
 
     plan_shape = getattr(getattr(session, "plan", None), "tile_shape", None)
     if plan_shape is None:

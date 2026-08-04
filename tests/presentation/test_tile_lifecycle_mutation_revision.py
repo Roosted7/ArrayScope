@@ -126,8 +126,16 @@ _ARGUMENTS: dict[str, object] = {
 def _snapshot(lifecycle: TileLifecycle):
     """Everything the ledger can be asked about, by reflection."""
 
+    # ``mutation_clock`` is the thing under test.  A field declaring
+    # ``metadata={"derived": True}`` is a memo of the other fields rather than
+    # ledger state: writing it says nothing new about the tile, so a pure read
+    # that fills one is not a mutation and owes no revision bump. The marker
+    # is on the field, not a name listed here, so a field that starts carrying
+    # real state has to remove its own exemption to get it.
     record_fields = tuple(
-        field.name for field in dataclass_fields(TileRecord) if field.name != "mutation_clock"
+        field.name
+        for field in dataclass_fields(TileRecord)
+        if field.name != "mutation_clock" and not field.metadata.get("derived")
     )
     records = tuple(
         (
