@@ -116,6 +116,81 @@ def test_same_slots_with_new_sources_open_a_new_scope_generation():
     assert policy.verdict.admits_lane(Lane.DISPLAY_PREVIEW)
 
 
+def test_an_already_covered_scope_opens_in_refine_and_owes_no_wakeup():
+    """A scope both observe owners would close at once never opens COVERAGE.
+
+    Trace 5 phase 4: a pan across a tile boundary on a montage that was never
+    uncovered opened COVERAGE, and the next verdict *inside the same retarget*
+    closed it again and fired the replan wakeup -- a second full retarget for
+    a scope that had been complete the whole time.
+
+    The flag is only ever passed as the conjunction of both owners, so the
+    phase reached here is the phase the first observation would have reached.
+    Nothing is refused, so nothing is owed a wakeup -- and none is fired.
+    """
+
+    lifecycle = TileLifecycle()
+    targets = _targets(10, 11)
+    lifecycle.retarget(targets)
+    _present(lifecycle, targets)
+
+    policy = ProgressiveSchedulingPolicy()
+    generation = policy.verdict.generation
+    replans: list[str] = []
+
+    assert (
+        policy.retarget(
+            tuple(targets.values()),
+            tuple(targets),
+            progressive=True,
+            already_covered=True,
+        )
+        is True
+    )
+
+    assert policy.verdict.generation == generation + 1
+    assert policy.verdict.required_tiles == tuple(targets)
+    assert policy.verdict.phase is SchedulingPhase.REFINE
+    assert policy.verdict.admits(SchedulingWork.COVERAGE)
+    assert policy.verdict.admits(SchedulingWork.REFINEMENT)
+    for lane in (
+        Lane.DISPLAY_PREVIEW,
+        Lane.DISPLAY_PREPARATION,
+        Lane.VISIBLE_MATERIALIZATION,
+        Lane.HISTOGRAM_REFINEMENT,
+        Lane.SPECULATIVE_RESIDENCY,
+    ):
+        assert policy.verdict.admits_lane(lane), lane
+
+    assert policy.observe(lifecycle, on_refinement_replan=lambda: replans.append("refine")) is False
+    assert replans == []
+
+
+def test_a_covered_scope_still_opens_coverage_when_the_flag_is_omitted():
+    """The shortcut is opt-in per call; the default may never flip.
+
+    Every other caller of ``retarget`` -- and every future one -- must keep
+    getting COVERAGE plus the close wakeup, however complete the montage
+    already is.  Only a caller that has itself computed the conjunction of
+    both observe owners is allowed to skip that.
+    """
+
+    lifecycle = TileLifecycle()
+    targets = _targets(10, 11)
+    lifecycle.retarget(targets)
+    _present(lifecycle, targets)
+
+    policy = ProgressiveSchedulingPolicy()
+    replans: list[str] = []
+
+    assert policy.retarget(tuple(targets.values()), tuple(targets), progressive=True) is True
+
+    assert policy.verdict.phase is SchedulingPhase.COVERAGE
+    assert not policy.verdict.admits(SchedulingWork.REFINEMENT)
+    assert policy.observe(lifecycle, on_refinement_replan=lambda: replans.append("refine")) is True
+    assert replans == ["refine"]
+
+
 def test_single_pass_scope_starts_in_refine():
     policy = ProgressiveSchedulingPolicy()
     targets = _targets(10, 11)

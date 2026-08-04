@@ -109,10 +109,33 @@ class ProgressiveSchedulingPolicy:
         required_tiles,
         *,
         progressive: bool,
+        already_covered: bool = False,
         session_id: int = 0,
         round_id: str = "",
     ) -> bool:
-        """Adopt one required lifecycle scope; return whether it changed."""
+        """Adopt one required lifecycle scope; return whether it changed.
+
+        ``already_covered`` is the caller's answer to "would the very first
+        :meth:`observe` of this generation have closed coverage immediately?"
+        It is a **conjunction of both ``observe`` coverage owners** — the
+        lifecycle's ``first_pixels_presented`` over the adopted scope *and* the
+        session's ``first_pass_pixels_presented`` over that same scope — because
+        the two live call sites pass different owners and either of them may be
+        the first to observe this generation.  Only when both already hold is
+        the answer independent of which one wins the race.
+
+        That conjunction is what makes opening in ``REFINE`` here safe rather
+        than merely cheaper.  The phase reached is the phase the first
+        observation would have reached anyway; no work is refused that today's
+        code would have admitted, so **no wakeup is owed** and none is emitted.
+        (There is no backstop for a lost wakeup: the montage watchdog observes
+        and emits evidence only, so a phase edge that nobody was told about
+        would strand the round permanently.)
+
+        The default is ``False``, which is exactly today's behaviour: a caller
+        that cannot cheaply prove both halves must let COVERAGE open and let
+        ``observe`` close it.
+        """
 
         required = tuple(dict.fromkeys(int(tile) for tile in tuple(required_tiles or ())))
         signature = (scope_signature, required, bool(progressive))
@@ -124,7 +147,7 @@ class ProgressiveSchedulingPolicy:
         self._coverage_evidence_pending = False
         self._phase = (
             SchedulingPhase.COVERAGE
-            if bool(progressive) and bool(required)
+            if bool(progressive) and bool(required) and not bool(already_covered)
             else SchedulingPhase.REFINE
         )
         emit_trace(
@@ -134,6 +157,7 @@ class ProgressiveSchedulingPolicy:
             phase=str(self._phase.value),
             required_tiles=len(required),
             required_tile_numbers=required,
+            already_covered=bool(already_covered),
             session_id=int(session_id),
             round_id=str(round_id or ""),
         )

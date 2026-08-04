@@ -1230,15 +1230,34 @@ class FrameSession:
         COVERAGE open forever on region ids that have no evaluation target.
         """
 
+        return self.first_pass_pixels_presented_for(self.first_pass_required_tile_numbers())
+
+    def first_pass_pixels_presented_for(self, tile_numbers) -> bool:
+        """The same predicate against a scope the policy has not adopted yet.
+
+        ``sync_lifecycle_scope`` needs the answer for the scope it is *about*
+        to adopt, one statement before the adoption happens, so it cannot go
+        through ``first_pass_required_tile_numbers`` (which reads the policy's
+        current — still previous — generation).
+
+        The ``quality is None or not tile_numbers`` bail stays ahead of the
+        loop: a cold session has no latched first pass and an empty scope
+        proves nothing, and both must read as *not* covered rather than
+        vacuously covered.
+        """
+
         quality = self.first_pass_quality
+        tile_numbers = tuple(int(tile) for tile in tuple(tile_numbers or ()))
+        if quality is None or not tile_numbers:
+            # Hoisted above the two montage-wide dict builds below, which are
+            # pure reads: a cold session (no latched first pass) is the common
+            # case on the planning path and must cost nothing here.
+            return False
         backend_identities = dict(self.lifecycle.backend_presented_identities)
         plan_tiles = {
             int(getattr(tile, "montage_index", offset)): tile
             for offset, tile in enumerate(tuple(getattr(self.plan, "tiles", ()) or ()))
         }
-        tile_numbers = self.first_pass_required_tile_numbers()
-        if quality is None or not tile_numbers:
-            return False
         for tile_number in tile_numbers:
             tile = plan_tiles.get(int(tile_number))
             if tile is None:
@@ -1514,10 +1533,34 @@ class FrameSession:
             for tile, target in sorted(targets.items())
             if int(tile) in required
         )
+        adopted = tuple(sorted(required.intersection(targets)))
+        # A pan across a tile boundary changes the visible set on a montage
+        # that was never uncovered.  Opening COVERAGE for it made the very next
+        # ``scheduling_verdict()`` -- inside the same ``retarget_frame_pipeline``
+        # call -- find coverage already complete, flip to REFINE and fire
+        # ``on_refinement_replan``, which arms a 1 ms timer and buys a second
+        # full retarget.  Trace 5 phase 4: ``montage_retarget`` was 47.9% of
+        # wall clock, 20.5 calls/s, and 95% of those calls submitted nothing.
+        #
+        # This is the CONJUNCTION of both ``observe`` coverage owners, not
+        # either half.  ``frame_effects.scheduling_verdict`` observes with
+        # ``session.lifecycle`` (first pixels) and the commit path's
+        # ``_acknowledge_and_publish`` observes with ``session`` (first-pass
+        # quality acknowledgement); whichever runs first for a generation
+        # decides it.  Only when both already hold is opening in REFINE the
+        # same phase the first observation would have reached, and therefore
+        # the only form of this shortcut that owes no wakeup.  The lifecycle
+        # half is first so the cheap test short-circuits the payload walk.
+        already_covered = bool(
+            adopted
+            and self.lifecycle.first_pixels_presented(adopted)
+            and self.first_pass_pixels_presented_for(adopted)
+        )
         self.scheduling_policy.retarget(
             scheduling_scope_signature,
-            tuple(sorted(required.intersection(targets))),
+            adopted,
             progressive=bool(self.shader_display or self._resident_lod_active()),
+            already_covered=already_covered,
             session_id=int(self.session_id),
             round_id=str(self.render_round_id or ""),
         )
