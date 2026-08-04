@@ -64,6 +64,12 @@ def _repo(tmp_path: Path, hook: str, *, env_supplies_tools: bool) -> Path:
     # masked by a missing-file failure from the scan after it.
     for scan in ("dead_code.py", "timing_guard.py"):
         (root / "tools" / scan).write_text("")
+
+    # The lint steps read `git diff --cached`, so an empty index means ruff is
+    # never invoked and the recovery under test is only half exercised. Stage
+    # one Python file so the hook reaches both lint calls with an argument.
+    (root / "staged_module.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(root), "add", "staged_module.py"], check=True)
     return root
 
 
@@ -104,9 +110,12 @@ def test_pre_commit_recovers_its_tools_through_tools_env(tmp_path):
 
     assert result.returncode == 0, result.stderr
     calls = (root / "calls").read_text().splitlines()
+    # The lint steps name the staged paths; the two whole-tree guards do not,
+    # and that asymmetry is the hook's design rather than an oversight (a
+    # dead-code cascade lands in files the commit never names).
     assert calls == [
-        "ruff check .",
-        "ruff format --check .",
+        "ruff check -- staged_module.py",
+        "ruff format --check -- staged_module.py",
         f"python {root}/tools/dead_code.py",
         f"python {root}/tools/timing_guard.py",
     ]

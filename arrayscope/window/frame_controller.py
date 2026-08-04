@@ -27,6 +27,7 @@ from arrayscope.display.model.montage_levels import (
     MontageLevelStats,
 )
 from arrayscope.display.montage import (
+    ACTIVE_MARGIN_TILES,
     COVERAGE_MARGIN_TILES,
     RETENTION_HALO_TILES,
     VISIBLE_MARGIN_TILES,
@@ -1587,6 +1588,114 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             ) + len(cached_tiles)
         return cached_tiles, missing_tiles
 
+    def _published_scope_covers_camera(self, session, viewport_plan) -> bool:
+        """Whether skipping the pass can leave the session's scope short.
+
+        ``retarget_viewport`` is not only the planner's front door: it is the
+        SOLE publisher of the session's notion of what the user is looking at.
+        ``visible_tiles``/``visible_tile_numbers``, the lifecycle target set,
+        the level-presentation scope, the tile priority order and -- through
+        the frame plan it precedes -- ``required_tile_numbers`` all come from
+        it, and other actors read every one of them. A skipped pass leaves all
+        of that describing the camera of the last pass that ran.
+
+        That is why the visible ring's IDENTITY was a sound term to key on,
+        and it is the half of the question ``camera_pending_tiles`` does not
+        answer: the pending set proves the PLANNER would do nothing, not that
+        the published scope still describes the screen.
+
+        It is also why the gate does not simply stop at the planner. Timed
+        inside one full pass, 272 tiles, wgpu, latch disabled so every call is
+        a full body (10.09 ms):
+
+            retarget_frame_pipeline   6.04 ms   60 %   <- the planner
+            retarget_viewport         2.13 ms   21 %   <- publication
+            sync_lifecycle_scope      1.69 ms   17 %   <- publication
+            mark_ladder_swaps         0.27 ms    3 %
+            frame planner .plan()     0.10 ms    1 %
+
+        Gating only the planner is unconditionally sound and buys 60 %.
+        Gating the whole pass buys all of it -- measured 10.09 ms -> 2.5 ms,
+        the residual being work that happens BEFORE the gate (the viewport
+        plan build, the colormap LUT, the session key, the prefetch) -- but
+        only if the other 40 % was not owed. This predicate is what decides
+        that, and it decides it by containment rather than by argument.
+
+        Containment is what makes the drift safe rather than unbounded. A
+        SUPERSET is harmless -- every consumer asks "is everything in scope
+        settled" or "does everything in scope have work", and both are
+        conservative when the scope carries extra tiles. A scope MISSING a
+        tile the camera shows is the dangerous direction: an actor that
+        replans over ``required_tile_numbers`` while the camera sits still
+        would leave that tile out, and nothing would come back for it. So this
+        refuses the skip the moment the camera reaches past what was
+        published, at which point the full pass republishes around the new
+        camera.
+
+        Both rings are checked because they come from different publishers at
+        different margins: ``visible_tile_numbers`` is the session's own
+        ``VISIBLE_MARGIN_TILES`` set and ``required_tile_numbers`` is the
+        frame planner's ``ACTIVE_MARGIN_TILES`` one, and containment in one
+        does not imply containment in the other.
+        """
+
+        plan = viewport_plan.plan
+        view_range = viewport_plan.view_range
+        published_visible = getattr(session, "visible_tile_numbers", None)
+        if not published_visible:
+            return False
+        for margin, published in (
+            (VISIBLE_MARGIN_TILES, published_visible),
+            (ACTIVE_MARGIN_TILES, frozenset(session.required_tile_numbers())),
+        ):
+            for tile in viewport_tiles(plan, view_range=view_range, margin_tiles=margin):
+                if int(tile.montage_index) not in published:
+                    return False
+        return True
+
+    def _relatch_converged_viewport(self, session, viewport_plan, *, key=None) -> None:
+        """Record the convergence latch from the state this pass ends in.
+
+        After a FULL pass the key is re-derived, never reused from the top of
+        the method. It carries the ledger and page-cache epochs and a pass
+        moves both (``retarget_viewport``, ``sync_lifecycle_scope``, the ladder
+        and the presentation apply all write records). Latching an entry key
+        would latch an epoch that is already stale, so the very next camera
+        move would miss and pay a second full pass to latch the same
+        convergence -- measured as 2 planner passes over 12 sub-tile pans that
+        should have cost none. What convergence means is "nothing to do from
+        HERE", so it has to be read after everything the pass does.
+
+        After a SUPPRESSED pass the caller hands its entry key back instead,
+        and that is not a shortcut with a different meaning: the pass proved
+        that key describes a convergence, so re-deriving it can only reproduce
+        it or -- if the prefetch the caller scheduled first moved the ledger --
+        produce one whose epochs no longer describe anything that was proved.
+        Keeping the proven one is the conservative half of that choice, and it
+        saves the second 0.5 ms derivation (at 272 tiles) on the path whose
+        entire point is to be cheap.
+
+        The session epoch is stored BESIDE the key rather than inside it, and
+        on the renderer rather than on the session, because the assignment
+        below is itself a session write: a self-carried reading would name the
+        instant before it was stored and be one behind for ever. It is paired
+        with the session id so an index-window retarget (same object, new id)
+        cannot inherit it; the key itself dies with the session, so a stale
+        pairing alone can never suppress anything.
+        """
+
+        session._viewport_converged_key = (
+            session.viewport_invariant_key(
+                viewport_plan.plan, viewport_plan.view_range, viewport_plan.viewport_shape
+            )
+            if key is None
+            else key
+        )
+        self._montage_viewport_converged_revision = (
+            int(getattr(session, "session_id", 0) or 0),
+            int(session.mutation_revision),
+        )
+
     @session_order_lock_section
     def _try_update_montage_viewport_only(self) -> bool:
         """Retarget a persistent tiled session without restarting evaluation."""
@@ -1594,6 +1703,14 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         session = getattr(self, "_frame_session", None)
         if not self._frame_session_is_current(session):
             return False
+        # BEFORE this method writes anything. The epoch moves on every session
+        # write and this method is a writer, so a reading taken later in the
+        # body would be compared against a latch recorded before those writes
+        # and could never match (``dde88c56``: 553 bumps for a settled
+        # retarget, 1399 during a fill). Both places that record the latch
+        # below re-read it at the very END of the pass, so what this compares
+        # is exactly "did anything write to the session since I last looked".
+        entry_revision = getattr(session, "mutation_revision", None)
         capabilities = image_view_backend_capabilities(self.win.img_view)
         try:
             display_mode = str(self.win.img_view.montageDisplayMode())
@@ -1647,7 +1764,60 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             if montage_commit.viewport_convergence_latch_backend(self, session)
             else None
         )
-        if invariant_key is not None and session._viewport_converged_key == invariant_key:
+        # The epoch half of the latch. ``None`` on either side fails OPEN:
+        # an unreadable epoch is a reason to plan, never a reason to assume
+        # nothing changed.
+        converged_revision = getattr(self, "_montage_viewport_converged_revision", None)
+        epoch_held = (
+            entry_revision is not None
+            and converged_revision is not None
+            and converged_revision
+            == (int(getattr(session, "session_id", 0) or 0), int(entry_revision))
+        )
+        # The SECOND arm, and the one that makes a pan over a settled montage
+        # free. The first is an argument from HISTORY: a full pass proved this
+        # camera converged and no session write has happened since. That
+        # argument cannot survive its own consequences -- a pass that crosses a
+        # tile boundary applies a presentation, the commit that follows
+        # acknowledges it, and acknowledging writes tile records, so the latch
+        # is always recorded in a state the commit is about to leave and the
+        # next gesture misses. One full 272-tile replan per gesture for ever,
+        # which is what ``viewport_retargets_suppressed`` 18 / 451 measures.
+        #
+        # This one is an argument from the PRESENT for the half the epoch
+        # cannot carry: every tile this camera reaches, out to the widest ring
+        # any consumer of the camera uses, is already on the screen at the
+        # demanded level with nothing outstanding that names it, so the pass
+        # would find no addition, no ladder swap, no admission and no stale
+        # level whatever happened in between. What it still takes from history
+        # is only what the tiles cannot answer -- the CAMERA terms, chiefly
+        # ``preview_floor``, which steps where ``desired_level`` does not.
+        # None of those move when a commit lands, so this arm survives one.
+        #
+        # It is still gated on an observed convergence (``latched is not
+        # None``), and on ``_published_scope_covers_camera`` -- the pending set
+        # proves the PLANNER would do nothing, not that the scope this pass
+        # would have published is still adequate. See there.
+        #
+        # The layout guard is the one thing neither argument covers:
+        # ``retarget_viewport`` treats a geometry change as a presentation
+        # change regardless of tile state, so a reflow takes the full path even
+        # over a montage with nothing to do.
+        latched = session._viewport_converged_key
+        layout_unchanged = getattr(viewport_plan.plan, "geometry", None) == getattr(
+            getattr(session, "plan", None), "geometry", object()
+        )
+        camera_has_no_work = (
+            invariant_key is not None
+            and latched is not None
+            and not invariant_key.camera_pending_tiles
+            and layout_unchanged
+            and latched.camera_terms == invariant_key.camera_terms
+            and self._published_scope_covers_camera(session, viewport_plan)
+        )
+        if invariant_key is not None and (
+            camera_has_no_work or (epoch_held and latched == invariant_key)
+        ):
             # A suppressed retarget must be visible in a stall dump, or a
             # montage that goes stale under a gesture has no first question.
             # The counter is the field instrument (``MontageRuntimeDiagnostics``);
@@ -1658,15 +1828,26 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             emit_trace(
                 "viewport_retarget_suppressed",
                 session_id=int(getattr(session, "session_id", 0) or 0),
-                active_tiles=len(invariant_key.active_tiles),
+                camera_pending_tiles=len(invariant_key.camera_pending_tiles),
                 desired_level=int(invariant_key.desired_level),
                 desired_factor=int(invariant_key.desired_factor),
                 preview_floor=int(invariant_key.preview_floor),
                 lifecycle_revision=int(invariant_key.lifecycle_revision),
                 page_cache_revision=int(invariant_key.page_cache_revision),
+                session_revision=int(entry_revision or 0),
+                arm="camera" if camera_has_no_work else "epoch",
             )
             # Prefetch is interaction-gated: it no-ops mid-drag, runs at settle.
             schedule_near_viewport_montage_prefetch(self, session)
+            # Re-latched with THIS camera's key and an epoch read after the
+            # prefetch above. Without it the latch would keep naming the camera
+            # and the epoch of whichever pass last converged, so the very next
+            # move would compare against a reading this call has already
+            # invalidated and pay a full pass to prove the same nothing.
+            # Absorbing this call's own writes is sound because it decided
+            # nothing and scheduled only speculative prefetch, whose
+            # completions come back through ``request_montage_replan``.
+            self._relatch_converged_viewport(session, viewport_plan, key=invariant_key)
             return True
         self._montage_viewport_retargets_planned = (
             int(getattr(self, "_montage_viewport_retargets_planned", 0) or 0) + 1
@@ -1684,8 +1865,10 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         )
         # The key just changed (we did not take the early-out), so any prior
         # convergence latch is stale; it is re-earned below only if this full
-        # pass submits nothing.
+        # pass submits nothing. Both halves, or the epoch pairing would outlive
+        # the key it belongs to.
         session._viewport_converged_key = None
+        self._montage_viewport_converged_revision = None
 
         memory_policy = self._memory_policy() if hasattr(self, "_memory_policy") else None
         session.frame_plan = self._montage_frame_planner().plan(
@@ -1741,29 +1924,25 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             # This full pass submitted no kernel work and admitted no cached
             # additions: convergence is OBSERVED, not predicted. Latch the
             # invariant key so the next pan that stays within the same tile/zoom
-            # bounds short-circuits at the top. A lod swap or presentation change
-            # means the scene is still moving, so do not latch then. (Parked work
-            # drains via scheduler callbacks, never this path, so zero submissions
-            # here genuinely means nothing left to do.)
-            if (
-                invariant_key is not None
-                and int(submitted or 0) == 0
-                and not lod_swap_ready
-                and not presentation_changed
-            ):
-                # RE-derived, not the key from the top of this method. The key
-                # carries the ledger and page-cache epochs, and this pass moved
-                # both (retarget_viewport, sync_lifecycle_scope and the ladder
-                # all write records). Latching the entry key would latch an
-                # epoch that is already stale, so the very next camera move
-                # would miss and pay a second full pass to latch the same
-                # convergence -- measured as 2 planner passes over 12 sub-tile
-                # pans that should have cost none. What convergence means is
-                # "nothing to do from HERE", so the key has to be read here.
-                session._viewport_converged_key = session.viewport_invariant_key(
-                    viewport_plan.plan, viewport_plan.view_range, viewport_plan.viewport_shape
-                )
+            # bounds short-circuits at the top. A lod swap means the scene is
+            # still moving, so do not latch then. (Parked work drains via
+            # scheduler callbacks, never this path, so zero submissions here
+            # genuinely means nothing left to do.)
+            #
+            # ``presentation_changed`` used to veto the latch too, and that
+            # veto is what pinned the field ratio at 0 suppressed / 112 planned
+            # in trace 6's 4K phase: it is set by ``retarget_viewport`` for ANY
+            # change of the visible tile numbers, and the operator's visible
+            # set swings 30 <-> 272, so every pan across a tile boundary
+            # refused to latch and the next one paid for it again. It is gone
+            # because ``apply_montage_presentation`` has already run for the
+            # new visible set two lines above, and because what the resulting
+            # commit goes on to change retires the latch when it LANDS -- it
+            # moves the ledger epoch and it makes tiles pending -- rather than
+            # having to be predicted from here.
             schedule_near_viewport_montage_prefetch(self, session)
+            if invariant_key is not None and int(submitted or 0) == 0 and not lod_swap_ready:
+                self._relatch_converged_viewport(session, viewport_plan)
             return True
         additions_to_process = tuple(additions)
         budget = self._montage_callback_budget(

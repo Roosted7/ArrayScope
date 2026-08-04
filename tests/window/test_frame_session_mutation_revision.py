@@ -191,12 +191,17 @@ def _arguments(win, session) -> dict[str, object]:
         "source_ids": {tile_number: session.tile_semantic_source_id(tile.source_index)},
         "source_index": int(tile.source_index),
         "state": MontageTileState.LOADED,
+        "target_level": 0,
         "targets": None,
         "texture_data": np.zeros(tuple(session.plan.tile_shape), dtype=np.float32),
         "texture_kind": getattr(payload, "texture_kind", None),
         "tile": tile,
         "tile_number": tile_number,
         "tile_numbers": (tile_number,),
+        # ``camera_pending_tiles`` walks plan tiles, not tile numbers: it reads
+        # ``montage_index`` AND ``source_index`` off each one, because the plan
+        # is the authority on which source a slot shows.
+        "tiles": tuple(session.plan.tiles),
         "upsert_cost_fn": lambda *_args, **_kwargs: 1,
         "view_range": session.view_range,
         "view_state": session.view_state,

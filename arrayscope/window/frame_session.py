@@ -87,6 +87,7 @@ from arrayscope.presentation import (
     TileLifecycle,
     TileTarget,
     payload_ref_from_display_payload,
+    quality_lod_satisfies_target,
 )
 from arrayscope.render import lod as render_lod
 from arrayscope.render.lod import (  # noqa: F401  (re-exports; canonical home is render_lod)
@@ -114,7 +115,7 @@ class ViewportInvariantKey(NamedTuple):
     """
 
     plan_id: int
-    active_tiles: frozenset[int]
+    camera_pending_tiles: frozenset[int]
     desired_level: int
     desired_factor: int
     desired_factor_xy: tuple[int, int]
@@ -124,6 +125,35 @@ class ViewportInvariantKey(NamedTuple):
     preview_floor: int
     lifecycle_revision: int
     page_cache_revision: int
+
+    @property
+    def camera_terms(self) -> tuple[object, ...]:
+        """The terms that are a pure function of the camera and the plan.
+
+        Everything the LOD machinery reads off a camera and nothing that a
+        completion, a commit or a residency change can move. The convergence
+        gate's second arm compares only these, because the state half of its
+        question is answered directly by ``camera_pending_tiles`` being empty
+        rather than by an epoch that has not moved.
+
+        ``desired_level`` is in here for completeness rather than for work:
+        the pending set is computed AT that level, so a level change already
+        turns every tile whose pixels no longer satisfy it pending. The terms
+        that genuinely need naming are the ones the pending set cannot see --
+        the per-axis factor and, above all, ``preview_floor``, which is a step
+        function of the continuous ``source_texels_per_pixel_xy`` and steps
+        where ``desired_level`` does not (see ``25e4d750``).
+        """
+
+        return (
+            self.desired_level,
+            self.desired_factor,
+            self.desired_factor_xy,
+            self.acceptable_levels,
+            self.demand_reason,
+            self.retention_level,
+            self.preview_floor,
+        )
 
 
 #: Share of ``tile_residency_budget_bytes`` an out-of-view display-payload
@@ -1924,23 +1954,134 @@ class FrameSession:
     def lifecycle_snapshot(self):
         return self.lifecycle.snapshot()
 
+    def camera_pending_tiles(self, tiles, *, target_level: int) -> frozenset[int]:
+        """Of ``tiles``, the ones a retarget could still find work for.
+
+        The complement -- an *inert* tile -- is one whose pixels are already
+        on the screen at the demanded level with nothing outstanding anywhere
+        in the session that names it.  Adding an inert tile to the visible set
+        changes what the retarget computes but not what it decides: it is
+        already ``known`` to ``retarget_viewport`` (so it is not an addition),
+        the ladder has no swap to mark for it (its resident level already
+        satisfies the demand), the frame pipeline admits nothing for it, and
+        the level generation has no stale value to chase.
+
+        This is the term that replaced the visible tile set's IDENTITY.  The
+        identity was sound and far too strong: the operator's visible set
+        swings 30 <-> 272 tiles on the field montage, so every visibility
+        change bought a full 272-tile replan, and trace 6 measured the latch
+        firing 18 times against 451 planned (0 of 112 in the 4K phase) while
+        ``wgpu_uploads_total`` was flat zero for the whole phase.  What a
+        camera move can actually create is work for a tile it newly *reaches*,
+        so the only tiles that must be named are the ones work is possible
+        for.  Two cameras that reach different inert tiles reach the same
+        pending set, and the retarget between them is provably a no-op.
+
+        The predicate is deliberately conservative -- every clause below can
+        only *shrink* the inert set, and a tile wrongly called pending costs
+        one replan while a tile wrongly called inert is a lost wakeup with no
+        backstop (``_montage_watchdog_tick`` observes and never schedules).
+        It is also only half of what the gate rests on: the other half is the
+        session mutation epoch (``dde88c56``), which
+        ``FrameControllerMixin._try_update_montage_viewport_only`` pairs with
+        this key.  This predicate answers "could this tile have work RIGHT
+        NOW"; the epoch answers "did anything at all change since I asked".
+
+        The ``backend_source_id == presented_source_id`` clause is what makes
+        this a statement about the SCREEN rather than about the ledger's
+        wishes: ``TileLifecycle.backend_presented_snapshot`` clears
+        ``backend_source_id`` for every record the backend did not report as
+        drawn, so a tile the surface has stopped drawing is pending even
+        though the session still holds its payload.  That is why the answer is
+        backend-shaped rather than uniform: out-of-view retention is
+        ``gpu_atlas``-only (``FrameControllerMixin._retains_out_of_view_payloads``),
+        so on a wgpu montage the tiles a pan reaches are already drawn and
+        inert, and on a ``cpu_item`` one they are genuinely not drawn and this
+        correctly refuses.
+        """
+
+        lifecycle = self.lifecycle
+        presented = lifecycle.presented_tiles
+        display_payloads = self.display_tile_payloads
+        # One union rather than seven per-tile lookups.  Every one of these is
+        # a "something is outstanding for this slot" index and all seven are
+        # EMPTY on the montage this gate exists for, so the union costs seven
+        # iterations of nothing and the loop below pays one lookup instead of
+        # seven per tile (measured at 272 tiles: 197 us -> 60 us).
+        outstanding: set[int] = set()
+        for index_set in (
+            self.dirty_payloads,
+            self.pending_payload_upserts,
+            self.pending_removals,
+            self.deferred_out_of_view_invalidations,
+            self.loading_tiles,
+            self.active_tile_requests,
+            self.skipped_tiles,
+        ):
+            outstanding.update(int(index) for index in index_set)
+        level_generation = self.level_generation
+        # No level target means no tile can be stale against one, and the
+        # per-tile call is ~0.4 us of the 2.7 this loop had.
+        level_target = level_generation.target_levels is not None
+        target_level = max(0, int(target_level))
+        pending: set[int] = set()
+        for tile in tiles:
+            index = int(tile.montage_index)
+            if index not in presented or index not in display_payloads or index in outstanding:
+                pending.add(index)
+                continue
+            rec = lifecycle.peek(index)
+            if rec is None:
+                pending.add(index)
+                continue
+            target = rec.target
+            fields = rec.presented_payload_fields()
+            if (
+                target is None
+                or fields is None
+                or rec.failed_reason
+                # The plan is the authority on which source a slot shows; a
+                # released target keeps the source index it was retired with.
+                or int(target.source_index) != int(tile.source_index)
+                or int(fields[2]) != int(tile.source_index)
+                # Against the CURRENT demand, never the record's own target
+                # level: a released out-of-view target keeps the level it was
+                # retired at, so a zoom that re-latched at a finer level would
+                # otherwise find a coarse tile "settled" the moment it panned
+                # back onto it.
+                or not quality_lod_satisfies_target(fields[0], fields[1], target_level)
+                # ``is not`` first: these are typed identities whose equality
+                # walks a nested dataclass, and the settled case is the SAME
+                # object on both sides.
+                or (
+                    rec.backend_source_id is not rec.presented_source_id
+                    and rec.backend_source_id != rec.presented_source_id
+                )
+                or (level_target and not level_generation.tile_matches_target(index))
+            ):
+                pending.add(index)
+        return frozenset(pending)
+
     def viewport_invariant_key(self, plan, view_range, viewport_shape):
         """A cheap key that is stable exactly while a retarget would be a no-op.
 
-        The montage is a regular grid, so the visible tile set is derivable in
-        O(1) (``tiles_intersecting`` is grid arithmetic, not a scan). Returns
-        ``None`` when there is no camera yet (nothing to compare).
+        The montage is a regular grid, so the camera's tile set is derivable
+        in O(1) (``tiles_intersecting`` is grid arithmetic, not a scan).
+        Returns ``None`` when there is no camera yet (nothing to compare), and
+        on anything else it cannot read -- no key means no latch means the
+        full retarget runs.
 
         The set is derived through ``viewport_tiles``, the same way
-        ``retarget_viewport`` derives ``visible_tiles``, and that is
-        load-bearing rather than tidiness. This key guards a skip of the very
-        pass that computes that set, so it has to change whenever that set
-        would: derived any other way it can only be *coarser*, and a coarser
-        key is a key that compares equal across two cameras the session would
-        have given different visible tiles -- i.e. a skipped retarget that had
-        real work, with no stall to report it. This key read the raw camera
-        rect while the session read the rect snapped outward to whole-tile
-        bounds, which on the 272-tile field montage is 6 tiles against 15.
+        ``retarget_viewport`` derives ``visible_tiles``, and at the WIDEST
+        margin any consumer of the camera uses (``RETENTION_HALO_TILES``,
+        which covers the session's ``active``/``coverage``/``near`` rings and
+        the frame planner's ``active``/``near`` ones alike). Derived any
+        narrower it could compare equal across two cameras whose coverage
+        additions differ; derived wider it only costs.
+
+        What is keyed is not that set's identity but
+        :meth:`camera_pending_tiles` of it -- see there for why, and for the
+        conservatism the substitution rests on.
 
         **The zoom term is the LOD decision, not the span.** It used to be
         ``round(span, 4)``, on the reasoning that LOD levels are 2x apart and
@@ -1975,8 +2116,36 @@ class FrameSession:
         completely, so a latched camera skipped whatever a completion had
         changed in between; it got away with it because completions come back
         through ``request_montage_replan``. That remains true, and this is now
-        belt as well as braces: any tile-state or residency mutation at all
-        retires the latch, and the next camera move takes the full path.
+        belt as well as braces.
+
+        The THIRD epoch the pending-tiles term rests on -- the whole session's
+        ``mutation_revision`` (``dde88c56``), complete by construction over
+        every session-owned field, container and owned sub-object -- is
+        deliberately NOT a field here. It is paired with this key by
+        ``FrameControllerMixin._relatch_converged_viewport`` and held on the
+        RENDERER, because recording the latch is itself a session write: a key
+        that carried its own epoch would name the reading from just before the
+        assignment that stored it, be one behind for ever, and never match.
+        The renderer's reading is taken after the assignment, and its own
+        write is not session state.
+
+        The FOUR in-flight atomic-handoff attributes ``dde88c56`` leaves
+        uncovered (``_atomic_prepared_transaction``, ``_atomic_warm_job``,
+        ``_atomic_warmed_payloads``, ``_atomic_warmed_identities``) are
+        counted on assignment only, so an in-place mutation of one of them
+        would not move the epoch. Rather than key on them, this refuses to
+        produce a key at all while a handoff is LIVE: no key means no latch
+        AND no suppression, in one place, for both directions.
+
+        Two of the four are the liveness flags and two are the buffers they
+        fill, so testing the flags covers all four. ``_atomic_warmed_payloads``
+        and ``_atomic_warmed_identities`` are long-lived memos -- non-empty for
+        the rest of the session once anything has been warmed, which is why
+        testing them for emptiness instead refuses every key on a wgpu montage
+        and is not the same question. Their only in-place writers are the two
+        lines at the end of ``frame_effects.continue_warm``, and that closure
+        returns at its first statement unless ``session._atomic_warm_job`` is
+        still the job it was posted for.
         """
 
         if view_range is None or plan is None:
@@ -1986,14 +2155,6 @@ class FrameSession:
         span_y = float(y1) - float(y0)
         if not (span_x > 0.0 and span_y > 0.0):
             return None
-        active = frozenset(
-            int(tile.montage_index)
-            for tile in viewport_tiles(
-                plan,
-                view_range=view_range,
-                margin_tiles=VISIBLE_MARGIN_TILES,
-            )
-        )
         # Fail OPEN on anything unreadable.  No key means no latch means the
         # full retarget runs: an owner this cannot see is a reason to plan,
         # never a reason to assume nothing changed.
@@ -2001,6 +2162,11 @@ class FrameSession:
         lifecycle = getattr(self, "lifecycle", None)
         mutation_revision = getattr(lifecycle, "mutation_revision", None)
         if previous_demand is None or mutation_revision is None:
+            return None
+        if (
+            getattr(self, "_atomic_warm_job", None) is not None
+            or getattr(self, "_atomic_prepared_transaction", None) is not None
+        ):
             return None
         demand = select_lod_demand(
             view_range,
@@ -2019,7 +2185,14 @@ class FrameSession:
         )
         return ViewportInvariantKey(
             plan_id=id(plan),
-            active_tiles=active,
+            camera_pending_tiles=self.camera_pending_tiles(
+                viewport_tiles(
+                    plan,
+                    view_range=view_range,
+                    margin_tiles=RETENTION_HALO_TILES,
+                ),
+                target_level=int(demand.desired_level),
+            ),
             desired_level=int(demand.desired_level),
             desired_factor=int(demand.desired_factor),
             desired_factor_xy=tuple(int(value) for value in demand.desired_factor_xy),

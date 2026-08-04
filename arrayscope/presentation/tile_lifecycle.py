@@ -109,7 +109,7 @@ class TilePhase(str, Enum):
     FAILED = "failed"
 
 
-def _quality_lod_satisfies_target(
+def quality_lod_satisfies_target(
     quality: str,
     payload_level: int,
     target_level: int,
@@ -164,7 +164,7 @@ class TilePayloadRef:
                 self.identity is not None
                 and target.identity is not None
                 and self.identity.semantic_key == target.identity.semantic_key
-                and _quality_lod_satisfies_target(
+                and quality_lod_satisfies_target(
                     self.quality,
                     self.lod_level,
                     target.lod_level,
@@ -172,7 +172,7 @@ class TilePayloadRef:
             )
         return bool(
             int(self.source_index) == int(target.source_index)
-            and _quality_lod_satisfies_target(
+            and quality_lod_satisfies_target(
                 self.quality,
                 self.lod_level,
                 target.lod_level,
@@ -410,12 +410,12 @@ class TileRecord:
 
     @property
     def target_settled(self) -> bool:
-        fields = self._presented_payload_fields()
+        fields = self.presented_payload_fields()
         return bool(
             self.target is not None
             and fields is not None
             and fields[2] == int(self.target.source_index)
-            and _quality_lod_satisfies_target(
+            and quality_lod_satisfies_target(
                 fields[0],
                 fields[1],
                 self.target.lod_level,
@@ -425,7 +425,7 @@ class TileRecord:
 
     @property
     def first_pixel_presented(self) -> bool:
-        fields = self._presented_payload_fields()
+        fields = self.presented_payload_fields()
         return bool(
             self.active
             and self.target is not None
@@ -434,7 +434,7 @@ class TileRecord:
             and self.backend_source_id == self.presented_source_id
         )
 
-    def _presented_payload_fields(self) -> tuple[str, int, int] | None:
+    def presented_payload_fields(self) -> tuple[str, int, int] | None:
         """Read acknowledged payload facts without normalizing a new ref."""
 
         if self.presented_source_id is None:
@@ -1635,7 +1635,7 @@ class TileLifecycle:
 
         if rec.satisfaction_traced or not trace_enabled() or not rec.target_settled:
             return
-        fields = rec._presented_payload_fields()
+        fields = rec.presented_payload_fields()
         if fields is None:
             return
         rec.satisfaction_traced = True

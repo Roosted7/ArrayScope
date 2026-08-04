@@ -278,6 +278,45 @@ def restore_default_backend(settings):
     settings.sync()
 
 
+def viewport_invariant_key_stand_in(**overrides):
+    """A Qt-free session stand-in ``viewport_invariant_key`` can be asked about.
+
+    The key is a statement about a plan and a camera, so the tests that pin
+    its shape drive it directly rather than through a window -- otherwise they
+    become statements about whichever LOD policy that window selected. The
+    stand-in has to carry every collection ``camera_pending_tiles`` reads, and
+    it borrows the real method rather than reimplementing it: a stand-in that
+    answered the pending question its own way would be pinning itself.
+
+    Everything defaults EMPTY, so nothing is presented and every tile the
+    camera reaches is pending. A caller wanting residency overrides the
+    collections it cares about by name.
+    """
+
+    from types import SimpleNamespace
+
+    from arrayscope.display.model.presentation_generation import PresentationGenerationTracker
+    from arrayscope.window.frame_session import FrameSession
+
+    class _StandIn(SimpleNamespace):
+        camera_pending_tiles = FrameSession.camera_pending_tiles
+
+    fields = {
+        "display_tile_payloads": {},
+        "dirty_payloads": {},
+        "pending_payload_upserts": {},
+        "pending_removals": set(),
+        "deferred_out_of_view_invalidations": set(),
+        "loading_tiles": set(),
+        "active_tile_requests": set(),
+        "skipped_tiles": set(),
+        "level_generation": PresentationGenerationTracker(),
+        "lod_page_cache": None,
+    }
+    fields.update(overrides)
+    return _StandIn(**fields)
+
+
 def make_backend_window(qtbot, data, *, backend, require_gpu_atlas=False):
     """Build an ArrayScopeWindow on the given backend, refusing a fallback one.
 

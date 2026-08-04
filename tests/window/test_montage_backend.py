@@ -6504,23 +6504,32 @@ def test_commit_policy_and_convergence_latch_are_different_questions():
 
 
 def test_convergence_latch_key_names_the_set_the_session_would_plan():
-    """The key that skips a retarget has to see what the retarget would see.
+    """The key that skips a retarget has to see every tile the pass would.
 
-    ``viewport_invariant_key`` guards a skip of the very pass that derives
-    ``visible_tiles``, so any camera pair the key calls equal must be a pair
-    the session would give the same visible set.  Derived from the raw camera
-    rect it is strictly *coarser* than the session's snapped derivation, and a
-    coarser key compares equal across cameras whose visible sets differ --
-    which is a skipped retarget with real work behind it and no stall to
-    report it.  Nothing observed this while the latch was WGPU-only.
+    ``viewport_invariant_key`` guards a skip of the pass that derives
+    ``visible_tiles``, its coverage additions and its retention halo, so its
+    tile term has to reach at least as far as the widest of those.  A narrower
+    term compares equal across two cameras whose coverage ring differs --
+    a skipped retarget with real work behind it and no stall to report it.
 
-    The two assertions before the equality are the regime: on a camera where
-    both conventions happen to agree, the equality holds for the unfixed code
-    too and the test proves nothing.
+    So the term is the RETENTION HALO, and it is derived through
+    ``viewport_tiles`` like every other camera tile set in the product rather
+    than off the raw camera rect.  (The raw-versus-snapped regime the visible
+    ring had is gone at this margin: the snap moves the rect by less than a
+    tile, which three rings of margin already cover.  What is left to pin is
+    the margin, and the second assertion is what makes that a real claim --
+    the halo has to be strictly wider than the visible ring the key used to
+    carry, or this is asserting on the same set under a new name.)
+
+    Nothing in this session has been presented, so every tile in that halo is
+    pending and the term is the halo exactly.  A session WITH residency, where
+    the term collapses and the pans stop replanning, is counted in
+    ``tests/ui/test_viewport_retarget_suppression.py``.
     """
 
     from arrayscope.core.view_state import ViewState
     from arrayscope.display.montage import (
+        RETENTION_HALO_TILES,
         VISIBLE_MARGIN_TILES,
         make_montage_plan,
         viewport_tiles,
@@ -6539,16 +6548,19 @@ def test_convergence_latch_key_names_the_set_the_session_would_plan():
     view_range = ((cx - 64.0, cx + 64.0), (cy - 64.0, cy + 64.0))
     viewport_shape = (800, 800)
 
-    raw = {int(t.montage_index) for t in plan.tiles_intersecting(view_range, margin_tiles=0)}
+    visible = {
+        int(t.montage_index)
+        for t in viewport_tiles(plan, view_range=view_range, margin_tiles=VISIBLE_MARGIN_TILES)
+    }
     planned = {
         int(t.montage_index)
         for t in viewport_tiles(
             plan,
             view_range=view_range,
-            margin_tiles=VISIBLE_MARGIN_TILES,
+            margin_tiles=RETENTION_HALO_TILES,
         )
     }
-    assert raw != planned, "camera chosen so the two rect conventions disagree"
+    assert visible < planned, "the halo must be wider than the visible ring it replaced"
     assert 0 < len(planned) < len(plan.tiles), "a whole-montage set would hold for any convention"
 
     # The key also reads the LOD decision and the tile ledger (its zoom term
@@ -6557,17 +6569,17 @@ def test_convergence_latch_key_names_the_set_the_session_would_plan():
     # this asserts on a fail-open None instead of on the tile set.
     from arrayscope.display.lod import LodPolicyDecision, select_lod_demand
     from arrayscope.presentation import TileLifecycle
+    from tests.ui.helpers import viewport_invariant_key_stand_in
 
-    session = SimpleNamespace(
+    session = viewport_invariant_key_stand_in(
         lod_policy_decision=LodPolicyDecision(
             demand=select_lod_demand(view_range, viewport_shape, plan.tile_shape)
         ),
         lifecycle=TileLifecycle(),
-        lod_page_cache=None,
     )
     key = FrameSession.viewport_invariant_key(session, plan, view_range, viewport_shape)
     assert key is not None
-    assert set(key[1]) == planned
+    assert set(key.camera_pending_tiles) == planned
 
 
 def test_the_convergence_latch_key_fails_open_when_it_cannot_see_an_owner():

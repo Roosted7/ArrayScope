@@ -13,6 +13,7 @@ from .tile_lifecycle import (
     TileRecord,
     TileTarget,
     payload_ref_from_display_payload,
+    quality_lod_satisfies_target,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "TileRecord",
     "TileTarget",
     "payload_ref_from_display_payload",
+    "quality_lod_satisfies_target",
 ]

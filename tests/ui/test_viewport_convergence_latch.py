@@ -230,15 +230,21 @@ _REAL_KEY = None
 
 
 def _blind_key(self, plan, view_range, viewport_shape):
-    """The mutant: an invariant key that forgets which tiles are on screen.
+    """The mutant: an invariant key that forgets which tiles could need work.
 
-    Built by blanking exactly one field of the real key, so the arm isolates
-    the tile-set term instead of also dropping the LOD-demand and epoch terms
-    the key carries alongside it.
+    Built by blanking exactly one field of the real key, so the arm keeps the
+    LOD-demand and epoch terms the key carries alongside it.
+
+    Paired with a blinded ``_published_scope_covers_camera`` in ``_run``,
+    because the gate takes BOTH answers and the arm has to actually reach a
+    stale frame or it proves nothing about this oracle. That pairing IS the
+    belt-and-braces statement: either guard alone is enough to keep the
+    montage correct under this script, and it takes removing both to make it
+    go stale.
     """
 
     key = _REAL_KEY(self, plan, view_range, viewport_shape)
-    return None if key is None else key._replace(active_tiles=frozenset())
+    return None if key is None else key._replace(camera_pending_tiles=frozenset())
 
 
 def _run(qtbot, monkeypatch, *, latch, depth, columns, mutate):
@@ -251,9 +257,16 @@ def _run(qtbot, monkeypatch, *, latch, depth, columns, mutate):
         lambda *_args, **_kwargs: bool(latch),
     )
     if mutate:
+        from arrayscope.window.frame_controller import FrameControllerMixin
+
         global _REAL_KEY
         _REAL_KEY = FrameSession.viewport_invariant_key
         monkeypatch.setattr(FrameSession, "viewport_invariant_key", _blind_key)
+        monkeypatch.setattr(
+            FrameControllerMixin,
+            "_published_scope_covers_camera",
+            lambda *_args, **_kwargs: True,
+        )
     win = _build(qtbot, depth, columns)
     engaged = 0
     frames = []
@@ -337,6 +350,7 @@ def test_convergence_latch_does_not_change_the_pyqtgraph_frame(
         assert not divergences, "the latch changed the frame:\n" + "\n".join(divergences)
     else:
         assert divergences, (
-            "the mutant key forgot the visible tile set and the montage still "
+            "the mutant forgot both the tiles work is possible for and whether "
+            "the published scope still covers the camera, and the montage still "
             "matched -- this oracle cannot see a stale frame and proves nothing"
         )
