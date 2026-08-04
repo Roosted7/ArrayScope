@@ -303,6 +303,67 @@ class MontageRuntimeDiagnostics:
     wgpu_pool_grows_total: int = 0
     wgpu_pool_growth_copy_bytes_total: int = 0
     wgpu_last_pool_exhaustion: str = ""
+    # ---- present path -------------------------------------------------------
+    # WHICH present path the frames actually went through, and how they were
+    # paced once there.  ``wgpu_present_method`` defaults to AUTO, which
+    # resolves to the screen path on Wayland, and that path asks for Mailbox
+    # and silently accepts Fifo when the surface does not advertise it.  Under
+    # Fifo ``get_current_texture()`` blocks the GUI thread for about a refresh
+    # period per draw, which reorders the whole optimisation priority list —
+    # so a trace that cannot name the mode cannot price anything else either.
+    #
+    # ``present_mode`` is the ONE field that answers it:
+    #
+    #   "mailbox" / "fifo"     -- a live screen swapchain, mode as configured
+    #   "screen-unconfigured"  -- screen path chosen, no swapchain yet
+    #   "bitmap"               -- wgpu fell back to the bitmap canvas
+    #   ""                     -- no image view answered
+    #
+    # Any other value is the name of the image-view backend in use, which is
+    # to say: not the wgpu one, so it paces nothing and has no swapchain.
+    # (Naming that backend here would trip the guard keeping this module free
+    # of every display library — see test_architecture_guards.)
+    present_mode: str = ""
+    present_method: str = ""
+    present_method_fallback_reason: str = ""
+    present_modes_available: tuple[str, ...] = ()
+    present_platform: str = ""
+    # Real ``wgpuSurfacePresent`` edges, against the physical draw count in
+    # ``presentation_draw_count``: a draw that never reached a present is not
+    # a frame the display showed.
+    present_frames_total: int = 0
+    canvas_update_request_count: int = 0
+    canvas_update_pending: bool = False
+    # ---- frame cadence (screen path only; zero everywhere else) -------------
+    # Computed on read from ``FrameTimingRecorder``'s bounded ring, so nothing
+    # here costs a frame anything.  ``frame_schedule_slip_ms_*`` is exactly
+    # "how much did content work steal from the paced frame clock", and
+    # ``frame_phase_lock_r`` says whether a reported rate is a real cadence
+    # (R -> 1) or only an average of scattered frames (R -> 0).  Read
+    # ``frame_phase_drift_ms_per_s`` only as far as
+    # ``frame_phase_advance_spread_ms`` allows — see ``frame_timing.py``.
+    present_frames_observed: int = 0
+    present_window_frames: int = 0
+    frame_period_ms: float = 0.0
+    frame_phase_lock_r: float = 0.0
+    frame_phase_spread_ms: float = 0.0
+    frame_phase_drift_ms_per_s: float = 0.0
+    frame_phase_advance_spread_ms: float = 0.0
+    frame_interval_ms_p50: float = 0.0
+    frame_interval_ms_p95: float = 0.0
+    frame_interval_ms_max: float = 0.0
+    frame_ms_p50: float = 0.0
+    frame_ms_p95: float = 0.0
+    frame_ms_max: float = 0.0
+    frame_schedule_slip_ms_p50: float = 0.0
+    frame_schedule_slip_ms_p95: float = 0.0
+    frame_schedule_slip_ms_max: float = 0.0
+    frame_acquire_ms_p50: float = 0.0
+    frame_acquire_ms_p95: float = 0.0
+    frame_acquire_ms_max: float = 0.0
+    frame_present_ms_p50: float = 0.0
+    frame_present_ms_p95: float = 0.0
+    frame_present_ms_max: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1080,6 +1141,24 @@ _MONTAGE_COVERED = frozenset(
         "tile_histogram_lod_swap_recomputes",
         "tile_histogram_cross_level_reuses",
         "overlay_count",
+        "present_mode",
+        "present_method",
+        "present_method_fallback_reason",
+        "present_modes_available",
+        "present_platform",
+        "present_frames_total",
+        "present_frames_observed",
+        "canvas_update_request_count",
+        "canvas_update_pending",
+        "frame_period_ms",
+        "frame_phase_lock_r",
+        "frame_phase_drift_ms_per_s",
+        "frame_phase_advance_spread_ms",
+        "frame_interval_ms_p50",
+        "frame_schedule_slip_ms_p50",
+        "frame_schedule_slip_ms_p95",
+        "frame_acquire_ms_p50",
+        "frame_acquire_ms_p95",
         "presentation_draw_count",
         "tile_presentation_draw_count",
         "tile_presentation_request_count",
@@ -1371,6 +1450,33 @@ def _montage_lines(snapshot: WindowRuntimeDiagnostics) -> tuple[str, ...]:
             f"pending={_bool_text(montage.tile_presentation_draw_pending)} "
             f"pages={montage.tile_visual_visible_pages} overlays={montage.overlay_count} "
             f"above_tiles={_bool_text(montage.overlays_above_tiles)}"
+        ),
+        (
+            "Present path: "
+            f"present_mode={montage.present_mode or 'n/a'} "
+            f"present_method={montage.present_method or 'n/a'} "
+            f"present_platform={montage.present_platform or 'n/a'} "
+            f"present_modes_available={'/'.join(montage.present_modes_available) or 'n/a'} "
+            f"present_frames_total={montage.present_frames_total} "
+            f"canvas_update_request_count={montage.canvas_update_request_count} "
+            f"canvas_update_pending={_bool_text(montage.canvas_update_pending)} "
+            f"present_method_fallback_reason={montage.present_method_fallback_reason or '-'}"
+        ),
+        (
+            "Frame cadence: "
+            f"present_frames_observed={montage.present_frames_observed} "
+            f"frame_period_ms={montage.frame_period_ms:.2f} "
+            f"frame_interval_ms_p50={montage.frame_interval_ms_p50:.2f} "
+            f"frame_phase_lock_r={montage.frame_phase_lock_r:.3f} "
+            f"frame_phase_drift_ms_per_s={montage.frame_phase_drift_ms_per_s:.2f} "
+            f"frame_phase_advance_spread_ms={montage.frame_phase_advance_spread_ms:.2f}"
+        ),
+        (
+            "Frame cost (ms): "
+            f"frame_schedule_slip_ms_p50={montage.frame_schedule_slip_ms_p50:.2f} "
+            f"frame_schedule_slip_ms_p95={montage.frame_schedule_slip_ms_p95:.2f} "
+            f"frame_acquire_ms_p50={montage.frame_acquire_ms_p50:.2f} "
+            f"frame_acquire_ms_p95={montage.frame_acquire_ms_p95:.2f}"
         ),
         *wgpu_lines,
         (

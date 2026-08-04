@@ -419,6 +419,7 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         presented_order_round_id=""
         if session is None
         else str(getattr(session, "presented_order_round_id", "") or ""),
+        **present_path_diagnostics(presentation),
     )
 
     decision = getattr(window, "_last_render_decision", None)
@@ -816,6 +817,82 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         image_rendering_backend_selected=str(image_backend_selected),
         image_rendering_backend_actual=image_backend_actual,
     )
+
+
+#: ``FrameTimingRecorder.snapshot`` keys (already ``wgpu_screen_``-prefixed by
+#: the view) against the montage field that carries each one into the JSONL.
+_FRAME_TIMING_FIELDS: tuple[tuple[str, str], ...] = (
+    ("wgpu_screen_period_ms", "frame_period_ms"),
+    ("wgpu_screen_phase_lock_r", "frame_phase_lock_r"),
+    ("wgpu_screen_phase_spread_ms", "frame_phase_spread_ms"),
+    ("wgpu_screen_phase_drift_ms_per_s", "frame_phase_drift_ms_per_s"),
+    ("wgpu_screen_phase_advance_spread_ms", "frame_phase_advance_spread_ms"),
+    ("wgpu_screen_interval_ms_p50", "frame_interval_ms_p50"),
+    ("wgpu_screen_interval_ms_p95", "frame_interval_ms_p95"),
+    ("wgpu_screen_interval_ms_max", "frame_interval_ms_max"),
+    ("wgpu_screen_frame_ms_p50", "frame_ms_p50"),
+    ("wgpu_screen_frame_ms_p95", "frame_ms_p95"),
+    ("wgpu_screen_frame_ms_max", "frame_ms_max"),
+    ("wgpu_screen_schedule_slip_ms_p50", "frame_schedule_slip_ms_p50"),
+    ("wgpu_screen_schedule_slip_ms_p95", "frame_schedule_slip_ms_p95"),
+    ("wgpu_screen_schedule_slip_ms_max", "frame_schedule_slip_ms_max"),
+    ("wgpu_screen_acquire_ms_p50", "frame_acquire_ms_p50"),
+    ("wgpu_screen_acquire_ms_p95", "frame_acquire_ms_p95"),
+    ("wgpu_screen_acquire_ms_max", "frame_acquire_ms_max"),
+    ("wgpu_screen_present_ms_p50", "frame_present_ms_p50"),
+    ("wgpu_screen_present_ms_p95", "frame_present_ms_p95"),
+    ("wgpu_screen_present_ms_max", "frame_present_ms_max"),
+)
+
+
+def present_path_diagnostics(presentation) -> dict[str, object]:
+    """Which present path is live, and how its frames were actually paced.
+
+    Pure: it relabels the mapping ``presentation_diagnostics()`` already
+    returned, so it costs one pass over an existing dict per diagnostics
+    snapshot and nothing per frame.  The frame-timing half of that mapping is
+    computed on read from ``FrameTimingRecorder``'s bounded ring — this adds
+    no work to the draw or present path either.
+
+    Every backend answers.  The pyqtgraph view and the wgpu bitmap fallback
+    publish none of the ``wgpu_screen_*`` keys, so they land on the zero form
+    with ``present_mode`` naming the path they did take — which is what makes
+    "no screen swapchain" distinguishable from "a screen swapchain that has
+    not presented a frame yet" instead of both reading as absent.
+    """
+
+    presentation = dict(presentation or {})
+    backend = str(presentation.get("backend", "") or "")
+    method = str(presentation.get("wgpu_present_method", "") or "")
+    screen_mode = str(presentation.get("wgpu_screen_present_mode", "") or "")
+    if backend and backend != "wgpu":
+        # A non-wgpu view paces nothing and has no swapchain; name it rather
+        # than reporting an empty mode a reader would have to cross-check.
+        resolved = backend
+    elif method == "screen":
+        resolved = screen_mode or "screen-unconfigured"
+    else:
+        resolved = method
+    fields: dict[str, object] = {
+        "present_mode": resolved,
+        "present_method": method,
+        "present_method_fallback_reason": str(
+            presentation.get("wgpu_present_method_fallback_reason", "") or ""
+        ),
+        "present_modes_available": tuple(
+            str(mode)
+            for mode in (presentation.get("wgpu_screen_present_modes_available", ()) or ())
+        ),
+        "present_platform": str(presentation.get("wgpu_screen_present_platform", "") or ""),
+        "present_frames_total": int(presentation.get("wgpu_screen_presents", 0) or 0),
+        "present_frames_observed": int(presentation.get("wgpu_screen_frames_observed", 0) or 0),
+        "present_window_frames": int(presentation.get("wgpu_screen_window_frames", 0) or 0),
+        "canvas_update_request_count": int(presentation.get("canvas_update_request_count", 0) or 0),
+        "canvas_update_pending": bool(presentation.get("canvas_update_pending", False)),
+    }
+    for key, name in _FRAME_TIMING_FIELDS:
+        fields[name] = float(presentation.get(key, 0.0) or 0.0)
+    return fields
 
 
 def _presentation_diagnostics(window) -> dict[str, object]:

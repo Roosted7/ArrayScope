@@ -6268,6 +6268,14 @@ def _reset_commit_timings(renderer) -> None:
     renderer._last_montage_decision_source_rank = 0
     renderer._last_montage_physical_levels = None
     for name in (
+        # Written only by _commit_tile_layer, which is also the only caller of
+        # this reset — so a commit that bails before writing one used to
+        # report the PREVIOUS commit's number as its own.  Two other timings
+        # _commit_feedback_details reads deliberately stay off this list:
+        # _last_set_image_ms and _last_montage_overlay_update_ms are also
+        # written by the single-image presenter and by frame_runtime, so
+        # zeroing them here would destroy a different owner's instrument.
+        "_last_montage_tile_payload_build_ms",
         "_last_montage_tile_prepare_apply_ms",
         "_last_montage_tile_prepare_stats_ms",
         "_last_montage_tile_prepare_metadata_ms",

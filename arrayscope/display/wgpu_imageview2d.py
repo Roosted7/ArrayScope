@@ -3696,6 +3696,17 @@ class WgpuImageView2D(ImageViewShell):
             ),
             "wgpu_present_method_fallback_reason": self.wgpuPresentMethodFallbackReason(),
             "wgpu_screen_present_mode": str(getattr(self._wgpu_canvas, "present_mode", "") or ""),
+            # Which modes the surface OFFERED, and on which windowing system.
+            # "fifo" alone cannot say whether Mailbox was refused or never
+            # advertised, and a screen-path timing that cannot be attributed
+            # to a platform is unusable — both forms exist in the field.
+            "wgpu_screen_present_modes_available": tuple(
+                str(mode)
+                for mode in (getattr(self._wgpu_canvas, "present_modes_available", ()) or ())
+            ),
+            "wgpu_screen_present_platform": str(
+                getattr(self._wgpu_canvas, "present_platform", "") or ""
+            ),
             "wgpu_screen_presents": int(getattr(self, "_wgpu_screen_presents", 0) or 0),
             "wgpu_screen_acquire_ms_last": float(
                 getattr(self, "_wgpu_screen_acquire_ms_last", 0.0) or 0.0

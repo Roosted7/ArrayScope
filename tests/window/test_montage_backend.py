@@ -7755,3 +7755,61 @@ def test_presented_bounds_records_are_built_only_for_the_rows_that_widen():
     assert records[0]["presentation_state"] == "admitted"
 
     assert frame_effects._shader_presented_bounds_observations(rows, outside=(-6.0, 9.0)) == ()
+
+
+def test_present_path_diagnostics_degrade_cleanly_off_the_screen_path():
+    """Every backend answers the Mailbox-or-Fifo question, or says why not.
+
+    The pyqtgraph view and the wgpu bitmap fallback publish none of the
+    ``wgpu_screen_*`` keys.  Reporting them as absent would leave a reader
+    unable to tell "this build has no swapchain" from "the export is broken",
+    so each non-screen path names itself in ``present_mode`` instead.
+    """
+
+    import dataclasses
+
+    from arrayscope.core.runtime_diagnostics import MontageRuntimeDiagnostics
+    from arrayscope.window.diagnostics_snapshot import present_path_diagnostics
+
+    montage_fields = {field.name for field in dataclasses.fields(MontageRuntimeDiagnostics)}
+
+    pyqtgraph = present_path_diagnostics({"backend": "pyqtgraph", "mode": "tile_layer"})
+    assert pyqtgraph["present_mode"] == "pyqtgraph"
+    assert pyqtgraph["present_method"] == ""
+    assert pyqtgraph["present_modes_available"] == ()
+    assert pyqtgraph["present_frames_total"] == 0
+    assert pyqtgraph["frame_phase_lock_r"] == 0.0
+    assert pyqtgraph["frame_schedule_slip_ms_p95"] == 0.0
+
+    bitmap = present_path_diagnostics(
+        {
+            "backend": "wgpu",
+            "wgpu_present_method": "bitmap",
+            "wgpu_present_method_fallback_reason": "not a native surface: offscreen",
+            "wgpu_screen_present_mode": "",
+            "wgpu_screen_presents": 0,
+            "canvas_update_request_count": 3,
+            "canvas_update_pending": False,
+        }
+    )
+    assert bitmap["present_mode"] == "bitmap"
+    assert bitmap["present_method_fallback_reason"] == "not a native surface: offscreen"
+    assert bitmap["canvas_update_request_count"] == 3
+    assert bitmap["frame_period_ms"] == 0.0
+
+    # The screen path was chosen but no swapchain exists yet: distinguishable
+    # from both "bitmap" and "the export never ran".
+    pending = present_path_diagnostics({"backend": "wgpu", "wgpu_present_method": "screen"})
+    assert pending["present_mode"] == "screen-unconfigured"
+
+    for absent in ({}, None):
+        blank = present_path_diagnostics(absent)
+        assert blank["present_mode"] == ""
+        assert blank["canvas_update_pending"] is False
+        assert blank["present_window_frames"] == 0
+
+    # Each form is accepted verbatim by the dataclass the snapshot splats it
+    # into — a renamed field fails here rather than at the next live trace.
+    for fields_out in (pyqtgraph, bitmap, pending, present_path_diagnostics({})):
+        assert set(fields_out) <= montage_fields
+        MontageRuntimeDiagnostics(active=True, **fields_out)

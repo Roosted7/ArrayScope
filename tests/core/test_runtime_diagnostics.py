@@ -1,6 +1,8 @@
 import json
 from dataclasses import fields, replace
 
+import pytest
+
 from arrayscope.core.cache_status import CacheDiagnosticsSnapshot, CacheStatus
 from arrayscope.core.diagnostics_jsonl import (
     diagnostics_jsonl_line,
@@ -298,6 +300,82 @@ def test_format_runtime_diagnostics_includes_all_major_sections():
     assert "stale_reused=1" in text
     assert "Inactive:" in text
     assert "Context:\n" in text
+
+
+def test_present_path_and_frame_cadence_reach_the_recorded_jsonl():
+    """Mailbox-or-Fifo, and the pacing evidence, survive to a trace file.
+
+    The frame-timing half is fed through the REAL ``FrameTimingRecorder`` and
+    the mapping is asserted to be total, so a series added to (or renamed in)
+    ``frame_timing.py`` cannot quietly stop reaching a trace: the recorder
+    computes it, the view prefixes it, this maps it, and the JSONL carries it.
+    """
+
+    from arrayscope.display.backends.wgpu.frame_timing import FrameTimingRecorder
+    from arrayscope.window import diagnostics_snapshot as ds
+
+    recorder = FrameTimingRecorder()
+    period_s = 1.0 / 60.0
+    for index in range(8):
+        wakeup = index * period_s
+        recorder.note_scheduled(wakeup)
+        recorder.note_draw_started(wakeup + 0.002)  # 2 ms of timer slip
+        recorder.note_presented(wakeup + 0.004, acquire_ms=0.5, present_ms=0.25)
+    timing = recorder.snapshot(period_ms=1000.0 / 60.0)
+
+    presentation = {
+        "backend": "wgpu",
+        "wgpu_present_method": "screen",
+        "wgpu_present_method_fallback_reason": "",
+        "wgpu_screen_present_mode": "fifo",
+        "wgpu_screen_present_modes_available": ("fifo", "immediate"),
+        "wgpu_screen_present_platform": "wayland",
+        "wgpu_screen_presents": 8,
+        "canvas_update_request_count": 41,
+        "canvas_update_pending": True,
+        **{f"wgpu_screen_{key}": value for key, value in timing.items()},
+    }
+    exported = ds.present_path_diagnostics(presentation)
+    montage = MontageRuntimeDiagnostics(active=True, **exported)
+
+    # Nothing the recorder publishes is dropped between it and the dataclass.
+    mapped = {key for key, _ in ds._FRAME_TIMING_FIELDS}
+    mapped |= {"wgpu_screen_frames_observed", "wgpu_screen_window_frames"}
+    assert {f"wgpu_screen_{key}" for key in timing} == mapped
+
+    record = json.loads(
+        diagnostics_jsonl_line(
+            diagnostics_snapshot_record(
+                replace(_snapshot(), montage=montage),
+                sequence=1,
+                recorded_at="2026-08-04T00:00:00Z",
+            )
+        )
+    )
+    payload = record["diagnostics"]["montage"]
+
+    assert payload["present_mode"] == "fifo"
+    assert payload["present_method"] == "screen"
+    assert payload["present_platform"] == "wayland"
+    assert payload["present_modes_available"] == ["fifo", "immediate"]
+    assert payload["present_frames_total"] == 8
+    assert payload["present_frames_observed"] == 8
+    assert payload["present_window_frames"] == 8
+    assert payload["canvas_update_request_count"] == 41
+    assert payload["canvas_update_pending"] is True
+    assert payload["frame_period_ms"] == pytest.approx(1000.0 / 60.0)
+    assert payload["frame_schedule_slip_ms_p50"] == pytest.approx(2.0, abs=1e-6)
+    assert payload["frame_schedule_slip_ms_max"] == pytest.approx(2.0, abs=1e-6)
+    assert payload["frame_ms_p50"] == pytest.approx(2.0, abs=1e-6)
+    assert payload["frame_interval_ms_p50"] == pytest.approx(1000.0 / 60.0, abs=1e-6)
+    assert payload["frame_acquire_ms_p95"] == pytest.approx(0.5)
+    assert payload["frame_present_ms_max"] == pytest.approx(0.25)
+    # Presented exactly one period apart: a phase-locked pacer, R -> 1.
+    assert payload["frame_phase_lock_r"] == pytest.approx(1.0, abs=1e-6)
+
+    text = format_runtime_diagnostics(replace(_snapshot(), montage=montage))
+    assert "present_mode=fifo" in text
+    assert "frame_schedule_slip_ms_p50=2.00" in text
 
 
 def test_montage_diagnostics_exclude_counters_without_live_owners():

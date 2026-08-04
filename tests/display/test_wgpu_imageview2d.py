@@ -3359,6 +3359,58 @@ def test_screen_request_falls_back_to_bitmap_without_a_native_surface(qt_app):
         view.close()
 
 
+def test_present_path_export_names_the_bitmap_fallback_on_a_live_view(qt_app):
+    """A real view off the screen path exports the empty form, not an error.
+
+    The export runs against whatever ``presentation_diagnostics()`` actually
+    returns, so this is where a key renamed on the view (rather than in the
+    test's hand-written payload) is caught.  Offscreen there is no native
+    surface, so this is the bitmap-fallback shape by construction.
+    """
+
+    from arrayscope.core.runtime_diagnostics import MontageRuntimeDiagnostics
+    from arrayscope.window.diagnostics_snapshot import present_path_diagnostics
+
+    view = _view_class("wgpu")(present_method="screen")
+    try:
+        exported = present_path_diagnostics(view.presentation_diagnostics())
+        assert exported["present_mode"] == "bitmap"
+        assert exported["present_method"] == "bitmap"
+        assert exported["present_method_fallback_reason"]
+        # No swapchain was ever configured, so nothing advertised a mode and
+        # no platform was resolved; both must read empty rather than absent.
+        assert exported["present_modes_available"] == ()
+        assert exported["present_platform"] == ""
+        assert exported["present_frames_total"] == 0
+        assert exported["frame_period_ms"] == 0.0
+        assert exported["frame_phase_lock_r"] == 0.0
+        # The canvas-update counters DO exist on the bitmap path.
+        assert exported["canvas_update_request_count"] >= 0
+        assert exported["canvas_update_pending"] in (True, False)
+        MontageRuntimeDiagnostics(active=True, **exported)
+    finally:
+        view.close()
+
+
+def test_present_path_export_names_the_pyqtgraph_backend_on_a_live_view(qt_app):
+    """The other backend answers too, without a wgpu key anywhere in sight."""
+
+    from arrayscope.core.runtime_diagnostics import MontageRuntimeDiagnostics
+    from arrayscope.window.diagnostics_snapshot import present_path_diagnostics
+
+    view = _view_class("pyqtgraph")()
+    try:
+        exported = present_path_diagnostics(view.presentation_diagnostics())
+        assert exported["present_mode"] == "pyqtgraph"
+        assert exported["present_method"] == ""
+        assert exported["present_modes_available"] == ()
+        assert exported["present_frames_total"] == 0
+        assert exported["frame_schedule_slip_ms_p95"] == 0.0
+        MontageRuntimeDiagnostics(active=True, **exported)
+    finally:
+        view.close()
+
+
 def test_present_method_request_normalizes_unknown_values(qt_app):
     view = _view_class("wgpu")(present_method="garbage")
     try:

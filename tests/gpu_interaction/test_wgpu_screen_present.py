@@ -108,6 +108,40 @@ def test_commit_presents_on_the_swapchain_and_drains_the_draw_gate(qt_app, scree
         assert view.wgpuPresentationDiagnostics()["wgpu_screen_acquire_ms_last"] < 10.0
 
 
+def test_present_path_export_reports_a_real_swapchain_mode(qt_app, screen_view):
+    """On a live canvas the export names Mailbox or Fifo, never the empty form.
+
+    This is the whole point of the export: the trace question "is the GUI
+    thread paying a full refresh period inside ``get_current_texture()``" is
+    answerable only if the mode a real swapchain configured reaches the
+    recorded JSONL.  The offscreen tests can only ever pin the bitmap shape.
+    """
+
+    from arrayscope.core.runtime_diagnostics import MontageRuntimeDiagnostics
+    from arrayscope.window.diagnostics_snapshot import present_path_diagnostics
+
+    view = screen_view
+    _commit_ramp(view)
+    assert wait_for_qt_condition(
+        qt_app,
+        lambda: view.wgpuPresentationDiagnostics()["wgpu_screen_presents"] >= 1,
+        timeout_s=10.0,
+    ), f"no present to describe: {view.wgpuPresentationDiagnostics()}"
+
+    exported = present_path_diagnostics(view.presentation_diagnostics())
+    assert exported["present_method"] == "screen"
+    assert exported["present_mode"] in ("mailbox", "fifo"), exported
+    assert exported["present_mode"] in exported["present_modes_available"], exported
+    assert exported["present_platform"] in ("wayland", "x11"), exported
+    assert exported["present_frames_total"] >= 1
+    assert exported["present_frames_observed"] >= 1
+    # A frame that presented has a period to be measured against and at least
+    # one acquire/present sample, so the cadence half cannot read all-zero.
+    assert exported["frame_period_ms"] > 0.0
+    assert exported["frame_present_ms_max"] >= 0.0
+    MontageRuntimeDiagnostics(active=True, **exported)
+
+
 def test_resize_reconfigures_and_keeps_presenting(qt_app, screen_view):
     view = screen_view
     _commit_ramp(view)
