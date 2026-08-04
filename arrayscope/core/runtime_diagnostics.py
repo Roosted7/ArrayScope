@@ -267,6 +267,13 @@ class MontageRuntimeDiagnostics:
     # observational only and never schedules or mutates render work.
     stall_assertions: int = 0
     last_stall_signature: tuple[int, ...] = ()
+    # Camera moves the convergence latch refused to replan, and the moves it
+    # let through. A gate that swallows silently is undiagnosable in the
+    # field: if a montage ever goes stale under a pan or a zoom, the ratio
+    # here is the first question, and a stall dump that cannot answer it
+    # sends the reader back to guessing from code.
+    viewport_retargets_suppressed: int = 0
+    viewport_retargets_planned: int = 0
     tile_identity_probe: tuple[dict[str, object], ...] = ()
     # ADR 0051 rule 1 ground truth: drawn tiles whose backend-reported slot
     # identity differs from the session's current payload — nonzero at idle

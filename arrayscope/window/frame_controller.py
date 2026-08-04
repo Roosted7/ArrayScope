@@ -1648,9 +1648,29 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             else None
         )
         if invariant_key is not None and session._viewport_converged_key == invariant_key:
+            # A suppressed retarget must be visible in a stall dump, or a
+            # montage that goes stale under a gesture has no first question.
+            # The counter is the field instrument (``MontageRuntimeDiagnostics``);
+            # the trace line names the key that did the suppressing.
+            self._montage_viewport_retargets_suppressed = (
+                int(getattr(self, "_montage_viewport_retargets_suppressed", 0) or 0) + 1
+            )
+            emit_trace(
+                "viewport_retarget_suppressed",
+                session_id=int(getattr(session, "session_id", 0) or 0),
+                active_tiles=len(invariant_key.active_tiles),
+                desired_level=int(invariant_key.desired_level),
+                desired_factor=int(invariant_key.desired_factor),
+                preview_floor=int(invariant_key.preview_floor),
+                lifecycle_revision=int(invariant_key.lifecycle_revision),
+                page_cache_revision=int(invariant_key.page_cache_revision),
+            )
             # Prefetch is interaction-gated: it no-ops mid-drag, runs at settle.
             schedule_near_viewport_montage_prefetch(self, session)
             return True
+        self._montage_viewport_retargets_planned = (
+            int(getattr(self, "_montage_viewport_retargets_planned", 0) or 0) + 1
+        )
 
         # Hidden residency is keyed to the viewport that selected its near
         additions, presentation_changed = session.retarget_viewport(
@@ -1731,7 +1751,18 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
                 and not lod_swap_ready
                 and not presentation_changed
             ):
-                session._viewport_converged_key = invariant_key
+                # RE-derived, not the key from the top of this method. The key
+                # carries the ledger and page-cache epochs, and this pass moved
+                # both (retarget_viewport, sync_lifecycle_scope and the ladder
+                # all write records). Latching the entry key would latch an
+                # epoch that is already stale, so the very next camera move
+                # would miss and pay a second full pass to latch the same
+                # convergence -- measured as 2 planner passes over 12 sub-tile
+                # pans that should have cost none. What convergence means is
+                # "nothing to do from HERE", so the key has to be read here.
+                session._viewport_converged_key = session.viewport_invariant_key(
+                    viewport_plan.plan, viewport_plan.view_range, viewport_plan.viewport_shape
+                )
             schedule_near_viewport_montage_prefetch(self, session)
             return True
         additions_to_process = tuple(additions)

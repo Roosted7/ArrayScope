@@ -1,11 +1,15 @@
 """The converged-viewport early-out must never change what PyQtGraph shows.
 
 ``viewport_invariant_key`` (``frame_session.py``) lets a camera move that
-crosses no tile boundary and no zoom threshold skip the whole retarget. The
-key captures plan identity, the visible tile set and the camera span, and
-nothing else -- so the question this ring answers is whether a state change the
-key does NOT capture can be silently skipped on a backend that maps levels on
-the CPU.
+crosses no tile boundary and no LOD threshold skip the whole retarget. The key
+captures plan identity, the visible tile set, the LOD decision the camera
+selects (level, factors, acceptable levels, preview floor) and the ledger and
+page-cache epochs -- and nothing else, so the question this ring answers is
+whether a state change the key does NOT capture can be silently skipped on a
+backend that maps levels on the CPU. Counting evidence for the LOD term
+against its ``round(span, 4)`` predecessor lives in
+``tests/ui/test_viewport_retarget_suppression.py``; this file owns the
+question of what is on screen.
 
 The load-bearing test is the differential one: run one scripted interaction
 twice, once with the latch and once without, and compare what the tile layer
@@ -222,17 +226,19 @@ SCRIPT = (
 )
 
 
-def _blind_key(self, plan, view_range, viewport_shape):
-    """The mutant: an invariant key that forgets which tiles are on screen."""
+_REAL_KEY = None
 
-    if view_range is None or plan is None:
-        return None
-    (x0, x1), (y0, y1) = view_range
-    span_x = float(x1) - float(x0)
-    span_y = float(y1) - float(y0)
-    if not (span_x > 0.0 and span_y > 0.0):
-        return None
-    return (id(plan), round(span_x, 4), round(span_y, 4))
+
+def _blind_key(self, plan, view_range, viewport_shape):
+    """The mutant: an invariant key that forgets which tiles are on screen.
+
+    Built by blanking exactly one field of the real key, so the arm isolates
+    the tile-set term instead of also dropping the LOD-demand and epoch terms
+    the key carries alongside it.
+    """
+
+    key = _REAL_KEY(self, plan, view_range, viewport_shape)
+    return None if key is None else key._replace(active_tiles=frozenset())
 
 
 def _run(qtbot, monkeypatch, *, latch, depth, columns, mutate):
@@ -245,6 +251,8 @@ def _run(qtbot, monkeypatch, *, latch, depth, columns, mutate):
         lambda *_args, **_kwargs: bool(latch),
     )
     if mutate:
+        global _REAL_KEY
+        _REAL_KEY = FrameSession.viewport_invariant_key
         monkeypatch.setattr(FrameSession, "viewport_invariant_key", _blind_key)
     win = _build(qtbot, depth, columns)
     engaged = 0

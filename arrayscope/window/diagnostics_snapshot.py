@@ -405,6 +405,12 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             getattr(window.renderer, "_slice_retention_max_replacement_ms", 0.0) or 0.0
         ),
         stall_assertions=int(getattr(window.renderer, "_montage_stall_assertions", 0) or 0),
+        viewport_retargets_suppressed=int(
+            getattr(window.renderer, "_montage_viewport_retargets_suppressed", 0) or 0
+        ),
+        viewport_retargets_planned=int(
+            getattr(window.renderer, "_montage_viewport_retargets_planned", 0) or 0
+        ),
         last_stall_signature=tuple(
             int(value)
             for value in (getattr(window.renderer, "_montage_watchdog_last_stall", ()) or ())

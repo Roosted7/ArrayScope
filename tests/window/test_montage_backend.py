@@ -6551,9 +6551,40 @@ def test_convergence_latch_key_names_the_set_the_session_would_plan():
     assert raw != planned, "camera chosen so the two rect conventions disagree"
     assert 0 < len(planned) < len(plan.tiles), "a whole-montage set would hold for any convention"
 
-    key = FrameSession.viewport_invariant_key(SimpleNamespace(), plan, view_range, viewport_shape)
+    # The key also reads the LOD decision and the tile ledger (its zoom term
+    # is the demand, not the raw span), and it returns None rather than a key
+    # when it cannot see one of those -- so the stand-in has to carry them or
+    # this asserts on a fail-open None instead of on the tile set.
+    from arrayscope.display.lod import LodPolicyDecision, select_lod_demand
+    from arrayscope.presentation import TileLifecycle
+
+    session = SimpleNamespace(
+        lod_policy_decision=LodPolicyDecision(
+            demand=select_lod_demand(view_range, viewport_shape, plan.tile_shape)
+        ),
+        lifecycle=TileLifecycle(),
+        lod_page_cache=None,
+    )
+    key = FrameSession.viewport_invariant_key(session, plan, view_range, viewport_shape)
     assert key is not None
     assert set(key[1]) == planned
+
+
+def test_the_convergence_latch_key_fails_open_when_it_cannot_see_an_owner():
+    """No key means no latch: an unreadable owner must never read as "quiet"."""
+
+    from types import SimpleNamespace as NS
+
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.display.montage import make_montage_plan
+    from arrayscope.window.frame_session import FrameSession
+
+    state = ViewState.from_shape((8, 8, 4)).with_montage_axis(
+        2, columns=2, indices=tuple(range(4)), text="0:4"
+    )
+    plan = make_montage_plan(state, axis=2, indices=tuple(range(4)), tile_shape=(8, 8), columns=2)
+    view_range = ((0.0, 16.0), (0.0, 16.0))
+    assert FrameSession.viewport_invariant_key(NS(), plan, view_range, (400, 400)) is None
 
 
 def test_retained_payload_store_is_keyed_by_semantic_source_identity():

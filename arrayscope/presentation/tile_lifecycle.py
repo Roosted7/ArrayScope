@@ -40,6 +40,138 @@ from arrayscope.core.trace import emit_trace, emit_trace_fields, trace_enabled
 from arrayscope.display.model.tile_identity import TileIdentity
 
 
+class _MutationClock:
+    """One monotonic counter shared by a lifecycle and all of its records.
+
+    ``level_revision`` and ``skipped_revision`` answer "did *this* index
+    change"; this answers "did *anything* change".  A retarget gate that
+    skips planning needs the second question, and a hand-maintained list of
+    mutating methods is not an answer to it -- a method added later would
+    silently not bump.  So the bump is installed on the *containers*, not on
+    the methods: every scalar field write goes through
+    :meth:`TileRecord.__setattr__`, every record-owned collection is a
+    tracked dict/set, and every lifecycle-owned collection is too.  A new
+    mutator therefore bumps by construction, whatever it is called.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: int = 0) -> None:
+        self.value = int(value)
+
+    def __repr__(self) -> str:
+        # Deliberately value-free.  Differential oracles dump records field by
+        # field via ``repr`` (``tests/presentation/test_tile_lifecycle_retarget_scale``),
+        # and the clock is bookkeeping, not observable tile state: leaking its
+        # identity or its count into those dumps would make two ledgers that
+        # agree on every tile compare unequal.
+        return "<mutation clock>"
+
+
+#: Shared by every record built before its lifecycle attached one (a record
+#: constructed outside :meth:`TileLifecycle.record` never reaches a gate).
+_NULL_CLOCK = _MutationClock()
+
+
+class _TrackedDict(dict):
+    """A dict that bumps a :class:`_MutationClock` on every mutation."""
+
+    __slots__ = ("_clock",)
+
+    def __init__(self, clock: _MutationClock, data=()) -> None:
+        super().__init__(data)
+        self._clock = clock
+
+    def __setitem__(self, key, value) -> None:
+        self._clock.value += 1
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key) -> None:
+        self._clock.value += 1
+        super().__delitem__(key)
+
+    def pop(self, *args):
+        self._clock.value += 1
+        return super().pop(*args)
+
+    def popitem(self):
+        self._clock.value += 1
+        return super().popitem()
+
+    def setdefault(self, key, default=None):
+        self._clock.value += 1
+        return super().setdefault(key, default)
+
+    def update(self, *args, **kwargs) -> None:
+        self._clock.value += 1
+        super().update(*args, **kwargs)
+
+    def clear(self) -> None:
+        self._clock.value += 1
+        super().clear()
+
+    def __repr__(self) -> str:
+        # Indistinguishable from the plain container it replaces, so every
+        # existing diagnostic dump and repr-based oracle reads unchanged.
+        return dict.__repr__(self)
+
+
+class _TrackedSet(set):
+    """A set that bumps a :class:`_MutationClock` on every mutation."""
+
+    __slots__ = ("_clock",)
+
+    def __init__(self, clock: _MutationClock, data=()) -> None:
+        super().__init__(data)
+        self._clock = clock
+
+    def add(self, value) -> None:
+        self._clock.value += 1
+        super().add(value)
+
+    def discard(self, value) -> None:
+        self._clock.value += 1
+        super().discard(value)
+
+    def remove(self, value) -> None:
+        self._clock.value += 1
+        super().remove(value)
+
+    def pop(self):
+        self._clock.value += 1
+        return super().pop()
+
+    def clear(self) -> None:
+        self._clock.value += 1
+        super().clear()
+
+    def update(self, *args) -> None:
+        self._clock.value += 1
+        super().update(*args)
+
+    def difference_update(self, *args) -> None:
+        self._clock.value += 1
+        super().difference_update(*args)
+
+    def intersection_update(self, *args) -> None:
+        self._clock.value += 1
+        super().intersection_update(*args)
+
+    def symmetric_difference_update(self, *args) -> None:
+        self._clock.value += 1
+        super().symmetric_difference_update(*args)
+
+    def __repr__(self) -> str:
+        return set.__repr__(self)
+
+
+#: Record fields whose value is a mutable collection.  A method that replaces
+#: one wholesale (``retarget`` prunes ``presentable_payloads`` that way) must
+#: not install an untracked container, so ``__setattr__`` re-wraps.
+_TRACKED_RECORD_DICTS = frozenset({"levels", "preview_claims", "presentable_payloads"})
+_TRACKED_RECORD_SETS = frozenset({"resigned"})
+
+
 class Semantic(str, Enum):
     UNPLANNED = "unplanned"
     PLANNED = "planned"
@@ -220,6 +352,18 @@ class _LevelEntry:
     owner: ClaimOwner
     request: object = None
     order: int = 0
+    #: The owning lifecycle's mutation clock.  A level entry is mutated in
+    #: place (``entry.phase = RESIDENT``), which no container hook can see,
+    #: so it carries the clock itself.
+    mutation_clock: _MutationClock = field(
+        default=_NULL_CLOCK, compare=False, repr=False, hash=False
+    )
+
+    def __setattr__(self, name, value) -> None:
+        clock = self.__dict__.get("mutation_clock")
+        if clock is not None and name != "mutation_clock":
+            clock.value += 1
+        object.__setattr__(self, name, value)
 
 
 @dataclass
@@ -282,6 +426,36 @@ class TileRecord:
     #: ``target_satisfied_retained`` edge).  Reset when a new requirement is
     #: adopted, so every requirement gets exactly one closure statement.
     satisfaction_traced: bool = False
+    #: The owning lifecycle's mutation clock.  Attached by
+    #: ``TileLifecycle.record``; never part of the record's value.
+    mutation_clock: _MutationClock = field(
+        default=_NULL_CLOCK, compare=False, repr=False, hash=False
+    )
+
+    def __post_init__(self) -> None:
+        clock = self.mutation_clock
+        if clock is _NULL_CLOCK:
+            return
+        for name in _TRACKED_RECORD_DICTS:
+            object.__setattr__(self, name, _TrackedDict(clock, getattr(self, name)))
+        for name in _TRACKED_RECORD_SETS:
+            object.__setattr__(self, name, _TrackedSet(clock, getattr(self, name)))
+
+    def __setattr__(self, name, value) -> None:
+        # ~200 ns per field write, against ~22 ns for a plain dataclass. The
+        # ordering below is what keeps that from being worse: the common case
+        # is a scalar, so the exact-type tests short-circuit before either
+        # name lookup and neither runs for a bool, a str or an enum.
+        clock = self.__dict__.get("mutation_clock")
+        if clock is None or name == "mutation_clock":
+            object.__setattr__(self, name, value)
+            return
+        clock.value += 1
+        if type(value) is dict and name in _TRACKED_RECORD_DICTS:
+            value = _TrackedDict(clock, value)
+        elif type(value) is set and name in _TRACKED_RECORD_SETS:
+            value = _TrackedSet(clock, value)
+        object.__setattr__(self, name, value)
 
     @property
     def active(self) -> bool:
@@ -443,23 +617,28 @@ class TileLifecycle:
     """Single owner of per-tile lifecycle state for one render session."""
 
     def __init__(self, *, trace_session_id: int = 0) -> None:
+        #: Bumped by EVERY mutation of this ledger, records included.  Must be
+        #: the first attribute bound: ``__setattr__`` below reads it.
+        self._mutations = _MutationClock()
         self._trace_session_id = int(trace_session_id)
-        self._records: dict[int, TileRecord] = {}
-        self._parked: set[int] = set()
-        self._evaluating: set[int] = set()
-        self._presented: set[int] = set()
-        self._loading: set[int] = set()
-        self._active_requests: set[int] = set()
-        self._skipped: set[int] = set()
+        self._records: dict[int, TileRecord] = _TrackedDict(self._mutations)
+        self._parked: set[int] = _TrackedSet(self._mutations)
+        self._evaluating: set[int] = _TrackedSet(self._mutations)
+        self._presented: set[int] = _TrackedSet(self._mutations)
+        self._loading: set[int] = _TrackedSet(self._mutations)
+        self._active_requests: set[int] = _TrackedSet(self._mutations)
+        self._skipped: set[int] = _TrackedSet(self._mutations)
         #: Bumped by every skip-index mutation. ``required_tile_numbers``
         #: latches on it, so a stale answer needs a missed bump, not a
         #: missed set comparison.
         self._skipped_revision = 0
-        self._stage_blocked: dict[object, set[int]] = {}
+        self._stage_blocked: dict[object, set[int]] = _TrackedDict(self._mutations)
         self._identity_rejections = 0
         #: (tile, emitted_id, backend_id) -> consecutive rejection count; a
         #: pair rejected IDENTITY_RESIGN_AFTER times is resigned (see below).
-        self._identity_rejection_counts: dict[tuple[int, object, object], int] = {}
+        self._identity_rejection_counts: dict[tuple[int, object, object], int] = _TrackedDict(
+            self._mutations
+        )
         self._level_order = 0
         self._level_revision = 0
         #: Incrementally maintained mirror of the records' backend slot ids.
@@ -470,7 +649,29 @@ class TileLifecycle:
         #: retarget (measured: 133k rebuilds across 120 pan events on a
         #: 400-tile montage). Every write goes through
         #: ``_set_backend_source_id``; records are never removed.
-        self._backend_identities: dict[int, object] = {}
+        self._backend_identities: dict[int, object] = _TrackedDict(self._mutations)
+
+    def __setattr__(self, name, value) -> None:
+        # Every ledger-owned attribute, not a list of the ones known to matter:
+        # an attribute added later must invalidate a retarget gate by default.
+        clock = self.__dict__.get("_mutations")
+        if clock is not None and name != "_mutations":
+            clock.value += 1
+        object.__setattr__(self, name, value)
+
+    @property
+    def mutation_revision(self) -> int:
+        """Monotonic count of every mutation of this ledger or its records.
+
+        Unlike :attr:`level_revision` (residency only) and
+        :attr:`skipped_revision` (the skip index only) this moves for *any*
+        change, so a caller may use it as a "nothing happened here" witness.
+        It is a counter, not a hash: equal values mean no mutation was
+        attempted, not that the state compares equal.  Mutations that write
+        back an identical value still bump, which fails the caller open.
+        """
+
+        return int(self._mutations.value)
 
     #: After this many identical rejections the machine records the backend's
     #: identity as the presented truth and stops the re-emit loop: a backend
@@ -522,7 +723,7 @@ class TileLifecycle:
         index = int(tile_number)
         rec = self._records.get(index)
         if rec is None:
-            rec = TileRecord(index)
+            rec = TileRecord(index, mutation_clock=self._mutations)
             self._records[index] = rec
         return rec
 
@@ -1165,7 +1366,7 @@ class TileLifecycle:
         rec = self.record(tile_number)
         self._stage_unbound(rec)
         rec.stage_key = stage_key
-        self._stage_blocked.setdefault(stage_key, set()).add(rec.tile_number)
+        self._stage_blocked.setdefault(stage_key, _TrackedSet(self._mutations)).add(rec.tile_number)
 
     def stage_resolved(self, stage_key: object) -> tuple[int, ...]:
         """A stage completed/failed/released: unbind every stage-blocked tile.
@@ -1211,7 +1412,9 @@ class TileLifecycle:
                 if rec.stage_key != key:
                     self._stage_unbound(rec)
                     rec.stage_key = key
-                    self._stage_blocked.setdefault(key, set()).add(rec.tile_number)
+                    self._stage_blocked.setdefault(key, _TrackedSet(self._mutations)).add(
+                        rec.tile_number
+                    )
 
     # -- residency axis ----------------------------------------------------
 
@@ -1231,6 +1434,7 @@ class TileLifecycle:
             ClaimOwner(owner),
             request=request,
             order=int(self._level_order),
+            mutation_clock=self._mutations,
         )
 
     def level_materializing(self, tile_number: int, level_key) -> None:
@@ -1245,7 +1449,9 @@ class TileLifecycle:
         rec = self.record(tile_number)
         entry = rec.levels.get(level_key)
         if entry is None:
-            rec.levels[level_key] = _LevelEntry(LevelPhase.RESIDENT, ClaimOwner.INGEST)
+            rec.levels[level_key] = _LevelEntry(
+                LevelPhase.RESIDENT, ClaimOwner.INGEST, mutation_clock=self._mutations
+            )
         else:
             entry.phase = LevelPhase.RESIDENT
         # Repeated resident publication can carry updated preview metadata

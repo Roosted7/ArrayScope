@@ -6,6 +6,7 @@ import os
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
 from time import monotonic, perf_counter, perf_counter_ns
+from typing import NamedTuple
 
 import numpy as np
 
@@ -16,6 +17,7 @@ from arrayscope.display.lod import (
     LodPolicyDecision,
     native_lod_policy,
     reduced_extent,
+    select_lod_demand,
 )
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
@@ -91,6 +93,29 @@ from arrayscope.render.progressive_scheduling import (
     RoundLoadShedding,
 )
 from arrayscope.window.montage_payload_cache import payload_compatible_with_tile
+
+
+class ViewportInvariantKey(NamedTuple):
+    """What a camera move must leave unchanged for a retarget to be a no-op.
+
+    A named tuple rather than a bare tuple so the suppression trace can name
+    its own fields: a positional trace goes quietly wrong the first time a
+    term is inserted, and this key exists to make a suppressed retarget
+    diagnosable.  Equality, and therefore the latch, is unchanged.
+    """
+
+    plan_id: int
+    active_tiles: frozenset[int]
+    desired_level: int
+    desired_factor: int
+    desired_factor_xy: tuple[int, int]
+    acceptable_levels: tuple[int, ...]
+    demand_reason: str
+    retention_level: int
+    preview_floor: int
+    lifecycle_revision: int
+    page_cache_revision: int
+
 
 #: Share of ``tile_residency_budget_bytes`` an out-of-view display-payload
 #: retention set may hold.  Retention keeps CPU-side payload wrappers (and the
@@ -1811,13 +1836,7 @@ class FrameSession:
         """A cheap key that is stable exactly while a retarget would be a no-op.
 
         The montage is a regular grid, so the visible tile set is derivable in
-        O(1) (``tiles_intersecting`` is grid arithmetic, not a scan). The zoom
-        is captured by the camera SPAN: a pan translates the range and leaves
-        the span bit-stable, while any zoom changes it -- and LOD levels are
-        power-of-two apart, far coarser than the rounding here, so a span that
-        rounds equal cannot hide a level change. The key therefore changes
-        precisely when the viewport crosses a tile boundary or a zoom
-        threshold, which is the only time planning has anything to do. Returns
+        O(1) (``tiles_intersecting`` is grid arithmetic, not a scan). Returns
         ``None`` when there is no camera yet (nothing to compare).
 
         The set is derived through ``viewport_tiles``, the same way
@@ -1830,6 +1849,42 @@ class FrameSession:
         real work, with no stall to report it. This key read the raw camera
         rect while the session read the rect snapped outward to whole-tile
         bounds, which on the 272-tile field montage is 6 tiles against 15.
+
+        **The zoom term is the LOD decision, not the span.** It used to be
+        ``round(span, 4)``, on the reasoning that LOD levels are 2x apart and
+        so far coarser than the rounding. True, and exactly the problem: the
+        span is *continuous*, so every wheel notch invalidated the key and
+        paid a full 272-tile replan that submitted nothing. Trace 5 phase 4
+        measured that stream at 20.5 retargets/second, 47.9 % of wall clock,
+        with 95 % submitting zero; a scripted 20-step zoom here ran 39 full
+        retarget bodies for 0 submissions, against 4 with this key.
+
+        What replaces the span is everything the retarget can actually read
+        off the camera:
+
+        * the quantized demand ``select_lod_demand`` selects for this exact
+          camera -- level, factor, per-axis factor, acceptable levels and
+          reason -- computed with the session's own ``previous_factor``, so
+          the key reproduces the demand ``selected_lod_factor`` would compute
+          rather than an approximation of it. Both LOD policies derive their
+          demand from this one call; what they add on top (``applied_*``) is a
+          function of residency, which is session state and cannot change
+          while the camera alone moves;
+        * the round's **preview floor**. ``round_preview_level`` is a step
+          function of the *continuous* ``source_texels_per_pixel_xy``, and it
+          steps where ``desired_level`` does not. Dropping the span without
+          this term would lose a preview rung to a zoom that never changed
+          the target level -- the one place a coarser key really does hide
+          work.
+
+        Two epochs make the key stricter than its predecessor rather than
+        merely coarser: the lifecycle's ``mutation_revision`` and the page
+        cache's ``revision``. The old key ignored ledger and residency state
+        completely, so a latched camera skipped whatever a completion had
+        changed in between; it got away with it because completions come back
+        through ``request_montage_replan``. That remains true, and this is now
+        belt as well as braces: any tile-state or residency mutation at all
+        retires the latch, and the next camera move takes the full path.
         """
 
         if view_range is None or plan is None:
@@ -1847,9 +1902,44 @@ class FrameSession:
                 margin_tiles=VISIBLE_MARGIN_TILES,
             )
         )
-        # Round the span generously: pan drift is ~1e-12, a real zoom step is
-        # >0.1%, and adjacent LOD levels are 2x apart.
-        return (id(plan), active, round(span_x, 4), round(span_y, 4))
+        # Fail OPEN on anything unreadable.  No key means no latch means the
+        # full retarget runs: an owner this cannot see is a reason to plan,
+        # never a reason to assume nothing changed.
+        previous_demand = getattr(getattr(self, "lod_policy_decision", None), "demand", None)
+        lifecycle = getattr(self, "lifecycle", None)
+        mutation_revision = getattr(lifecycle, "mutation_revision", None)
+        if previous_demand is None or mutation_revision is None:
+            return None
+        demand = select_lod_demand(
+            view_range,
+            viewport_shape,
+            plan.tile_shape,
+            previous_factor=int(previous_demand.desired_factor),
+            allow_anisotropy=bool(getattr(self, "lod_anisotropic_pages", True)),
+        )
+        retention_level = int(
+            getattr(self, "lod_preview_min_level", 0) or getattr(self, "lod_preview_level", 0) or 0
+        )
+        preview_floor = (
+            int(render_lod.round_preview_level(demand=demand, retention_level=retention_level))
+            if retention_level > 0
+            else 0
+        )
+        return ViewportInvariantKey(
+            plan_id=id(plan),
+            active_tiles=active,
+            desired_level=int(demand.desired_level),
+            desired_factor=int(demand.desired_factor),
+            desired_factor_xy=tuple(int(value) for value in demand.desired_factor_xy),
+            acceptable_levels=tuple(int(value) for value in demand.acceptable_levels),
+            demand_reason=str(demand.reason),
+            retention_level=retention_level,
+            preview_floor=preview_floor,
+            lifecycle_revision=int(mutation_revision),
+            page_cache_revision=int(
+                getattr(getattr(self, "lod_page_cache", None), "revision", 0) or 0
+            ),
+        )
 
     def retarget_viewport(
         self,
