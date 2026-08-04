@@ -101,14 +101,44 @@ fi
 
 status=0
 
-if ! ruff check .; then
-	echo "pre-commit: ruff check failed. Fix with: ruff check --fix ." >&2
-	status=1
-fi
+# The two ruff steps run over the Python files this commit actually touches,
+# not over the whole working tree.
+#
+# The header above argues for the whole tree, and that argument is right about
+# CI -- but `ruff check .` reads the WORKING TREE, which is not what the commit
+# contains. A file some other worktree agent is mid-edit on, or a scratch file
+# left dirty beside the change, failed the gate for a commit that did not
+# include it. That is not a gate catching a regression, it is a gate refusing
+# an unrelated commit, and its only available answer -- reformat someone else's
+# in-flight file -- is worse than the problem.
+#
+# What is given up, stated so nobody rediscovers it as a surprise: a file
+# already broken in the tree and NOT touched by this commit no longer fails
+# here. It cannot regress from this commit, and CI still lints the tree.
+# Partially staged files are checked as they are on DISK, not as staged, so a
+# `git add -p` that stages a clean hunk out of a dirty file is checked against
+# the dirty version -- stricter than the commit, never looser.
+#
+# Deletions and renames-away are excluded (ACMR) because ruff cannot lint a
+# path that no longer exists. The whole-tree form is kept for the dead-code and
+# timing guards below: those are genuinely whole-tree questions -- the
+# dead-code guard's entire value is catching a deletion's cascade into files
+# this commit does not name.
+staged_py=()
+while IFS= read -r -d '' path; do
+	staged_py+=("$path")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- '*.py' '*.pyi')
 
-if ! ruff format --check .; then
-	echo "pre-commit: ruff format check failed. Fix with: ruff format ." >&2
-	status=1
+if [ ${#staged_py[@]} -gt 0 ]; then
+	if ! ruff check -- "${staged_py[@]}"; then
+		echo "pre-commit: ruff check failed. Fix with: ruff check --fix ." >&2
+		status=1
+	fi
+
+	if ! ruff format --check -- "${staged_py[@]}"; then
+		echo "pre-commit: ruff format check failed. Fix with: ruff format ." >&2
+		status=1
+	fi
 fi
 
 if ! python "$root/tools/dead_code.py"; then
