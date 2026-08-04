@@ -658,7 +658,34 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         viewport_shape = viewport_plan.viewport_shape
         tile_shape = viewport_plan.tile_shape
         plan = viewport_plan.plan
-        if self._maybe_auto_fit_montage_tiles(plan):
+        # The auto-fit writes the camera, Qt emits ``sigRangeChanged``
+        # synchronously, and ``ViewportBridge`` used to answer a programmatic
+        # montage range change by calling ``retarget_montage_viewport()`` right
+        # here -- which cannot take its viewport-only path (the live session is
+        # still keyed to the OUTGOING view state, so
+        # ``_try_update_montage_viewport_only`` rejects on ``session.key``) and
+        # so ran a whole nested ``update_image_view`` inside this one, inside
+        # the ``plan_start`` span.  Measured on a 144-tile wgpu montage return,
+        # 7 returns per arm, median: 2 entries and ``viewport_plan_ms`` 22.4 ms
+        # of a 23.1 ms callback, against 1 entry and 1.9 ms of 20.3 ms with
+        # this flag.  A depth-resolved run put the nested entry at 29.5 ms wall
+        # inside a 34.4 ms outer one, whose own plan phase was 1.0 ms — the
+        # plan was never slow, the label was billing a second render.  It was
+        # invisible in the bill of materials because the nested entry writes
+        # the same five phase attributes this one then overwrites.
+        #
+        # The flag makes that camera write announce itself so the bridge can
+        # DEFER instead, and the two lines below are why deferring loses
+        # nothing: this entry immediately replans against the very range the
+        # signal was reporting.  try/finally rather than a plain pair, because
+        # a flag left set would silently disable the bridge's synchronous
+        # retarget for the life of the window.
+        self._montage_entry_autofit_active = True
+        try:
+            fitted = self._maybe_auto_fit_montage_tiles(plan)
+        finally:
+            self._montage_entry_autofit_active = False
+        if fitted:
             viewport_plan = self._montage_viewport_plan(
                 view_state,
                 view_range=self._current_montage_global_view_range(),

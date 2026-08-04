@@ -38,6 +38,28 @@ class ViewportBridge:
                 # obligation used by extent-induced range changes; user and
                 # profile gestures crossing the same guard join that owner.
                 self.owner._frame_viewport_retarget_after_commit = True
+            elif montage and getattr(self.owner, "_montage_entry_autofit_active", False):
+                # This signal IS the render entry's own auto-fit, delivered
+                # synchronously from inside ``update_image_view``.  Retargeting
+                # from here cannot take the cheap viewport-only path — the live
+                # session is still keyed to the outgoing view state, so
+                # ``_try_update_montage_viewport_only`` rejects on
+                # ``session.key != expected_key`` — so it ran a whole nested
+                # render entry: measured 29.5 ms inside a 34.4 ms callback on a
+                # 144-tile montage return, all of it billed to
+                # ``viewport_plan_ms`` (median over 7 returns: 22.4 ms with the
+                # nested entry, 1.9 ms without).
+                #
+                # Deferring loses nothing, and the reason is specific rather
+                # than hopeful: the entry that made this camera move replans
+                # against ``_current_montage_global_view_range()`` on the very
+                # next line, so the camera this signal reports is the camera
+                # the rest of that entry plans for.  The obligation is still
+                # ARMED rather than assumed discharged — same owner and same
+                # teardown (``_finish_presentation_commit``) as the commit
+                # guard above.  Deferring is what makes this safe; dropping the
+                # intent would not be.
+                self.owner._frame_viewport_retarget_after_commit = True
             elif montage and not pointer_gesture:
                 # Programmatic range replay is a semantic obligation and the
                 # V1 boundary reveal requires its visibility update before the

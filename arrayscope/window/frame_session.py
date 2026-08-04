@@ -669,10 +669,11 @@ class LifecycleRungMaterializations:
         if not render_lod._page_set_exact(pyramid, request.key):
             self.release(request)
             return False
+        # No mirror here: ``materialization_resident`` publishes one
+        # ``level_resident`` per entry this request holds and the session's
+        # observer files every one, so a mirror of ``request.key`` beside it
+        # would be a second copy of a stream it cannot see all of.
         self._lifecycle.materialization_resident(request)
-        render_lod.remember_resident_floor(
-            self._session, int(request.tile_number), getattr(request, "key", None)
-        )
         return True
 
     def release(self, request) -> tuple[ReleaseClaim, ...]:
@@ -1458,6 +1459,10 @@ class FrameSession:
         object.__setattr__(self, "_mutations", MutationClock())
         bind_existing_state(self, self.__dict__["_mutations"], skip=("_mutations",))
         self.lifecycle.set_trace_session_id(int(self.session_id))
+        # One observer on the publication, replacing three mirrors hung off
+        # its callers.  See ``_remember_resident_floor`` for what that does and
+        # does not buy.
+        self.lifecycle.level_resident_observer = self._remember_resident_floor
         self.pending_level_tiles = deque(self.pending_level_tiles)
         self.pending_level_sources = {
             int(source) for source in (self.pending_level_sources or ())
@@ -4063,8 +4068,38 @@ class FrameSession:
                 int(tile_number), key, ClaimOwner.PREVIEW, request=("preview-floor", key)
             )
         self.lifecycle.level_resident(int(tile_number), key)
-        render_lod.remember_resident_floor(self, int(tile_number), key)
         return True
+
+    def _remember_resident_floor(self, tile_number: int, level_key, entry) -> None:
+        """Every RESIDENT verdict this session's ledger publishes, indexed.
+
+        Installed on ``lifecycle.level_resident_observer`` in ``__post_init__``
+        and reached from nowhere else, so the window-scoped floor index sees
+        exactly the ledger's residency stream — no more and, which is the
+        point, no less.
+
+        This is the observer ``dec82315`` named as the proper close for its
+        recorded incompleteness, and it replaces that commit's three mirror
+        call sites.  What it does NOT do is recover work, and the reason is
+        worth keeping: the incompleteness was hypothesised as "a singleflight
+        request shared by several tiles indexes only one of them", and that
+        cannot happen in this tree.  ``LifecycleRungMaterializations.append``
+        is the only caller of ``materialization_planned`` and always passes
+        ``request.tile_number``, and ``_request_level_keys`` reads
+        ``LodPageMaterializationRequest.chain``, which is the single-element
+        ``((key, (1, 1)),)``.  So ``materialization_resident`` could only ever
+        publish the one ``(request.tile_number, request.key)`` verdict that the
+        ``mark_resident`` mirror was already filing.  Measured on the live-wgpu
+        montage -> slice -> montage cycle, both arms in one process: 128
+        ``level_resident`` publications and 128 index writes, over the same 64
+        slots, on the mirrors and on this observer alike.
+
+        It is kept because the equivalence is contingent on those two facts and
+        the mirror had no way to notice either of them changing, whereas this
+        cannot miss a publication by construction.
+        """
+
+        render_lod.remember_resident_floor(self, int(tile_number), level_key, entry=entry)
 
     def _lod_preview_floor_first_fill_active(self, planned_numbers) -> bool:
         """Whether a preview-floor fill is IN PROGRESS (scheduling preference).

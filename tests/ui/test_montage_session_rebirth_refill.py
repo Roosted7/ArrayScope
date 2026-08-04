@@ -88,8 +88,12 @@ def _counters(win) -> dict[str, int]:
     }
 
 
-def _cycle(qtbot):
-    """Open the montage, leave for one slice, come back.  Returns the counters."""
+def _cycle(qtbot, *, on_return=None):
+    """Open the montage, leave for one slice, come back.  Returns the counters.
+
+    ``on_return`` wraps only the return leg, so a probe sees the transition the
+    user reported and not the cold first entry.
+    """
 
     settings = use_wgpu_backend(extra_settings={"montage_quality_policy": "resident"})
     win = make_backend_window(qtbot, _montage_data(), backend="wgpu", require_gpu_atlas=True)
@@ -100,6 +104,8 @@ def _cycle(qtbot):
         first = _counters(win)
         _montage_off(win)
         away = _counters(win)
+        if on_return is not None:
+            on_return(win)
         _montage_on(win)
         back = _counters(win)
         # The cycle has to be a real rebirth, or the assertions below measure
@@ -151,12 +157,79 @@ def test_a_montage_return_re_presents_instead_of_re_producing(qtbot):
     reason="cold floor fill"``.  ``render.lod.ResidentFloorIndex`` is that
     missing name, kept beside the pages it names.
 
-    The bound is deliberately loose (a handful of tiles, not zero).  The claim
-    is "the return is not a refill", and a fix that leaves a few genuinely
-    evicted tiles to re-produce still satisfies it; a fix that only shrinks the
-    batch does not.
+    The bound was deliberately loose (a handful of tiles, not zero) while the
+    claim was only "the return is not a refill".  It is now 1, for the reason
+    recorded at the assertion.
     """
 
     _first, away, back = _cycle(qtbot)
 
-    assert back["preview_tasks"] - away["preview_tasks"] <= SOURCES // 8
+    # Measured 2026-08-04, live wgpu, both settled and mid-fill predecessors:
+    # ZERO.  The bound was ``<= SOURCES // 8`` while the claim was only "the
+    # return is not a refill"; the claim it can now carry is the stronger one
+    # the user actually reported — nothing pops back in, because nothing is
+    # re-made.  A tile whose pages the pyramid genuinely evicted still has to
+    # re-produce, and that is what the ``+ 1`` leaves room for: eviction is a
+    # budget event this test does not control, and pinning exactly 0 would make
+    # an unrelated cache-size change look like this defect returning.
+    assert back["preview_tasks"] - away["preview_tasks"] <= 1
+
+
+def test_a_montage_return_is_one_render_entry(qtbot):
+    """The return leg blocks the GUI once, not twice.
+
+    The other half of the same transition, and it is not about tiles at all.
+    Trace 7 records the return (t=148.1, ``reason=slice-range``) as a single
+    689.4 ms ``render_entry`` of which ``viewport_plan_ms`` claimed 353.5 —
+    against a settled baseline for that same label of 1.3 ms.  The plan had not
+    become 270x slower.  The label was billing a second, complete
+    ``update_image_view``:
+
+    ``_maybe_auto_fit_montage_tiles`` moves the camera from inside the entry,
+    Qt delivers ``sigRangeChanged`` synchronously, ``ViewportBridge`` answered a
+    programmatic montage range change with an immediate
+    ``retarget_montage_viewport()``, and that cannot take its viewport-only path
+    because the live session is still keyed to the OUTGOING view state -- so it
+    fell through to a whole nested render entry, inside the timed span, whose
+    own phase attributes the outer entry then overwrote.  The duplicate was
+    therefore invisible in the bill of materials and visible only as an
+    inflated ``viewport_plan_ms``.
+
+    Measured on a 144-tile montage return, 7 returns per arm, median: before,
+    2 entries (one nested) and ``viewport_plan_ms`` 22.4 ms of a 23.1 ms
+    callback; after, 1 entry and 1.9 ms of 20.3 ms.  The callback only drops
+    12% because the nested entry was doing real work the outer one then had to
+    do itself — what is removed is the DUPLICATION and the mis-attribution,
+    not a third of a second of pure waste.
+
+    The assertion is on the ENTRY COUNT, deliberately, and on neither duration.
+    Re-entrancy is the defect; the milliseconds are its consequence, and a
+    millisecond bound here would fail on a busy machine for reasons that have
+    nothing to do with this.
+    """
+
+    entries: list[int] = []
+    depth = {"value": 0}
+
+    def instrument(win) -> None:
+        renderer = win.renderer
+        original = type(renderer).update_image_view
+
+        def counted(self, **kwargs):
+            depth["value"] += 1
+            entries.append(depth["value"])
+            try:
+                return original(self, **kwargs)
+            finally:
+                depth["value"] -= 1
+
+        # Bound to the instance: nothing here outlives this window.
+        renderer.update_image_view = counted.__get__(renderer, type(renderer))
+
+    _first, _away, _back = _cycle(qtbot, on_return=instrument)
+
+    assert entries, "the return leg ran no render entry at all"
+    assert not [d for d in entries if d > 1], (
+        f"the montage return re-entered update_image_view (depths {entries}); "
+        "a camera change made by a render entry started a second complete one"
+    )

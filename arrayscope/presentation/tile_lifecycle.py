@@ -637,6 +637,21 @@ class TileLifecycle:
         #: 400-tile montage). Every write goes through
         #: ``_set_backend_source_id``; records are never removed.
         self._backend_identities: dict[int, object] = _TrackedDict(self._mutations)
+        #: Optional ``(tile_number, level_key, entry) -> None`` hook fired by
+        #: :meth:`level_resident` AFTER the entry reaches RESIDENT, and by
+        #: nothing else.
+        #:
+        #: It exists so that a downstream mirror of residency is taken from the
+        #: publication rather than assembled from the publisher's *callers*.
+        #: ``materialization_resident`` publishes one verdict per
+        #: ``(record, level_key)`` a request holds, and a mirror at that call
+        #: site can only see ``request.key`` — so the two agree exactly as long
+        #: as ``_request_level_keys`` stays single-valued and one request is
+        #: only ever planned against its own ``tile_number``.  Both hold today
+        #: (measured 2026-08-04: identical index contents on both arms), so
+        #: this hook buys no work back; what it buys is that neither
+        #: assumption has to keep holding for the mirror to stay complete.
+        self.level_resident_observer = None
 
     def __setattr__(self, name, value) -> None:
         # Every ledger-owned attribute, not a list of the ones known to matter:
@@ -1448,15 +1463,21 @@ class TileLifecycle:
         rec = self.record(tile_number)
         entry = rec.levels.get(level_key)
         if entry is None:
-            rec.levels[level_key] = _LevelEntry(
+            entry = _LevelEntry(
                 LevelPhase.RESIDENT, ClaimOwner.INGEST, mutation_clock=self._mutations
             )
+            rec.levels[level_key] = entry
         else:
             entry.phase = LevelPhase.RESIDENT
         # Repeated resident publication can carry updated preview metadata
         # even when the phase itself is unchanged.
         self._level_revision += 1
         _trace_lifecycle(rec, "level_resident", level_key=level_key)
+        # Last, and only once the entry is RESIDENT: an observer must never be
+        # able to read a phase this call has not finished writing.
+        observer = self.level_resident_observer
+        if observer is not None:
+            observer(int(tile_number), level_key, entry)
 
     def materialization_planned(
         self,

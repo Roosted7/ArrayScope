@@ -208,21 +208,29 @@ class ResidentFloorIndex:
         return tuple(alive)
 
 
-def remember_resident_floor(session, tile_number: int, key) -> None:
+def remember_resident_floor(session, tile_number: int, key, *, entry=None) -> None:
     """Mirror one lifecycle RESIDENT verdict into the window-scoped index.
 
     Deliberately reads the verdict back out of the lifecycle instead of
     trusting its caller: the lifecycle is the only owner of "resident", and an
     index that could disagree with it would be a second, quieter authority.
-    Call sites therefore cannot file anything the lifecycle has not published.
+    Callers therefore cannot file anything the lifecycle has not published.
+
+    ``entry`` is that same verdict handed over directly, and is what
+    ``TileLifecycle.level_resident_observer`` passes: there the ledger IS the
+    caller and is publishing this entry as it calls, so re-reading it would
+    only re-derive what was just given.  The phase is still checked, because
+    the point of the check is that this function never files a non-RESIDENT
+    entry — not that it distrusts one particular caller.
     """
 
     index = getattr(session, "lod_floor_index", None)
     if not isinstance(index, ResidentFloorIndex) or not isinstance(key, LodPageSetKey):
         return
-    lifecycle = getattr(session, "lifecycle", None)
-    rec = None if lifecycle is None else lifecycle.peek(int(tile_number))
-    entry = None if rec is None else rec.levels.get(key)
+    if entry is None:
+        lifecycle = getattr(session, "lifecycle", None)
+        rec = None if lifecycle is None else lifecycle.peek(int(tile_number))
+        entry = None if rec is None else rec.levels.get(key)
     if entry is None or entry.phase is not LevelPhase.RESIDENT:
         return
     index.remember(key, entry.owner)

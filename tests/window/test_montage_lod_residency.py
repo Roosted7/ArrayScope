@@ -7859,7 +7859,14 @@ def _reborn(session, *, key=None, plan=None):
 
 
 def _publish_floors(session, level=2):
-    """Admit one page set per tile and publish it through the real seam."""
+    """Admit one page set per tile and publish it through the real seam.
+
+    ``level_resident`` alone is the seam: since 2026-08-04 the index is fed by
+    ``TileLifecycle.level_resident_observer``, which ``FrameSession`` installs
+    in ``__post_init__``.  This helper deliberately does NOT mirror the verdict
+    itself — if it did, every test below would pass on the helper's own
+    bookkeeping rather than on the product's.
+    """
 
     demand = select_lod_demand(ZOOMED_OUT_RANGE, VIEWPORT, (TILE, TILE))
     published = {}
@@ -7873,7 +7880,6 @@ def _publish_floors(session, level=2):
         )
         _admit_page_set(session.lod_page_cache, key, np.asarray(rendered.image))
         session.lifecycle.level_resident(tile_number, key)
-        render_lod.remember_resident_floor(session, tile_number, key)
         published[tile_number] = key
     return published
 
