@@ -413,8 +413,12 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         presented_order_sample=()
         if session is None
         else tuple(
-            int(index) for index in tuple(getattr(session, "presented_order", ()) or ())[:64]
+            tuple(int(value) for value in row)
+            for row in tuple(getattr(session, "presented_order", ()) or ())
         ),
+        presented_order_round_id=""
+        if session is None
+        else str(getattr(session, "presented_order_round_id", "") or ""),
     )
 
     decision = getattr(window, "_last_render_decision", None)

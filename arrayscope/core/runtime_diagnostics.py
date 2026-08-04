@@ -219,7 +219,27 @@ class MontageRuntimeDiagnostics:
     # field JSONL distinguishes "never called" from "called and declined".
     resident_crop_rebind_last_gate: str = ""
     resident_crop_rebind_totals: dict[str, int] = field(default_factory=dict)
-    presented_order_sample: tuple[int, ...] = ()
+    # Which tile got pixels first, and at which rung.  One row per tile the
+    # CURRENT render round first presented, in the order it happened:
+    #
+    #     (tile_number, priority_rank, lod_level, quality_code)
+    #
+    # ``priority_rank`` is the tile's position in the montage's centre-out
+    # priority order (0 = the focus tile), so this sample answers the ordering
+    # question by itself:
+    #
+    #   * centre-out fill  -> the priority_rank column is non-decreasing;
+    #   * tile-number fill -> the tile_number column is non-decreasing instead
+    #                         (that is the "starts at the bottom-left corner"
+    #                         report).
+    #
+    # ``quality_code``: 0 = preview/coarse rung, 1 = target/exact rung, 2 = a
+    # payload naming neither (fallback, resident-crop rebind).  Filter the rows
+    # by it to adjudicate the two rungs separately.
+    presented_order_sample: tuple[tuple[int, int, int, int], ...] = ()
+    # The render round ``presented_order_sample`` describes.  The sample resets
+    # per round, so a changed id means a new fill rather than a truncated one.
+    presented_order_round_id: str = ""
     # ADR 0051: single-owner tile lifecycle machine.
     lifecycle_parked: int = 0
     lifecycle_evaluating: int = 0

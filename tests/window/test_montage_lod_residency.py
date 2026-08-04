@@ -7623,3 +7623,202 @@ def test_montage_axis_fft_with_known_display_axes_reaches_the_coarse_ladder():
 
     session.rgb = False
     assert _reduced_input_coarse_rung_available(session, seed) is True
+
+
+# --- First-presentation order instrument (montage.presented_order_sample) ----
+#
+# The report this pins: "the preview-quality round fills from the first tile
+# number instead of centre-outwards".  It is adjudicable only from an
+# instrument, never from a stopwatch, so the tests below read the recorded
+# order and assert its SHAPE.
+
+
+def _commit_and_acknowledge(session, tile_numbers) -> None:
+    """Drive one real commit for ``tile_numbers`` and acknowledge it."""
+
+    _state, delta = session.build_tile_presentation({})
+    accepted = tuple(int(tile) for tile in tile_numbers if int(tile) in delta.upserts)
+    session.acknowledge_tile_presentation(
+        replace(delta, upserts={int(tile): delta.upserts[int(tile)] for tile in accepted}),
+        TileCommitReport(presented_tiles=frozenset(accepted)),
+    )
+
+
+def test_presented_order_sample_round_trips_a_known_presentation_order():
+    """The instrument reports the order it was actually given.
+
+    The predecessor of this sample recorded NOTHING across 232 recorded
+    snapshots, because it was gated on ``index not in
+    lifecycle.presented_tiles`` at a site the lifecycle had already run.  A
+    round-trip is therefore the first thing to pin: feed a known order in,
+    read the same order back out, with each row carrying its own rank.
+    """
+
+    session = _session(
+        mode=LOD_POLICY_NATIVE_ONLY,
+        count=12,
+        view_range=((0.0, 12.0 * TILE), (0.0, TILE)),
+    )
+    session.render_round_id = "round-a"
+    order = (7, 2, 11, 0, 5)
+    ranks = session.montage_priority_ranks()
+
+    for tile_number in order:
+        _commit_and_acknowledge(session, (tile_number,))
+
+    assert [row[0] for row in session.presented_order] == list(order)
+    assert [row[1] for row in session.presented_order] == [ranks[tile] for tile in order]
+    assert session.presented_order_round_id == "round-a"
+    # quality_code 1 == target/exact rung; these are native results.
+    assert {row[3] for row in session.presented_order} == {1}
+
+    # Re-presenting a tile is not a FIRST presentation.
+    session.dirty_payloads[7] = None
+    _commit_and_acknowledge(session, (7,))
+    assert [row[0] for row in session.presented_order] == list(order)
+
+
+def test_presented_order_sample_resets_per_round_and_stays_bounded():
+    """A session spans many rounds; the sample describes exactly one.
+
+    Without the reset a 64-entry log could only ever describe a session's
+    first round -- which is why the field was useless even where it was
+    populated.
+    """
+
+    from arrayscope.window.frame_session import PRESENTED_ORDER_SAMPLE_LIMIT
+
+    session = _session(
+        mode=LOD_POLICY_NATIVE_ONLY,
+        count=12,
+        view_range=((0.0, 12.0 * TILE), (0.0, TILE)),
+    )
+    session.render_round_id = "round-a"
+    _commit_and_acknowledge(session, (3, 4))
+    assert [row[0] for row in session.presented_order] == [3, 4]
+
+    session.render_round_id = "round-b"
+    for tile_number in (9, 1):
+        session.dirty_payloads[tile_number] = None
+    _commit_and_acknowledge(session, (9, 1))
+
+    assert [row[0] for row in session.presented_order] == [9, 1]
+    assert session.presented_order_round_id == "round-b"
+    assert PRESENTED_ORDER_SAMPLE_LIMIT >= 272
+
+
+def test_presented_order_sample_names_the_rung_and_the_level():
+    """Preview and target rows are separable, or the report is unanswerable."""
+
+    session = _session(
+        count=4,
+        pyramid=LodPageCache(max_bytes=1 << 22),
+        view_range=ZOOMED_OUT_RANGE,
+    )
+    session.render_round_id = "round-a"
+    _commit_and_acknowledge(session, range(4))
+
+    assert session.presented_order
+    codes = {"preview": 0, "exact": 1}
+    for tile, _rank, level, quality_code in session.presented_order:
+        payload = session.display_tile_payloads[int(tile)]
+        quality = str(getattr(payload, "quality", "") or "")
+        assert quality_code == codes.get(quality, 2), (quality, quality_code)
+        # -1 is the honest reading for a payload carrying no LOD identity;
+        # anything else must be the payload's own level, never a guess.
+        assert level == int(getattr(getattr(payload, "lod", None), "level", -1) or -1)
+
+
+def test_first_presentation_order_is_centre_out_for_both_rungs():
+    """The ordering contract, read from the instrument rather than a clock.
+
+    ``build_tile_presentation`` is driven with a governed cap so admission has
+    to choose, and the tiles are offered in the WORST possible order --
+    ascending tile number, which is the corner-first order the field report
+    describes.  Both rungs must still land centre-out.
+    """
+
+    for pyramid, expected_codes in (
+        (None, {1}),
+        (LodPageCache(max_bytes=1 << 22), {0, 1, 2}),
+    ):
+        session = _session(
+            mode=LOD_POLICY_NATIVE_ONLY if pyramid is None else LOD_POLICY_RESIDENT,
+            pyramid=pyramid,
+            count=12,
+            view_range=((0.0, 12.0 * TILE), (0.0, TILE)),
+        )
+        session.render_round_id = "round-a"
+        canonical = prioritize_tile_numbers(
+            range(12),
+            plan_tiles=session.plan.tiles,
+            context=session.tile_priority_context(),
+        )
+        assert canonical != tuple(range(12)), "fixture must not make corner order correct"
+
+        # Offer the debt corner-first, three tiles per governed transaction.
+        session.dirty_payloads.clear()
+        for tile_number in range(12):
+            session.dirty_payloads[tile_number] = None
+        for _ in range(12):
+            _state, delta = session.build_tile_presentation({}, max_upserts=3)
+            if not delta.upserts:
+                break
+            session.acknowledge_tile_presentation(
+                delta,
+                TileCommitReport(presented_tiles=frozenset(int(t) for t in delta.upserts)),
+            )
+
+        assert len(session.presented_order) == 12
+        assert {row[3] for row in session.presented_order} <= expected_codes
+        for code in sorted({row[3] for row in session.presented_order}):
+            ranks = [row[1] for row in session.presented_order if row[3] == code]
+            assert ranks == sorted(ranks), (
+                f"rung {code} filled out of priority order: {session.presented_order}"
+            )
+
+
+def test_capped_level_generation_bind_cohort_is_priority_ordered():
+    """A payload not bound to the current generation cannot commit next.
+
+    So when ``max_count`` cuts this cohort it is choosing which tiles are
+    eligible for the next transaction.  It used to cut on CALLER order, and
+    the caller's order is ``required_tile_numbers()`` -- ascending tile
+    number.  The cut is live across the preview pass (the round installs its
+    levels as the preview rung is admitted) and mostly inert on the target
+    pass, which is what made corner-first a preview-rung defect.
+    """
+
+    session = _session(
+        mode=LOD_POLICY_NATIVE_ONLY,
+        count=12,
+        view_range=((0.0, 12.0 * TILE), (0.0, TILE)),
+    )
+    session.build_tile_presentation({})
+    canonical = prioritize_tile_numbers(
+        range(12),
+        plan_tiles=session.plan.tiles,
+        context=session.tile_priority_context(),
+    )
+    assert canonical[:4] != tuple(range(4))
+
+    session.begin_level_presentation_update((0.0, 7.0))
+    corner_first = tuple(range(12))
+    rebound = session.bind_payloads_to_level_generation(corner_first, max_count=4)
+
+    assert rebound == 4
+    identity = session.tile_presentation_identity(
+        session.display_tile_payloads[canonical[0]].shader_mapping
+    )
+    bound = tuple(
+        tile
+        for tile in range(12)
+        if session.display_tile_payloads[tile].presentation_identity == identity
+    )
+    assert set(bound) == set(canonical[:4]), (
+        f"capped bind cohort took corner order {bound}, wanted {canonical[:4]}"
+    )
+
+    # An uncapped cohort keeps caller order -- nothing is discarded, so there
+    # is no choice to make and no sort to pay for.
+    assert session.bind_payloads_to_level_generation(corner_first) == 8

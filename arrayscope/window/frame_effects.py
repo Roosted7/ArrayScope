@@ -30,7 +30,6 @@ from arrayscope.display.model.tile_identity import (
     acknowledged_identity_satisfies_target,
     tile_ack_identity,
 )
-from arrayscope.display.model.tile_priority import prioritize_tile_numbers
 from arrayscope.display.montage import VISIBLE_MARGIN_TILES, montage_rect_for_viewport
 from arrayscope.display.planning import LevelSourceRank, decide_presentation, normalize_bounds
 from arrayscope.display.pyramid import materialize_lod_page
@@ -4156,46 +4155,12 @@ class FramePipelineEffects:
 def montage_priority_ranks(session) -> dict[int, int]:
     """The whole-montage priority order, computed once per distinct ordering.
 
-    Two consumers need a rank that is comparable across the *entire* montage
-    rather than within one batch: the backend command boundary below, which
-    freezes the camera's order onto a delta, and stage scheduling, which
-    compares one stage's best consumer against every other stage's. Both used
-    to sort all N tiles for themselves.
-
-    Both halves of the key are object identity, and both are load-bearing for
-    different reasons. ``make_montage_plan`` is ``lru_cache``d and returns the
-    identical plan across pans on purpose (montage.py:176-188), so ``id(plan)``
-    is stable exactly while the tile geometry is. The ordering context is
-    replaced only by ``retarget_tile_priority``, which keeps the incumbent
-    object when the new one would rank tiles identically, so ``id(context)`` is
-    stable exactly while the order is. Neither is a value hash: the context
-    holds two frozensets and a view range, and comparing those on every commit
-    would pay an O(visible) compare to avoid an O(N log N) sort that is usually
-    already cached -- the identity check is O(1) and, given the retarget-side
-    fix, no less accurate.
+    The rank map is session state and caches on the session, so
+    :meth:`FrameSession.montage_priority_ranks` owns it; this is the name the
+    effects-side call sites already used.
     """
 
-    plan = getattr(session, "plan", None)
-    context = session.tile_priority_context()
-    cache_key = (id(plan), id(context))
-    cached = getattr(session, "_presentation_priority_rank_cache", None)
-    if cached is not None and cached[0] == cache_key:
-        session._presentation_priority_rank_hits = (
-            int(getattr(session, "_presentation_priority_rank_hits", 0)) + 1
-        )
-        return cached[1]
-    plan_tiles = tuple(getattr(plan, "tiles", ()) or ())
-    priority_order = prioritize_tile_numbers(
-        range(len(plan_tiles)),
-        plan_tiles=plan_tiles,
-        context=context,
-    )
-    priority_ranks = {int(tile): int(rank) for rank, tile in enumerate(priority_order)}
-    session._presentation_priority_rank_cache = (cache_key, priority_ranks)
-    session._presentation_priority_rank_misses = (
-        int(getattr(session, "_presentation_priority_rank_misses", 0)) + 1
-    )
-    return priority_ranks
+    return session.montage_priority_ranks()
 
 
 def _priority_ordered_tile_delta(session, tile_delta):

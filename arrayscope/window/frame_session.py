@@ -112,6 +112,15 @@ RETAINED_OUT_OF_VIEW_BUDGET_SHARE = 0.5
 #: becomes the next bottleneck.
 RETAINED_OUT_OF_VIEW_MAX_TILES = 512
 
+#: Rows of ``FrameSession.presented_order`` kept per round.  A 272-tile montage
+#: is the field scale, so this holds a complete round; the bound exists because
+#: a snapshot field must not grow without limit, not to sub-sample a fill.
+PRESENTED_ORDER_SAMPLE_LIMIT = 288
+
+#: ``quality_code`` column of a ``presented_order`` row.  Anything the payload
+#: does not name (``fallback``, a resident-crop rebind) records as 2.
+_PRESENTED_ORDER_QUALITY_CODES = {"preview": 0, "exact": 1}
+
 #: Every reason ``_may_retain_out_of_view`` can refuse a candidate.  Named once
 #: so the counter map is a closed set rather than whatever strings the call
 #: sites happen to pass.
@@ -941,9 +950,21 @@ class FrameSession:
     # read by the semantic evidence owner, which promotes itself from trickle
     # batches to the blocking batch size while it holds.
     level_evidence_reanchor: bool = False
-    # First presented tile numbers in presentation order (capped): makes
-    # priority-order violations observable in diagnostics logs.
-    presented_order: list[int] = field(default_factory=list)
+    # First-presentation order for the CURRENT render round, one row per tile
+    # the round first put pixels on:
+    #   (tile_number, priority_rank, lod_level, quality_code)
+    # See ``_record_first_presentation`` for how to read it.  Reset per round
+    # and capped, so priority-order violations are observable in a recorded
+    # trace without turning a snapshot field into a log.
+    presented_order: list[tuple[int, int, int, int]] = field(default_factory=list)
+    # The round ``presented_order`` describes.  Exported beside the sample so a
+    # reader can tell a fresh round's short sample from a settled one.
+    presented_order_round_id: str = ""
+    # Membership mirror for the sample: "has this tile ever had pixels in this
+    # round".  The lifecycle cannot answer that at the recording site -- it has
+    # already marked the tile presented by then, which is exactly why the
+    # previous form of this instrument recorded nothing in 232 snapshots.
+    presented_order_seen: set[int] = field(default_factory=set)
     presentation_geometry_changed: bool = False
     _layout_geometry_changed_pending: bool = False
     # A compatible successor needs one atomic physical handoff.
@@ -2529,8 +2550,6 @@ class FrameSession:
                 self.dirty_payloads[index] = None
                 continue
             confirmed.append(index)
-            if index not in self.lifecycle.presented_tiles and len(self.presented_order) < 64:
-                self.presented_order.append(index)
             if index in self.visible_tile_numbers and index in self.display_tile_payloads:
                 level_scope_additions.append(index)
                 self.lifecycle.remember_presentable(index, self.display_tile_payloads[index])
@@ -3307,7 +3326,29 @@ class FrameSession:
         *,
         max_count: int | None = None,
     ) -> int:
-        """Bind a governed wrapper cohort to the uniform generation."""
+        """Bind a governed wrapper cohort to the uniform generation.
+
+        A payload that is not bound to the current generation cannot enter the
+        next transaction, so when ``max_count`` cuts this cohort it is choosing
+        which tiles are eligible to commit next -- and that choice belongs to
+        the same centre-out priority system every other capped cohort uses.
+        It used to be a cut on **caller order**, and the caller's order is the
+        insertion order of ``dirty_payloads``/``pending_payload_upserts``, which
+        ``_rearm_required_first_pixel_payloads`` fills by iterating
+        ``required_tile_numbers()`` -- ascending tile number, i.e. the montage's
+        corner first.
+
+        The asymmetry that made this a preview-rung defect rather than a
+        round-wide one is *when* the cut is live: the round installs its levels
+        as the preview rung is admitted, so ``has_pending_level_update`` holds
+        across the preview pass and the governor's batch limit is at its
+        smallest there, while the target pass mostly runs with the generation
+        already settled and the cap inert.
+
+        Ordering here cannot delay first pixels: an unbound tile keeps its debt
+        and binds on the next commit, so the same work happens either way. Only
+        which tiles go first changes.
+        """
 
         rebound = 0
         candidates = (
@@ -3316,7 +3357,11 @@ class FrameSession:
             else tuple(dict.fromkeys(int(tile) for tile in tile_numbers))
         )
         if max_count is not None:
-            candidates = candidates[: max(1, int(max_count))]
+            limit = max(1, int(max_count))
+            # Only pay the sort when the cap actually discards something.
+            if len(candidates) > limit:
+                candidates = self._prioritized_tile_numbers(candidates)
+            candidates = candidates[:limit]
         for tile_number in candidates:
             payload = self.display_tile_payloads.get(tile_number)
             if payload is None:
@@ -5591,6 +5636,13 @@ class FrameSession:
         for tile_number in accepted_upserts:
             payload = acknowledged.payloads.get(int(tile_number))
             if payload is not None:
+                # The one ORDERED pixel event.  ``accepted_upserts`` is the
+                # producer's presentation order, which is what the backend
+                # applied; ``mark_presented`` cannot serve the instrument
+                # because the report hands it a frozenset and set iteration
+                # over small ints is ascending tile number -- i.e. it would
+                # manufacture exactly the defect the sample exists to detect.
+                self._record_first_presentation(int(tile_number), payload)
                 self.acknowledged_source_ids.add(payload.source_id)
                 self.lifecycle.remember_presentable(int(tile_number), payload)
                 self.lifecycle.acknowledge_presented(
@@ -6190,6 +6242,92 @@ class FrameSession:
             plan_tiles=tuple(getattr(self.plan, "tiles", ()) or ()),
             context=self.tile_priority_context(),
         )
+
+    def montage_priority_ranks(self) -> dict[int, int]:
+        """The whole-montage priority order, computed once per distinct ordering.
+
+        Three consumers need a rank that is comparable across the *entire*
+        montage rather than within one batch: the backend command boundary,
+        which freezes the camera's order onto a delta; stage scheduling, which
+        compares one stage's best consumer against every other stage's; and the
+        first-presentation instrument below, which has to say where in this
+        order a tile that just got pixels actually sat.
+
+        Both halves of the key are object identity, and both are load-bearing
+        for different reasons. ``make_montage_plan`` is ``lru_cache``d and
+        returns the identical plan across pans on purpose
+        (montage.py:176-188), so ``id(plan)`` is stable exactly while the tile
+        geometry is. The ordering context is replaced only by
+        ``retarget_tile_priority``, which keeps the incumbent object when the
+        new one would rank tiles identically, so ``id(context)`` is stable
+        exactly while the order is. Neither is a value hash: the context holds
+        two frozensets and a view range, and comparing those on every commit
+        would pay an O(visible) compare to avoid an O(N log N) sort that is
+        usually already cached -- the identity check is O(1) and, given the
+        retarget-side fix, no less accurate.
+        """
+
+        plan = getattr(self, "plan", None)
+        context = self.tile_priority_context()
+        cache_key = (id(plan), id(context))
+        cached = getattr(self, "_presentation_priority_rank_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            self._presentation_priority_rank_hits = (
+                int(getattr(self, "_presentation_priority_rank_hits", 0)) + 1
+            )
+            return cached[1]
+        plan_tiles = tuple(getattr(plan, "tiles", ()) or ())
+        priority_order = prioritize_tile_numbers(
+            range(len(plan_tiles)),
+            plan_tiles=plan_tiles,
+            context=context,
+        )
+        priority_ranks = {int(tile): int(rank) for rank, tile in enumerate(priority_order)}
+        self._presentation_priority_rank_cache = (cache_key, priority_ranks)
+        self._presentation_priority_rank_misses = (
+            int(getattr(self, "_presentation_priority_rank_misses", 0)) + 1
+        )
+        return priority_ranks
+
+    def _record_first_presentation(self, tile_number: int, payload) -> None:
+        """Log one row of the round's first-presentation order.
+
+        This is the instrument that adjudicates "which tile got pixels first,
+        and at which rung".  It has to be read from a recorded trace with no
+        access to the code, so each row carries its own answer rather than a
+        tile number a reader would have to re-derive geometry for:
+
+            (tile_number, priority_rank, lod_level, quality_code)
+
+        ``priority_rank`` is the tile's position in
+        :meth:`montage_priority_ranks` -- the very order the commit path claims
+        to enforce -- so a centre-out fill has a NON-DECREASING rank column,
+        while a fill that runs in tile-number order has a non-decreasing
+        *tile_number* column instead.  The two are distinguishable from the
+        sample alone.
+
+        The sample is per **round**, not per session: a session spans many
+        rounds (ADR: "a session is not a round"), and a 64-entry log that never
+        reset could only ever describe the session's first round.  It is
+        bounded because this is a diagnostic snapshot field, not a log.
+        """
+
+        index = int(tile_number)
+        round_id = str(self.render_round_id or "")
+        if round_id != self.presented_order_round_id:
+            self.presented_order_round_id = round_id
+            self.presented_order.clear()
+            self.presented_order_seen.clear()
+        if index in self.presented_order_seen:
+            return
+        self.presented_order_seen.add(index)
+        if len(self.presented_order) >= PRESENTED_ORDER_SAMPLE_LIMIT:
+            return
+        quality = str(getattr(payload, "quality", "") or "")
+        quality_code = _PRESENTED_ORDER_QUALITY_CODES.get(quality, 2)
+        level = int(getattr(getattr(payload, "lod", None), "level", -1) or -1)
+        rank = self.montage_priority_ranks().get(index, -1)
+        self.presented_order.append((index, int(rank), level, int(quality_code)))
 
 
 @dataclass(frozen=True)
