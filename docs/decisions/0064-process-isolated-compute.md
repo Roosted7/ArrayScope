@@ -2,6 +2,74 @@
 
 Date: 2026-08-02. Status: accepted, staged delivery.
 
+> **Measured, 2026-08-04 — turning the pool on costs ~12 % of the frame rate.
+> The shipped default already refuses it, and nothing here changes that.**
+>
+> The default is `ComputeProcessPoolChoice.AUTO`, which resolves to *off*
+> (`app/settings_state.py:compute_process_pool_enabled`, locked by
+> `tests/app/test_theme_settings.py`). **There was no default to change.** Only
+> an explicit `compute_process_pool=on` builds a pool — and the operator's
+> diagnostic recordings were all made with that pin, so every other improvement
+> measured in those sessions was measured through this handicap. That, not the
+> default, is the finding to act on.
+>
+> Four order-balanced sweeps of the real 272-tile montage workflow (wgpu
+> screen, `tools/profile_montage_workflow`), 78 runs, arms interleaved in
+> blocks of three so every arm carries the same mean position in the sequence.
+> Adjudicated on `presentation_draw_count` per second.
+>
+> **The decisive sweep** — 21 runs, 7 per arm, on an otherwise quiet desktop
+> (load 0.8–3.9, no competing batch job):
+>
+> | arm | n | draws/s | range | vs off |
+> |---|---|---|---|---|
+> | pool OFF | 7 | **8.990** | 8.514 – 9.203 | — |
+> | pool ON (14 procs) | 7 | **7.913** | 7.558 – 8.442 | **−12.0 %** |
+> | pool ON, 4 procs | 7 | **8.143** | 7.849 – 8.305 | −9.4 % |
+>
+> The pool-OFF and pool-ON distributions are **disjoint** — every pool-OFF run
+> beats every pool-ON run — giving the smallest p an exact rank test can return
+> at this n (**p = 0.0003**, one-sided Mann-Whitney).
+>
+> **The control says this is real.** Two earlier sweeps carried an explicit
+> same-config control arm (`ctrl` running exactly the `off` configuration); it
+> never separated from `off` (p = 0.37 and p = 0.52) while pool-ON did
+> (p = 0.0020, p = 0.0001). In the decisive sweep the same question is asked by
+> splitting the 7-run `off` arm in half: the two halves of one identical
+> configuration differ by **2.13 %**, against a **12.0 %** effect — 5.6× the
+> harness's own noise, and the arm's spread is only 2.6 % CV.
+>
+> **It is not merely pool start-up.** Wall clock rises ~2.3 s with the pool, but
+> the long interactive scroll phase, measured against its *own* elapsed time so
+> start-up is excluded entirely, is **−13.7 %** (14.93 → 12.89 draws/s,
+> p = 0.0003). There is a deterministic setup cost *and* a steady-state cost.
+>
+> **It is mostly transport, not oversubscription.** Pool-ON runs
+> `default_worker_count()` + `default_process_count()` = 28 compute contexts on
+> 16 cores, so oversubscription was the competing explanation. Dropping to 4
+> processes while keeping the transport (~1250 routed calls either way) recovers
+> only **21 % of the whole-run gap and 31 % of the scroll-phase gap**; ~70–80 %
+> of the loss survives. That is the cost `d3f5d1b3` priced directly: ~1290
+> routed `RemoteCall` bodies at ~1.29 ms of parent CPU each (~0.93 ms
+> GIL-holding) is ~1.6 s of added parent CPU over a ~26 s session, contending
+> with the paint loop.
+>
+> Correcting the record on both predecessors: `d3f5d1b3`'s headline **6.33 vs
+> 8.17 draws/s (−22 %) overstates the effect** — it came from a single
+> back-to-back pair — and its own caveat, that its 9-slot sweep could not
+> adjudicate this, was right and is now discharged. `f758e126`'s incidental
+> control (8.32/8.20 ON vs 9.01 OFF, **−8.4 %**) was closer to the truth than
+> the measurement it was a footnote to.
+>
+> **Nothing is retired and nothing is deleted.** `RemoteCall`, the four
+> converted families, `ProcessWorkerBackend`, the shm publication path and the
+> slot pool all still exist and still work; a `RemoteCall` with no pool still
+> runs in-thread through its own `__call__`. What is measured is only that
+> *enabling the pool today costs frames* — which is exactly why AUTO resolves to
+> off. The strategy is not refused: see the 2026-08-04 graveyard rows for the
+> shape of family that would pay, namely one whose routed body is much larger
+> than the ~1.3 ms the transport costs to carry it.
+
 ## Context
 
 The UI stutters under load even though the GUI thread "only" coordinates. Three
