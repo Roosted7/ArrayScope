@@ -499,8 +499,35 @@ class TileRecord:
         return self.target_and_fallback_payloads()[0]
 
     @property
-    def fallback_payload(self) -> TilePayloadRef | None:
-        return self.target_and_fallback_payloads()[1]
+    def best_presentable_payload(self) -> TilePayloadRef | None:
+        """``target_payload or fallback_payload`` from ONE candidate scan.
+
+        The two properties above partition the same candidate set by the same
+        predicate, so asking for both walked ``presentable_payloads`` twice and
+        normalized every candidate twice.  A commit asks this question for
+        every lifecycle row it considers; at 272 rows that second walk was pure
+        duplication.  The selection rule of each half is unchanged, including
+        its first-minimum tie-break.
+        """
+
+        target = self.target
+        if target is None:
+            return None
+        best: TilePayloadRef | None = None
+        best_key: tuple | None = None
+        fallback: TilePayloadRef | None = None
+        fallback_key: tuple | None = None
+        for value in self.presentable_payloads.values():
+            ref = payload_ref_from_display_payload(value)
+            if ref.satisfies_target(target):
+                key = (ref.lod_level, repr(ref.source_id))
+                if best_key is None or key < best_key:
+                    best_key, best = key, ref
+            elif ref.source_index == target.source_index:
+                key = (0 if ref.quality == "exact" else 1, ref.lod_level)
+                if fallback_key is None or key < fallback_key:
+                    fallback_key, fallback = key, ref
+        return best if best is not None else fallback
 
     @property
     def target_payload_satisfies(self) -> bool:
@@ -974,7 +1001,7 @@ class TileLifecycle:
         for tile_number, rec in sorted(self._records.items()):
             if not rec.active or rec.presentation is Presentation.EMITTED:
                 continue
-            payload = rec.target_payload or rec.fallback_payload
+            payload = rec.best_presentable_payload
             if payload is None:
                 continue
             if _payload_refs_match(rec.acknowledged_payload, payload):
@@ -1035,7 +1062,21 @@ class TileLifecycle:
         return tuple(dict.fromkeys(unsettled))
 
     def target_settled(self, tile_numbers) -> bool:
-        return not self.target_unsettled_tiles(tile_numbers)
+        """Whether every named slot's target is settled.
+
+        Deliberately not ``not self.target_unsettled_tiles(...)``: the answer
+        is one bit, and the first unsettled slot decides it.  Enumerating the
+        whole scope to throw the enumeration away made every caller who asks
+        this question pay ``TileRecord.target_settled`` — and the acknowledged
+        payload read behind it — once per montage tile.
+        """
+
+        records = self._records
+        for tile_number in tuple(tile_numbers or ()):
+            rec = records.get(int(tile_number))
+            if rec is None or not rec.target_settled:
+                return False
+        return True
 
     def snapshot(self) -> TileLifecycleSnapshot:
         rows = tuple(rec for rec in self._records.values() if rec.active)
@@ -1146,7 +1187,7 @@ class TileLifecycle:
         rec = self._records.get(int(tile_number))
         if rec is None:
             return None
-        ref = rec.target_payload or rec.fallback_payload
+        ref = rec.best_presentable_payload
         return None if ref is None else ref.payload
 
     def acknowledge_presented(
@@ -1918,9 +1959,39 @@ def _request_level_keys(request: object) -> tuple[object, ...]:
     return tuple(keys)
 
 
+#: Where one payload keeps the ref derived from it.
+#:
+#: ``DisplayTilePayload`` is a frozen dataclass whose every field — including
+#: ``lod``, ``shader_mapping``, ``tile_identity`` and ``page_backing`` — is
+#: itself a frozen dataclass or a scalar, and its only writes happen inside its
+#: own ``__post_init__``.  The ref below is therefore a pure function of an
+#: object that cannot change, and caching it on that object is memoization,
+#: not state.
+#:
+#: This is not a micro-optimization of an incidental call.  One 272-tile
+#: presentation delta build calls this 1115 times over 282 distinct payloads
+#: (measured 2026-08-04): the lifecycle derives the same ref again for the
+#: target scan, the fallback scan, the acknowledged-identity lookup and the
+#: currency check, and every one of those rebuilds the whole ref.  The
+#: derivation and the ``TilePayloadRef`` construction it drives were 24 % of
+#: the entire build.
+#:
+#: The cache is written through ``__dict__`` rather than ``setattr`` because
+#: the payload is frozen, and it is READ through ``__dict__`` because a test
+#: double is not: ``getattr`` on a mock answers every name, and a mock's
+#: answer here would be returned as if it were a ref.  A missing ``__dict__``
+#: (a slotted payload type) simply does not cache.
+_PAYLOAD_REF_ATTR = "_arrayscope_payload_ref"
+
+
 def payload_ref_from_display_payload(payload) -> TilePayloadRef:
     if isinstance(payload, TilePayloadRef):
         return payload
+    store = getattr(payload, "__dict__", None)
+    if store is not None:
+        cached = store.get(_PAYLOAD_REF_ATTR)
+        if type(cached) is TilePayloadRef:
+            return cached
     lod = getattr(payload, "lod", None)
     texture_kind = getattr(payload, "texture_kind", None)
     shader_mapping = getattr(payload, "shader_mapping", None)
@@ -1932,7 +2003,7 @@ def payload_ref_from_display_payload(payload) -> TilePayloadRef:
             int(getattr(lod, "level", 0) or 0),
         )
     )
-    return TilePayloadRef(
+    ref = TilePayloadRef(
         source_id=getattr(payload, "source_id", None),
         quality="fallback" if quality == "preview" else quality,
         lod_level=policy_lod_level,
@@ -1944,6 +2015,15 @@ def payload_ref_from_display_payload(payload) -> TilePayloadRef:
         identity=getattr(payload, "tile_identity", None),
         payload=payload,
     )
+    if store is not None:
+        # ``ref.payload`` is ``payload``, so this closes a reference cycle the
+        # cyclic collector — not refcounting — has to break.  That is already
+        # how a payload's lifetime ends here: every presentable payload is
+        # reachable from a lifecycle ref that holds it strongly, so the arrays
+        # it carries are released when the session drops the record, never by
+        # the last name going out of scope.
+        store[_PAYLOAD_REF_ATTR] = ref
+    return ref
 
 
 def _coerce_payload_ref(payload) -> TilePayloadRef:

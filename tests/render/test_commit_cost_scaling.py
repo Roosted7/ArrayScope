@@ -992,3 +992,295 @@ def test_plan_tile_index_is_derived_once_per_plan():
         columns=COLUMNS,
     )
     assert plan_tiles_by_number(other) is not first, "a different plan owns a different map"
+
+
+# --------------------------------------------------------------------------
+# The same rule one layer up: the SESSION's presentation delta build.
+#
+# Everything above measures what the backend does with a delta.  This section
+# measures what building that delta costs, because that is where the field
+# trace put the money: ``payload`` — the presentation delta build — is 39 % of
+# ``montage_commit``, itself 17 % of session wall (trace 7, 2026-08-04).
+#
+# Measured on this fixture, a ONE-tile delta into a settled 272-tile montage
+# executed 155 690 lines of arrayscope bytecode and a 272-tile delta executed
+# 473 356.  The build is therefore ~97 % fixed cost at a one-tile delta, and
+# the honest reading is that most of that fixed term is IRREDUCIBLE: a commit
+# has to reconcile every drawn slot against backend identity truth, every
+# retained payload against the camera, and every planned slot against its
+# lifecycle target.  Those walks are the correctness of the commit and are
+# deliberately not pinned smaller here.
+#
+# What is pinned here is the part that was never montage-proportional by
+# necessity — asking one question twice, and deriving one pure value again for
+# every reader.  Tile PIXELS are irrelevant to a count, so these use a small
+# tile shape; the tile COUNT is the thing that must stay at field scale, for
+# exactly the reason the module docstring gives.
+# --------------------------------------------------------------------------
+
+SESSION_TILE = (4, 4)
+
+
+def _field_session(tiles: int = FIELD_TILES):
+    """A settled montage of ``tiles`` presented, acknowledged, drawn tiles."""
+
+    from arrayscope.display.model.tile_identity import tile_ack_identity
+    from arrayscope.display.montage import RenderedTile, make_montage_plan
+    from arrayscope.window.frame_session import FrameSession
+
+    rows, cols = SESSION_TILE
+    view_state = (
+        ViewState.from_shape((rows, cols, tiles))
+        .with_image_axes(0, 1)
+        .with_montage_axis(2, columns=COLUMNS, indices=tuple(range(tiles)))
+    )
+    plan = make_montage_plan(
+        view_state,
+        axis=2,
+        indices=tuple(range(tiles)),
+        tile_shape=SESSION_TILE,
+        columns=COLUMNS,
+    )
+    session = FrameSession(
+        session_id=1,
+        key="key",
+        render_generation=1,
+        level_key="levels",
+        level_expected_indices=tuple(range(tiles)),
+        plan=plan,
+        view_state=view_state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(1024, 1024),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+    )
+    session.visible_tile_numbers = frozenset(range(tiles))
+    session.sync_lifecycle_scope()
+
+    presented = {}
+    for index in range(tiles):
+        tile = plan.tiles[index]
+        image = np.full(SESSION_TILE, float(index), dtype=np.float32)
+        session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+        payload = DisplayTilePayload(
+            tile_number=index,
+            source_index=int(tile.source_index),
+            image=image,
+            histogram_data=image,
+            source_id=("tile", int(tile.source_index), "exact"),
+        )
+        session.display_tile_payloads[index] = payload
+        session.record_tile_payload(payload)
+        presented[index] = payload
+        session.lifecycle.commit_emitted({index: payload})
+        session.lifecycle.backend_ack({index: payload})
+        session.lifecycle.acknowledge_presented(index, payload.source_id, payload.quality, 0)
+    session.tile_presentation_state = TilePresentationState(presented)
+    session.lifecycle.presentation_confirmed(tuple(range(tiles)))
+    session.lifecycle.backend_presented_snapshot(
+        {index: tile_ack_identity(payload) for index, payload in presented.items()}
+    )
+    session.display_committed = True
+    # Drain the residue of settling to quiescence, acknowledging each round the
+    # way the backend does.  Without the acknowledgement the queue never
+    # empties, the next build takes the paced-followup shortcut instead of the
+    # reconciling one, and a counting test measures a build that never ran.
+    settle_ids = {index: ("tile", index, "exact") for index in range(tiles)}
+    for _ in range(40):
+        if not session.dirty_payloads and not session.pending_payload_upserts:
+            break
+        state, delta = session.build_tile_presentation(settle_ids, max_upserts=tiles)
+        if not delta.upserts:
+            break
+        session.lifecycle.commit_emitted(dict(delta.upserts))
+        session.lifecycle.backend_ack(dict(delta.upserts))
+        for index, payload in delta.upserts.items():
+            session.lifecycle.acknowledge_presented(
+                int(index), payload.source_id, payload.quality, 0
+            )
+        session.lifecycle.presentation_confirmed(tuple(delta.upserts))
+        session.lifecycle.backend_presented_snapshot(
+            {int(i): tile_ack_identity(p) for i, p in delta.upserts.items()}
+        )
+        session.tile_presentation_state = state
+    unsettled = "the fixture montage never settled, so a build measured against it is "
+    unsettled += "not the one-tile-delta build these tests claim to measure"
+    assert not session.dirty_payloads, unsettled
+    assert not session.pending_payload_upserts, unsettled
+    return session
+
+
+def _dirty_one_tile(session, index: int, tiles: int):
+    from arrayscope.display.montage import RenderedTile
+
+    tile = session.plan.tiles[index]
+    image = np.full(SESSION_TILE, float(index) + 1e4, dtype=np.float32)
+    session.mark_materialized(RenderedTile(tile, image, image, 0.0, image.shape, image.nbytes))
+    session.dirty_payloads[index] = None
+    return {i: ("tile", i, "moved" if i == index else "exact") for i in range(tiles)}
+
+
+class _MethodCounter:
+    """Count calls to one method or property for the duration of a build."""
+
+    def __init__(self, monkeypatch, owner, name, *, prop=False):
+        self.count = 0
+        original = owner.__dict__[name]
+        if prop:
+            getter = original.fget
+
+            def counted_get(instance):
+                self.count += 1
+                return getter(instance)
+
+            monkeypatch.setattr(owner, name, property(counted_get))
+        else:
+
+            def counted(instance, *args, **kwargs):
+                self.count += 1
+                return original(instance, *args, **kwargs)
+
+            monkeypatch.setattr(owner, name, counted)
+
+
+def test_presentation_build_derives_each_payload_ref_once(monkeypatch):
+    """A pure function of an immutable payload is derived once, not per reader.
+
+    ``payload_ref_from_display_payload`` normalizes a ``DisplayTilePayload``
+    into the identity metadata the lifecycle reasons with.  The payload is a
+    frozen dataclass of frozen dataclasses, so that ref cannot change — yet a
+    single 272-tile build asked for it 1115 times over 282 distinct payload
+    objects (measured 2026-08-04), because the target scan, the fallback scan,
+    the acknowledged-identity lookup and the currency check each rebuilt it.
+    The derivation and the construction it drives were 24 % of the whole build.
+
+    The gate is the RATIO, not a constant: however many payloads a build
+    consults, it may run the derivation body at most once for each.
+    """
+
+    from arrayscope.display.model.frame import DisplayTilePayload as _Payload
+    from arrayscope.presentation import tile_lifecycle
+
+    session = _field_session()
+    source_ids = _dirty_one_tile(session, 7, FIELD_TILES)
+
+    consulted: set[int] = set()
+    original = tile_lifecycle.payload_ref_from_display_payload
+
+    def recording(payload):
+        consulted.add(id(payload))
+        return original(payload)
+
+    monkeypatch.setattr(tile_lifecycle, "payload_ref_from_display_payload", recording)
+    # Reached only on the derivation path; a reader served the cached ref never
+    # touches it.  Counting it counts derivations, not lookups.
+    derivations = _MethodCounter(monkeypatch, _Payload, "conservative_actual_lod_level", prop=True)
+
+    session.build_tile_presentation(source_ids, max_upserts=1)
+
+    assert consulted, "the build consulted no payload at all; the fixture is inert"
+    assert derivations.count <= len(consulted), (
+        f"a 1-tile delta into a {FIELD_TILES}-tile montage ran the payload-ref "
+        f"derivation {derivations.count} times over {len(consulted)} distinct "
+        "payloads; the payload is immutable, so every reader after the first "
+        "is rebuilding a value that cannot have changed"
+    )
+
+
+def test_payload_ref_cache_still_answers_a_replaced_payload():
+    """The memo is per-object, so new pixels get a new ref — not a stale one.
+
+    A memo on an immutable object is only safe if a CHANGED payload is a
+    different object.  ``dataclasses.replace`` makes one, and this pins that
+    the derived ref follows the replacement rather than the slot.
+    """
+
+    from dataclasses import replace as _replace
+
+    from arrayscope.presentation.tile_lifecycle import payload_ref_from_display_payload
+
+    image = np.zeros(SESSION_TILE, dtype=np.float32)
+    first = DisplayTilePayload(
+        tile_number=3,
+        source_index=3,
+        image=image,
+        histogram_data=None,
+        source_id=("tile", 3, "a"),
+        quality="preview",
+    )
+    ref = payload_ref_from_display_payload(first)
+    assert payload_ref_from_display_payload(first) is ref, "the same object re-derived"
+
+    second = _replace(first, source_id=("tile", 3, "b"), quality="exact")
+    other = payload_ref_from_display_payload(second)
+    assert other is not ref
+    assert other.source_id == ("tile", 3, "b")
+    assert other.quality == "exact"
+    assert ref.source_id == ("tile", 3, "a"), "caching must not mutate the first ref"
+    assert ref.quality == "fallback"
+
+
+def test_pending_removal_reconciliation_does_not_scale_with_the_montage(monkeypatch):
+    """Discharging an empty removal queue must not poll every planned tile.
+
+    The transaction boundary retires queued removals whose slot turned out to
+    hold current pixels after all.  It asked ``payload_is_current`` for every
+    planned tile to do it — 272 lifecycle ref normalizations to discharge a
+    queue that is usually empty.  ``discard`` is a no-op for anything not
+    queued, so only the queued tiles can change the outcome.
+
+    Two montage sizes, one identical delta: the count must not move.
+    """
+
+    from arrayscope.presentation.tile_lifecycle import TileLifecycle
+
+    counts = {}
+    for tiles in (FIELD_TILES // 4, FIELD_TILES):
+        session = _field_session(tiles)
+        source_ids = _dirty_one_tile(session, 5, tiles)
+        counter = _MethodCounter(monkeypatch, TileLifecycle, "payload_is_current")
+        session.build_tile_presentation(source_ids, max_upserts=1)
+        counts[tiles] = counter.count
+        monkeypatch.undo()
+
+    small, field = counts[FIELD_TILES // 4], counts[FIELD_TILES]
+    assert field == small, (
+        f"one tile changed in both montages, yet the build asked "
+        f"'is this payload current?' {small} times into a {FIELD_TILES // 4}-tile "
+        f"montage and {field} times into a {FIELD_TILES}-tile one; the answer "
+        "for a tile nobody queued for removal cannot change anything"
+    )
+
+
+def test_first_pixel_membership_is_asked_once_per_tile(monkeypatch):
+    """Coverage and re-arm ask the same question; they may ask it once.
+
+    ``unpresented_tiles`` and ``_rearm_required_first_pixel_payloads`` both
+    need "does this slot own a first pixel", over scopes that in a settled
+    montage are the same scope.  Asked separately, each answer cost a
+    lifecycle record's acknowledged-payload read and a 272-tile montage paid
+    for 544 of them per commit.
+    """
+
+    from arrayscope.presentation.tile_lifecycle import TileRecord
+
+    session = _field_session()
+    source_ids = _dirty_one_tile(session, 11, FIELD_TILES)
+    counter = _MethodCounter(monkeypatch, TileRecord, "first_pixel_presented", prop=True)
+
+    session.build_tile_presentation(source_ids, max_upserts=1)
+
+    assert 0 < counter.count <= FIELD_TILES, (
+        f"the build read first-pixel presentation {counter.count} times across "
+        f"{FIELD_TILES} tiles; the two readers share one scope and one moment, "
+        "so one pass answers both"
+    )

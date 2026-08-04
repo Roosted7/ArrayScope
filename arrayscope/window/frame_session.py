@@ -1766,15 +1766,34 @@ class FrameSession:
                 self.record_tile_payload(payload)
         self._rearm_required_first_pixel_payloads()
 
-    def _rearm_required_first_pixel_payloads(self) -> tuple[int, ...]:
-        """Arm retained payloads whose required slots are not physically drawn."""
+    def _rearm_required_first_pixel_payloads(
+        self,
+        *,
+        required=None,
+        first_pixel_scope=None,
+    ) -> tuple[int, ...]:
+        """Arm retained payloads whose required slots are not physically drawn.
+
+        ``required``/``first_pixel_scope`` let a caller that has already asked
+        the lifecycle these two questions hand the answers in rather than pay
+        for them twice.  Both must describe THIS moment: the scope is a pure
+        read and nothing between the caller's read and this pass writes the
+        lifecycle, which is what makes reuse identical rather than merely
+        cheaper.  Omit either and it is derived here as before.
+        """
 
         rearmed: list[int] = []
-        for tile_number in self.required_tile_numbers():
+        if required is None:
+            required = self.required_tile_numbers()
+        for tile_number in required:
             index = int(tile_number)
-            record = self.lifecycle.peek(index)
-            if record is not None and record.first_pixel_presented:
-                continue
+            if first_pixel_scope is not None:
+                if index in first_pixel_scope:
+                    continue
+            else:
+                record = self.lifecycle.peek(index)
+                if record is not None and record.first_pixel_presented:
+                    continue
             payload = self.display_tile_payloads.get(index)
             if payload is None or not self.lifecycle.payload_is_current(index, payload):
                 continue
@@ -5226,15 +5245,24 @@ class FrameSession:
         )
         for tile_number in missing_rendered_payload_tiles:
             self.dirty_payloads[int(tile_number)] = None
-        unpresented_tiles = tuple(
-            int(tile)
-            for tile in active
-            if (
-                (record := self.lifecycle.peek(int(tile))) is None
-                or not record.first_pixel_presented
-            )
+        # One membership question, asked once.  The coverage scan below and the
+        # re-arm pass under it both need "does this slot own a first pixel",
+        # over scopes that overlap almost completely, and each answer costs a
+        # lifecycle record's acknowledged-payload read.  Asked separately, a
+        # 272-tile montage paid for 544 of them per commit.
+        rearm_required = tuple(self.required_tile_numbers())
+        # De-duplicated deliberately: the two scopes overlap almost exactly and
+        # ``first_pixel_presented_scope`` answers per element, not per distinct
+        # tile, so handing it the concatenation would re-ask the whole overlap.
+        first_pixel_scope = self.lifecycle.first_pixel_presented_scope(
+            {*(int(tile) for tile in active), *(int(tile) for tile in rearm_required)}
         )
-        self._rearm_required_first_pixel_payloads()
+        unpresented_tiles = tuple(
+            int(tile) for tile in active if int(tile) not in first_pixel_scope
+        )
+        self._rearm_required_first_pixel_payloads(
+            required=rearm_required, first_pixel_scope=first_pixel_scope
+        )
         priority_context = self.tile_priority_context()
 
         def prioritize(tiles) -> tuple[int, ...]:
@@ -5452,7 +5480,14 @@ class FrameSession:
         # removals at the transaction boundary, after every payload-building
         # step, so a newly current lifecycle payload wins atomically even when
         # its upsert is deferred by the per-commit cap.
-        for tile_number in planned_numbers:
+        # Walked over ``planned_numbers`` until 2026-08-04, which asked the
+        # lifecycle to normalize a payload ref for all 272 tiles to discharge
+        # a queue that is usually empty.  ``discard`` is a no-op for anything
+        # not queued and ``payload_is_current`` writes nothing, so the only
+        # tiles whose answer can change anything are the queued ones.
+        for tile_number in tuple(self.pending_removals):
+            if int(tile_number) not in planned_numbers:
+                continue
             if self.lifecycle.payload_is_current(
                 int(tile_number), current_payloads.get(int(tile_number))
             ):
@@ -5580,8 +5615,11 @@ class FrameSession:
         # enforced where COMPUTE is submitted (the ladder's phase barrier),
         # never here at commit.
         required = set(self.required_tile_numbers())
-        required_unsettled = set(self.lifecycle.target_unsettled_tiles(required))
-        if self.display_committed and required_unsettled:
+        # Only whether ANY required target is unfinished decides this branch,
+        # and ``target_settled`` stops at the first one.  Materializing the
+        # whole unsettled set to test it for emptiness read every required
+        # record even when the first answered the question.
+        if self.display_committed and not self.lifecycle.target_settled(required):
             # Coverage-ring payloads remain drawn/retained, but they may not
             # consume a backend transaction while an actual on-screen target
             # is unfinished. Otherwise a small zoom target shared an 8-item
