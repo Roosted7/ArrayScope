@@ -33,6 +33,7 @@ CHILD_GUI_MODULES = "tests.kernel.remote_entries:child_gui_modules"
 CONCATENATED = "tests.kernel.remote_entries:concatenated"
 DOUBLED = "tests.kernel.remote_entries:doubled"
 KILL_OWN_PROCESS = "tests.kernel.remote_entries:kill_own_process"
+NATIVE_THREAD_TEAMS = "tests.kernel.remote_entries:native_thread_team_sizes"
 OWN_PID = "tests.kernel.remote_entries:own_pid"
 RAISE_VALUE_ERROR = "tests.kernel.remote_entries:raise_value_error"
 
@@ -95,6 +96,64 @@ def test_the_child_pins_its_native_thread_teams(pool):
     names = sorted(CHILD_ENVIRONMENT)
 
     assert pool.run(RemoteCall(CHILD_ENVIRONMENT_ENTRY, names)) == dict.fromkeys(names, "1")
+
+
+def test_the_childs_blas_really_sized_itself_to_the_pin(pool):
+    # The environment assertion above passed for the whole life of the bug: it
+    # reads the intent, and `os.environ` did carry "1". OpenBLAS sizes its
+    # thread team in a loader constructor that reads the environment once, so
+    # the only honest check is the team size the child ended up with.
+    reading = pool.run(RemoteCall(NATIVE_THREAD_TEAMS, None))
+
+    assert reading["env"] == "1"
+    if reading["openblas"] is None:
+        pytest.skip("no OpenBLAS with a readable get_num_threads in the child")
+    assert reading["openblas"] == 1
+
+
+def test_no_process_argument_reaches_the_child_through_an_arrayscope_module():
+    # `spawn` unpickles the target and its arguments before `_bootstrap` calls
+    # `_worker_main`, so every module an argument names is imported while the
+    # environment is still the parent's. `kernel.shm_slots` imports numpy,
+    # which loads OpenBLAS -- passing a `SlotPoolHandle` here is what made the
+    # pin inert. Guard the arguments `_spawn` actually builds, not a helper's
+    # return value: the defect lived in the call, so the call is the subject.
+    recorded = {}
+
+    class _RecordingProcess:
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+        def start(self):
+            pass
+
+    probe = ProcessPool(processes=1)
+    try:
+        real_context = probe._context
+
+        class _RecordingContext:
+            def Pipe(self, duplex=True):
+                return real_context.Pipe(duplex=duplex)
+
+            def Process(self, **kwargs):
+                return _RecordingProcess(**kwargs)
+
+        probe._context = _RecordingContext()
+        try:
+            worker = probe._spawn(0)
+        finally:
+            probe._context = real_context
+        worker.conn.close()
+    finally:
+        probe.close()
+
+    offenders = {
+        type(argument).__module__
+        for argument in recorded["args"]
+        if type(argument).__module__.startswith("arrayscope")
+    }
+    assert recorded["args"], "no process arguments were recorded"
+    assert offenders == set()
 
 
 def test_a_child_exception_arrives_typed_with_the_childs_traceback(pool):

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from arrayscope.core.memory_policy import SystemMemorySnapshot, sample_system_memory
 
-_PROCESS_CPU_SAMPLERS: dict[int, object] = {}
+_CPU_SAMPLERS: dict[int, _CpuSampler] = {}
 
 
 @dataclass(frozen=True)
@@ -44,9 +44,7 @@ def sample_resource_snapshot(
             psutil_module = None
     if psutil_module is not None:
         try:
-            system_cpu = float(psutil_module.cpu_percent(interval=None))
-            process = _process_cpu_sampler(psutil_module)
-            process_cpu = float(process.cpu_percent(interval=None))
+            system_cpu, process_cpu = _cpu_sampler(psutil_module).read()
             source = "psutil"
         except Exception:
             warnings.append("psutil CPU telemetry unavailable")
@@ -70,12 +68,45 @@ def sample_resource_snapshot(
     )
 
 
-def _process_cpu_sampler(psutil_module):
-    """Return a stable Process object for psutil's delta-based CPU sampler."""
+class _CpuSampler:
+    """A warmed, stable pair of psutil CPU-percent samplers.
+
+    `cpu_percent(interval=None)` reports the busy fraction *since the previous
+    call on the same object*.  The first call has no previous reading, so it
+    returns 0.0 by construction — documented psutil behaviour, not an error.
+
+    That zero is indistinguishable from a genuinely idle host, and the governor
+    maps `system_cpu <= 0.0` onto a neutral 0.5 headroom.  An un-warmed sampler
+    therefore pins `cpu_headroom` at the neutral value and makes the
+    `cpu_headroom < 0.15` branch in `core/resource_governor.py` unreachable.
+    Burn the first reading here so the first sample a caller sees is live.
+    """
+
+    __slots__ = ("_process", "_psutil")
+
+    def __init__(self, psutil_module) -> None:
+        # The module reference is held for the lifetime of the cache entry:
+        # the cache is keyed by `id()`, so a collected module could otherwise
+        # let a later object reuse the address and inherit this sampler.
+        self._psutil = psutil_module
+        self._process = psutil_module.Process()
+        # The discarded warm-up. Both samplers keep independent deltas.
+        psutil_module.cpu_percent(interval=None)
+        self._process.cpu_percent(interval=None)
+
+    def read(self) -> tuple[float, float]:
+        return (
+            float(self._psutil.cpu_percent(interval=None)),
+            float(self._process.cpu_percent(interval=None)),
+        )
+
+
+def _cpu_sampler(psutil_module) -> _CpuSampler:
+    """Return the warmed sampler for this psutil module, creating it once."""
 
     key = id(psutil_module)
-    process = _PROCESS_CPU_SAMPLERS.get(key)
-    if process is None:
-        process = psutil_module.Process()
-        _PROCESS_CPU_SAMPLERS[key] = process
-    return process
+    sampler = _CPU_SAMPLERS.get(key)
+    if sampler is None:
+        sampler = _CpuSampler(psutil_module)
+        _CPU_SAMPLERS[key] = sampler
+    return sampler

@@ -55,6 +55,29 @@ class RemoteWorkerError(RuntimeError):
     """A worker process failed in a way with no parent-side counterpart."""
 
 
+def _slot_handle_fields(slots) -> tuple:
+    """Flatten a ``SlotPoolHandle`` into members a child can unpickle numpy-free.
+
+    The shared state has to reach the child through `Process(args=...)`: a
+    `multiprocessing.sharedctypes` object refuses to travel any other way
+    ("should only be shared between processes through inheritance"), so it
+    cannot be sent over the pipe after the child has pinned its environment.
+    Sending the *fields* instead keeps the inheritance path while keeping
+    `kernel.shm_slots` -- and therefore numpy, and therefore OpenBLAS -- out of
+    the child's pre-pin import set. `_worker_main` rebuilds the handle.
+    """
+
+    handle = slots.handle()
+    return (
+        handle.name,
+        handle.slot_bytes,
+        handle.slots,
+        handle.states,
+        handle.owners,
+        handle.fallbacks,
+    )
+
+
 # --------------------------------------------------------------- child side
 
 
@@ -72,13 +95,25 @@ class _ChildCancellationToken:
         return bool(self._control[self._index])
 
 
-def _worker_main(conn, index, control, slot_handle):
+def _worker_main(conn, index, control, slot_fields):
+    # FIRST, before anything drags in a native library. `spawn` unpickles this
+    # function and its arguments before `_bootstrap` calls it, so every module
+    # those arguments name is imported while the environment is still the
+    # parent's. OpenBLAS and libgomp size their thread teams in a loader
+    # constructor, reading the environment exactly once, so an import that
+    # lands ahead of this line makes the pin below inert -- `os.environ` says
+    # 1 and `openblas_get_num_threads()` says `os.cpu_count()`.
+    #
+    # This is why `slot_fields` is a plain tuple rather than a `SlotPoolHandle`:
+    # unpickling the dataclass would import `kernel.shm_slots`, which imports
+    # numpy, which loads OpenBLAS. The tuple's members unpickle through
+    # `multiprocessing.sharedctypes` alone, which is numpy-free.
     os.environ.update(CHILD_ENVIRONMENT)
     with suppress(AttributeError, OSError):
         os.nice(CHILD_NICENESS)
-    from arrayscope.kernel.shm_slots import SlotPool
+    from arrayscope.kernel.shm_slots import SlotPool, SlotPoolHandle
 
-    slots = SlotPool.attach(slot_handle)
+    slots = SlotPool.attach(SlotPoolHandle(*slot_fields))
     token = _ChildCancellationToken(control, index)
     owner = int(index) + 1
     try:
@@ -249,7 +284,7 @@ class ProcessPool:
         parent_conn, child_conn = self._context.Pipe(duplex=True)
         process = self._context.Process(
             target=_worker_main,
-            args=(child_conn, int(index), self._control, self._slots.handle()),
+            args=(child_conn, int(index), self._control, _slot_handle_fields(self._slots)),
             name=f"arrayscope-compute-{index}",
             daemon=True,
         )

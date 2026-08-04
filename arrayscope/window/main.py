@@ -70,6 +70,13 @@ def _kernel_worker_backend(settings):
     return ProcessWorkerBackend()
 
 
+# How stale the governor's host telemetry may get before a hot-path reconcile
+# resamples it. A sample costs ~0.13 ms, so this bounds the added GUI-thread
+# cost at ~0.05 % of wall while keeping CPU pressure inside one frame budget
+# of the truth at 60 Hz.
+_RESOURCE_TELEMETRY_REFRESH_SECONDS = 0.25
+
+
 class ArrayScopeWindow(
     WindowMenuMixin,
     DisplayControlBuildMixin,
@@ -164,6 +171,7 @@ class ArrayScopeWindow(
             sample_resource_snapshot(),
             self.renderer._memory_policy(),
         )
+        self._last_resource_telemetry_sample = perf_counter()
         self._init_compare_document(data)
         self.kernel = Kernel(
             _kernel_worker_backend(self.app_settings),
@@ -638,6 +646,13 @@ class ArrayScopeWindow(
                 active_render=self._resource_governor_work_active()
             )
             governor.update_telemetry(sample_resource_snapshot(), policy)
+            self._last_resource_telemetry_sample = perf_counter()
+        elif self._resource_telemetry_is_stale():
+            # Host telemetry only. Recomputing the memory policy here would
+            # also re-apply it to the evaluator caches, and that cadence is a
+            # separate decision from how fresh the CPU reading needs to be.
+            governor.update_telemetry(sample_resource_snapshot(), self.renderer._memory_policy())
+            self._last_resource_telemetry_sample = perf_counter()
         interactive = self._interaction_active_now()
         self._governor_interactive_applied = interactive
         busy = self._scheduler_busy_state()
@@ -685,6 +700,27 @@ class ArrayScopeWindow(
         # `window.montage_prefetch`. Do not project that local decision onto
         # the shared prefetch controller: slice/profile prefetch have their
         # own policy depth and admission gates.
+
+    def _resource_telemetry_is_stale(self) -> bool:
+        """True when the governor's host CPU reading is older than the cadence.
+
+        Every hot-path caller of `_apply_resource_governor_decisions` passes
+        `refresh_telemetry=False`, and the only unconditional refresher is a
+        settings change — so before this cadence existed the governor's
+        telemetry was frozen at the value sampled during window build, for the
+        whole session.  `pressure.cpu_headroom` was then permanently 0.5 (the
+        `system_cpu is None or <= 0.0` neutral branch) and no CPU-pressure
+        decision could ever fire.
+
+        A refresh costs ~0.13 ms, so at this cadence the ceiling is ~0.05 % of
+        wall — cheap enough to run on the hot path, which is the only path that
+        actually runs during an interaction.
+        """
+
+        last = getattr(self, "_last_resource_telemetry_sample", None)
+        if last is None:
+            return True
+        return (perf_counter() - last) >= _RESOURCE_TELEMETRY_REFRESH_SECONDS
 
     def _record_ui_work(
         self,

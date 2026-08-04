@@ -79,6 +79,61 @@ def child_environment(request):
     return {name: os.environ.get(name) for name in request}
 
 
+def native_thread_team_sizes(request):
+    """What the loaded native libraries actually sized their thread teams to.
+
+    ``child_environment`` reads the *intent* — that ``os.environ`` carries the
+    pin.  This reads the *effect*.  OpenBLAS sizes its team in a loader
+    constructor that reads the environment exactly once, so any import landing
+    ahead of ``_worker_main``'s pin leaves ``os.environ`` looking correct while
+    the team is already ``os.cpu_count()`` wide.  That is precisely the state a
+    ``SlotPoolHandle`` process argument used to produce.
+    """
+
+    del request
+    return {"openblas": _loaded_openblas_threads(), "env": os.environ.get("OPENBLAS_NUM_THREADS")}
+
+
+def _loaded_openblas_threads():
+    """Read ``*_get_num_threads`` from the BLAS this process already loaded.
+
+    Returns ``None`` when the library or symbol cannot be found, which is a
+    skip for the caller rather than a failure: the pin is what is under test,
+    not which BLAS a given wheel happens to bundle.
+    """
+
+    import ctypes
+    import re
+
+    try:
+        with open("/proc/self/maps") as handle:
+            candidates = [
+                match.group(1)
+                for match in (
+                    re.search(r"(\S*(?:openblas|blas)\S*\.so\S*)", line) for line in handle
+                )
+                if match
+            ]
+    except OSError:
+        return None
+    for path in dict.fromkeys(candidates):
+        try:
+            library = ctypes.CDLL(path)
+        except OSError:
+            continue
+        for symbol in (
+            "openblas_get_num_threads",
+            "openblas_get_num_threads64_",
+            "scipy_openblas_get_num_threads64_",
+            "scipy_openblas_get_num_threads_64_",
+        ):
+            reader = getattr(library, symbol, None)
+            if reader is not None:
+                reader.restype = ctypes.c_int
+                return int(reader())
+    return None
+
+
 def cancellation_flag(request, token):
     """Read the token once. ``pass_token`` is what routes it here."""
 

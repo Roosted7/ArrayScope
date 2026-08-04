@@ -260,3 +260,43 @@ def test_runtime_diagnostics_lists_kernel_bridge_drain_channel(qtbot):
         assert "kernel_bridge_drain" in channels
     finally:
         win.close()
+
+
+def test_hot_path_reconcile_resamples_telemetry_on_the_cadence(qtbot, monkeypatch):
+    # Every hot-path caller of `_apply_resource_governor_decisions` passes
+    # `refresh_telemetry=False`, and the only unconditional refresher is a
+    # settings change. Without a cadence the governor's host telemetry stays
+    # frozen at the value sampled during window build for the whole session,
+    # which pins `cpu_headroom` at the neutral 0.5 forever.
+    from time import perf_counter
+
+    from arrayscope.window import ArrayScopeWindow
+    from arrayscope.window import main as window_main
+
+    clear_arrayscope_settings()
+    win = ArrayScopeWindow(np.zeros((8, 8, 4), dtype=np.float32))
+    qtbot.addWidget(win)
+    try:
+        _settle_idle(win)
+        samples: list[int] = []
+        real_sampler = window_main.sample_resource_snapshot
+
+        def counting_sampler():
+            samples.append(1)
+            return real_sampler()
+
+        monkeypatch.setattr(window_main, "sample_resource_snapshot", counting_sampler)
+
+        # Fresh reading: the hot path must not pay for a resample.
+        win._last_resource_telemetry_sample = perf_counter()
+        win._apply_resource_governor_decisions(refresh_telemetry=False)
+        assert samples == []
+
+        # Older than the cadence: the same hot-path call must resample.
+        win._last_resource_telemetry_sample = perf_counter() - (
+            window_main._RESOURCE_TELEMETRY_REFRESH_SECONDS + 0.05
+        )
+        win._apply_resource_governor_decisions(refresh_telemetry=False)
+        assert len(samples) == 1
+    finally:
+        win.close()
