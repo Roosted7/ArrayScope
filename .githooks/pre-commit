@@ -139,6 +139,16 @@ if [ ${#staged_py[@]} -gt 0 ]; then
 		echo "pre-commit: ruff format check failed. Fix with: ruff format ." >&2
 		status=1
 	fi
+else
+	# Say it, rather than looking identical to "ruff ran and passed".
+	#
+	# Not a reason to fall back to the working tree: a commit staging no
+	# Python cannot introduce a Python lint error, and linting unstaged files
+	# is the exact behaviour removed above -- it refused a docs-only commit
+	# because an unrelated file was mid-edit. The dangerous version of this
+	# case, a commit whose deletions strand code elsewhere, is caught by the
+	# dead-code guard below, which is whole-tree for that reason.
+	echo "pre-commit: no staged Python — ruff skipped (whole-tree guards still ran)."
 fi
 
 if ! python "$root/tools/dead_code.py"; then

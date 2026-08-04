@@ -121,6 +121,30 @@ def test_pre_commit_recovers_its_tools_through_tools_env(tmp_path):
     ]
 
 
+def test_pre_commit_skips_ruff_and_says_so_when_no_python_is_staged(tmp_path):
+    """A commit with no Python runs the whole-tree guards and nothing else.
+
+    The lint steps read the index, so an empty Python selection means ruff has
+    nothing this commit could regress. Falling back to the working tree is the
+    behaviour that refused a docs-only commit because an unrelated file was
+    mid-edit, so the hook must skip -- and say it, or a skip reads exactly like
+    a pass.
+    """
+
+    root = _repo(tmp_path, "pre-commit", env_supplies_tools=True)
+    subprocess.run(["git", "-C", str(root), "rm", "-q", "--cached", "staged_module.py"], check=True)
+
+    result = _run(root, "pre-commit")
+
+    assert result.returncode == 0, result.stderr
+    assert "no staged Python" in result.stdout
+    calls = (root / "calls").read_text().splitlines()
+    assert calls == [
+        f"python {root}/tools/dead_code.py",
+        f"python {root}/tools/timing_guard.py",
+    ]
+
+
 def test_pre_commit_hands_off_once_and_then_reports_the_missing_tool(tmp_path):
     """The guard, which is the whole reason the handoff is safe.
 
