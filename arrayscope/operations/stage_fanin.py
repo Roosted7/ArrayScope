@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from arrayscope.core.mutation_clock import ClockedState
+
 
 @dataclass(frozen=True)
 class StageActivationBatch:
@@ -20,7 +22,7 @@ class StageReleaseBatch:
 
 
 @dataclass
-class StageFanInState:
+class StageFanInState(ClockedState):
     active_requests: set[object] = field(default_factory=set)
     attached_requests: set[object] = field(default_factory=set)
     values: dict[object, object] = field(default_factory=dict)

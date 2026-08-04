@@ -240,6 +240,11 @@ class MontageRuntimeDiagnostics:
     # The render round ``presented_order_sample`` describes.  The sample resets
     # per round, so a changed id means a new fill rather than a truncated one.
     presented_order_round_id: str = ""
+    # ``FrameSession.mutation_revision``: one monotonic count of every mutation
+    # of the session or its ledger.  Exported because a consumer that SKIPS a
+    # replan on it must be adjudicable from a recording: a stall whose epoch is
+    # frozen across the gap is a lost wakeup, and one that keeps moving is not.
+    session_mutation_revision: int = 0
     # ADR 0051: single-owner tile lifecycle machine.
     lifecycle_parked: int = 0
     lifecycle_evaluating: int = 0

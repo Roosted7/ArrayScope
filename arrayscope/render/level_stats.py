@@ -170,8 +170,10 @@ class LevelStatsService:
                 return 0
             offsets = getattr(session, "_level_rehydrate_offsets", None)
             if offsets is None:
-                offsets = {}
-                session._level_rehydrate_offsets = offsets
+                # Assign first, then read BACK: session attributes hold
+                # mutation-tracked containers (``core.mutation_clock``).
+                session._level_rehydrate_offsets = {}
+                offsets = session._level_rehydrate_offsets
             offset = int(offsets.get(session.level_key, 0) or 0) % len(expected)
             candidates = (*expected, *expected)[offset : offset + count]
             offsets[session.level_key] = (offset + len(candidates)) % len(expected)

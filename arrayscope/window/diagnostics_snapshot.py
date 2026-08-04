@@ -422,6 +422,9 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
             tuple(int(value) for value in row)
             for row in tuple(getattr(session, "presented_order", ()) or ())
         ),
+        session_mutation_revision=0
+        if session is None
+        else int(getattr(session, "mutation_revision", 0) or 0),
         presented_order_round_id=""
         if session is None
         else str(getattr(session, "presented_order_round_id", "") or ""),

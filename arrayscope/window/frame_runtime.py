@@ -1334,8 +1334,10 @@ class FrameRuntimeMixin:
     def _montage_tile_source_ids(self, session) -> dict[int, object]:
         source_ids = getattr(session, "tile_source_ids", None)
         if source_ids is None:
-            source_ids = {}
-            session.tile_source_ids = source_ids
+            # Assign first, then read BACK: session attributes hold
+            # mutation-tracked containers (``core.mutation_clock``).
+            session.tile_source_ids = {}
+            source_ids = session.tile_source_ids
         plan = getattr(session, "plan", None)
         plan_tiles_tuple = tuple(getattr(plan, "tiles", ()) or ())
         if getattr(session, "_tile_source_ids_plan", None) is plan and len(source_ids) == len(

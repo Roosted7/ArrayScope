@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 
+from arrayscope.core.mutation_clock import ClockedState
 from arrayscope.core.trace import emit_trace
 from arrayscope.kernel.task import Lane
 
@@ -85,7 +86,7 @@ class SchedulingVerdict:
         )
 
 
-class ProgressiveSchedulingPolicy:
+class ProgressiveSchedulingPolicy(ClockedState):
     """Per-required-scope-generation COVERAGE -> REFINE state machine."""
 
     def __init__(self) -> None:
@@ -240,7 +241,7 @@ class RoundShedding:
 NO_SHEDDING = RoundShedding(level=ShedLevel.NONE, streak=0)
 
 
-class RoundLoadShedding:
+class RoundLoadShedding(ClockedState):
     """R6 owner: one shedding verdict per round, relaxed when input settles.
 
     The "falling behind" signal is the product's own commit counter, not a

@@ -5,11 +5,20 @@ from __future__ import annotations
 import os
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
+from dataclasses import fields as dataclass_fields
 from time import monotonic, perf_counter, perf_counter_ns
 from typing import NamedTuple
 
 import numpy as np
 
+from arrayscope.core.mutation_clock import (
+    IMMUTABLE_VALUE_TYPES,
+    ClockedState,
+    MutationClock,
+    bind_existing_state,
+    track_mutable,
+    track_state_object,
+)
 from arrayscope.core.trace import emit_trace
 from arrayscope.display.lod import (
     LOD_POLICY_NATIVE_ONLY,
@@ -201,7 +210,7 @@ class SemanticLevelEvidenceTarget:
 
 
 @dataclass
-class SemanticLevelEvidenceProgress:
+class SemanticLevelEvidenceProgress(ClockedState):
     """Bounded scheduler progress; LevelStatsService is its only mutator."""
 
     target: SemanticLevelEvidenceTarget
@@ -1338,7 +1347,86 @@ class FrameSession:
     def level_revision(self, value: int) -> None:
         self.level_generation.revision = int(value)
 
+    def __setattr__(self, name, value) -> None:
+        # Every session-owned attribute, not a list of the ones known to
+        # matter: a field added later must retire a gate keyed on this epoch
+        # BY DEFAULT.  ~120 ns per write against ~25 ns for a plain dataclass
+        # field, and the ordering below is what keeps that from being worse --
+        # the common case is a scalar, so a single dict lookup misses and
+        # neither the isinstance chain in ``track_mutable`` nor the lifecycle
+        # branch runs for an int, a bool, a str, a tuple or an enum.
+        clock = self.__dict__.get("_mutations")
+        if clock is None:
+            # ``dataclass.__init__`` runs before ``__post_init__`` adopts the
+            # clock.  Everything it bound is tracked there, in one pass.
+            object.__setattr__(self, name, value)
+            return
+        clock.value += 1
+        if type(value) not in IMMUTABLE_VALUE_TYPES:
+            if name == "lifecycle":
+                self._absorb_replaced_lifecycle(value)
+            elif name in _SESSION_FIELD_NAMES:
+                value = track_mutable(value, clock)
+            else:
+                value = track_state_object(value, clock)
+        object.__setattr__(self, name, value)
+
+    def _absorb_replaced_lifecycle(self, lifecycle) -> None:
+        """Keep :attr:`mutation_revision` monotonic across a ledger swap.
+
+        The epoch is the SUM of this session's counter and its ledger's, and
+        a replacement ledger arrives with a counter of its own that is behind.
+        Absorbing the outgoing ledger's reading into the session counter makes
+        the sum strictly increase whatever the replacement's reading is.
+
+        (The alternative, sharing one clock with the ledger, was measured and
+        rejected: it makes ``lifecycle.mutation_revision`` move on every
+        session write, and ``viewport_invariant_key`` reads that revision to
+        mean "tile state or residency changed".  Coarsening it there retires
+        the viewport latch on writes it was built to ignore.)
+
+        No production path replaces ``session.lifecycle``: the single
+        construction site in ``frame_controller`` never passes one and nothing
+        assigns one afterwards.  This exists so that a path which starts doing
+        it is correct rather than silently stale.
+        """
+
+        previous = self.__dict__.get("lifecycle")
+        if previous is lifecycle or previous is None:
+            return
+        self.__dict__["_mutations"].value += int(getattr(previous, "mutation_revision", 0) or 0)
+
+    @property
+    def mutation_revision(self) -> int:
+        """Monotonic count of every mutation of this session or its ledger.
+
+        This is the coarse "did ANYTHING a plan reads change?" witness.  The
+        typed revisions beside it (:attr:`payload_revision`,
+        :attr:`structure_revision`, :attr:`visibility_revision`,
+        :attr:`viewport_revision`, :attr:`tile_state_revision`,
+        ``lifecycle.level_revision``, ``tile_presentation_state.revision``)
+        answer sharper questions and are unchanged; what none of them could
+        answer is this one, because each covers one axis and a plan reads
+        ~94 session fields across its branches.
+
+        It is a counter, not a hash: equal values mean no mutation was
+        attempted, not that the state compares equal.  A write-back of an
+        identical value still bumps, which fails a consumer OPEN -- one
+        redundant replan, never a skipped one.
+
+        The ledger's own epoch is a TERM of this sum rather than a shared
+        counter, so ``lifecycle.mutation_revision`` keeps meaning "tile state
+        or residency changed" for the consumer that already reads it.
+        """
+
+        return int(self._mutations.value) + int(self.lifecycle.mutation_revision)
+
     def __post_init__(self) -> None:
+        # First, before anything below mutates.  ``dataclass.__init__`` bound
+        # every field before this ran, so the one pass below is what makes
+        # those bindings tracked; from here on ``__setattr__`` does it.
+        object.__setattr__(self, "_mutations", MutationClock())
+        bind_existing_state(self, self.__dict__["_mutations"], skip=("_mutations",))
         self.lifecycle.set_trace_session_id(int(self.session_id))
         self.pending_level_tiles = deque(self.pending_level_tiles)
         self.pending_level_sources = {
@@ -1452,8 +1540,12 @@ class FrameSession:
 
         memo = getattr(self, "_lifecycle_payload_objects", None)
         if memo is None:
-            memo = {}
-            self._lifecycle_payload_objects = memo
+            # Assign first, then read BACK: a session attribute holds a
+            # mutation-tracked container, and assignment installs it, so a
+            # local alias to the pre-assignment dict would be a different
+            # object (see ``core.mutation_clock``).
+            self._lifecycle_payload_objects = {}
+            memo = self._lifecycle_payload_objects
         owner, recorded = memo.get(str(container), (None, None))
         if recorded is None or owner is not payloads:
             recorded = {}
@@ -3097,8 +3189,11 @@ class FrameSession:
         window-exact, kernel-side, and off the display lane.
         """
 
-        stats: dict[str, int] = {"considered": 0, "rebound": 0}
-        self.resident_crop_rebind_stats = stats
+        # Assign first, then read BACK -- the attribute holds a
+        # mutation-tracked container (``core.mutation_clock``), so the
+        # pre-assignment dict is not the one ``decline`` must write to.
+        self.resident_crop_rebind_stats = {"considered": 0, "rebound": 0}
+        stats: dict[str, int] = self.resident_crop_rebind_stats
 
         def decline(reason: str) -> None:
             stats[reason] = stats.get(reason, 0) + 1
@@ -6815,3 +6910,12 @@ def _priority_contexts_order_alike(
         and previous.priority_tiles == current.priority_tiles
         and _view_range_cache_key(previous.view_range) == _view_range_cache_key(current.view_range)
     )
+
+
+#: The attributes ``FrameSession`` DECLARES.  ``__setattr__`` replaces a plain
+#: container assigned to one of these with a tracked container, and confines
+#: that replacement to them: their assignment sites are bounded (six in
+#: production, all audited) whereas an ad-hoc attribute may be a generation
+#: token compared by identity.  Derived from the dataclass, never listed, so a
+#: field added later is tracked by default -- which is the whole requirement.
+_SESSION_FIELD_NAMES = frozenset(item.name for item in dataclass_fields(FrameSession))

@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from math import isclose
 
+from arrayscope.core.mutation_clock import ClockedState
+
 LEVEL_REL_TOL = 1e-12
 LEVEL_ABS_TOL = 1e-9
 
@@ -40,7 +42,7 @@ class PresentationGenerationSnapshot:
 
 
 @dataclass
-class PresentationGenerationTracker:
+class PresentationGenerationTracker(ClockedState):
     """Mutable convergence model for one latest presentation target."""
 
     revision: int = 0

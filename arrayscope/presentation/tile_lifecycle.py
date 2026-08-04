@@ -36,133 +36,23 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
+from arrayscope.core.mutation_clock import (
+    NULL_CLOCK,
+    MutationClock,
+    TrackedDict,
+    TrackedSet,
+)
 from arrayscope.core.trace import emit_trace, emit_trace_fields, trace_enabled
 from arrayscope.display.model.tile_identity import TileIdentity
 
-
-class _MutationClock:
-    """One monotonic counter shared by a lifecycle and all of its records.
-
-    ``level_revision`` and ``skipped_revision`` answer "did *this* index
-    change"; this answers "did *anything* change".  A retarget gate that
-    skips planning needs the second question, and a hand-maintained list of
-    mutating methods is not an answer to it -- a method added later would
-    silently not bump.  So the bump is installed on the *containers*, not on
-    the methods: every scalar field write goes through
-    :meth:`TileRecord.__setattr__`, every record-owned collection is a
-    tracked dict/set, and every lifecycle-owned collection is too.  A new
-    mutator therefore bumps by construction, whatever it is called.
-    """
-
-    __slots__ = ("value",)
-
-    def __init__(self, value: int = 0) -> None:
-        self.value = int(value)
-
-    def __repr__(self) -> str:
-        # Deliberately value-free.  Differential oracles dump records field by
-        # field via ``repr`` (``tests/presentation/test_tile_lifecycle_retarget_scale``),
-        # and the clock is bookkeeping, not observable tile state: leaking its
-        # identity or its count into those dumps would make two ledgers that
-        # agree on every tile compare unequal.
-        return "<mutation clock>"
-
-
-#: Shared by every record built before its lifecycle attached one (a record
-#: constructed outside :meth:`TileLifecycle.record` never reaches a gate).
-_NULL_CLOCK = _MutationClock()
-
-
-class _TrackedDict(dict):
-    """A dict that bumps a :class:`_MutationClock` on every mutation."""
-
-    __slots__ = ("_clock",)
-
-    def __init__(self, clock: _MutationClock, data=()) -> None:
-        super().__init__(data)
-        self._clock = clock
-
-    def __setitem__(self, key, value) -> None:
-        self._clock.value += 1
-        super().__setitem__(key, value)
-
-    def __delitem__(self, key) -> None:
-        self._clock.value += 1
-        super().__delitem__(key)
-
-    def pop(self, *args):
-        self._clock.value += 1
-        return super().pop(*args)
-
-    def popitem(self):
-        self._clock.value += 1
-        return super().popitem()
-
-    def setdefault(self, key, default=None):
-        self._clock.value += 1
-        return super().setdefault(key, default)
-
-    def update(self, *args, **kwargs) -> None:
-        self._clock.value += 1
-        super().update(*args, **kwargs)
-
-    def clear(self) -> None:
-        self._clock.value += 1
-        super().clear()
-
-    def __repr__(self) -> str:
-        # Indistinguishable from the plain container it replaces, so every
-        # existing diagnostic dump and repr-based oracle reads unchanged.
-        return dict.__repr__(self)
-
-
-class _TrackedSet(set):
-    """A set that bumps a :class:`_MutationClock` on every mutation."""
-
-    __slots__ = ("_clock",)
-
-    def __init__(self, clock: _MutationClock, data=()) -> None:
-        super().__init__(data)
-        self._clock = clock
-
-    def add(self, value) -> None:
-        self._clock.value += 1
-        super().add(value)
-
-    def discard(self, value) -> None:
-        self._clock.value += 1
-        super().discard(value)
-
-    def remove(self, value) -> None:
-        self._clock.value += 1
-        super().remove(value)
-
-    def pop(self):
-        self._clock.value += 1
-        return super().pop()
-
-    def clear(self) -> None:
-        self._clock.value += 1
-        super().clear()
-
-    def update(self, *args) -> None:
-        self._clock.value += 1
-        super().update(*args)
-
-    def difference_update(self, *args) -> None:
-        self._clock.value += 1
-        super().difference_update(*args)
-
-    def intersection_update(self, *args) -> None:
-        self._clock.value += 1
-        super().intersection_update(*args)
-
-    def symmetric_difference_update(self, *args) -> None:
-        self._clock.value += 1
-        super().symmetric_difference_update(*args)
-
-    def __repr__(self) -> str:
-        return set.__repr__(self)
+#: The lifecycle's mutation epoch is the shared one (``core.mutation_clock``):
+#: one implementation, one place to mutation-check, and the same counter can
+#: then be shared with the owning ``FrameSession`` so a single read answers
+#: "did anything about this frame change?".
+_MutationClock = MutationClock
+_NULL_CLOCK = NULL_CLOCK
+_TrackedDict = TrackedDict
+_TrackedSet = TrackedSet
 
 
 #: Record fields whose value is a mutable collection.  A method that replaces
@@ -658,6 +548,18 @@ class TileLifecycle:
         if clock is not None and name != "_mutations":
             clock.value += 1
         object.__setattr__(self, name, value)
+
+    @property
+    def mutation_clock(self) -> MutationClock:
+        """The counter object itself, so an owner can share it.
+
+        ``FrameSession`` adopts this rather than keeping a second counter and
+        summing: a sum of two counters is not monotonic across a replacement
+        of either term, and the whole value of the epoch is that a consumer
+        may compare two readings.
+        """
+
+        return self._mutations
 
     @property
     def mutation_revision(self) -> int:
