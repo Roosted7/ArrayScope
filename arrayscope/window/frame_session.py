@@ -3337,6 +3337,86 @@ class FrameSession:
         if changed_state or confirmed_tiles:
             self.invalidate_tile_states()
 
+    def _resident_crop_predecessor(self, tile_number: int, previous_by_tile):
+        """The wrapper a rebind of ``tile_number`` would clone, or ``None``.
+
+        Prefer the last committed wrapper (the predecessor window): a new
+        session's ``display_tile_payloads`` is empty at plan time, and a
+        continued session may already hold the new-window wrapper (no shift to
+        rebind).  The committed frame is the pre-scrub truth.
+        """
+
+        previous = previous_by_tile.get(tile_number)
+        if previous is None or getattr(previous, "source_anchor", None) is None:
+            previous = self.display_tile_payloads.get(tile_number)
+        if previous is None or getattr(previous, "source_anchor", None) is None:
+            return None
+        return previous
+
+    def _resident_crop_window_is_settled(self, tile_numbers, previous_by_tile) -> bool:
+        """Whether the crop window proves no named tile can rebind.
+
+        The crop origin is ONE session-level fact — ``source_anchoring``'s
+        anchored starts — but the rebind loop rediscovered it per tile, building
+        an identity tile and a ``PayloadSourceAnchor`` for each one before it
+        could decline.  Measured over a field session: 282 274 candidate
+        evaluations, 87 % of them declining ``window_unchanged``, and
+        ``rebound = 0`` throughout.  Hoisting the origin here reduces the common
+        case to one integer comparison per tile against the wrapper the loop
+        would have cloned.
+
+        The proof is that a rebind requires ``new_anchor != previous.source_anchor``
+        under an EQUAL content key and plane shape, and the only window-varying
+        term of an anchor is ``source_rect`` — origin from this session, extent
+        from the predecessor's own native shape.  So a tile whose predecessor
+        already carries that exact rect declines whatever else differs
+        (``window_unchanged``, or ``content_key_changed``/``plane_shape_changed``
+        one check earlier); a tile with no anchored predecessor declines too.
+        When every named tile is in one of those two states the loop is provably
+        a no-op and the whole scan — including the plan-tile map it needs — is
+        skipped.
+
+        Fails open: an unreadable anchoring, an unreadable native shape or any
+        rect that disagrees returns ``False`` and takes the full per-tile path.
+        A suppressed rebind is a tile bound to stale cropped data, which is far
+        worse than the scan it saves.
+        """
+
+        anchoring = self.source_anchoring
+        if anchoring is None:
+            return False
+        starts = getattr(anchoring, "source_starts_yx", None)
+        if starts is None:
+            starts = getattr(anchoring, "anchored_starts", None)
+        if starts is None or getattr(anchoring, "content_key", None) is None:
+            return False
+        try:
+            y_start = int(starts[0] or 0)
+            x_start = int(starts[1] or 0)
+        except (IndexError, TypeError, ValueError):
+            return False
+        for raw_number in tile_numbers:
+            previous = self._resident_crop_predecessor(int(raw_number), previous_by_tile)
+            if previous is None:
+                # No anchored wrapper to clone: this tile declines however the
+                # window moved.
+                continue
+            previous_lod = getattr(previous, "lod", None)
+            native_shape = (
+                getattr(previous_lod, "source_shape", None)
+                if previous_lod is not None
+                else getattr(previous, "source_shape", None)
+            )
+            try:
+                height = int(native_shape[0])
+                width = int(native_shape[1])
+                rect = tuple(int(value) for value in previous.source_anchor.source_rect)
+            except (AttributeError, IndexError, TypeError, ValueError):
+                return False
+            if rect != (y_start, y_start + height, x_start, x_start + width):
+                return False
+        return True
+
     def rebind_resident_crop_tiles(
         self,
         *,
@@ -3398,29 +3478,27 @@ class FrameSession:
         if not callable(physical_resident_fn):
             decline("no_residency_seam")
             return ()
-        plan_tiles = {
-            int(tile.montage_index): tile
-            for tile in tuple(getattr(getattr(self, "plan", None), "tiles", ()) or ())
-        }
-        if not plan_tiles:
+        plan_source = tuple(getattr(getattr(self, "plan", None), "tiles", ()) or ())
+        if not plan_source:
             decline("no_plan_tiles")
             return ()
-        previous_by_tile = dict(previous_by_tile or {})
+        tile_numbers = tuple(tile_numbers or ())
+        previous_by_tile = previous_by_tile or {}
+        if self._resident_crop_window_is_settled(tile_numbers, previous_by_tile):
+            stats["window_settled"] = 1
+            stats["window_settled_tiles"] = len(tile_numbers)
+            return ()
+        plan_tiles = {int(tile.montage_index): tile for tile in plan_source}
+        previous_by_tile = dict(previous_by_tile)
         canonical_by_tile = dict(canonical_by_tile or {})
         stats["previous_by_tile"] = len(previous_by_tile)
         stats["canonical_by_tile"] = len(canonical_by_tile)
         rebound: list[int] = []
-        for raw_number in tuple(tile_numbers or ()):
+        for raw_number in tile_numbers:
             stats["considered"] += 1
             tile_number = int(raw_number)
-            # Prefer the last committed wrapper (the predecessor window): a new
-            # session's ``display_tile_payloads`` is empty at plan time, and a
-            # continued session may already hold the new-window wrapper (no
-            # shift to rebind).  The committed frame is the pre-scrub truth.
-            previous = previous_by_tile.get(tile_number)
-            if previous is None or getattr(previous, "source_anchor", None) is None:
-                previous = self.display_tile_payloads.get(tile_number)
-            if previous is None or getattr(previous, "source_anchor", None) is None:
+            previous = self._resident_crop_predecessor(tile_number, previous_by_tile)
+            if previous is None:
                 decline("no_anchored_predecessor")
                 continue
             # The predecessor wrapper is the reuse source; the plan tile carries

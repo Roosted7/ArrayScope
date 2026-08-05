@@ -12,6 +12,7 @@ from arrayscope.display.frame_planner import FramePlanner
 from arrayscope.display.lod import LodInfo
 from arrayscope.display.model.frame import (
     DisplayTilePayload,
+    PayloadSourceAnchor,
     TileCommitReport,
     TilePresentationState,
 )
@@ -2913,3 +2914,173 @@ def test_watchdog_stops_without_reporting_frame_currency_while_window_closes(qtb
     assert renderer._montage_watchdog_timer.stopped
     assert renderer._montage_watchdog_state is None
     assert renderer._montage_stall_assertions == 0
+
+
+def _crop_session():
+    # A 4x4 source plane so a shifted 2x2 crop window still names a sub-rect of
+    # the plane the anchors describe.
+    state = ViewState.from_shape((4, 4, 4)).with_montage_axis(2, indices=(0, 1, 2, 3), text=":")
+    plan = make_montage_plan(state, axis=2, indices=(0, 1, 2, 3), tile_shape=(4, 4), columns=4)
+    session = FrameSession(
+        session_id=1,
+        key="key",
+        render_generation=1,
+        level_key="levels",
+        level_expected_indices=(0, 1, 2, 3),
+        plan=plan,
+        view_state=state,
+        document=None,
+        montage_axis=2,
+        colormap_lut=None,
+        viewport_shape=(10, 10),
+        view_range=None,
+        output_dtype=np.dtype(np.float32),
+        rgb=False,
+        window_mode=None,
+        force_auto=False,
+        visible_tiles=plan.tiles,
+        rendered_tiles={},
+        loading_tiles=set(),
+        skipped_tiles=set(),
+    )
+    session.source_anchoring = SimpleNamespace(source_starts_yx=(0, 0), content_key=("key",))
+    return session
+
+
+def _crop_window_predecessors(session, *, origin):
+    # Page-backed wrappers (no exact CPU plane) carrying the whole native plane:
+    # the shape a montage crop rebind actually clones, and the one whose
+    # ``_rebind_reslice_planes`` is the anchor shift alone.
+    y_start, x_start = origin
+    payloads = {}
+    for tile in session.plan.tiles:
+        number = int(tile.montage_index)
+        window = np.full((2, 2), float(number), dtype=np.float32)
+        payloads[number] = DisplayTilePayload(
+            tile_number=number,
+            source_index=int(tile.source_index),
+            image=window,
+            histogram_data=None,
+            source_id=("tile", int(tile.source_index)),
+            quality="preview",
+            native_residency_data=np.full((4, 4), float(number), dtype=np.float32),
+            source_anchor=PayloadSourceAnchor(
+                content_key=(("key",), "montage-source", int(tile.source_index)),
+                source_rect=(y_start, y_start + 2, x_start, x_start + 2),
+                plane_shape=(4, 4),
+            ),
+        )
+    return payloads
+
+
+def test_an_unmoved_crop_window_skips_the_whole_rebind_scan():
+    """The crop origin is one session fact, so it is read once, not per tile.
+
+    ``_seed_resident_crop_rebinds`` runs at the head of every ``tile_states``
+    retarget, and its loop built an identity tile plus a ``PayloadSourceAnchor``
+    per visible tile before it could decline.  A field session measured 282 274
+    such candidate evaluations with ``rebound = 0`` throughout — 87 % of them
+    declining ``window_unchanged``, which is the same answer for every tile
+    because the window is one fact.  Counting both arms is the proof: the
+    settled window must consider ZERO tiles and probe residency zero times,
+    while a window that genuinely moved must still consider and rebind exactly
+    what it did before the hoist.
+    """
+
+    session = _crop_session()
+    tile_numbers = (0, 1, 2, 3)
+    probes: list[object] = []
+
+    def resident(candidate):
+        probes.append(candidate)
+        return True
+
+    # Arm 1: the committed wrappers already sit at the session's crop origin.
+    settled = session.rebind_resident_crop_tiles(
+        physical_resident_fn=resident,
+        tile_numbers=tile_numbers,
+        previous_by_tile=_crop_window_predecessors(session, origin=(0, 0)),
+    )
+    settled_stats = dict(session.resident_crop_rebind_stats)
+    assert settled == ()
+    assert settled_stats["considered"] == 0, "a settled window must evaluate no candidate"
+    assert settled_stats["rebound"] == 0
+    assert settled_stats["window_settled_tiles"] == len(tile_numbers)
+    assert settled_stats.get("window_unchanged", 0) == 0
+    assert probes == [], "the skipped scan must not reach the residency seam"
+
+    # Arm 2: the crop window moved by one index on both displayed axes. The
+    # predecessors are unchanged, so this is the hoisted fact alone deciding.
+    session.source_anchoring = SimpleNamespace(source_starts_yx=(1, 1), content_key=("key",))
+    moved = session.rebind_resident_crop_tiles(
+        physical_resident_fn=resident,
+        tile_numbers=tile_numbers,
+        previous_by_tile=_crop_window_predecessors(session, origin=(0, 0)),
+    )
+    moved_stats = dict(session.resident_crop_rebind_stats)
+    assert moved == tile_numbers
+    assert moved_stats["considered"] == len(tile_numbers)
+    assert moved_stats["rebound"] == len(tile_numbers)
+    assert len(probes) == len(tile_numbers)
+    assert all(
+        session.display_tile_payloads[number].source_anchor.source_rect == (1, 3, 1, 3)
+        for number in tile_numbers
+    ), "a rebound wrapper must carry the new window's source rect"
+
+
+def test_one_tile_the_window_left_behind_keeps_the_whole_scan_open():
+    """A tile with no predecessor must never stand in for a settled window.
+
+    The hoisted test walks the same wrappers the loop would clone, and a tile
+    with nothing anchored to clone is not evidence either way — it declines
+    however the window moved.  Skipping on that alone would be the dangerous
+    reading: one uncommitted tile would suppress the rebind of every tile beside
+    it, and a suppressed rebind is a tile drawn from its predecessor window's
+    pixels.  So the proof must be unanimous, and this mixes the three states one
+    converging montage really holds.
+    """
+
+    session = _crop_session()
+    settled = _crop_window_predecessors(session, origin=(0, 0))
+    stale = _crop_window_predecessors(session, origin=(2, 2))
+    previous_by_tile = {0: settled[0], 1: settled[1], 3: stale[3]}
+
+    rebound = session.rebind_resident_crop_tiles(
+        physical_resident_fn=lambda _candidate: True,
+        tile_numbers=(0, 1, 2, 3),
+        previous_by_tile=previous_by_tile,
+    )
+    stats = dict(session.resident_crop_rebind_stats)
+
+    assert rebound == (3,), "the one wrapper the window left behind must still rebind"
+    assert stats["considered"] == 4, "an unprovable window takes the full per-tile path"
+    assert "window_settled_tiles" not in stats
+    assert stats["window_unchanged"] == 2
+    assert stats["no_anchored_predecessor"] == 1
+    assert stats["rebound"] == 1
+    assert session.display_tile_payloads[3].source_anchor.source_rect == (0, 2, 0, 2)
+
+
+def test_an_unreadable_crop_origin_takes_the_per_tile_path():
+    """No session anchoring is not a proof of a settled window, it is no answer.
+
+    Fail open: the skip is only ever taken on positive evidence, so a session
+    that cannot say where its crop window starts pays for the scan rather than
+    risking a tile left bound to stale cropped data.
+    """
+
+    session = _crop_session()
+    session.source_anchoring = None
+
+    assert (
+        session.rebind_resident_crop_tiles(
+            physical_resident_fn=lambda _candidate: True,
+            tile_numbers=(0, 1, 2, 3),
+            previous_by_tile=_crop_window_predecessors(session, origin=(0, 0)),
+        )
+        == ()
+    )
+    stats = dict(session.resident_crop_rebind_stats)
+    assert stats["considered"] == 4
+    assert stats["no_new_anchor"] == 4
+    assert "window_settled_tiles" not in stats
