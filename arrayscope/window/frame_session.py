@@ -13,6 +13,7 @@ import numpy as np
 
 from arrayscope.core.mutation_clock import (
     IMMUTABLE_VALUE_TYPES,
+    NOTHING_HELD,
     ClockedState,
     MutationClock,
     bind_existing_state,
@@ -1391,6 +1392,12 @@ class FrameSession:
             # ``dataclass.__init__`` runs before ``__post_init__`` adopts the
             # clock.  Everything it bound is tracked there, in one pass.
             object.__setattr__(self, name, value)
+            return
+        if self.__dict__.get(name, NOTHING_HELD) is value:
+            # Already this exact object; see ``core.mutation_clock``'s no-op
+            # rule.  Nothing below would change anything either -- the value
+            # stored is already the tracked one, and ``_absorb_replaced_
+            # lifecycle`` returns at its own identity test.
             return
         clock.value += 1
         if type(value) not in IMMUTABLE_VALUE_TYPES:

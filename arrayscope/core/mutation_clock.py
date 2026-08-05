@@ -28,9 +28,31 @@ auditable; see :func:`track_state_object` for the other half and the owning
 class for what that leaves as a residual.
 
 The counter fails its callers *open*: a mutation that writes back an
-identical value still bumps.  Equal values mean no mutation was attempted,
+EQUAL value still bumps.  Equal values mean no mutation was attempted,
 never that two states compare equal.  Over-bumping costs one redundant pass;
 under-bumping costs a frame that never arrives.
+
+**A store of the object already held is not a write-back of an equal value.**
+It is not a write at all: the object graph after it is the same graph, by
+identity, and there is nothing for any consumer to notice.  So the bump is
+skipped exactly where the no-op is decidable in O(1) without comparing state
+-- ``d[k] = v`` when ``d[k] is v``, ``s.add(x)`` when ``x in s``,
+``s.discard(x)``/``d.pop(k, default)`` when it is not, ``setdefault`` on a
+key already present, ``clear()`` on an empty container -- and nowhere else.
+Every other mutator still fails open.  This is not the equality short-circuit
+the paragraph above refuses; ``==`` is never called, ``__hash__`` is never
+called on anything the container does not already hash, and no state is
+compared.
+
+That distinction is load-bearing, not hygiene.  Measured 2026-08-05 on a
+settled 272-tile montage: one commit that created nothing, updated nothing and
+uploaded nothing moved ``FrameSession.mutation_revision`` by **2460** -- 1088
+record attribute stores, 816 ``set.add``/``discard`` of members and non-members,
+544 ``dict.pop`` of absent keys and 6 session field stores, and **every one of
+them left the object graph identical**.  A 1-tile delta moved it by 2465.  The
+epoch a consumer reads to mean "tile state changed" therefore carried 5 parts
+signal in 2465, and ``viewport_invariant_key``'s epoch arm could not hold
+across any commit at all.  With the guards: **0** and **3**.
 """
 
 from __future__ import annotations
@@ -41,6 +63,7 @@ __all__ = [
     "CONTAINER_MUTATORS",
     "CONTAINER_READERS",
     "IMMUTABLE_VALUE_TYPES",
+    "NOTHING_HELD",
     "NULL_CLOCK",
     "TRACKED_CONTAINER_TYPES",
     "ClockedState",
@@ -76,6 +99,28 @@ class MutationClock:
 #: Shared by anything built before its owner attached a real clock.  Such an
 #: object never reaches a gate, so its mutations need not be counted.
 NULL_CLOCK = MutationClock()
+
+
+class _NothingHeld:
+    """What a slot holds when it holds nothing -- distinct from ``None``.
+
+    ``None`` is a legitimate stored value on most of the attributes and keys
+    these guards protect (``rec.target``, ``dirty_payloads[i]``), so "absent"
+    and "holds None" have to be told apart by an object that can never be
+    stored.  A dedicated class rather than a bare ``object()`` so a stray one
+    reaching a repr or a traceback names itself.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<nothing held>"
+
+
+#: The sentinel for "this slot is empty", shared by every owner that guards a
+#: no-op write.  One object, so ``is`` against it is one pointer compare and
+#: no owner can accidentally define a second one that compares unequal.
+NOTHING_HELD = _NothingHeld()
 
 
 #: Every public method of each tracked base type, classified as one that can
@@ -201,26 +246,76 @@ def _bumping_namespace(base: type) -> dict[str, object]:
 #: They are an optimisation ONLY: the generated wrapper is correct, the guard
 #: test still requires every name in :data:`CONTAINER_MUTATORS` to be
 #: overridden, and a name here that is not a mutator changes nothing.
+#:
+#: They are ALSO where the module docstring's no-op rule is enforced, and that
+#: half is not an optimisation: an operation that leaves the container
+#: identical must not move an epoch a consumer reads as "something changed".
+#: Each guard below decides that in O(1) by identity or membership -- never by
+#: comparing state -- and the call still happens, so only the bump is
+#: conditional and no container semantics change.  The membership test costs
+#: ~30 ns against the ~110 ns the specialization already spends; the epoch
+#: noise it removes was 2460 counts per settled commit.
 def _specialized(base: type) -> dict[str, object]:
+    is_mapping = base in (dict, OrderedDict)
+
     def __setitem__(self, key, value) -> None:
+        # Storing the object the key already holds changes neither the key
+        # set, the values, nor (for OrderedDict) the insertion order.
+        if base.get(self, key, NOTHING_HELD) is not value:
+            self._clock.value += 1
+        base.__setitem__(self, key, value)
+
+    def __setindex__(self, key, value) -> None:
+        # ``list``/``deque`` take slices as well as indices, so "what is
+        # already there" is not one object.  Fail open.
         self._clock.value += 1
         base.__setitem__(self, key, value)
 
     def __delitem__(self, key) -> None:
+        # A delete either removes something or raises; there is no no-op case.
         self._clock.value += 1
         base.__delitem__(self, key)
 
+    def pop(self, *args):
+        # ``pop(missing, default)`` is the single most common no-op in the
+        # commit path: 545 of one settled commit's 556 session-level bumps.
+        # With no default a missing key raises, and the bump then belongs to
+        # nobody -- so the membership test decides both cases correctly.
+        if args and args[0] in self:
+            self._clock.value += 1
+        return base.pop(self, *args)
+
+    def setdefault(self, key, default=None):
+        # A key already present keeps its value and its position.
+        if key not in self:
+            self._clock.value += 1
+        return base.setdefault(self, key, default)
+
+    def clear(self) -> None:
+        if len(self):
+            self._clock.value += 1
+        base.clear(self)
+
     def add(self, value) -> None:
-        self._clock.value += 1
+        # ``set.add`` of a member is a no-op: it does not replace the element
+        # already stored, so nothing observable changes.
+        if value not in self:
+            self._clock.value += 1
         base.add(self, value)
 
     def discard(self, value) -> None:
-        self._clock.value += 1
+        if value in self:
+            self._clock.value += 1
         base.discard(self, value)
 
     def append(self, value) -> None:
         self._clock.value += 1
         base.append(self, value)
+
+    if not is_mapping:
+        __setitem__ = __setindex__
+        pop = None
+        setdefault = None
 
     return {
         name: member
@@ -230,8 +325,11 @@ def _specialized(base: type) -> dict[str, object]:
             ("add", add),
             ("discard", discard),
             ("append", append),
+            ("clear", clear),
+            ("pop", pop),
+            ("setdefault", setdefault),
         )
-        if name in CONTAINER_MUTATORS[base]
+        if member is not None and name in CONTAINER_MUTATORS[base]
     }
 
 
@@ -309,6 +407,11 @@ class ClockedState:
         clock = self.__dict__.get("_mutation_clock")
         if clock is None or name == "_mutation_clock":
             object.__setattr__(self, name, value)
+            return
+        if self.__dict__.get(name, NOTHING_HELD) is value:
+            # Already holds this exact object.  Skipping the store as well as
+            # the bump is what makes the skip provable rather than a policy:
+            # there is no second write whose effect could differ.
             return
         clock.value += 1
         if type(value) not in IMMUTABLE_VALUE_TYPES:

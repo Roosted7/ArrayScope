@@ -37,6 +37,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from arrayscope.core.mutation_clock import (
+    NOTHING_HELD,
     NULL_CLOCK,
     MutationClock,
     TrackedDict,
@@ -252,6 +253,8 @@ class _LevelEntry:
     def __setattr__(self, name, value) -> None:
         clock = self.__dict__.get("mutation_clock")
         if clock is not None and name != "mutation_clock":
+            if self.__dict__.get(name, NOTHING_HELD) is value:
+                return
             clock.value += 1
         object.__setattr__(self, name, value)
 
@@ -373,6 +376,13 @@ class TileRecord:
         clock = self.__dict__.get("mutation_clock")
         if clock is None or name == "mutation_clock":
             object.__setattr__(self, name, value)
+            return
+        if self.__dict__.get(name, NOTHING_HELD) is value:
+            # This field already holds this exact object.  The store and the
+            # bump are both skipped -- see ``core.mutation_clock``'s no-op
+            # rule.  A settled commit's ``presentation_confirmed`` pass alone
+            # took this branch 1088 times per commit, on records where
+            # nothing had changed since the previous one.
             return
         clock.value += 1
         if type(value) is dict and name in _TRACKED_RECORD_DICTS:
@@ -685,6 +695,8 @@ class TileLifecycle:
         # an attribute added later must invalidate a retarget gate by default.
         clock = self.__dict__.get("_mutations")
         if clock is not None and name != "_mutations":
+            if self.__dict__.get(name, NOTHING_HELD) is value:
+                return
             clock.value += 1
         object.__setattr__(self, name, value)
 

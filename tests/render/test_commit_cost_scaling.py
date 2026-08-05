@@ -1284,3 +1284,90 @@ def test_first_pixel_membership_is_asked_once_per_tile(monkeypatch):
         f"{FIELD_TILES} tiles; the two readers share one scope and one moment, "
         "so one pass answers both"
     )
+
+
+# --------------------------------------------------------------------------
+# The same rule applied to the commit's WRITES.
+#
+# Everything above counts what a commit READS.  This section counts what it
+# CHANGES, which is the other half of "a commit costs what its delta costs"
+# and the half with a consumer: ``FrameSession.mutation_revision`` is the
+# epoch ``viewport_invariant_key`` carries as ``lifecycle_revision``, and a
+# planner that finds it moved replans the whole viewport.
+#
+# Measured 2026-08-05 before the no-op-write rule landed, on this fixture: a
+# commit into a settled 272-tile montage that created nothing, updated nothing
+# and uploaded nothing moved the session epoch by **2460** and the ledger's by
+# **1904**.  Every one of those calls stored the object the slot already held
+# — 1088 record attribute stores, 816 set add/discard, 544 dict pops of absent
+# keys.  A genuine one-tile delta moved the ledger by 1909: five parts signal
+# in 1909.
+#
+# The gates below are threshold-free.  They run the SAME delta into two
+# montage sizes and require the epoch movement to be equal, because the defect
+# is not "this number is large" — it is "this number is a function of the
+# montage instead of the delta".  Before the rule: 238 against 1904.
+# --------------------------------------------------------------------------
+
+
+def _settled_source_ids(tiles: int) -> dict[int, object]:
+    return {index: ("tile", index, "exact") for index in range(tiles)}
+
+
+def test_a_commit_that_changes_nothing_moves_no_epoch():
+    """The absolute case, where the answer is a number and not a comparison.
+
+    A settled montage re-committed with the same source ids creates nothing,
+    updates nothing and uploads nothing.  There is no state for it to change,
+    so there is nothing for the epoch to report, at any montage size.
+    """
+
+    for tiles in (FIELD_TILES // 4, FIELD_TILES):
+        session = _field_session(tiles)
+        before_session = session.mutation_revision
+        before_ledger = session.lifecycle.mutation_revision
+
+        _state, delta = session.build_tile_presentation(_settled_source_ids(tiles), max_upserts=8)
+
+        unsettled = "the fixture is not settled, so this is not the commit the test names"
+        assert not delta.upserts, unsettled
+        assert not delta.removals, unsettled
+        assert session.lifecycle.mutation_revision == before_ledger, (
+            f"a {tiles}-tile commit with nothing to present moved the ledger epoch by "
+            f"{session.lifecycle.mutation_revision - before_ledger}; every write it "
+            "makes stores the object the record already holds"
+        )
+        assert session.mutation_revision - before_session <= 8, (
+            f"a {tiles}-tile commit with nothing to present moved the session epoch by "
+            f"{session.mutation_revision - before_session}; the handful that remain are "
+            "the admission bookkeeping fields, which genuinely change"
+        )
+
+
+def test_the_epoch_a_commit_moves_is_the_size_of_its_delta_not_the_montage():
+    """One tile changed in both montages: the same epoch movement, exactly.
+
+    This is the gate.  A constant would have to be re-tuned as the commit
+    gains and loses legitimate writes; the comparison holds whatever that
+    number is, and fails the moment any per-montage-tile write returns.
+    """
+
+    moved = {}
+    for tiles in (FIELD_TILES // 4, FIELD_TILES):
+        session = _field_session(tiles)
+        source_ids = _dirty_one_tile(session, 5, tiles)
+        before = session.lifecycle.mutation_revision
+        session.build_tile_presentation(source_ids, max_upserts=1)
+        moved[tiles] = session.lifecycle.mutation_revision - before
+
+    small, field = moved[FIELD_TILES // 4], moved[FIELD_TILES]
+    assert field == small, (
+        f"one tile changed in both montages, yet the commit moved the ledger epoch "
+        f"by {small} into a {FIELD_TILES // 4}-tile montage and by {field} into a "
+        f"{FIELD_TILES}-tile one. A commit is montage-wide exactly when this "
+        "difference is nonzero, and ``viewport_invariant_key`` reads the result"
+    )
+    assert 0 < field < FIELD_TILES // 4, (
+        f"the commit moved the ledger epoch by {field}; a one-tile delta is a "
+        "handful of writes, and zero would mean the fixture never changed anything"
+    )

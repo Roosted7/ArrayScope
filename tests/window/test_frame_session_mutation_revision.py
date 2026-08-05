@@ -27,8 +27,18 @@ Three properties make it un-rottable:
   the product's types change.
 
 The converse direction (the epoch moving when nothing changed) is deliberately
-NOT asserted: the counter fails callers *open*, and a spurious bump costs one
-replan, while a missing one costs a frame that never arrives.
+NOT asserted *in general*: the counter fails callers open on anything it cannot
+decide cheaply, and a spurious bump costs one replan while a missing one costs
+a frame that never arrives.  The one case it does decide is a store of the
+object the slot already holds, which is not a write at all -- see
+``core.mutation_clock``'s no-op rule and
+``tests/core/test_mutation_clock_noop_writes.py``.
+
+That rule is why the walks below assign a value that is *different*.  They
+used to assert the hook by writing a field back to itself, which reads as "any
+assignment bumps" and is now false; the property they were built to defend --
+a field, container or sub-object whose write the epoch cannot see is a lost
+wakeup -- is unchanged and is what they still assert.
 """
 
 from __future__ import annotations
@@ -368,17 +378,55 @@ def test_a_declared_container_field_write_outside_the_session_bumps(qtbot):
     assert session.mutation_revision > before, "a deque field mutation was not counted"
 
 
-def test_a_scalar_field_write_bumps(qtbot):
+class _Different:
+    """A value no session field can already be holding.
+
+    The walk below has to change a field whose type it does not know, so it
+    stores an object that is by construction not the one already there and
+    puts the original back afterwards.  ``__setattr__`` never inspects the
+    value beyond its exact type, so an alien object exercises the same path a
+    real one would.
+    """
+
+    __slots__ = ()
+
+
+def test_a_changing_scalar_field_write_bumps(qtbot):
     """Including a field that did not exist when this test was written."""
 
     _win, session = _build(qtbot)
     for name in (item.name for item in dataclass_fields(FrameSession)):
+        original = getattr(session, name)
         before = session.mutation_revision
-        object_value = getattr(session, name)
-        setattr(session, name, object_value)
+        setattr(session, name, _Different())
+        # Restored BEFORE the assertion, and without a second bump.  The epoch
+        # is the sum of the session's counter and its ledger's, so while
+        # ``lifecycle`` holds the sentinel the property cannot even be read;
+        # and putting it back through ``setattr`` would fold the sentinel's
+        # (absent) reading into the session counter.  Counters only rise, so
+        # reading after the restore still measures the write above.
+        object.__setattr__(session, name, original)
         assert session.mutation_revision > before, (
             f"assigning FrameSession.{name} did not move mutation_revision; "
-            "a write-back must still bump, because the epoch fails callers open"
+            "a write the epoch cannot see is a lost wakeup"
+        )
+
+
+def test_a_field_write_of_the_object_already_held_does_not_bump(qtbot):
+    """The no-op rule, stated over the same reflected field walk.
+
+    The counterpart of the test above and the reason it had to change: this
+    walk is exactly what it used to do, and the expectation is inverted.
+    """
+
+    _win, session = _build(qtbot)
+    for name in (item.name for item in dataclass_fields(FrameSession)):
+        before = session.mutation_revision
+        setattr(session, name, getattr(session, name))
+        assert session.mutation_revision == before, (
+            f"storing the object FrameSession.{name} already holds moved "
+            "mutation_revision; the graph is identical, so there is nothing "
+            "for a consumer of the epoch to notice"
         )
 
 
@@ -401,11 +449,11 @@ def test_owned_state_objects_bump_through_their_own_writes(qtbot):
     _win, session = _build(qtbot)
 
     before = session.mutation_revision
-    session.scheduling_policy._phase = session.scheduling_policy._phase
+    session.scheduling_policy._phase = _Different()
     assert session.mutation_revision > before, "ProgressiveSchedulingPolicy is not clocked"
 
     before = session.mutation_revision
-    session.round_load_shedding.rounds_shed += 0
+    session.round_load_shedding.rounds_shed += 1
     assert session.mutation_revision > before, "RoundLoadShedding is not clocked"
 
     before = session.mutation_revision
