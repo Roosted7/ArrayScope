@@ -180,6 +180,15 @@ A wide `-n 0` is refused — serial is not a safer mode here, it is a different
 regime with its own standing failures, no per-test timeout and no worker to
 survive a segfault. Rings 2–4 are serial by design and never refused.
 
+**If a run is refused for machine pressure, you are not the only thing running.**
+The harness samples load, memory and swap before starting workers and declines
+commands the machine cannot host ([why and with what
+thresholds](docs/testing/strategy.md#parallel-execution)). This fires because
+several agents each sized a pool from `os.cpu_count()` as though alone and froze
+the machine. The refusal names a narrower width — retype it, or wait. Do **not**
+reach for `--load-force-please-i-really-consider-it-needed`: it excuses busy
+cores only, it does not reach the memory or swap refusals, and nothing does.
+
 Also run:
 
 ```bash

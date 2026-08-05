@@ -460,6 +460,71 @@ this run (`tests/load_report.py`). Both the flake advice below and every
 performance number depend on knowing the machine was quiet; that used to be
 established after an hour of bisecting a phantom.
 
+**A machine already at its limit is refused, not warned.** The paragraph above
+is about evidence; this one is about survival. On 2026-08-05 several agents ran
+their suites concurrently in sibling worktrees, each sizing its pool from
+`os.cpu_count()` as though it were alone, and the machine froze hard enough to
+need a power cycle. A warning printed into a scrollback nobody was watching
+would not have changed that; declining to start would. So `tests/conftest.py`
+samples the machine once, after the pool is finally sized and before the first
+worker exists, and refuses commands it cannot host
+(`tests/machine_pressure.py`).
+
+Three signals, each degrading in the same three steps — half the ceiling, then
+one worker, then nothing:
+
+| signal | measured as | halve | one | refuse |
+| --- | --- | --- | --- | --- |
+| CPU | runnable tasks ÷ logical threads, **and** PSI cpu `some avg10` ≥ 5% | 1.0× | 1.5× | 2.0× |
+| memory | `1 − MemAvailable/MemTotal` | 75% | 85% | 90% |
+| swap | `1 − SwapFree/SwapTotal` | 25% | 40% | 50% |
+
+The most restrictive wins, and the refusal names every signal that bound, the
+width to retype, and where the competing work probably is. It names a width
+rather than silently reducing one on purpose: the failure being prevented is
+*several* processes each independently concluding it is alone, and a harness
+that quietly halved would give every one of them the same false reassurance.
+
+Four details are load-bearing rather than incidental:
+
+- **The magnitude is the *instantaneous* runnable count, not the load average,
+  and that is measured rather than assumed.** On this 16-thread machine, 16
+  spinning processes (a true 1.0×) moved the one-minute average to 0.52× after
+  28 s; 32 spinners reached 0.96× — not 2.0× — after 24 s. A ladder reading that
+  number would essentially never reach its own refusing band. Field 4 of
+  `/proc/loadavg` showed 32 runnable within 4 s. This is exactly the blind spot
+  the incident lived in: several suites starting within seconds of each other
+  are invisible to a 60-second average.
+- **The CPU ladder needs both halves, and PSI is the second one.**
+  `/proc/pressure/cpu`'s `some avg10` is the share of the last 10 s in which
+  some runnable task was stalled waiting for a core. It does two jobs at once:
+  a momentary burst cannot move a 10-second average, so it de-spikes the fast
+  count without sampling anything; and it answers what the earlier "cores ≥ 90%
+  busy" check was a proxy for, more directly — Linux counts uninterruptible
+  sleep in the load average, and a task blocked on I/O stalls on
+  `/proc/pressure/io`, never here. Measured: idle 0.08–1.1%, 1.0× load 1.9% at
+  t+4 s rising to 8–12%, 2.0× load 14% rising to 59%. Hence the 5% edge.
+- **Swap is the harshest ladder because here swap is `zram`** — compressed
+  pages held *in RAM*. Filling it is not capacity being drawn on; it is
+  capacity already gone, plus a compression tax on every touch.
+- **The memory and swap refusals cannot be overridden.** Not by a flag, not by
+  `CI`, and there is deliberately nowhere to add one
+  (`machine_pressure.NON_NEGOTIABLE`). Only the CPU ladder can be, with
+  `--load-force-please-i-really-consider-it-needed`, because "this will be slow
+  and I accept that" is a coherent position — the load-robustness experiment
+  (three concurrent full suites at `-n 6`, which is how the settle waits in
+  `tests/settle.py` were shown to be deadline-bound) saturates the machine on
+  purpose and would otherwise be unrunnable. "This will not fit in memory and I
+  accept that" is not a position; it is the sequence of events that ended in a
+  power cycle.
+
+Every run pays ~0.06 ms for this, and nothing in it sleeps: four `/proc` reads,
+no sampling interval, no fast path to maintain. The first version bought two
+timed measurements (~200 ms) behind a cheap first look; PSI made both
+unnecessary, because every window the gate needs is one the kernel is already
+keeping. That matters here — this repository deletes pytest plugins to save
+58 ms, and a gate costing 200 ms on every no-op run would be removed, correctly.
+
 **No fixed-time assertions.** Parallel load makes wall-clock timing nondeterministic. A test that
 launches background work and then asserts state after a *fixed* window — `QTest.qWait(220)`, or a
 short `qtbot.waitUntil(..., timeout=250)` — passes only on an idle CPU and flakes under load. Wait on

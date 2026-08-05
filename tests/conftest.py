@@ -1,4 +1,5 @@
 import os
+import shlex
 import sys
 import tempfile
 from time import monotonic
@@ -48,7 +49,14 @@ if _XDIST_WORKER:
     os.environ.setdefault("ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_config_root, "artifacts"))
 
 
-from tests import coverage_map, load_report, red_ledger, skip_ledger, testmon_policy
+from tests import (
+    coverage_map,
+    load_report,
+    machine_pressure,
+    red_ledger,
+    skip_ledger,
+    testmon_policy,
+)
 
 # testmon reads each test's dependency edges out of coverage dynamic contexts,
 # and coverage's sysmon core (its default on CPython 3.14+) credits a line only
@@ -86,6 +94,16 @@ _SERIAL_BELOW_SECONDS = 2.5
 #: Deliberately unpleasant, and deliberately *not* the bypass override. See the
 #: help text on the option, and :func:`serial_run_refusal`.
 SERIAL_FLAG = "--serial-force-please-i-really-consider-it-needed"
+
+#: The third of the three, and separate from both for the same reason they are
+#: separate from each other: "run this on a machine that is already busy" is a
+#: claim about the machine, not about the tracer or the process count. The one
+#: documented use is the load-robustness experiment in
+#: ``docs/testing/strategy.md``, which saturates the machine on purpose.
+#:
+#: Unlike the other two, this one is *partial* — it excuses contention for the
+#: cores and nothing else. See :data:`machine_pressure.NON_NEGOTIABLE`.
+LOAD_FLAG = "--load-force-please-i-really-consider-it-needed"
 
 
 #: The one line ``pytest --help`` prints above these options, directly under
@@ -166,6 +184,16 @@ def pytest_addoption(parser):
             "override on purpose: 'I need the tracer out of the way' and 'I need "
             "this in one process' are unrelated claims, and one flag granting "
             "both would hand each exemption to somebody who only meant the other."
+        ),
+    )
+    group.addoption(
+        LOAD_FLAG,
+        action="store_true",
+        default=False,
+        help=(
+            "Compete for a busy machine's cores anyway. For the load-robustness "
+            "experiment, which saturates it deliberately. It does NOT reach the memory "
+            "or swap refusals -- nothing does; that is the state this machine froze in."
         ),
     )
 
@@ -1023,6 +1051,230 @@ def _cap_explicit_workers(config) -> None:
     )
 
 
+def _retry_command(config, workers: int) -> str:
+    """The command that was typed, re-sized to ``workers``.
+
+    Rebuilt from the whole command line rather than from ``config.args``, which
+    holds only the positional paths. A refusal of ``pytest tests/ui -k montage``
+    that answered "run `pytest -n 4 tests/ui`" would be handing back a *wider*
+    run than the one it just declined, to somebody who is copying rather than
+    reading — and the whole point of naming a command is that it gets copied.
+
+    Any ``-n`` already there is dropped rather than left to fight the new one:
+    argparse takes the last spelling, but the reader should not have to know
+    that to trust the line.
+    """
+
+    arguments = [str(argument) for argument in getattr(config.invocation_params, "args", ())]
+    kept: list[str] = []
+    skip_next = False
+    for argument in arguments:
+        if skip_next:
+            skip_next = False
+            continue
+        if argument in ("-n", "--numprocesses"):
+            skip_next = True
+            continue
+        if argument.startswith("--numprocesses=") or (
+            argument.startswith("-n") and len(argument) > 2
+        ):
+            continue
+        kept.append(argument)
+    return " ".join(["pytest", "-n", str(workers), *(shlex.quote(part) for part in kept)])
+
+
+def _load_gate_skipped(config) -> bool:
+    """Runs the gate does not look at, at all.
+
+    Only the ones that execute no tests. ``--help`` in particular *must* stay
+    answerable on a machine in any state: it is where a reader who has just been
+    refused goes to find the flag, and a gate that could refuse the explanation
+    of itself would be a trap rather than a guard.
+    """
+
+    options = vars(config.option)
+    return any(options.get(name) for name in _INSPECTION_OPTIONS)
+
+
+def _load_gate_permitted(config) -> str:
+    """Why this run may compete for a busy machine's *cores*, or ``""``.
+
+    Cores only. Whatever this returns, the memory and swap ladders are still
+    consulted — see :data:`machine_pressure.NON_NEGOTIABLE`, which is where that
+    is enforced rather than here. Being loaded is a speed problem somebody may
+    knowingly accept; being out of memory is not a problem anybody accepts, it
+    is the thing that took the machine down.
+
+    Two entries, each with a reason it cannot simply be told to wait:
+
+    * the override, whose whole purpose is the load-robustness experiment that
+      saturates the machine deliberately;
+    * CI, which owns its runner outright — a 2-core runner sitting at a load of
+      2.0 is a runner doing its job, not a contended desktop.
+
+    ``ARRAYSCOPE_STRESS`` and the other rings are deliberately *absent*, unlike
+    :func:`_serial_permitted`. A ring being serial by design says nothing about
+    whether the machine can currently host it, and ring 3 is the heaviest thing
+    here — exempting it would exempt the run most able to finish the job.
+    """
+
+    options = vars(config.option)
+    if options.get(LOAD_FLAG.lstrip("-").replace("-", "_")):
+        return "explicitly forced"
+    if os.environ.get("CI"):
+        return "CI, which owns its runner"
+    return ""
+
+
+def _overloaded_run_refusal(allowance, requested: int) -> bool:
+    """Whether a run of ``requested`` processes is over what the machine allows.
+
+    ``requested`` is *processes*, so an in-process run counts as one rather than
+    as zero: `-n 0` still imports Qt and still allocates. That matters only in
+    the refusing band, where the answer is that nothing may start — which is the
+    band the freeze happened in, and the one where "just run it serially" is the
+    reflex that would have made no difference.
+    """
+
+    if allowance.refuses:
+        return True
+    return max(1, requested) > allowance.workers
+
+
+def _refuse_overloaded_run(config) -> None:
+    """Decline to add workers to a machine that is already at its limit.
+
+    Placed after :func:`_cap_explicit_workers` on purpose: that clamp is the
+    last writer of ``numprocesses``, so this is the first point at which the
+    number being judged is the number the pool will actually be built from.
+
+    The refusal names the width to retype rather than silently reducing it.
+    Silent reduction was considered and rejected — the failure it is protecting
+    against is *several* processes each independently deciding it is alone, and
+    a harness that quietly halves gives every one of them the same false
+    reassurance that it handled things. A stop that has to be read is also the
+    only version that tells the reader the other suites exist.
+    """
+
+    if _XDIST_WORKER or _load_gate_skipped(config):
+        return
+    permitted = _load_gate_permitted(config)
+    if permitted == "explicitly forced":
+        # Not silently: the override exists for one experiment, and a stale
+        # `--load-force-...` left in a shell alias would otherwise excuse
+        # contention for weeks without ever saying so.
+        config.arrayscope_load_gate = (
+            f"machine-pressure gate: CPU ladder off ({LOAD_FLAG}); memory and swap "
+            "still apply. You are responsible for what else is running."
+        )
+
+    reading = machine_pressure.read_machine()
+    ceiling = worker_ceiling(os.cpu_count() or 2)
+    allowance = machine_pressure.allow(
+        reading,
+        ceiling,
+        only=machine_pressure.NON_NEGOTIABLE if permitted else machine_pressure.SIGNALS,
+    )
+    if not allowance.reasons:
+        return
+
+    requested = int(getattr(config.option, "numprocesses", 0) or 0)
+    if not _overloaded_run_refusal(allowance, requested):
+        # Under pressure but within budget — a small selection sized itself
+        # below what is left. Worth one line, because the next command in the
+        # same shell may not be.
+        config.arrayscope_load_gate = (
+            f"machine-pressure gate: {allowance.workers} workers is all this machine "
+            f"has room for right now — bound by {allowance.reasons[0]}. This run asked "
+            f"for {max(1, requested)}, so it stands."
+        )
+        return
+
+    situation = [f"    {line}" for line in machine_pressure.situation(reading)]
+    # Both refusing branches end at "nothing may start", and they are still
+    # written separately: the reason is the reader's whole next decision. Out of
+    # memory means stop something; twice-oversubscribed cores mean wait. Telling
+    # someone with 24 GiB free that a serial run "still allocates" is an
+    # argument they can see is wrong, and a gate caught being wrong once is a
+    # gate that gets deleted.
+    finder = [
+        "  Find it:",
+        "    pgrep -af 'pytest|python -m pytest'      other suites, including agents'",
+        "    ls ~/.claude/worktrees .worktrees        where they are probably running",
+    ]
+    if allowance.refuses and not allowance.negotiable:
+        headline = "Refused: this machine is out of memory, and a test run is how it freezes."
+        remedy = [
+            "No worker count fits, including `-n 0` -- a serial run still imports Qt",
+            "and still allocates. Something has to give the memory back first.",
+            "",
+            *finder,
+        ]
+    elif allowance.refuses:
+        headline = "Refused: this machine's cores are more than twice oversubscribed already."
+        remedy = [
+            "Even one more worker here would be taking turns rather than running.",
+            "There is nothing to re-run at a narrower width; wait for what is",
+            "already going, and this clears on its own.",
+            "",
+            *finder,
+        ]
+    else:
+        # Same band, two different machines. "Already loaded" in front of a
+        # memory figure reads as a harness that did not look at what it printed.
+        state = "already loaded" if allowance.negotiable else "low on memory"
+        headline = (
+            f"Refused: this machine is {state}, and {max(1, requested)} test workers "
+            f"is more than it can take."
+        )
+        remedy = [
+            f"Re-run at the width the machine has left, which is {allowance.workers}:",
+            "",
+            f"    {_retry_command(config, allowance.workers)}",
+            "",
+            "Most often this is another agent's suite in a sibling worktree. Waiting",
+            "for it and then re-running at full width is usually faster than this.",
+            "",
+            *finder,
+        ]
+
+    if allowance.negotiable:
+        escape = [
+            "This gate exists because concurrent suites froze this machine hard",
+            "enough to need a power cycle. If you are certain, the override is",
+            f"    {LOAD_FLAG}",
+            "and it is that long on purpose.",
+        ]
+    else:
+        # Naming the flag here and letting it not work would be worse than not
+        # naming it: the reader would spend the next five minutes deciding the
+        # harness is broken. Say instead that there is nothing to type.
+        escape = [
+            "There is no override for this one, and deliberately nowhere to add it.",
+            f"    {LOAD_FLAG}",
+            "excuses a busy machine, not an empty one: no worker count fits in memory",
+            "that is not there, and this is the state the machine froze in.",
+        ]
+
+    raise pytest.UsageError(
+        "\n".join(
+            (
+                headline,
+                "",
+                *situation,
+                "",
+                *(f"  bound by {reason}" for reason in allowance.reasons),
+                "",
+                *remedy,
+                "",
+                *escape,
+                "",
+                "Read docs/testing/strategy.md.",
+            )
+        )
+    )
+
+
 # --------------------------------------------------------------------------- #
 # The run with nothing to do
 # --------------------------------------------------------------------------- #
@@ -1304,6 +1556,10 @@ def pytest_configure(config):
     _refuse_serial_run(config)
     _refuse_since_on_unattributed_map(config)
     _cap_explicit_workers(config)
+    # Last of the run-shape gates, and last for a reason: it is the only one
+    # that judges the pool as finally sized, and the only one whose verdict can
+    # change between two identical commands a minute apart.
+    _refuse_overloaded_run(config)
     decision = testmon_policy.decide(config)
     config.arrayscope_selection = decision
     if decision.active:
@@ -1623,6 +1879,9 @@ def pytest_report_header(config):
     capped = getattr(config, "arrayscope_worker_cap", None)
     if capped:
         lines.append(capped)
+    pressure = getattr(config, "arrayscope_load_gate", None)
+    if pressure:
+        lines.append(pressure)
 
     decision = getattr(config, "arrayscope_selection", None)
     if decision is None:
