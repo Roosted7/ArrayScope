@@ -279,6 +279,13 @@ class MontageRuntimeDiagnostics:
     # sends the reader back to guessing from code.
     viewport_retargets_suppressed: int = 0
     viewport_retargets_planned: int = 0
+    # The same ratio for the PLANNER's own gate, which every caller passes
+    # through rather than only the viewport one. The pair is separate from the
+    # viewport pair on purpose: a montage that goes stale needs to say WHICH
+    # containment refused the pass, and the viewport gate suppresses a
+    # superset of the work (publication as well as planning).
+    planner_retargets_suppressed: int = 0
+    planner_retargets_planned: int = 0
     tile_identity_probe: tuple[dict[str, object], ...] = ()
     # ADR 0051 rule 1 ground truth: drawn tiles whose backend-reported slot
     # identity differs from the session's current payload — nonzero at idle

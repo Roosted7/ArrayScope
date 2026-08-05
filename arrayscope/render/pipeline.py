@@ -278,6 +278,21 @@ class FramePipeline:
         self._flush_ready()
         return submitted
 
+    def has_pending_admissions(self) -> bool:
+        """Whether steps are planned but not yet handed to the kernel.
+
+        Admission is chunked (``_admission_chunk_limit``), so a plan can end
+        with work owed that appears in no session-owned set: the queue lives
+        here, and ``loading_tiles``/``active_tile_requests`` only learn about a
+        step once it is submitted. Any containment gate that reasons about the
+        session alone is therefore blind to it, and a gate that suppresses a
+        replan while this is non-empty is betting on the kernel continuation
+        alone. It is a bet that should not be taken: this is one attribute
+        read, and the alternative is a fill that stops with work still queued.
+        """
+
+        return bool(self._pending_admissions)
+
     def coarse_rung_refusals(self) -> tuple[tuple[str, int], ...]:
         """Cumulative "why no coarse rung", in tile-plans, commonest first."""
 

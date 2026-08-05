@@ -446,6 +446,66 @@ class FrameRuntimeMixin:
     ) -> int:
         if session is None or not self._frame_session_is_current(session):
             return 0
+        # Before the first write. Everything below writes to the session, and
+        # the gate's epoch arm compares against a reading taken at the END of
+        # the pass that proved convergence -- so what it must answer is "did
+        # anything write since I last looked", not "since I started working".
+        idle_key = self.montage_planner_pass_is_idle(session, force_commit=force_commit)
+        if idle_key is not None:
+            self._montage_planner_retargets_suppressed = (
+                int(getattr(self, "_montage_planner_retargets_suppressed", 0) or 0) + 1
+            )
+            emit_trace(
+                "planner_retarget_suppressed",
+                session_id=int(getattr(session, "session_id", 0) or 0),
+                camera_pending_tiles=len(idle_key.camera_pending_tiles),
+                desired_level=int(idle_key.desired_level),
+                preview_floor=int(idle_key.preview_floor),
+                lifecycle_revision=int(idle_key.lifecycle_revision),
+                page_cache_revision=int(idle_key.page_cache_revision),
+            )
+            # The gate suppresses the PLANNER, not the pass. Everything below
+            # is a tail owner of last resort that the full body also runs, and
+            # every one of them is O(1) or O(work already queued) -- measured
+            # together at ~0.2 ms against the 5.8 ms mean pass. Vetoing the
+            # gate on them instead (the first draft did) cost most of its hit
+            # rate for nothing: ``flush_pending`` alone was the first refusal
+            # in 198 of 575 passes, and a flush is discharged here in a line.
+            if montage_commit.complete_deferred_stage_fan_in(self, session):
+                return 0
+            # Stage dependents idle until something releases them, and the
+            # planner is not that something -- this is. Omitting it is a lost
+            # wakeup with no backstop, which is how it announced itself: a
+            # 16-tile fill that never settled.
+            montage_commit.rearm_ready_stage_dependents(session)
+            if (
+                getattr(session, "pending_level_tiles", None)
+                or int(getattr(session, "level_scan_remaining_tiles", 0) or 0) > 0
+            ):
+                self._schedule_montage_cached_level_stats(session)
+            if (
+                session.flush_pending
+                or session.final_commit_pending
+                or session.pending_payload_upserts
+            ):
+                self.apply_ready_montage_display(session)
+            if session.round_load_shedding.release():
+                self.request_montage_replan(session)
+            # A commit that landed since the latch could be the one that
+            # COMPLETED the session, and the camera arm deliberately survives a
+            # moved epoch -- so a completion nobody fires would be a stall the
+            # watchdog can only observe.
+            self._finish_frame_session_if_complete(session)
+            if not session.is_complete():
+                self._ensure_montage_watchdog()
+            # Re-derived, NOT the proven key: the discharges above are real
+            # session writes, so the key this pass entered with no longer
+            # describes the state it leaves in.
+            self.relatch_converged_planner(session)
+            return 0
+        self._montage_planner_retargets_planned = (
+            int(getattr(self, "_montage_planner_retargets_planned", 0) or 0) + 1
+        )
         if prepared_lod_swap_ready is None:
             render_lod.selected_lod_factor(session)
             # This is the final demand snapshot used by lifecycle retargeting.
@@ -525,6 +585,14 @@ class FrameRuntimeMixin:
             self._finish_frame_session_if_complete(session)
         if not session.is_complete():
             self._ensure_montage_watchdog()
+        if submitted:
+            # A pass that admitted work leaves tiles in flight, so the next one
+            # has something to decide. Clearing is belt as well as braces --
+            # ``loading_tiles`` alone would veto the gate -- but it keeps the
+            # latch from naming a convergence that demonstrably ended here.
+            self._montage_planner_converged = None
+        else:
+            self.relatch_converged_planner(session)
         return int(submitted)
 
     @session_order_lock_section

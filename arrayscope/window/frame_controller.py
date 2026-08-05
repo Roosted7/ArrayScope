@@ -1723,6 +1723,230 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             int(session.mutation_revision),
         )
 
+    # ------------------------------------------------------------------
+    # The planner's own convergence gate.
+    #
+    # ``_try_update_montage_viewport_only`` above gates the VIEWPORT caller.
+    # Attributed by caller over a 272-tile wgpu workflow (fill + scroll +
+    # zoom/pan, 558 recorded ``retarget_frame_pipeline`` calls, 92.5 % of them
+    # ``submitted=0`` costing 3108 ms), that caller is a MINORITY of the
+    # stream:
+    #
+    #     caller                                     calls  zero  zero ms
+    #     request_montage_replan's fire()              207   183     1406
+    #     _maybe_retarget_frame_session                 83    83      457
+    #     _try_update_montage_viewport_only (2054)      33    32      401
+    #     frame_effects.retarget_on_gui                 95    92      387
+    #     _try_update_montage_viewport_only (1928)      90    79      318
+    #     replan_deferred_interactive_native_quality     7     6       85
+    #     _try_update_montage_viewport_only (2067)      37    37       38
+    #     _retarget_montage_resize_payloads              6     4       15
+    #
+    # 70 % of the calls and 76 % of the wasted milliseconds enter through a
+    # door the viewport latch does not stand in, which is why
+    # ``viewport_retargets_suppressed`` reads 48 / 341 in the field traces
+    # while 93 % of all retargets submit nothing.  So the containment is
+    # lifted to the planner, where every caller passes.
+    #
+    # Timed inside the body (561 calls, 3270 ms, 2625 ms of it in passes that
+    # submitted nothing), gating here rather than at ``pipeline.retarget``
+    # buys the whole pass rather than 59 % of it:
+    #
+    #     pipeline.retarget            1933 ms   <- effects.tile_states 1246
+    #     mark_ladder_swaps             908 ms
+    #     everything else               429 ms
+    #
+    # ``mark_ladder_swaps_for_current_demand`` alone is 28 % and runs BEFORE
+    # the planner, so a gate inside the pipeline cannot reach it.
+    # ------------------------------------------------------------------
+
+    def _montage_planner_outstanding_is_camera_local(self, session) -> bool:
+        """Whether nothing is outstanding for a slot the camera cannot see.
+
+        Only the CAMERA arm needs this, and reading the refusal counts is what
+        showed why. Over 575 planner passes on a 272-tile wgpu workflow the
+        two arms refuse 419 (epoch moved) and 409 (a camera tile is genuinely
+        pending) times, so the arms — not the tail obligations — are what the
+        gate turns on. An earlier draft vetoed on the whole obligation list and
+        suppressed 48 passes; the list is the wrong instrument for most of it
+        (``flush_pending`` alone was the first refusal 198 times, and the tail
+        DISCHARGES that rather than needing to plan for it).
+
+        What is left here is the one thing the tile statement cannot cover.
+        Every set below is already in :meth:`FrameSession.camera_pending_tiles`'
+        ``outstanding`` union — but only for tiles the camera reaches. So a
+        non-empty set either intersects the camera, in which case the camera
+        arm has already refused and this clause costs nothing, or it lies
+        entirely OUTSIDE the retention halo, which is the one shape the arm
+        cannot see: ``_lod_admission_scope`` folds ``loading_tiles`` and
+        ``active_tile_requests`` into coverage wherever they are. Refusing
+        there is therefore free in hit rate and removes the whole class.
+
+        Biased to VETO on an unreadable state: every default is the "something
+        is outstanding" value. A tile that never appears is far worse than a
+        replan that finds nothing.
+        """
+
+        return not (
+            getattr(session, "dirty_payloads", True)
+            or getattr(session, "pending_payload_upserts", True)
+            or getattr(session, "pending_removals", True)
+            or getattr(session, "loading_tiles", True)
+            or getattr(session, "active_tile_requests", True)
+            or getattr(session, "skipped_tiles", True)
+            or getattr(session, "deferred_out_of_view_invalidations", True)
+        )
+
+    def _montage_planner_guard_terms(self, session) -> tuple | None:
+        """The planner's inputs that the session mutation epoch does not carry.
+
+        ``interactive`` is the load-bearing one and it is not session state at
+        all: it lives on the render coordinator, and the ladder defers native
+        rungs on it (``_defer_native_quality_during_interaction``).  A gesture
+        ending changes what an otherwise identical plan admits, which is
+        exactly what ``replan_deferred_interactive_native_quality`` exists to
+        pick up -- so it has to break the latch, and it does, here.
+
+        The round terms are session state, and therefore covered by the epoch
+        arm.  They are named anyway because the CAMERA arm deliberately
+        survives a moved epoch: a round that reopens at a different preview or
+        target floor plans differently over the same settled tiles.
+        """
+
+        shedding = getattr(getattr(session, "round_load_shedding", None), "verdict", None)
+        if shedding is None:
+            return None
+        return (
+            bool(_interactive_active(self)),
+            getattr(session, "key", None),
+            str(getattr(session, "render_round_id", "") or ""),
+            int(getattr(session, "round_preview_level", 0) or 0),
+            int(getattr(session, "round_target_level", 0) or 0),
+            bool(getattr(shedding, "drops_target_pass", True)),
+        )
+
+    def montage_planner_pass_is_idle(self, session, *, force_commit: bool):
+        """The live invariant key when this planner pass provably decides nothing.
+
+        ``None`` on every ambiguity, which is the whole contract: an
+        unreadable epoch, a missing latch, a backend that drops out-of-view
+        pixels, an obligation still owed -- all of them mean PLAN.  The two
+        arms are the same two the viewport gate rests on, and for the same
+        reasons; what differs is that the publication half
+        (``_published_scope_covers_camera``) is not needed here, because the
+        planner is not the publisher.  ``retarget_viewport`` is, and it runs
+        in the caller above this gate, not inside it.
+
+        **Epoch arm** -- argument from determinism.  Same session, same
+        mutation epoch, same key, same non-session inputs: the pass has
+        literally the same inputs as one that already returned zero, so it
+        returns zero.  This is the arm that must hold when a caller replans
+        speculatively.
+
+        **Camera arm** -- argument from the present, for the case the epoch
+        cannot serve.  The replan gate fires BECAUSE a completion wrote to the
+        session, so its epoch has always moved by the time it runs and the
+        first arm can never hold for it; that caller is 45 % of the wasted
+        milliseconds.  What survives a commit is the tile statement: every
+        tile the camera reaches is drawn at the demanded level with nothing
+        outstanding, nothing is outstanding anywhere else either
+        (:meth:`_montage_planner_obligations_clear`), and the camera terms the
+        tiles cannot answer for -- chiefly ``preview_floor`` -- are unchanged.
+
+        The full key equality in the epoch arm is not redundant with the
+        epoch.  ``lifecycle_revision`` and ``page_cache_revision`` live in the
+        key and neither is session state, so the session epoch alone would let
+        a ledger write through.
+        """
+
+        if force_commit:
+            # A forced commit is a caller saying "present regardless"; it has
+            # never been a question about the plan.
+            return None
+        if not montage_commit.viewport_convergence_latch_backend(self, session):
+            return None
+        if getattr(session, "atomic_successor_pending", True):
+            # A live successor handoff makes ``tile_states`` answer differently
+            # (``allow_preview`` is forced off while compatible predecessor
+            # pixels are held), and that is not a function of the camera.
+            return None
+        pending_admissions = getattr(
+            getattr(session, "pipeline", None), "has_pending_admissions", None
+        )
+        if pending_admissions is None or pending_admissions():
+            # A pipeline that has not been built yet reads ``None`` and is
+            # refused, which is right: there is no evidence either way, and a
+            # session with no planner has never planned.
+            return None
+        latched = getattr(self, "_montage_planner_converged", None)
+        if latched is None:
+            return None
+        latched_session_id, latched_revision, latched_key, latched_guard = latched
+        if int(latched_session_id) != int(getattr(session, "session_id", -1) or -1):
+            return None
+        guard = self._montage_planner_guard_terms(session)
+        if guard is None or guard != latched_guard:
+            return None
+        entry_revision = getattr(session, "mutation_revision", None)
+        invariant_key = session.viewport_invariant_key(
+            getattr(session, "plan", None),
+            getattr(session, "view_range", None),
+            getattr(session, "viewport_shape", None),
+        )
+        if invariant_key is None:
+            return None
+        epoch_held = entry_revision is not None and int(entry_revision) == int(latched_revision)
+        if epoch_held and latched_key == invariant_key:
+            return invariant_key
+        if (
+            not invariant_key.camera_pending_tiles
+            and latched_key.camera_terms == invariant_key.camera_terms
+            and self._montage_planner_outstanding_is_camera_local(session)
+        ):
+            return invariant_key
+        return None
+
+    def relatch_converged_planner(self, session, *, key=None) -> None:
+        """Record the planner latch from the state the pass ENDS in.
+
+        Read after everything the pass did, for the reason
+        :meth:`_relatch_converged_viewport` documents: the epoch moves on every
+        session write and the pass is a writer, so an entry reading would name
+        a state the pass itself has already left and could never match again.
+
+        A suppressed pass hands its own proven key back rather than re-deriving
+        one, and the epoch is still re-read -- ``_finish_frame_session_if_complete``
+        runs on that path and is allowed to write.
+        """
+
+        if not montage_commit.viewport_convergence_latch_backend(self, session):
+            # Nothing will ever read it, and deriving the key is not free: it
+            # walks the retention halo. Also the reason this asks the backend
+            # rather than trusting the caller -- a latch derived on a surface
+            # that drops out-of-view pixels is a key nobody can use.
+            self._montage_planner_converged = None
+            return
+        guard = self._montage_planner_guard_terms(session)
+        if guard is None:
+            self._montage_planner_converged = None
+            return
+        if key is None:
+            key = session.viewport_invariant_key(
+                getattr(session, "plan", None),
+                getattr(session, "view_range", None),
+                getattr(session, "viewport_shape", None),
+            )
+        revision = getattr(session, "mutation_revision", None)
+        if key is None or revision is None:
+            self._montage_planner_converged = None
+            return
+        self._montage_planner_converged = (
+            int(getattr(session, "session_id", 0) or 0),
+            int(revision),
+            key,
+            guard,
+        )
+
     @session_order_lock_section
     def _try_update_montage_viewport_only(self) -> bool:
         """Retarget a persistent tiled session without restarting evaluation."""

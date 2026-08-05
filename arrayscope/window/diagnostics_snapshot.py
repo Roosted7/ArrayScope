@@ -411,6 +411,12 @@ def collect_runtime_diagnostics_snapshot(window) -> WindowRuntimeDiagnostics:
         viewport_retargets_planned=int(
             getattr(window.renderer, "_montage_viewport_retargets_planned", 0) or 0
         ),
+        planner_retargets_suppressed=int(
+            getattr(window.renderer, "_montage_planner_retargets_suppressed", 0) or 0
+        ),
+        planner_retargets_planned=int(
+            getattr(window.renderer, "_montage_planner_retargets_planned", 0) or 0
+        ),
         last_stall_signature=tuple(
             int(value)
             for value in (getattr(window.renderer, "_montage_watchdog_last_stall", ()) or ())

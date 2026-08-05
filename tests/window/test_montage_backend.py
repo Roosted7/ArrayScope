@@ -182,6 +182,12 @@ def test_pipeline_retarget_commits_swaps_for_its_final_lod_demand(monkeypatch):
     runtime._finish_frame_session_if_complete = lambda _session: None
     runtime._ensure_montage_watchdog = lambda: None
     runtime._schedule_montage_cached_level_stats = lambda _session: None
+    # This stand-in always plans, stated rather than inherited: the planner
+    # convergence gate is a separate claim with its own oracle
+    # (``tests/ui/test_planner_retarget_suppression.py``), and what is being
+    # measured here is the body it guards.
+    runtime.montage_planner_pass_is_idle = lambda _session, *, force_commit: None
+    runtime.relatch_converged_planner = lambda _session, **_kwargs: None
 
     def select_lod(current):
         calls.append("select")
