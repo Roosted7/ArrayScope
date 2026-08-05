@@ -502,9 +502,6 @@ class FrameRuntimeMixin:
             self._finish_frame_session_if_complete(session)
             if not session.is_complete():
                 self._ensure_montage_watchdog()
-            # Re-derived, NOT the proven key: the discharges above are real
-            # session writes, so the key this pass entered with no longer
-            # describes the state it leaves in.
             self.relatch_converged_planner(session)
             return 0
         self._montage_planner_retargets_planned = (

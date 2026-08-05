@@ -1732,15 +1732,15 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
     # ``submitted=0`` costing 3108 ms), that caller is a MINORITY of the
     # stream:
     #
-    #     caller                                     calls  zero  zero ms
-    #     request_montage_replan's fire()              207   183     1406
-    #     _maybe_retarget_frame_session                 83    83      457
-    #     _try_update_montage_viewport_only (2054)      33    32      401
-    #     frame_effects.retarget_on_gui                 95    92      387
-    #     _try_update_montage_viewport_only (1928)      90    79      318
-    #     replan_deferred_interactive_native_quality     7     6       85
-    #     _try_update_montage_viewport_only (2067)      37    37       38
-    #     _retarget_montage_resize_payloads              6     4       15
+    #     caller                                          calls zero  ms
+    #     request_montage_replan's fire()                   207 183 1406
+    #     _maybe_retarget_frame_session                      83  83  457
+    #     _try_update_montage_viewport_only, deferred fan-in  33  32  401
+    #     frame_effects.retarget_on_gui                      95  92  387
+    #     _try_update_montage_viewport_only, main pass       90  79  318
+    #     replan_deferred_interactive_native_quality          7   6   85
+    #     _try_update_montage_viewport_only, interactive     37  37   38
+    #     _retarget_montage_resize_payloads                   6   4   15
     #
     # 70 % of the calls and 76 % of the wasted milliseconds enter through a
     # door the viewport latch does not stand in, which is why
@@ -1906,7 +1906,7 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             return invariant_key
         return None
 
-    def relatch_converged_planner(self, session, *, key=None) -> None:
+    def relatch_converged_planner(self, session) -> None:
         """Record the planner latch from the state the pass ENDS in.
 
         Read after everything the pass did, for the reason
@@ -1914,9 +1914,10 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         session write and the pass is a writer, so an entry reading would name
         a state the pass itself has already left and could never match again.
 
-        A suppressed pass hands its own proven key back rather than re-deriving
-        one, and the epoch is still re-read -- ``_finish_frame_session_if_complete``
-        runs on that path and is allowed to write.
+        Unlike the viewport latch this never takes a key from its caller, not
+        even on the suppressed path. That path is not read-only here -- it
+        discharges the flush, the stage re-arm and the completion edge -- so
+        the key it entered with describes a state it has already left.
         """
 
         if not montage_commit.viewport_convergence_latch_backend(self, session):
@@ -1930,12 +1931,11 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
         if guard is None:
             self._montage_planner_converged = None
             return
-        if key is None:
-            key = session.viewport_invariant_key(
-                getattr(session, "plan", None),
-                getattr(session, "view_range", None),
-                getattr(session, "viewport_shape", None),
-            )
+        key = session.viewport_invariant_key(
+            getattr(session, "plan", None),
+            getattr(session, "view_range", None),
+            getattr(session, "viewport_shape", None),
+        )
         revision = getattr(session, "mutation_revision", None)
         if key is None or revision is None:
             self._montage_planner_converged = None
