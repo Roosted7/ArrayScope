@@ -7376,6 +7376,10 @@ def _phase_record(
     resource = snapshot.resource_governor
     recent_callbacks = () if resource is None else tuple(resource.recent_over_warning_callbacks)
     recent_ui_work = () if resource is None else tuple(resource.recent_ui_work_observations)
+    # Episodes ride in their own field, never in the UI-work rows: those rows
+    # are summed for occupancy (`ui_work_total_ms`) and maxed against the R5
+    # 50 ms callback ceiling, and an interaction span is neither.
+    recent_episodes = () if resource is None else tuple(resource.recent_interaction_episodes)
     phase_recent_ui_work, phase_recent_ui_work_truncated = _ui_work_observation_delta(
         recent_ui_work,
         phase_ui_work_start,
@@ -7718,6 +7722,7 @@ def _phase_record(
         ),
         "phase_ui_work_observation_evidence_complete": bool(epoch_complete),
         "recent_over_warning_callbacks": [asdict(callback) for callback in recent_callbacks],
+        "recent_interaction_episodes": [asdict(episode) for episode in recent_episodes],
     }
 
 

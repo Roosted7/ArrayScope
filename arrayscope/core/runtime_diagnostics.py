@@ -747,6 +747,18 @@ def _feedback_lines(diagnostics: ResourceGovernorDiagnostics | None) -> tuple[st
             details.append(f"items={callback.processed_items}")
             details.append(f"bytes={format_bytes(callback.processed_bytes)}")
             lines.append(f"  {label}: " + " ".join(details))
+    if diagnostics.recent_interaction_episodes:
+        # Spans, listed apart from the callback sections above and never
+        # totalled with them: the thread is idle for most of an episode.
+        lines.append("Interaction episodes (spans, not callback time):")
+        for episode in diagnostics.recent_interaction_episodes[-8:]:
+            terms = " ".join(
+                f"{name}={_ms_text(value)}" for name, value in sorted(episode.metrics.items())
+            )
+            lines.append(
+                f"  {episode.kind}: span={_ms_text(episode.span_ms)}"
+                + (f" {terms}" if terms else "")
+            )
     return tuple(lines)
 
 

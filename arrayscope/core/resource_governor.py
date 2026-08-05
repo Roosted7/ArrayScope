@@ -91,12 +91,37 @@ class FeedbackChannelDiagnostics:
 
 
 @dataclass(frozen=True)
+class InteractionEpisodeObservation:
+    """One interaction EPISODE: a span across many callbacks and much idle time.
+
+    Deliberately not a ``GuiCallbackObservation`` and deliberately not in the
+    UI-work ring. That ring is the GUI-thread callback occupancy record: every
+    entry is one callback's own ``elapsed_ms``, and consumers sum it
+    (``ui_work_total_ms`` in the profiling harness), take its maximum against
+    the R5 50 ms callback ceiling, and rank channels by it. An episode span is
+    none of those things -- it is wall time during which the thread was mostly
+    idle -- so a single episode channel in that ring inflates every occupancy
+    figure derived from it and outranks the real work.
+
+    ``span_ms`` is therefore named for what it is, and ``metrics`` carries the
+    episode's own terms (for the viewport latch: gesture/latch/wakeup/slip),
+    which is the evidence the measurement exists for.
+    """
+
+    kind: str
+    span_ms: float
+    metrics: dict[str, float] = field(default_factory=dict)
+    details: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ResourceGovernorDiagnostics:
     pressure: ResourcePressureState
     lane_decisions: tuple[LaneWorkerDecision, ...] = ()
     feedback_channels: tuple[FeedbackChannelDiagnostics, ...] = ()
     recent_ui_work_observations: tuple[GuiCallbackObservation, ...] = ()
     recent_over_warning_callbacks: tuple[GuiCallbackObservation, ...] = ()
+    recent_interaction_episodes: tuple[InteractionEpisodeObservation, ...] = ()
     telemetry_source: str = "n/a"
     system_cpu_percent: float | None = None
     process_cpu_percent: float | None = None
@@ -203,6 +228,9 @@ _DIAGNOSTIC_UI_OBSERVATION_LIMIT = 64
 # one JSON line at record time, so the stream survives crashes and flooding.
 _UI_OBSERVATION_LOG_ENV = "ARRAYSCOPE_UI_OBSERVATION_LOG"
 
+# Tag on the observation-log lines that are episodes rather than callbacks.
+_INTERACTION_EPISODE_LOG_RECORD = "interaction_episode"
+
 
 def _maybe_log_ui_observation(observation: GuiCallbackObservation) -> None:
     path = os.environ.get(_UI_OBSERVATION_LOG_ENV)
@@ -211,6 +239,31 @@ def _maybe_log_ui_observation(observation: GuiCallbackObservation) -> None:
     try:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps({"t_monotonic": monotonic(), **asdict(observation)}) + "\n")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _maybe_log_interaction_episode(episode: InteractionEpisodeObservation) -> None:
+    """Append one episode to the same stream, tagged so it cannot be summed.
+
+    It shares the file because an episode is only readable against the
+    callbacks it spans, but it carries ``record="interaction_episode"`` and no
+    ``elapsed_ms`` key at all: the reader recipe for occupancy is "sum
+    ``elapsed_ms``", and a line without that key is arithmetically invisible to
+    it however naive the reader is.
+    """
+
+    path = os.environ.get(_UI_OBSERVATION_LOG_ENV)
+    if not path:
+        return
+    record = {
+        "t_monotonic": monotonic(),
+        "record": _INTERACTION_EPISODE_LOG_RECORD,
+        **asdict(episode),
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
     except (OSError, TypeError, ValueError):
         pass
 
@@ -279,6 +332,12 @@ class ResourceGovernor:
     )
     _recent_over_warning_callbacks: deque[GuiCallbackObservation] = field(
         default_factory=lambda: deque(maxlen=32)
+    )
+    # Episodes live in their own ring, never in the callback ring above. See
+    # `InteractionEpisodeObservation`: a span is not occupancy, and there is no
+    # filter a consumer can forget to apply if the record is never there.
+    _recent_interaction_episodes: deque[InteractionEpisodeObservation] = field(
+        default_factory=lambda: deque(maxlen=256)
     )
     _ui_observation_epoch: int = 0
     _ui_observation_epoch_active: int = 0
@@ -374,6 +433,15 @@ class ResourceGovernor:
         backend: str = "",
         details: tuple[str, ...] = (),
     ) -> None:
+        """Record one GUI-thread callback: ``elapsed_ms`` is that callback's own cost.
+
+        Only a callback belongs here. A span that covers several callbacks and
+        the idle time between them goes to ``record_interaction_episode``: this
+        deque is what consumers sum for GUI occupancy and max for the R5
+        callback ceiling, and one span-shaped channel makes both read the
+        thread as a third busier than it was.
+        """
+
         if _diagnostics_only_ui_work(channel, work_class=work_class, byte_count=byte_count):
             return
         count = max(1, int(item_count))
@@ -424,6 +492,37 @@ class ResourceGovernor:
             observation.channel, feedback_elapsed_ms, count=count, byte_count=byte_count
         )
         self._pressure = self._pressure_with_ui(observation.channel)
+
+    @_governed
+    def record_interaction_episode(
+        self,
+        kind: str,
+        span_ms: float,
+        *,
+        metrics: dict[str, float] | None = None,
+        details: tuple[str, ...] = (),
+    ) -> None:
+        """Record one interaction episode -- a span, not a callback.
+
+        Kept out of every callback family on purpose. It skips
+        ``latency_feedback`` (so it cannot move a channel budget or batch
+        limit), ``_pressure_with_ui`` (so a 3 s span cannot pin ``ui_pressure``
+        HIGH and make the bottleneck line read "UI fan-in" forever), the
+        over-warning ring (32 deep -- a per-gesture span would evict the real
+        slow callbacks it exists to name), and the epoch maximum (which the
+        harness adjudicates against the R5 50 ms callback ceiling).
+
+        Everything the measurement is for -- the per-episode terms -- is kept.
+        """
+
+        episode = InteractionEpisodeObservation(
+            kind=str(kind),
+            span_ms=max(0.0, float(span_ms)),
+            metrics={str(key): float(value) for key, value in dict(metrics or {}).items()},
+            details=tuple(str(detail) for detail in details),
+        )
+        self._recent_interaction_episodes.append(episode)
+        _maybe_log_interaction_episode(episode)
 
     @_governed
     def observe_latency(
@@ -1188,6 +1287,9 @@ class ResourceGovernor:
                 _deque_tail(self._recent_ui_work_observations, _DIAGNOSTIC_UI_OBSERVATION_LIMIT)
             ),
             recent_over_warning_callbacks=tuple(self._recent_over_warning_callbacks),
+            recent_interaction_episodes=tuple(
+                _deque_tail(self._recent_interaction_episodes, _DIAGNOSTIC_UI_OBSERVATION_LIMIT)
+            ),
             telemetry_source="n/a" if cpu is None else cpu.source,
             system_cpu_percent=None if cpu is None else cpu.system_cpu_percent,
             process_cpu_percent=None if cpu is None else cpu.process_cpu_percent,

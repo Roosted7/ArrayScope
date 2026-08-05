@@ -13,6 +13,7 @@ from arrayscope.core.memory_policy import (
 )
 from arrayscope.core.resource_governor import (
     ResourceGovernor,
+    ResourcePressure,
     SchedulerBusyState,
     _render_pass_cost_model,
     _render_pass_extrapolation_cost_ms,
@@ -1453,3 +1454,120 @@ def test_one_caller_section_may_span_several_governor_entry_points():
     assert results["diagnostics"].recent_ui_work_observations[-1].channel == (
         "presentation_owner_drain"
     )
+
+
+def test_an_interaction_episode_is_not_gui_callback_occupancy():
+    """The measurement that made a third of "GUI occupancy" idle time.
+
+    `viewport_interaction_latch` is a SPAN: one record covering many callbacks
+    and the idle time between them (116 records, 48 s, max 3105 ms in the
+    2026-08-04 operator recording). The UI-work ring is the GUI-thread callback
+    occupancy record, and its consumers sum `elapsed_ms` over it
+    (`ui_work_total_ms` in the profiling harness) and take its maximum against
+    the R5 50 ms callback ceiling. An occupancy consumer must therefore never
+    see the episode at all -- and must still count an ordinary callback.
+    """
+
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation("montage_commit", 12.5, item_count=4)
+    governor.record_interaction_episode(
+        "viewport_interaction_latch",
+        3105.0,
+        metrics={"gesture_ms": 0.4, "latch_ms": 120.4, "wakeup_ms": 3105.0, "slip_ms": 2984.6},
+    )
+    governor.record_ui_observation("kernel_bridge_drain", 3.5, item_count=2)
+
+    diagnostics = governor.diagnostics()
+    occupancy_ms = sum(
+        float(observation.elapsed_ms) for observation in diagnostics.recent_ui_work_observations
+    )
+
+    assert occupancy_ms == 16.0, "an episode span was counted as GUI-thread work"
+    assert [observation.channel for observation in diagnostics.recent_ui_work_observations] == [
+        "montage_commit",
+        "kernel_bridge_drain",
+    ]
+    # The R5 ceiling is a per-callback claim; a 3105 ms span must not fail it.
+    assert (
+        max(
+            float(observation.elapsed_ms) for observation in diagnostics.recent_ui_work_observations
+        )
+        < 50.0
+    )
+    # The over-warning ring is 32 deep and names the slow callbacks; a
+    # per-gesture span would evict every one of them.
+    assert [callback.channel for callback in diagnostics.recent_over_warning_callbacks] == []
+
+
+def test_an_interaction_episode_steers_no_governor_decision():
+    """A 3 s span must not price a channel, pin UI pressure, or set the epoch max.
+
+    `record_ui_observation` feeds `latency_feedback` and recomputes
+    `ui_pressure` from every channel's EWMA against an 8 ms idle target. A
+    span-shaped channel therefore held `ui_pressure` at HIGH for the rest of
+    the session after the first gesture -- which is what
+    `runtime_bottleneck_text` reads to report "UI fan-in".
+    """
+
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.update_telemetry(_snapshot(_memory()), _memory())
+    epoch = governor.begin_ui_observation_epoch()
+    governor.record_ui_observation("montage_commit", 3.0)
+    governor.record_interaction_episode(
+        "viewport_interaction_latch",
+        3105.0,
+        metrics={"gesture_ms": 0.4, "slip_ms": 2984.6},
+    )
+
+    diagnostics = governor.diagnostics()
+
+    assert diagnostics.pressure.ui_pressure == ResourcePressure.NORMAL
+    assert "viewport_interaction_latch" not in {
+        channel.channel for channel in diagnostics.feedback_channels
+    }
+    count, max_ms, complete = governor.ui_observation_epoch_evidence(epoch)
+    assert complete
+    assert count == 1, "the episode was counted as a callback in the phase evidence"
+    assert max_ms == 3.0
+    assert governor.ui_observation_epoch_max(epoch).channel == "montage_commit"
+
+
+def test_interaction_episode_terms_reach_the_recorded_jsonl(tmp_path, monkeypatch):
+    """The episode's own terms must survive to the observation log, unsummable.
+
+    Same file as the callback lines, because an episode is only readable
+    against the callbacks it spans -- but tagged `record=interaction_episode`
+    and carrying no `elapsed_ms` key, so the "sum elapsed_ms" recipe cannot
+    pick it up however naive the reader.
+    """
+
+    import json
+
+    log_path = tmp_path / "observations.jsonl"
+    monkeypatch.setenv("ARRAYSCOPE_UI_OBSERVATION_LOG", str(log_path))
+    governor = ResourceGovernor(_policy(), profile=MemoryProfileChoice.BALANCED)
+    governor.record_ui_observation("montage_commit", 12.5)
+    governor.record_interaction_episode(
+        "viewport_interaction_latch",
+        295.0,
+        metrics={"gesture_ms": 175.0, "latch_ms": 295.0, "wakeup_ms": 675.0, "slip_ms": 380.0},
+        details=("gesture_ms=175.0",),
+    )
+
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    episodes = [row for row in rows if row.get("record") == "interaction_episode"]
+    callbacks = [row for row in rows if "elapsed_ms" in row]
+
+    assert len(episodes) == 1
+    episode = episodes[0]
+    assert episode["kind"] == "viewport_interaction_latch"
+    assert episode["span_ms"] == 295.0
+    assert episode["metrics"] == {
+        "gesture_ms": 175.0,
+        "latch_ms": 295.0,
+        "wakeup_ms": 675.0,
+        "slip_ms": 380.0,
+    }
+    assert "elapsed_ms" not in episode
+    assert [row["channel"] for row in callbacks] == ["montage_commit"]
+    assert sum(float(row["elapsed_ms"]) for row in callbacks) == 12.5

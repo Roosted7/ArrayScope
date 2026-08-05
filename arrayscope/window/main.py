@@ -753,6 +753,27 @@ class ArrayScopeWindow(
             details=tuple(details),
         )
 
+    def _record_interaction_episode(
+        self,
+        kind: str,
+        span_ms: float,
+        *,
+        metrics: dict[str, float] | None = None,
+        details: tuple[str, ...] = (),
+    ) -> None:
+        # The episode sibling of `_record_ui_work`, with the same "no governor,
+        # no record" contract. Separate because the sink is separate: an
+        # episode is a span, not GUI-thread occupancy.
+        governor = getattr(self, "resource_governor", None)
+        if governor is None:
+            return
+        governor.record_interaction_episode(
+            kind,
+            span_ms,
+            metrics=dict(metrics or {}),
+            details=tuple(details),
+        )
+
     def _gui_callback_budget_decision(self, channel: str, *, interactive: bool = False):
         return default_gui_callback_budget_decision(channel, interactive=interactive)
 
@@ -820,6 +841,14 @@ class ArrayScopeWindow(
         the interval readers see the flag already down. Keeping it recorded is
         what lets a later trace say whether the mechanism regressed rather
         than re-deriving it from a constant.
+
+        It goes to the governor's EPISODE ring, not its UI-work ring. The
+        first version of this instrument sent `latch_ms` through
+        `_record_ui_work`, and one operator recording then showed
+        `viewport_interaction_latch` as 116 observations totalling 48 s --
+        33 % of apparent GUI-thread occupancy, ranking above `montage_commit`
+        -- for a thread that was idle almost all of it. An episode spans many
+        callbacks; the callback ring holds one callback each.
         """
 
         started = getattr(self, "_viewport_latch_episode_start", None)
@@ -838,11 +867,10 @@ class ArrayScopeWindow(
             "slip_ms": max(0.0, wakeup_ms - latch_ms),
         }
         self._last_viewport_latch_episode = episode
-        self._record_ui_work(
+        self._record_interaction_episode(
             "viewport_interaction_latch",
             latch_ms,
-            count=1,
-            work_class="viewport_input",
+            metrics=dict(episode),
             details=(
                 f"gesture_ms={gesture_ms:.1f}",
                 f"wakeup_ms={wakeup_ms:.1f}",

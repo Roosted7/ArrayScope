@@ -308,6 +308,68 @@ def test_the_interaction_latch_tracks_the_gesture_not_the_quiet_timer(qtbot, mon
         win.close()
 
 
+def test_the_latch_episode_is_recorded_as_a_span_not_as_gui_callback_work(qtbot, monkeypatch):
+    """The episode the latch fix is adjudicated on must not read as occupancy.
+
+    The first version of this instrument sent ``latch_ms`` through
+    ``_record_ui_work``, which is the GUI-thread callback occupancy record --
+    every other entry in it is one callback's own ``elapsed_ms``. One operator
+    recording then carried 116 ``viewport_interaction_latch`` records totalling
+    48 s (p95 1518 ms), a third of apparent GUI occupancy, for a thread that
+    was idle for nearly all of it. The episode is a span across many callbacks;
+    it belongs in the episode ring, and an occupancy consumer must not see it.
+    """
+
+    _clear_arrayscope_settings()
+    import arrayscope.window.main as window_main
+    from arrayscope.window import ArrayScopeWindow
+
+    clock = {"now": 2_000.0}
+    monkeypatch.setattr(window_main, "perf_counter", lambda: clock["now"])
+
+    win = ArrayScopeWindow(np.arange(4 * 5 * 8, dtype=float).reshape(4, 5, 8))
+    qtbot.addWidget(win)
+    try:
+        governor = win.resource_governor
+        governor._recent_ui_work_observations.clear()
+        governor._recent_interaction_episodes.clear()
+        # One ordinary callback, so "counts nothing at all" cannot pass.
+        win._record_ui_work("roi_refresh", 7.0)
+
+        _drive_gesture(win, clock, steps=8, step_ms=25.0)
+        win._viewport_interaction_quiet_timer.stop()
+        clock["now"] += 3.0  # a wakeup three seconds late, as trace 7 records
+        win._on_viewport_interaction_quiet()
+
+        work = tuple(governor._recent_ui_work_observations)
+        occupancy_ms = sum(float(observation.elapsed_ms) for observation in work)
+
+        assert [observation.channel for observation in work] == ["roi_refresh"]
+        assert occupancy_ms == pytest.approx(7.0, abs=0.01)
+
+        episodes = tuple(governor._recent_interaction_episodes)
+        assert [episode.kind for episode in episodes] == ["viewport_interaction_latch"]
+        metrics = episodes[-1].metrics
+        assert metrics["gesture_ms"] == pytest.approx(175.0, abs=1.0)
+        assert metrics["latch_ms"] == pytest.approx(295.0, abs=1.0)
+        assert metrics["wakeup_ms"] == pytest.approx(3200.0, abs=1.0)
+        assert metrics["slip_ms"] == pytest.approx(2905.0, abs=1.0)
+        assert episodes[-1].span_ms == pytest.approx(metrics["latch_ms"], abs=0.01)
+
+        # And it steers nothing: a 3 s span must not price a feedback channel
+        # or pin `ui_pressure`, which `runtime_bottleneck_text` reads.
+        diagnostics = governor.diagnostics()
+        assert "viewport_interaction_latch" not in {
+            channel.channel for channel in diagnostics.feedback_channels
+        }
+        assert "viewport_interaction_latch" not in {
+            callback.channel for callback in diagnostics.recent_over_warning_callbacks
+        }
+        assert diagnostics.recent_interaction_episodes == episodes
+    finally:
+        win.close()
+
+
 def test_an_explicitly_pinned_interaction_flag_still_holds(qtbot, monkeypatch):
     """The mutation guard: the deadline must not break the direct pin.
 

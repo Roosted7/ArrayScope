@@ -59,6 +59,14 @@ already knew) before cutting anything.
   64-observation tail (saturated by `kernel_bridge_drain` within a second),
   and a phase that dies mid-run (the fft-scroll stall, §6) never writes its
   row at all.
+- Lines tagged `"record": "interaction_episode"` are **spans, not callbacks**:
+  one record covers many callbacks and the idle time between them (the
+  viewport interaction latch, with `gesture_ms`/`latch_ms`/`wakeup_ms`/
+  `slip_ms` under `metrics`). They deliberately carry `span_ms` and no
+  `elapsed_ms`, so the occupancy recipe below cannot pick them up. **GUI
+  occupancy is the sum of `elapsed_ms` over the callback lines only** — one
+  such span-shaped channel briefly lived in the callback ring and made 33 % of
+  apparent occupancy idle time (2026-08-05).
 - The pyqtgraph tile layer appends a `tile_layer_sections` record per direct
   commit to the same file: per-pass wall time (`resolve`, `active_seed`,
   `reshow`, `hide_inactive`, `tile_order`, `level_scan`, `preclaim`,

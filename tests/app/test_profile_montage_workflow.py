@@ -110,6 +110,94 @@ def test_phase_record_excludes_montage_counters_without_live_owners(monkeypatch)
     assert record["wgpu_binding_fast_path_commits"] == 3
 
 
+def test_phase_record_keeps_interaction_episodes_out_of_the_ui_work_rows(monkeypatch):
+    """The harness JSONL must carry the episode without inflating occupancy.
+
+    ``recent_ui_work_observations`` and its phase delta are what this file sums
+    for ``ui_work_total_ms`` and maxes against the R5 50 ms callback ceiling. A
+    3105 ms interaction span in those rows both inflates occupancy and fails a
+    per-callback verdict on work that never ran on the GUI thread, so it rides
+    in its own field.
+    """
+
+    import arrayscope.tools.profile_montage_workflow as workflow
+    from arrayscope.app.settings_state import AppSettingsState
+    from arrayscope.core.compute_policy import compute_policy_from_settings
+    from arrayscope.core.memory_policy import MemoryProfileChoice
+    from arrayscope.core.resource_governor import ResourceGovernor
+
+    governor = ResourceGovernor(
+        compute_policy_from_settings(
+            AppSettingsState(memory_profile=MemoryProfileChoice.BALANCED), cpu_count=16
+        ),
+        profile=MemoryProfileChoice.BALANCED,
+    )
+    governor.record_ui_observation("montage_commit", 9.0, item_count=2)
+    governor.record_interaction_episode(
+        "viewport_interaction_latch",
+        3105.0,
+        metrics={"gesture_ms": 0.4, "latch_ms": 120.4, "wakeup_ms": 3105.0, "slip_ms": 2984.6},
+    )
+    snapshot = SimpleNamespace(
+        image_rendering_backend_actual="wgpu",
+        montage=MontageRuntimeDiagnostics(active=False),
+        montage_timing=MontageTimingDiagnostics(),
+        render_timing=RenderTimingDiagnostics(),
+        resource_governor=governor.diagnostics(),
+    )
+    win = SimpleNamespace(
+        collect_runtime_diagnostics=lambda: snapshot,
+        renderer=SimpleNamespace(),
+        resource_governor=governor,
+    )
+    monkeypatch.setattr(workflow, "_window_geometry_state", lambda _win: {})
+    monkeypatch.setattr(workflow, "_backend_presentation_diagnostics", lambda _win: {})
+    monkeypatch.setattr(workflow, "_wgpu_frame_cadence", lambda _win: {})
+    monkeypatch.setattr(workflow, "_montage_overlay_count", lambda _win: 0)
+    monkeypatch.setattr(
+        workflow,
+        "_montage_level_presentation_state",
+        lambda _win: {
+            "revision": 0,
+            "target_levels": None,
+            "stale_tiles": 0,
+            "pending_tiles": 0,
+            "settled": True,
+            "active_tile_count": 0,
+            "active_presented_tile_count": 0,
+        },
+    )
+
+    record = workflow._phase_record(
+        win,
+        phase="unit",
+        elapsed_ms=1.0,
+        event_loop_p95_gap_ms=None,
+        event_loop_p99_gap_ms=None,
+        event_loop_max_gap_ms=0.0,
+    )
+    # The record must survive a JSON round trip: this is a JSONL row.
+    row = json.loads(json.dumps(record))
+    ui_rows = row["recent_ui_work_observations"]
+
+    assert [item["channel"] for item in ui_rows] == ["montage_commit"]
+    assert sum(float(item["elapsed_ms"]) for item in ui_rows) == 9.0
+    assert row["phase_recent_ui_work_observations"] == ui_rows
+    assert row["recent_interaction_episodes"] == [
+        {
+            "kind": "viewport_interaction_latch",
+            "span_ms": 3105.0,
+            "metrics": {
+                "gesture_ms": 0.4,
+                "latch_ms": 120.4,
+                "wakeup_ms": 3105.0,
+                "slip_ms": 2984.6,
+            },
+            "details": [],
+        }
+    ]
+
+
 def _journey_gesture_win(pending_fn, capture_log):
     return SimpleNamespace(
         img_view=SimpleNamespace(presentationDrawPending=pending_fn),
