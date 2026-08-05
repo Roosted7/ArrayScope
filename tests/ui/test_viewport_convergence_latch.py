@@ -44,6 +44,7 @@ import numpy as np
 import pytest
 
 from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
+from arrayscope.window.frame_session import FrameSession
 from tests.ui.helpers import clear_arrayscope_settings
 from tests.ui.helpers import (
     settle_quiescent as _settle_quiet,
@@ -226,7 +227,13 @@ SCRIPT = (
 )
 
 
-_REAL_KEY = None
+#: Captured at import, before any arm patches the attribute. ``_run`` used to
+#: read it live, which is a trap with a fuse in it: the second arm of a mutated
+#: parametrisation re-read an attribute the FIRST arm had already replaced, so
+#: the mutant wrapped itself and every key derivation became infinite
+#: recursion. It only stayed latent because the unlatched arm happened never to
+#: derive a key -- a property of the code under test, not of this file.
+_REAL_KEY = FrameSession.viewport_invariant_key
 
 
 def _blind_key(self, plan, view_range, viewport_shape):
@@ -249,7 +256,6 @@ def _blind_key(self, plan, view_range, viewport_shape):
 
 def _run(qtbot, monkeypatch, *, latch, depth, columns, mutate):
     from arrayscope.window import frame_effects
-    from arrayscope.window.frame_session import FrameSession
 
     monkeypatch.setattr(
         frame_effects,
@@ -259,13 +265,26 @@ def _run(qtbot, monkeypatch, *, latch, depth, columns, mutate):
     if mutate:
         from arrayscope.window.frame_controller import FrameControllerMixin
 
-        global _REAL_KEY
-        _REAL_KEY = FrameSession.viewport_invariant_key
         monkeypatch.setattr(FrameSession, "viewport_invariant_key", _blind_key)
         monkeypatch.setattr(
             FrameControllerMixin,
             "_published_scope_covers_camera",
             lambda *_args, **_kwargs: True,
+        )
+        # The planner's own gate reads the SAME key, so the mutation reaches
+        # it too -- and there it is not a stale frame but a stalled fill: the
+        # blinded key hides tile 14's unsatisfied target and the completion
+        # replan is suppressed, so `_build` never settles and the script below
+        # never runs. That is the mutant behaving correctly against a
+        # different guard, and measuring it here would make this file's
+        # subject ambiguous. The planner gate carries its own oracle and its
+        # own mutation checks in
+        # ``tests/ui/test_planner_retarget_suppression.py``; this arm is about
+        # what the VIEWPORT early-out puts on screen.
+        monkeypatch.setattr(
+            FrameControllerMixin,
+            "montage_planner_pass_is_idle",
+            lambda self, session, *, force_commit: None,
         )
     win = _build(qtbot, depth, columns)
     engaged = 0
