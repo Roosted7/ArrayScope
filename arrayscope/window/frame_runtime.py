@@ -472,6 +472,10 @@ class FrameRuntimeMixin:
             # rate for nothing: ``flush_pending`` alone was the first refusal
             # in 198 of 575 passes, and a flush is discharged here in a line.
             if montage_commit.complete_deferred_stage_fan_in(self, session):
+                # It completed something, so the next pass has a decision to
+                # make. Both exits that skip the re-latch below drop it rather
+                # than leave it naming a convergence this pass ended.
+                self._montage_planner_converged = None
                 return 0
             # Stage dependents idle until something releases them, and the
             # planner is not that something -- this is. Omitting it is a lost
@@ -525,6 +529,7 @@ class FrameRuntimeMixin:
         pipeline = self._frame_pipeline_for_session(session)
         ladder_policy = getattr(getattr(pipeline, "ladder", None), "policy", None)
         if montage_commit.complete_deferred_stage_fan_in(self, session):
+            self._montage_planner_converged = None
             return 0
         montage_commit.rearm_ready_stage_dependents(session)
         submitted = pipeline.retarget(intent, session.lod_policy_decision.demand, scope)
