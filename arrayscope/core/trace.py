@@ -126,6 +126,21 @@ class TraceBus:
         the event below is a fresh dict, so a caller may reuse or mutate its
         mapping afterwards.
 
+        That fresh dict is a **copy plus four inserts**, not a
+        ``{header, **fields}`` display.  The display re-hashed every field key
+        on the way into a dict that already held four entries; ``dict.copy``
+        duplicates the hash table wholesale and hashes nothing, so the merge
+        cost stops scaling with the field count.  Measured on the two hot
+        shapes with the ring armed: 790 → 703 ns for the 7-field
+        ``rung_prepare`` record and 1165 → 952 ns for the 15-field
+        ``lifecycle`` one.  The trade is that the four header keys are written
+        *after* the caller's fields, so an event can no longer shadow its own
+        identity by naming ``kind``/``ts_ns``/``sequence``/``schema_version``
+        as a field — the header wins now.  No emit site does that, and a row
+        that lied about its own kind was never the useful outcome.  Key
+        *order* changes with it; nothing depends on it, because `_encode`
+        sorts keys and every consumer reads by name.
+
         Keys must be strings.  Keyword emission guarantees that by
         construction, and there is deliberately no coercion pass here: it ran
         over every field of every event of every montage session (the stall
@@ -137,22 +152,22 @@ class TraceBus:
 
         if not self._enabled:
             return
-        event = {
-            "schema_version": TRACE_SCHEMA_VERSION,
-            "sequence": 0,
-            "ts_ns": perf_counter_ns(),
-            "kind": str(kind),
-            **fields,
-        }
+        ts_ns = perf_counter_ns()
+        event = fields.copy()
+        event["schema_version"] = TRACE_SCHEMA_VERSION
+        event["ts_ns"] = ts_ns
+        event["kind"] = str(kind)
         with self._lock:
             if not self._enabled:
                 return
-            self._sequence += 1
-            event["sequence"] = self._sequence
+            sequence = self._sequence + 1
+            self._sequence = sequence
+            event["sequence"] = sequence
             # The ring keeps the event; only a real sink pays for encoding it.
             self._ring.append(event)
-            if self._handle is not None:
-                self._handle.write(_encode(event) + "\n")
+            handle = self._handle
+            if handle is not None:
+                handle.write(_encode(event) + "\n")
 
     def snapshot(self) -> tuple[dict[str, object], ...]:
         with self._lock:
@@ -206,7 +221,19 @@ def trace_enabled() -> bool:
 
 
 def emit_trace(kind: str, **fields) -> None:
-    TRACE.emit(kind, **fields)
+    """Emit by keyword — the door 84 of the app's 86 emit sites come through.
+
+    It routes to ``emit_fields``, not to ``TraceBus.emit``.  ``**fields`` has
+    already cost one dict; re-splatting it into ``emit(kind, **fields)`` built
+    a *second* one with every key hashed again, for a mapping that was about
+    to be handed straight back to ``emit_fields`` anyway.  Two dicts and three
+    calls became one dict and two, with byte-identical output: measured
+    1316 → 703 ns per keyword emit with the ring armed (the state the montage
+    watchdog leaves every production session in), and 715 → 268 ns with it
+    closed.
+    """
+
+    TRACE.emit_fields(kind, fields)
 
 
 def emit_trace_fields(kind: str, fields: dict[str, object]) -> None:

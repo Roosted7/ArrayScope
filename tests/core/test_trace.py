@@ -195,6 +195,68 @@ def test_emit_fields_records_exactly_what_keyword_emission_records():
     assert from_mapping["tile"] == 4
 
 
+def test_an_event_cannot_shadow_its_own_identity_with_a_like_named_field():
+    """The four header keys are written last, so the header wins.
+
+    The `{header, **fields}` display this replaced let a caller's field
+    overwrite `kind`, `sequence`, `ts_ns` or `schema_version` — a row that
+    lied about which kind it was, which every replay oracle indexes on.  No
+    emit site does this, but the copy-then-insert order that made the merge
+    stop scaling with the field count also decides the collision, so pin
+    which way it now falls rather than leaving it to the implementation.
+    """
+
+    from arrayscope.core.trace import TraceBus
+
+    bus = TraceBus()
+    bus.configure(ring_events=2)
+    bus.emit_fields(
+        "lifecycle",
+        {"tile": 3, "kind": "not-a-kind", "sequence": 999, "schema_version": 41},
+    )
+    (event,) = bus.snapshot()
+    bus.close()
+
+    assert event["kind"] == "lifecycle"
+    assert event["sequence"] == 1
+    assert event["schema_version"] == 1
+    assert event["tile"] == 3
+
+
+def test_module_level_emit_trace_records_what_the_mapping_door_records():
+    """`emit_trace` routes to `emit_fields`, not back through `emit`.
+
+    84 of the app's 86 emit sites come through the keyword door, so the extra
+    kwargs dict `emit(kind, **fields)` rebuilt was paid by nearly every event
+    of every montage session.  Removing that hop must not make the keyword
+    door record a different event from the mapping door.
+    """
+
+    from arrayscope.core import trace as trace_module
+
+    fields = {"edge": "presented", "tile": 4, "presented_level": None}
+
+    bus = trace_module.TraceBus()
+    bus.configure(ring_events=4)
+    original = trace_module.TRACE
+    trace_module.TRACE = bus
+    try:
+        trace_module.emit_trace("lifecycle", **fields)
+        trace_module.emit_trace_fields("lifecycle", dict(fields))
+    finally:
+        trace_module.TRACE = original
+
+    keyword_event, mapping_event = bus.snapshot()
+    bus.close()
+    assert keyword_event["sequence"] == 1
+    assert mapping_event["sequence"] == 2
+    for event in (keyword_event, mapping_event):
+        event.pop("ts_ns")
+        event.pop("sequence")
+    assert keyword_event == mapping_event
+    assert list(keyword_event) == list(mapping_event)
+
+
 def test_emit_fields_is_disabled_with_the_rest_of_the_bus():
     from arrayscope.core.trace import TraceBus
 
