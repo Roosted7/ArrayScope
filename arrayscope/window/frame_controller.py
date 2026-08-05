@@ -2066,8 +2066,32 @@ class FrameControllerMixin(FrameRuntimeMixin, LevelStatsService):
             and latched.camera_terms == invariant_key.camera_terms
             and self._published_scope_covers_camera(session, viewport_plan)
         )
+        # The epoch arm needs the SAME containment the camera arm carries, and
+        # for a reason the epoch arm's own argument hides.  "Same session, same
+        # epoch, same key" is only "same inputs" if the epoch covers every
+        # input, and the camera is not session state until ``retarget_viewport``
+        # publishes it -- so a pan moves no epoch at all, and the invariant key
+        # has no viewport-position term either (over a resident montage
+        # ``camera_pending_tiles`` is empty for both cameras and every camera
+        # term is unchanged).  Two different cameras therefore compare EQUAL
+        # here, and suppressing leaves the published scope on the older one.
+        #
+        # This was unreachable rather than absent until 2026-08-05: every
+        # commit moved the epoch by ~2460 counts of no-op writes, so
+        # ``epoch_held`` was false across any commit and this arm effectively
+        # never fired.  The mutation-clock no-op rule made it reachable, and
+        # ``test_a_suppressed_pan_never_leaves_the_published_scope_behind_the_
+        # camera`` and ``test_convergence_latch_does_not_change_the_pyqtgraph_
+        # frame`` both went red the moment it did -- 2 of 3 epoch-arm firings
+        # over a 16-pan script had ``_published_scope_covers_camera`` False,
+        # and tiles left the frame.  Epoch noise is not a safety mechanism.
         if invariant_key is not None and (
-            camera_has_no_work or (epoch_held and latched == invariant_key)
+            camera_has_no_work
+            or (
+                epoch_held
+                and latched == invariant_key
+                and self._published_scope_covers_camera(session, viewport_plan)
+            )
         ):
             # A suppressed retarget must be visible in a stall dump, or a
             # montage that goes stale under a gesture has no first question.
