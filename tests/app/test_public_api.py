@@ -1,4 +1,3 @@
-import sys
 from pathlib import Path
 
 try:
@@ -48,22 +47,12 @@ def test_changelog_names_arrayscope_v080_release_candidate():
 
 
 def test_package_module_is_callable():
-    for name in list(sys.modules):
-        if name == "arrayscope" or name.startswith("arrayscope."):
-            del sys.modules[name]
-
     import arrayscope as asc
 
     assert callable(asc)
 
 
 def test_calling_package_delegates_to_launch(monkeypatch):
-    import sys
-
-    for name in list(sys.modules):
-        if name == "arrayscope" or name.startswith("arrayscope."):
-            del sys.modules[name]
-
     import arrayscope as asc
 
     calls = []

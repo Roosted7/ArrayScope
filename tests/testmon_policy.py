@@ -91,6 +91,12 @@ MAP_FILENAME = ".testmondata"
 #: mid-suite ``INTERNALERROR``; see
 #: :func:`install_extensionless_dependency_support`.
 OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    # Fresh gw0-labeled interpreters exercise the import-time filesystem
+    # setup, which cannot be re-run inside the parent pytest process.
+    "tests/app/test_qsettings_isolation.py": (
+        "tests/conftest.py",
+        "tests/filesystem_isolation.py",
+    ),
     # `python tools/demo_recorder.py --smoke ...`
     "tests/app/test_demo_recorder_smoke.py": ("tools/demo_recorder.py",),
     # `python tools/demo_inspector.py --strict ...`. The findings tests in the
@@ -104,6 +110,7 @@ OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "tests/app/test_qt_binding.py": (
         "arrayscope/__init__.py",
         "arrayscope/app/qt_binding.py",
+        "arrayscope/app/launch.py",
     ),
     # `python -c "... from arrayscope.app.launch import _prepare_qt_environment"`
     # — the Qt logging-category rules are process-global mutable state, so the

@@ -6,6 +6,8 @@ from time import monotonic
 
 import pytest
 
+from tests.filesystem_isolation import install_artifact_directory, isolated_process_root
+
 # --- Test filesystem isolation (QSettings + artifacts) -----------------------
 # Two shared on-disk resources leak developer/cross-process state into tests:
 #   * QSettings — the test QApplication resolves a UserScope store under
@@ -37,8 +39,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 _XDIST_WORKER = os.environ.get("PYTEST_XDIST_WORKER")
 # Per-run private config root: one per xdist worker, one per process for serial.
-_config_tag = _XDIST_WORKER or f"serial-{os.getpid()}"
-_config_root = os.path.join(tempfile.gettempdir(), f"arrayscope-test-{_config_tag}")
+_config_root = str(
+    isolated_process_root(
+        tempfile.gettempdir(),
+        worker=_XDIST_WORKER,
+        run_uid=os.environ.get("PYTEST_XDIST_TESTRUNUID"),
+        process_id=os.getpid(),
+    )
+)
 _worker_config = os.path.join(_config_root, "config")
 os.makedirs(_worker_config, exist_ok=True)
 # On Linux/Unix QSettings (UserScope) resolves under XDG_CONFIG_HOME; pointing
@@ -46,7 +54,7 @@ os.makedirs(_worker_config, exist_ok=True)
 # of the un-clearable ``Unknown Organization.conf`` org fallback.
 os.environ["XDG_CONFIG_HOME"] = _worker_config
 if _XDIST_WORKER:
-    os.environ.setdefault("ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_config_root, "artifacts"))
+    install_artifact_directory(os.environ, _config_root)
 
 
 from tests import (
@@ -1582,7 +1590,7 @@ def pytest_configure(config):
         # artifacts (that is ``--no-testmon``, or CI's serial step), and it may
         # well execute in-process — see pytest_xdist_auto_num_workers. Keep it
         # off the shared directory the way an xdist worker already is.
-        os.environ.setdefault("ARRAYSCOPE_ARTIFACT_DIR", os.path.join(_config_root, "artifacts"))
+        install_artifact_directory(os.environ, _config_root)
     config.arrayscope_load_start = load_report.LoadWindow.sample()
     config.arrayscope_started = monotonic()
 

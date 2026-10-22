@@ -129,7 +129,7 @@ def test_headless_runs_are_never_pinned(monkeypatch):
     assert pinned == {"QT_WAYLAND_DECORATION": None, "QT_QPA_PLATFORMTHEME": None}
 
 
-def test_importing_launch_never_pins_appearance(monkeypatch):
+def test_importing_launch_never_pins_appearance():
     """The pin must wait for _prepare_qt_environment, not fire on import.
 
     An import-time pin runs before a test harness can say "offscreen", so a
@@ -137,15 +137,24 @@ def test_importing_launch_never_pins_appearance(monkeypatch):
     processes — whose settle loops then paid real DBus round-trips (measured
     11.6 s -> 30.5 s on one settle-budget test, deterministically, serial)."""
 
-    import importlib
-    import sys
-
+    environment = os.environ.copy()
     for name in ("QT_WAYLAND_DECORATION", "QT_QPA_PLATFORMTHEME", "QT_QPA_PLATFORM"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
-    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
+        environment.pop(name, None)
+    environment["WAYLAND_DISPLAY"] = "wayland-0"
+    environment["XDG_CURRENT_DESKTOP"] = "GNOME"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os; import arrayscope.app.launch; "
+            "assert os.environ.get('QT_WAYLAND_DECORATION') is None; "
+            "assert os.environ.get('QT_QPA_PLATFORMTHEME') is None",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=20,
+        check=False,
+    )
 
-    sys.modules.pop("arrayscope.app.launch", None)
-    importlib.import_module("arrayscope.app.launch")
-    assert os.environ.get("QT_WAYLAND_DECORATION") is None
-    assert os.environ.get("QT_QPA_PLATFORMTHEME") is None
+    assert result.returncode == 0, result.stderr
