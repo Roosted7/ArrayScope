@@ -248,7 +248,8 @@ def _config(**options):
     return SimpleNamespace(option=SimpleNamespace(**options), args=[])
 
 
-def test_selection_is_on_by_default():
+def test_selection_is_on_by_default(monkeypatch):
+    monkeypatch.delenv("CI", raising=False)
     decision = testmon_policy.decide(_config())
     assert decision.active
     assert decision.reason == "default"
