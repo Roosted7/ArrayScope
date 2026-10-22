@@ -68,11 +68,26 @@ def operation_to_recipe_item(operation_or_step):
     return item
 
 
-def steps_from_recipe(recipe, base_shape, *, imported: bool = False, slot_resolver=None):
+def steps_from_recipe(
+    recipe,
+    base_shape,
+    *,
+    imported: bool = False,
+    slot_resolver=None,
+    operation_policy=None,
+    require_available: bool = False,
+):
+    """Resolve authored steps with optional pre-lookup and availability policies.
+
+    ``operation_policy(id)`` runs before registry lookup or imported-command
+    quarantine, allowing a noninteractive caller to enforce its execution
+    boundary without loading an unsupported operation. ``require_available``
+    refuses an authored enabled step that would otherwise become disabled.
+    """
     if not isinstance(recipe, dict):
         raise ValueError("recipe must be a JSON object")
     version = recipe.get("version")
-    if version not in {LEGACY_RECIPE_VERSION, RECIPE_VERSION}:
+    if type(version) is not int or version not in {LEGACY_RECIPE_VERSION, RECIPE_VERSION}:
         raise ValueError(f"unsupported recipe version: {recipe.get('version')!r}")
 
     raw_operations = recipe.get("operations")
@@ -87,7 +102,12 @@ def steps_from_recipe(recipe, base_shape, *, imported: bool = False, slot_resolv
         operation_id = item.get("id")
         if not isinstance(operation_id, str):
             raise ValueError(f"operation {index} is missing an id")
+        requested_enabled = item.get("enabled", True) if version == RECIPE_VERSION else True
+        if not isinstance(requested_enabled, bool):
+            raise ValueError(f"operation {index} ({operation_id}) enabled must be a JSON boolean")
         try:
+            if operation_policy is not None:
+                operation_policy(operation_id)
             quarantined = False
             if imported:
                 from arrayscope.operations import library
@@ -106,12 +126,16 @@ def steps_from_recipe(recipe, base_shape, *, imported: bool = False, slot_resolv
                 slot_bindings=item.get("inputs", {}),
                 slot_resolver=slot_resolver,
             )
-            enabled = bool(item.get("enabled", True)) if version == RECIPE_VERSION else True
+            enabled = bool(requested_enabled)
             if quarantined:
                 enabled = False
             binding_reason = str(
                 getattr(operation, "current_unavailable_reason", lambda: "")() or ""
             )
+            if require_available and requested_enabled and (quarantined or binding_reason):
+                raise ValueError(
+                    binding_reason or "the enabled operation requires review before execution"
+                )
             if binding_reason:
                 enabled = False
             if enabled:
@@ -150,12 +174,27 @@ def loads_recipe(text: str, base_shape, *, imported: bool = False, slot_resolver
     )
 
 
-def loads_recipe_steps(text: str, base_shape, *, imported: bool = False, slot_resolver=None):
+def loads_recipe_steps(
+    text: str,
+    base_shape,
+    *,
+    imported: bool = False,
+    slot_resolver=None,
+    operation_policy=None,
+    require_available: bool = False,
+):
     try:
         recipe = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON recipe: {exc}") from exc
-    return steps_from_recipe(recipe, base_shape, imported=imported, slot_resolver=slot_resolver)
+    return steps_from_recipe(
+        recipe,
+        base_shape,
+        imported=imported,
+        slot_resolver=slot_resolver,
+        operation_policy=operation_policy,
+        require_available=require_available,
+    )
 
 
 def save_recipe(path, operations):
