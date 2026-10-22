@@ -4,8 +4,8 @@ The runtime owns four things and nothing operation-specific:
 
 * explicit command-template tokenization (``shell=False`` by default),
 * array handoff through a named format,
-* concurrent stdout/stderr draining, and
-* bounded cancellation/timeout teardown of the whole child process group.
+* discarded stdout and a bounded diagnostic tail from stderr, and
+* bounded cancellation/timeout teardown (the whole child group on POSIX).
 
 ``cfl`` and ``npy`` are the first two handoffs.  The small registry at the
 bottom is deliberately the extension seam for later NIfTI/raw support.
@@ -19,6 +19,7 @@ import signal
 import string
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from arrayscope.operations.cancellation import EvaluationCancelled
 DEFAULT_TIMEOUT_S = 600.0
 POLL_INTERVAL_S = 0.02
 TERM_GRACE_S = 0.25
+MAX_STDERR_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -196,21 +198,42 @@ def build_command(
 
 
 def _terminate_child(proc, grace: float = TERM_GRACE_S) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        proc.terminate()
+    """Stop the dedicated child group, even after its leader has exited.
+
+    ``start_new_session=True`` makes the child's PID the POSIX group ID. A
+    lookup through ``getpgid`` after reaping the leader loses that identity
+    while descendants can still be alive and holding our pipes open.
+    """
+
+    group = os.name == "posix"
+
+    def send(*, kill: bool = False) -> None:
+        with suppress(ProcessLookupError):
+            if group:
+                os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
+            elif proc.poll() is None:
+                # Windows has no killpg; terminate/kill are its supported
+                # direct-process operations and do not use POSIX signals.
+                if kill:
+                    proc.kill()
+                else:
+                    proc.terminate()
+
+    send()
     deadline = time.monotonic() + max(0.0, float(grace))
-    while proc.poll() is None and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        if group:
+            try:
+                os.killpg(proc.pid, 0)
+            except ProcessLookupError:
+                break
+        elif proc.poll() is not None:
+            break
         time.sleep(0.005)
-    if proc.poll() is None:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            proc.kill()
-    proc.wait()
+    # A descendant can ignore TERM after the leader has exited. Polling only
+    # the leader here used to leave that descendant running indefinitely.
+    send(kill=True)
+    proc.wait(timeout=max(1.0, float(grace)))
 
 
 def _child_environment(overrides: Mapping[str, object] | None) -> dict[str, str]:
@@ -302,61 +325,84 @@ def run_array_command(
                     resolved = resolved.replace(placeholder, path)
                 child_command.append(resolved)
 
+        stderr_tail = bytearray()
+        stderr_bytes = 0
+        stderr_done = threading.Event()
+        stop_reader = threading.Event()
+
+        def drain() -> None:
+            nonlocal stderr_bytes
+            try:
+                while not stop_reader.is_set():
+                    try:
+                        chunk = os.read(stderr_fd, 65536)
+                    except BlockingIOError:
+                        stop_reader.wait(max(0.001, float(poll_interval)))
+                        continue
+                    if not chunk:
+                        break
+                    stderr_bytes += len(chunk)
+                    stderr_tail.extend(chunk)
+                    del stderr_tail[: max(0, len(stderr_tail) - MAX_STDERR_BYTES)]
+            except (OSError, ValueError):
+                pass
+            finally:
+                stderr_done.set()
+
+        reader = threading.Thread(target=drain, daemon=True)
         proc = subprocess.Popen(
             child_command,
             cwd=cwd or None,
             env=_child_environment(env),
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             start_new_session=True,
             shell=bool(shell),
+            # Raw FileIO avoids BufferedReader.close waiting for a blocked
+            # reader's lock when a descendant inherited the pipe.
+            bufsize=0,
         )
-        stderr_chunks: list[bytes] = []
-        readers: list[threading.Thread] = []
-
-        def drain(stream, sink: list[bytes] | None) -> None:
-            try:
-                for chunk in iter(lambda: stream.read(65536), b""):
-                    if sink is not None:
-                        sink.append(chunk)
-            except (OSError, ValueError):
-                pass
-
-        for stream, sink in ((proc.stdout, None), (proc.stderr, stderr_chunks)):
-            if stream is not None:
-                reader = threading.Thread(target=drain, args=(stream, sink), daemon=True)
-                reader.start()
-                readers.append(reader)
-
-        deadline = None if timeout is None else time.monotonic() + float(timeout)
         try:
-            while True:
+            stderr_fd = proc.stderr.fileno()
+            with suppress(OSError, NotImplementedError):
+                # POSIX pipes, and Windows pipes on Python >=3.12, support
+                # nonblocking reads. Older Windows versions use the bounded
+                # join and raw close below, but cannot interrupt a pipe read
+                # held open by a descendant outside direct-process cleanup.
+                os.set_blocking(stderr_fd, False)
+            reader.start()
+            deadline = None if timeout is None else time.monotonic() + float(timeout)
+            # Keep an exited POSIX leader unreaped while descendants hold the
+            # pipe: its reserved PID also reserves our process-group identity,
+            # so timeout cleanup cannot signal a later group reusing that PID.
+            while not stderr_done.is_set() or proc.poll() is None:
                 if cancelled():
-                    _terminate_child(proc, grace)
                     raise EvaluationCancelled()
                 if deadline is not None and time.monotonic() >= deadline:
-                    _terminate_child(proc, grace)
                     raise RuntimeError(f"command timed out after {float(timeout):g}s")
+                if not stderr_done.is_set():
+                    stderr_done.wait(max(0.001, float(poll_interval)))
+                    continue
                 try:
                     proc.wait(timeout=max(0.001, float(poll_interval)))
                 except subprocess.TimeoutExpired:
                     continue
-                break
-            for reader in readers:
-                reader.join()
-            stderr = b"".join(stderr_chunks).decode("utf-8", "replace").strip()
+            stderr = stderr_tail.decode("utf-8", "replace").strip()
+            if stderr_bytes > MAX_STDERR_BYTES:
+                stderr = f"[stderr truncated; last {MAX_STDERR_BYTES} bytes]\n{stderr}"
             if proc.returncode != 0:
                 label = child_command if isinstance(child_command, str) else " ".join(child_command)
                 raise RuntimeError(f"command {label!r} failed (exit {proc.returncode}): {stderr}")
             return format_spec.read(output_path, **read_options)
         finally:
-            if proc.poll() is None:
-                _terminate_child(proc, grace)
-            for reader in readers:
-                reader.join(timeout=grace + 1.0)
-            for stream in (proc.stdout, proc.stderr):
-                if stream is not None:
-                    stream.close()
+            try:
+                if not stderr_done.is_set() or proc.poll() is None:
+                    _terminate_child(proc, grace)
+            finally:
+                stop_reader.set()
+                if reader.ident is not None:
+                    reader.join(timeout=max(0.0, float(grace)) + 1.0)
+                proc.stderr.close()
 
 
 def run_command_template(

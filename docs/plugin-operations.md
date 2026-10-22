@@ -627,8 +627,14 @@ runtimes.
 `handoff` currently accepts `"npy"` (dtype-preserving NumPy files) and `"cfl"`
 (BART's complex64, Fortran-ordered `.hdr`/`.cfl` pair). The runtime dispatches
 through a small handoff registry so NIfTI/raw can be added without another
-subprocess implementation. Both formats use the same concurrent stdout/stderr
-draining, overall timeout, and SIGTERM-to-SIGKILL cancellation path.
+subprocess implementation. Command stdout is discarded; failures retain the
+last 64 KiB of stderr and explicitly mark truncation. Timeout and cancellation
+remain active until the command exits and stderr closes, including when a
+descendant keeps that pipe open after the command leader exits. On POSIX,
+teardown sends TERM, then KILL to the dedicated process group. Descendants that
+deliberately detach into another session fall outside that group. Windows
+currently terminates the direct child only; on Python 3.10–3.11 an inherited
+pipe can also keep a daemon reader alive until the descendant closes it.
 
 ### Named execution environments
 

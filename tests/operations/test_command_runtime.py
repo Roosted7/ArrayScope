@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +19,7 @@ from arrayscope.operations.command_runtime import (
     run_command_template,
     write_cfl,
 )
+from arrayscope.tools.interaction_budget import INTERACTION_SETTLE_HARD_LIMIT_S
 from tests import seams
 
 
@@ -183,6 +187,153 @@ def test_command_timeout_and_cancellation_kill_the_child(tmp_path):
 
     assert not thread.is_alive()
     assert isinstance(outcome.get("error"), EvaluationCancelled)
+
+
+def test_command_failure_keeps_a_bounded_stderr_tail(tmp_path):
+    stderr_budget = 64 * 1024
+    script = tmp_path / "noisy tool.py"
+    script.write_text(
+        "import os\n"
+        "os.write(1, b'output' * 100000)\n"
+        f"os.write(2, b'x' * {stderr_budget * 3})\n"
+        "os.write(2, b'\\nfinal diagnostic\\n')\n"
+        "raise SystemExit(7)\n"
+    )
+
+    with pytest.raises(RuntimeError, match="exit 7") as error:
+        run_command_template(f'"{sys.executable}" "{script}" {{in}} {{out}}', np.ones(2))
+
+    message = str(error.value)
+    assert message.endswith("final diagnostic")
+    assert "stderr truncated" in message
+    assert len(message.encode()) <= stderr_budget + 1024
+
+
+@pytest.mark.parametrize("failure", ["termination", "reader start"])
+def test_command_closes_stderr_when_runtime_setup_or_cleanup_raises(tmp_path, monkeypatch, failure):
+    import subprocess
+
+    from arrayscope.operations import command_runtime
+
+    script = tmp_path / "sleeping tool.py"
+    script.write_text("import time\ntime.sleep(30)\n")
+    spawned = []
+    real_popen = subprocess.Popen
+    real_terminate = command_runtime._terminate_child
+
+    def record_spawn(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        spawned.append(proc)
+        return proc
+
+    def terminate_then_raise(proc, grace):
+        real_terminate(proc, grace)
+        raise RuntimeError("termination failed")
+
+    monkeypatch.setattr(subprocess, "Popen", record_spawn)
+    if failure == "termination":
+        monkeypatch.setattr(command_runtime, "_terminate_child", terminate_then_raise)
+    else:
+
+        def fail_reader_start(_reader):
+            raise RuntimeError("reader start failed")
+
+        monkeypatch.setattr(threading.Thread, "start", fail_reader_start)
+
+    with pytest.raises(RuntimeError, match=f"{failure} failed"):
+        run_command_template(
+            f'"{sys.executable}" "{script}" {{in}} {{out}}',
+            np.ones(2),
+            timeout=0.05,
+            grace=0.02,
+        )
+
+    assert len(spawned) == 1
+    assert spawned[0].poll() is not None
+    assert spawned[0].stderr.closed
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
+@pytest.mark.parametrize("interrupt", ["timeout", "cancel"])
+def test_command_supervision_continues_after_leader_exits(tmp_path, interrupt):
+    """A grandchild holding stderr open must not disable the command deadline.
+
+    This exercises a real child group, including a grandchild which ignores
+    TERM. The final cleanup makes the regression fail without leaving a
+    sleeping process or a permanently blocked test thread on the old runtime.
+    """
+
+    import psutil
+
+    marker = tmp_path / "child.json"
+    script = tmp_path / "forking tool.py"
+    script.write_text(
+        "import json, os, shutil, signal, sys, time\n"
+        "shutil.copyfile(sys.argv[1], sys.argv[2])\n"
+        "leader = os.getpid()\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"    open({str(marker)!r}, 'w').write(json.dumps([leader, os.getpid()]))\n"
+        "    time.sleep(30)\n"
+        "    os._exit(0)\n"
+        f"while not os.path.exists({str(marker)!r}):\n"
+        "    time.sleep(0.005)\n"
+    )
+    token = SimpleNamespace(cancelled=False)
+    outcome = {}
+
+    def run():
+        try:
+            outcome["result"] = run_command_template(
+                f'"{sys.executable}" "{script}" {{in}} {{out}}',
+                np.ones(2),
+                cancellation_token=token,
+                timeout=1.0 if interrupt == "timeout" else None,
+                poll_interval=0.005,
+                grace=0.02,
+            )
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    child_pid = None
+    child_process = None
+    try:
+        deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S
+        while time.monotonic() < deadline:
+            if marker.exists() and marker.read_text():
+                leader_pid, child_pid = json.loads(marker.read_text())
+                with suppress(psutil.NoSuchProcess):
+                    child_process = psutil.Process(child_pid)
+                leader_exited = True
+                with suppress(psutil.NoSuchProcess):
+                    leader_exited = psutil.Process(leader_pid).status() == psutil.STATUS_ZOMBIE
+                if leader_exited:
+                    break
+            time.sleep(0.005)
+        else:
+            pytest.fail("the command leader did not exit")
+
+        token.cancelled = interrupt == "cancel"
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "inherited stderr bypassed cancellation/timeout"
+        expected = EvaluationCancelled if interrupt == "cancel" else RuntimeError
+        assert isinstance(outcome.get("error"), expected)
+        if interrupt == "timeout":
+            assert "timed out" in str(outcome["error"])
+        with suppress(psutil.NoSuchProcess):
+            assert psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE
+    finally:
+        if child_pid is None and marker.exists() and marker.read_text():
+            _leader_pid, child_pid = json.loads(marker.read_text())
+        if child_pid is not None:
+            with suppress(psutil.NoSuchProcess):
+                if child_process is None:
+                    child_process = psutil.Process(child_pid)
+                child_process.kill()
+        thread.join(timeout=5)
 
 
 @pytest.mark.parametrize("handoff", ["npy", "cfl"])
