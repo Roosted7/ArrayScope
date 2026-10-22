@@ -44,7 +44,11 @@ wakeup -- is unchanged and is what they still assert.
 from __future__ import annotations
 
 import inspect
+from collections import deque
+from collections.abc import Collection
+from dataclasses import dataclass, is_dataclass
 from dataclasses import fields as dataclass_fields
+from hashlib import blake2b
 
 import numpy as np
 import pytest
@@ -54,13 +58,14 @@ from arrayscope.core.mutation_clock import (
     CONTAINER_READERS,
     TRACKED_CONTAINER_TYPES,
     ClockedState,
+    MutationClock,
 )
 from arrayscope.display.model.frame import (
     TileCommitReport,
     TilePresentationDelta,
 )
 from arrayscope.display.montage import MontageTileState
-from arrayscope.window.frame_session import FrameSession
+from arrayscope.window.frame_session import FrameSession, LifecycleRungMaterializations
 from tests.ui.helpers import clear_arrayscope_settings  # noqa: F401  (autouse-style import)
 from tests.ui.helpers import settle_quiescent as _settle_quiet
 
@@ -224,14 +229,92 @@ def _arguments(win, session) -> dict[str, object]:
     }
 
 
-def _value_repr(value):
-    if isinstance(value, dict):
-        return tuple(sorted((repr(key), _value_repr(item)) for key, item in value.items()))
-    if isinstance(value, (set, frozenset)):
-        return tuple(sorted(repr(item) for item in value))
-    if isinstance(value, np.ndarray):
-        return (value.shape, value.dtype.str, float(np.nansum(value)))
-    return repr(value)
+class _SnapshotValues:
+    """Reflect the state graph once, without formatting shared pixel planes.
+
+    References address this snapshot's flat node table. Repeated objects and
+    cycles therefore cost one visit, and equality does not expand a shared
+    graph back into a tree. Every snapshot gets a fresh table so in-place
+    writes remain visible. Mutation clocks and explicitly derived record
+    memos are bookkeeping rather than the state whose clock is under test.
+    """
+
+    def __init__(self):
+        self.seen = {}
+        self.nodes = []
+        self.owners = []
+
+    def value(self, value):
+        if type(value) in (type(None), bool, int, str, bytes):
+            return (type(value), value)
+        if isinstance(value, (float, np.generic)):
+            # A NaN must compare equal to its own unchanged snapshot.
+            return (type(value), repr(value))
+        if isinstance(value, MutationClock):
+            return (MutationClock,)
+        identity = id(value)
+        if identity in self.seen:
+            return ("ref", self.seen[identity])
+        number = len(self.nodes)
+        self.seen[identity] = number
+        self.nodes.append(None)
+        # Iterated lifecycle facades may yield temporary wrappers. Retain them
+        # during this snapshot so their ids cannot be reused for another node.
+        self.owners.append(value)
+        if isinstance(value, np.ndarray):
+            if value.dtype.hasobject:
+                contents = tuple(self.value(item) for item in value.flat)
+            else:
+                digest = blake2b(digest_size=32)
+                if value.size and value.itemsize:
+                    with np.nditer(
+                        value,
+                        flags=["external_loop", "buffered", "zerosize_ok"],
+                        op_flags=["readonly", "contig"],
+                        order="C",
+                        buffersize=max(1, 65536 // value.itemsize),
+                    ) as iterator:
+                        for block in iterator:
+                            digest.update(block.view(np.uint8))
+                contents = digest.digest()
+            state = (value.shape, repr(value.dtype.descr), contents)
+        elif isinstance(value, dict):
+            state = tuple(
+                (self.value(key), self.value(item))
+                for key, item in sorted(value.items(), key=lambda pair: repr(pair[0]))
+            )
+        elif isinstance(value, (set, frozenset)):
+            state = tuple(self.value(item) for item in sorted(value, key=repr))
+        elif isinstance(value, (tuple, list, deque)):
+            state = tuple(self.value(item) for item in value)
+        elif is_dataclass(value) and not isinstance(value, type):
+            declared = dataclass_fields(value)
+            attributes = dict(getattr(value, "__dict__", {}))
+            for item in declared:
+                attributes.setdefault(item.name, getattr(value, item.name))
+            derived = {item.name for item in declared if item.metadata.get("derived")}
+            state = tuple(
+                (name, self.value(item))
+                for name, item in sorted(attributes.items())
+                if name != "_mutations" and name not in derived
+            )
+        elif isinstance(value, ClockedState):
+            state = tuple(
+                (name, self.value(item))
+                for name, item in sorted(value.__dict__.items())
+                if name != "_mutations"
+            )
+        elif inspect.ismethod(value):
+            # Bound-method repr recursively formats its owning FrameSession.
+            state = (self.value(value.__func__), self.value(value.__self__))
+        elif isinstance(value, (Collection, LifecycleRungMaterializations)):
+            # Lifecycle's set/list facades expose real ledger contents through
+            # iteration. Their repr would format every shared payload again.
+            state = tuple(self.value(item) for item in value)
+        else:
+            state = repr(value)
+        self.nodes[number] = (type(value), state)
+        return ("ref", number)
 
 
 def _snapshot(session):
@@ -241,23 +324,38 @@ def _snapshot(session):
     memoize, so reading them would be a mutation of its own.
     """
 
+    values = _SnapshotValues()
     declared = tuple(item.name for item in dataclass_fields(FrameSession))
     own = tuple(
-        (name, _value_repr(value))
+        (name, values.value(value))
         for name, value in sorted(session.__dict__.items())
         # The clock is the thing under test; the ledger is expanded below.
         if name not in {"_mutations", "lifecycle"}
     )
     lifecycle = session.lifecycle
     ledger = tuple(
-        (name, _value_repr(value))
+        (name, values.value(value))
         for name, value in sorted(lifecycle.__dict__.items())
         if name not in {"_mutations", "_records"}
     )
-    records = tuple((number, repr(record)) for number, record in sorted(lifecycle._records.items()))
+    records = tuple(
+        (number, values.value(record)) for number, record in sorted(lifecycle._records.items())
+    )
     # ``declared`` is carried so a field REMOVED from the dataclass while an
     # instance attribute of that name lingers is still compared.
-    return (declared, own, ledger, records)
+    return (declared, own, ledger, records, tuple(values.nodes))
+
+
+def _observe_mutation(session, call, *args, **kwargs):
+    before_state = _snapshot(session)
+    before_revision = session.mutation_revision
+    call(*args, **kwargs)
+    after_revision = session.mutation_revision
+    if after_revision > before_revision:
+        # The implication is already satisfied. A second deep comparison
+        # cannot expose a missed bump once the revision has visibly moved.
+        return True, None
+    return False, _snapshot(session) != before_state
 
 
 def _public_methods():
@@ -297,6 +395,59 @@ def _call_arguments(method_name, method, table):
     return args, kwargs, unknown
 
 
+def test_snapshot_detects_unclocked_fields_and_pixels_without_recursive_repr():
+    from arrayscope.presentation import TileLifecycle
+
+    @dataclass
+    class Watched:
+        plane: np.ndarray
+        reason: str
+
+        def __repr__(self):
+            raise AssertionError("snapshot formatted a nested state object")
+
+    session = object.__new__(FrameSession)
+    lifecycle = TileLifecycle()
+    record = lifecycle.record(0)
+    plane = np.array([1.0, 2.0])
+    watched = Watched(plane, "initial")
+    state = {"nested": watched, "shared": watched, "plane_alias": plane}
+    state["cycle"] = state
+    iterator = iter([1, 2])
+    state["opaque_iterator"] = iterator
+    object.__setattr__(session, "_mutations", MutationClock())
+    object.__setattr__(session, "lifecycle", lifecycle)
+    object.__setattr__(session, "unlisted_field", state)
+    _snapshot(session)
+    assert next(iterator) == 1, "snapshot consumed an opaque iterator"
+
+    def rearrange_pixels():
+        # Same shape, dtype and sum: the old nansum signature missed this.
+        plane[:] = plane[::-1]
+
+    for mutate in (
+        lambda: setattr(watched, "reason", "unclocked nested write"),
+        rearrange_pixels,
+        lambda: object.__setattr__(record, "failed_reason", "unclocked ledger write"),
+        lambda: object.__setattr__(session, "future_field", "unclocked new field"),
+    ):
+        assert _observe_mutation(session, lambda: None) == (False, False)
+        assert _observe_mutation(session, mutate) == (False, True)
+
+
+def test_reflected_walk_discovers_a_new_mutator_and_rejects_unknown_arguments(monkeypatch):
+    def future_mutator(self, previously_unknown_parameter):
+        raise AssertionError("an unsupplied mutator must not be invoked")
+
+    monkeypatch.setattr(FrameSession, "future_mutator", future_mutator, raising=False)
+
+    assert "future_mutator" in set(_public_methods())
+    args, kwargs, unknown = _call_arguments("future_mutator", future_mutator, {})
+    assert args == []
+    assert kwargs == {}
+    assert unknown == ["previously_unknown_parameter"]
+
+
 @pytest.fixture(scope="module")
 def _walk_session(qtbot_module_session):
     return qtbot_module_session
@@ -321,14 +472,12 @@ def test_every_public_mutator_moves_the_mutation_revision(qtbot):
         if unknown:
             unknown_by_method[name] = unknown
             continue
-        before_state = _snapshot(session)
-        before_revision = session.mutation_revision
-        getattr(session, name)(*args, **kwargs)
-        after_state = _snapshot(session)
-        after_revision = session.mutation_revision
-        if after_revision > before_revision:
+        revision_moved, state_changed = _observe_mutation(
+            session, getattr(session, name), *args, **kwargs
+        )
+        if revision_moved:
             moved.append(name)
-        elif after_state != before_state:
+        elif state_changed:
             missed.append(name)
 
     assert not unknown_by_method, (
