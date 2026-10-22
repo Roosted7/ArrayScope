@@ -30,7 +30,9 @@ if QT_SIGNAL is None:
 class RangeSlider(QtWidgets.QWidget):
     """A minimal horizontal two-handle slider for inclusive integer ranges."""
 
-    valuesChanged = QT_SIGNAL(int, int)
+    # Qt's `int` signal narrows indices to signed 32 bits. Geometry is
+    # approximate in screen pixels, but selected bounds remain Python ints.
+    valuesChanged = QT_SIGNAL(object, object)
 
     def __init__(self, parent=None, minimum=0, maximum=0):
         super().__init__(parent)
