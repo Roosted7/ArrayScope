@@ -1718,6 +1718,15 @@ def pytest_sessionstart(session):
         # worker can record durations, including runs using explicit --tx.
         _freeze_collection_seconds(config)
     testmon_config = getattr(config, "testmon_config", None)
+    if (
+        testmon_config
+        and getattr(options, "dist", None) == "loadfile"
+        and hasattr(options, "loadscopereorder")
+    ):
+        # xdist otherwise sorts file units by test count after our cost sort,
+        # pushing expensive two-test files behind cheap, larger test files.
+        # Older xdist lacks this option and retains its existing scheduling.
+        options.loadscopereorder = False
     # Both the controller and every worker delete from the map during their own
     # collection, so both need the scope guard — unlike the ledger below, which
     # deliberately has one writer. Installed here because sessionstart is the
