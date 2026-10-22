@@ -120,6 +120,8 @@ class OperationStackDock(StandardDockWidget):
         on_change_axis=None,
         axis_choices_provider=None,
         on_manage_operations=None,
+        on_copy_recipe=None,
+        on_paste_recipe=None,
     ):
         super().__init__("Operations", parent)
         self.setObjectName("OperationsDock")
@@ -263,6 +265,15 @@ class OperationStackDock(StandardDockWidget):
             lambda menu=recent_menu: self._populate_recent_recipes(menu)
         )
         self.more_button.setMenu(more_menu)
+        before = next(action for action in more_menu.actions() if action.isSeparator())
+        for label, icon_name, callback in (
+            ("Copy Operation Recipe to Clipboard", "content_copy", on_copy_recipe),
+            ("Paste Operation Recipe (Replace Stack)", "content_paste", on_paste_recipe),
+        ):
+            if callback is not None:
+                action = QtGui.QAction(material_icon(icon_name), label, more_menu)
+                action.triggered.connect(callback)
+                more_menu.insertAction(before, action)
 
         button_layout = QtWidgets.QHBoxLayout()
         button_layout.setSpacing(4)

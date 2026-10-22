@@ -910,6 +910,8 @@ class DisplayControlBuildMixin:
             on_clear=self.clear_operations,
             on_save_recipe=self.save_operation_recipe,
             on_load_recipe=self.load_operation_recipe,
+            on_copy_recipe=self.copy_operation_recipe,
+            on_paste_recipe=self.paste_operation_recipe,
             on_materialize=self.materialize_current_array,
             on_delete_selected=self.delete_selected_operation,
             on_move_selected_up=lambda index: self.move_selected_operation(index, -1),

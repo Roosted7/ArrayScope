@@ -102,6 +102,17 @@ class WindowMenuMixin:
         load_recipe_action = QtGui.QAction("Load Operation Recipe", self)
         set_action_icon(load_recipe_action, "folder_open")
         load_recipe_action.triggered.connect(self.load_operation_recipe)
+        copy_recipe_action = QtGui.QAction("Copy Operation Recipe to Clipboard", self)
+        copy_recipe_action.setObjectName("CopyOperationRecipeAction")
+        set_action_icon(copy_recipe_action, "content_copy")
+        copy_recipe_action.triggered.connect(self.copy_operation_recipe)
+        paste_recipe_action = QtGui.QAction("Paste Operation Recipe (Replace Stack)", self)
+        paste_recipe_action.setObjectName("PasteOperationRecipeAction")
+        paste_recipe_action.setToolTip(
+            "Replace this array's operation stack with the JSON recipe on the clipboard"
+        )
+        set_action_icon(paste_recipe_action, "content_paste")
+        paste_recipe_action.triggered.connect(self.paste_operation_recipe)
         save_view_action = QtGui.QAction("Save View Recipe", self)
         set_action_icon(save_view_action, "view_quilt")
         save_view_action.triggered.connect(self.save_view_recipe)
@@ -114,6 +125,8 @@ class WindowMenuMixin:
         for action in (
             save_recipe_action,
             load_recipe_action,
+            copy_recipe_action,
+            paste_recipe_action,
             save_view_action,
             load_view_action,
             export_derived_action,

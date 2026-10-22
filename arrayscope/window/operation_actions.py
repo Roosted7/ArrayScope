@@ -17,7 +17,12 @@ from arrayscope.operations.cost import estimate_pipeline_cost
 from arrayscope.operations.evaluator import LARGE_MATERIALIZE_BYTES
 from arrayscope.operations.parameter_forms import build_parameter_form
 from arrayscope.operations.pipeline import OperationStep, evaluate_shape
-from arrayscope.operations.recipes import dumps_recipe, load_recipe_steps, save_recipe
+from arrayscope.operations.recipes import (
+    dumps_recipe,
+    load_recipe_steps,
+    loads_recipe_steps,
+    save_recipe,
+)
 from arrayscope.operations.registry import (
     create_operation,
     get_operation_entry,
@@ -429,6 +434,14 @@ class OperationActionsMixin:
                 PaletteCommand("export_derived", "Export derived array", icon="download"),
                 PaletteCommand("save_recipe", "Save operation recipe", icon="save"),
                 PaletteCommand("load_recipe", "Load operation recipe", icon="folder_open"),
+                PaletteCommand(
+                    "copy_recipe", "Copy operation recipe to clipboard", icon="content_copy"
+                ),
+                PaletteCommand(
+                    "paste_recipe",
+                    "Paste operation recipe — replace operation stack",
+                    icon="content_paste",
+                ),
                 PaletteCommand("save_view_recipe", "Save view recipe", icon="view_quilt"),
                 PaletteCommand("load_view_recipe", "Load view recipe", icon="folder_open"),
                 PaletteCommand("manage_colormaps", "Manage colormaps", icon="palette"),
@@ -495,6 +508,8 @@ class OperationActionsMixin:
             "export_derived": self.export_derived_array,
             "save_recipe": self.save_operation_recipe,
             "load_recipe": self.load_operation_recipe,
+            "copy_recipe": self.copy_operation_recipe,
+            "paste_recipe": self.paste_operation_recipe,
             "save_view_recipe": self.save_view_recipe,
             "load_view_recipe": self.load_view_recipe,
         }
@@ -655,17 +670,56 @@ class OperationActionsMixin:
                 self.base_data.shape,
                 slot_resolver=self._resolve_operation_slot,
             )
-            self.operation_coordinator.load_steps(steps)
+            self._apply_operation_recipe_steps(steps)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Recipe Load Error", f"Failed to load recipe:\n{e}")
-            return
-        try:
-            self._set_document(self.operation_coordinator.document)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Recipe Load Error", f"Failed to load recipe:\n{e}")
-            return
+            return False
         self._remember_recent_recipe(file_path)
+        return True
+
+    def _apply_operation_recipe_steps(self, steps):
+        """Apply validated file or clipboard steps through the same document owner."""
+
+        self.operation_coordinator.load_steps(steps)
+        handed_off = self._set_document(self.operation_coordinator.document)
+        if handed_off is not None:
+            return handed_off
         self.render(reason="recipe-load", force_autolevel=True)
+        return self
+
+    def copy_operation_recipe(self):
+        """Copy the complete editable stack, including disabled steps, as JSON."""
+
+        try:
+            text = dumps_recipe(self.document.steps)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Recipe Copy Error", f"Failed to copy operation recipe:\n{exc}"
+            )
+            return False
+        QtWidgets.QApplication.clipboard().setText(text)
+        count = len(self.document.steps)
+        show_status_message(self, f"Copied {count} operation recipe steps to the clipboard.")
+        return True
+
+    def paste_operation_recipe(self):
+        """Replace the stack using the same validation and trust rules as a file import."""
+
+        try:
+            steps = loads_recipe_steps(
+                QtWidgets.QApplication.clipboard().text(),
+                self.base_data.shape,
+                imported=True,
+                slot_resolver=self._resolve_operation_slot,
+            )
+            target = self._apply_operation_recipe_steps(steps)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Recipe Paste Error", f"Failed to paste operation recipe:\n{exc}"
+            )
+            return False
+        show_status_message(target, f"Replaced the operation stack with {len(steps)} recipe steps.")
+        return True
 
     def populate_recent_recipes_menu(self, menu):
         """Fill `menu` with the most recently saved/loaded recipes."""
