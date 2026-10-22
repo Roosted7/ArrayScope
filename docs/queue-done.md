@@ -6,6 +6,12 @@ blocks graduated during cleanups are preserved after it.
 
 ## Done (most recent first — one line each, evidence linked)
 
+
+- 2026-10-22 — **Start, discover, and transfer workflows:** local labelled examples and recent-data launcher; searchable metadata-only HDF5/NPZ/MAT browsing; clipboard recipes share file-import validation. Interaction and exact-value gates: [open flow](../tests/app/test_open_flow.py), [launcher](../tests/ui/test_launcher_window.py), [browser](../tests/io/test_dataset_selectors.py), [recipes](../tests/ui/test_recipe_clipboard.py); dark/light scenarios in [the gallery](../tools/ui_gallery.py).
+- 2026-10-22 — **Data safety and scientific correctness:** staged atomic NumPy export, grouped/compound/complex HDF5 and nested MAT loading, stable large-offset ROI variance, and direct complex magnitude statistics; [export regressions](../tests/io/test_numpy_save.py), [selector boundaries](../tests/io/test_dataset_selectors.py), [ROI oracles](../tests/core/test_roi.py). Final NPZ metadata benchmark: 326.2 → 16.5 ms median on a 34.96 MB archive, six whole-array decodes/72 MiB → zero, six fresh order-balanced processes; this is a CPU metadata claim, not rendering evidence.
+- 2026-10-22 — **Bounded resource lifetimes:** command stderr tail is bounded and POSIX descendant supervision survives leader exit; rejected shared-memory payloads release leases; process teardown shares one graceful budget and reaps stubborn children before storage reuse; launched viewers destroy their Qt tree and release source weakrefs. Gates: [commands](../tests/operations/test_command_runtime.py), [slots](../tests/kernel/test_shm_slots.py), [processes](../tests/kernel/test_process_backend.py), [viewer lifetime](../tests/app/test_window_references.py).
+- 2026-10-22 — **Trustworthy development loop:** proportional validation guidance replaces directory-wide hardware requirements; normal imports preserve class identity, concurrent test invocations isolate settings, and trace observers use monotonic sequences. [Isolation](../tests/app/test_qsettings_isolation.py), [profile imports](../tests/profiles/test_profile_coordinator.py), [saturated trace observer](../tests/window/test_session_order_lock.py). Local IPC tests require a sandbox that permits Unix socket binding.
+
 - 2026-08-01 — **The dead-code backlog is closed and the excuse lists are
   gone.** All 64 `_PENDING_ADJUDICATION` entries, all 115 `_PENDING_METHODS`,
   and all 12 `_ALLOWLIST` entries are adjudicated; `tests/dead_code.py` no

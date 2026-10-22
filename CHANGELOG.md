@@ -6,6 +6,16 @@ This file records user-visible release changes. Detailed development history and
 
 ### Added
 
+- A home screen with recent data, an explicit DICOM folder picker, accessible
+  keyboard actions, saved appearance, and local volume/time-series/complex
+  examples with meaningful axes and interaction hints.
+- Searchable HDF5, NPZ, and MAT dataset browsing with shapes, numeric types,
+  memory estimates, keyboard opening, and explicit no-match states. Browsing
+  NPZ/HDF5 metadata no longer loads every array payload.
+- Copy/paste operation recipes through File, Operations → More, and the
+  command palette, preserving parameters and disabled steps while sharing
+  existing import compatibility and command-review behavior.
+
 - Coverage numbers now come out of the change-selection map for free:
   `python tools/test_selection.py coverage` reports which functions in
   `arrayscope/` the suite executes (one SQL query, 47 ms warm, no coverage
@@ -40,6 +50,22 @@ This file records user-visible release changes. Detailed development history and
   selection instead of trying to construct a removed backend.
 
 ### Fixed
+
+- Nested HDF5 data, compound-array shapes, encoded complex fields, and MAT
+  numeric fields beside metadata now open consistently. Selectors close file
+  handles on cancellation and read errors.
+- NumPy exports preserve exact filenames and stage complete outputs before
+  atomic replacement, protecting previous files and mapped inputs from
+  partial-write corruption. Separate sidecars remain separate transactions.
+- ROI standard deviation retains small differences at large offsets, and
+  direct complex statistics use magnitude consistently with streaming stats.
+- External-operation diagnostics retain a bounded stderr tail, and timeout
+  and cancellation continue after a POSIX command leader exits.
+- Launched viewers release their Qt trees and source arrays on close.
+  Shared-memory transport rolls back rejected payload leases; process shutdown
+  shares one graceful budget and reaps stubborn workers before storage reuse.
+- Tests preserve canonical production module identities, isolate settings
+  across concurrent runs, and observe bounded trace rings by event sequence.
 
 - A montage round no longer freezes with nothing on screen while it waits for
   level evidence that nothing is computing. Scrolling an FFT montage could

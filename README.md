@@ -18,6 +18,15 @@ The current repository is the ArrayScope `0.8.0` release-candidate line. It has 
 
 ## Start here
 
+Run `arrayscope` without arguments to open your data, resume a recent file,
+or explore a built-in volume, time series, or complex field. Examples are
+generated locally, include named dimensions and hints, and need no download.
+
+HDF5, NPZ, and MAT containers have a searchable dataset browser with shape,
+type, and memory estimates. To transfer a processing workflow between arrays,
+use **Copy Operation Recipe to Clipboard** and **Paste Operation Recipe
+(Replace Stack)** from File, Operations → More, or the `Ctrl+K` palette.
+
 ```python
 import numpy as np
 import arrayscope as asc

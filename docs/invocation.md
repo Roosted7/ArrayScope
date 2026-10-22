@@ -23,7 +23,22 @@ process. When Qt already runs in the calling process (IPython/Jupyter with
 `%gui qt`), the window opens inline; without a running Qt event loop the call
 falls back to blocking mode with a warning.
 
+An inline call returns a viewer window. Closing a launched viewer cancels its
+work and destroys its Qt widget tree; open a new viewer to inspect again, and
+do not call Qt widget methods on the closed window. Direct `ArrayScopeWindow`
+construction keeps caller-owned Qt lifetime for embedding.
+
 ## Command line
+
+Starting `arrayscope` without arguments opens a launcher with **Open Files…**
+and **Open DICOM Folder…** buttons. The standard Open shortcut (`Ctrl+O`, or
+`Cmd+O` on macOS) opens the file picker. Files and DICOM folders can also be
+dragged onto the launcher, which honors the saved appearance preference.
+The home screen also offers locally generated volume, time-series, and complex
+examples with named dimensions and interaction hints. Recent history resumes
+loaded data files and browsed containers; missing paths remain visible with an
+explanation. Failed/canceled asynchronous loads and consumed temporary wrapper
+handoffs do not enter history.
 
 ```bash
 arrayscope data.npy                       # one file: blocking
@@ -38,6 +53,28 @@ lazy and shared with the OS page cache, and in-place edits stay private to the
 viewer process without writing back to the file. `--consume` deletes the input
 file once it is loaded (or mapped) — meant for temporary handoff files, best
 effort on Windows where a mapped file cannot be unlinked.
+
+HDF5 selectors support datasets inside nested groups and numeric compound
+array fields. NPZ selectors inspect array headers to list available datasets;
+they load the chosen array only, and ignore object metadata without unpickling
+it. MAT selectors discover nested numeric fields alongside metadata. Search
+matches names and full paths; the tree shows shape, type, and estimated memory.
+Press Enter or use Open to load the selected array. Canceling a selector or
+encountering a read failure closes its container.
+
+NumPy exports stage complete files beside their destinations before replacing
+them. Preparation failures preserve previous exports, and uppercase `.NPY` or
+`.NPZ` names are used exactly as entered. Replacement is atomic per file; use
+an NPZ export to keep data and embedded recipes in a single file. Separate NPY
+recipe sidecars do not form a multi-file transaction. On Windows, replacing an
+open memory-mapped source may be refused while leaving the original intact.
+
+Operation recipes can also travel through the clipboard: choose **Copy
+Operation Recipe to Clipboard** or **Paste Operation Recipe (Replace Stack)**
+from File, Operations → More, or the `Ctrl+K` command palette. JSON preserves
+operation parameters and enabled/disabled state. Paste replaces the current
+stack and uses the same shape, input-slot, and imported-command review rules
+as loading a recipe file. Both installations need the referenced plugins.
 
 ## Julia and MATLAB wrappers
 

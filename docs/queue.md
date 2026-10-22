@@ -18,7 +18,27 @@ this file says *what, in what order, and when it counts as done*.
    the reverting commit.
 4. Re-order only with a stated reason in the commit message.
 
-## Now (2026-07-16, in order)
+## Current direction (2026-10-22)
+
+The user authorized broad product and architecture renewal, including native
+code if measurements justify it. Reliability, accessible entry points, correct
+scientific measurements, and unnecessary data work take priority over the
+historical engine-only restriction. Existing measurements below remain evidence.
+
+This pass improves dataset browsing/loading, atomic NumPy export, command
+supervision, shared-memory rollback, ROI statistics, launcher accessibility,
+application window ownership, guided examples/recent files, and clipboard recipes. Validation and remaining limits are recorded
+in the [Done ledger](queue-done.md). Working guidance now chooses validation by
+behavior rather than directory and permits evidence-backed redesigns.
+
+| Next | Work | Acceptance |
+|---|---|---|
+| 1 | Selection-first, cancellable region export. Ask for ranges and destination before evaluating data, then use existing exact region/evaluator owners in a worker. Opaque operations retain their explicit whole-stage cost warning. | Canceling the dialogs does zero evaluation; small-region exports avoid whole-array materialization where capabilities allow it; exact values/shape/recipes round-trip and cancellation preserves previous files. |
+| 2 | Recheck maintained-backend interaction and callback bars on real hardware after correctness work. | Physical-pixel and compositor evidence with a representative dataset, both WGPU and PyQtGraph; offscreen runs do not count as GPU performance evidence. |
+| 3 | Evaluate a batched native planning boundary only after a fresh profile shows sufficient cost. | Immutable bulk input, no per-tile Python/native calls, exact state semantics, packaging proof, and a timing improvement beyond same-code spread plus pixel regression checks. Current measured candidate costs total about 6% of the workflow, so a whole-app rewrite is not justified. |
+
+## Engine and platform backlog (2026-08 evidence)
+
 
 | # | Step | Exit gate |
 |---|---|---|
