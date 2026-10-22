@@ -19,6 +19,7 @@ import numpy as np
 
 from arrayscope.core.array_source import LazySourceArray, NdArraySource
 from arrayscope.io.region_export import RegionExportRequest, export_region, plan_region_export
+from arrayscope.io.streaming_export import export_streaming_region, plan_streaming_export
 from arrayscope.operations import recipes
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.pipeline import ArrayDocument
@@ -34,6 +35,7 @@ class BatchExportRequest:
     squeeze: bool = True
     allow_expensive: bool = False
     dataset_path: str | None = None
+    streaming: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, "input_path", Path(self.input_path).expanduser().absolute())
@@ -63,6 +65,10 @@ class BatchExportResult:
     paths: tuple[Path, ...]
     dry_run: bool
     dataset_path: str | None = None
+    streaming: bool = False
+    chunk_shape: tuple[int, ...] | None = None
+    chunk_count: int | None = None
+    estimated_chunk_peak_bytes: int | None = None
 
     @property
     def summary(self):
@@ -87,6 +93,13 @@ class BatchExportResult:
         }
         if self.dataset_path is not None:
             summary["dataset_path"] = self.dataset_path
+        if self.streaming:
+            summary.update(
+                execution_mode="streaming",
+                chunk_shape=list(self.chunk_shape),
+                chunk_count=self.chunk_count,
+                estimated_chunk_peak_bytes=self.estimated_chunk_peak_bytes,
+            )
         return summary
 
 
@@ -199,6 +212,8 @@ def run_batch_export(
         raise ValueError("headless replay input must be .npy or selected .h5/.hdf5 data")
     if request.output_path.suffix.lower() not in {".npy", ".npz"}:
         raise ValueError("headless replay output must end with .npy or .npz")
+    if request.streaming and request.output_path.suffix.lower() != ".npy":
+        raise ValueError("streaming export requires .npy output; omit streaming for .npz")
     if not S_ISREG(request.input_path.stat().st_mode):
         raise ValueError("headless replay input must be a regular array file")
     if request.recipe_path is not None and not S_ISREG(request.recipe_path.stat().st_mode):
@@ -239,7 +254,9 @@ def run_batch_export(
                 else None
             ),
         )
-        plan = plan_region_export(region_request, cancellation_token=cancellation_token)
+        planner = plan_streaming_export if request.streaming else plan_region_export
+        exporter = export_streaming_region if request.streaming else export_region
+        plan = planner(region_request, cancellation_token=cancellation_token)
         result = BatchExportResult(
             input_path=request.input_path,
             output_path=request.output_path,
@@ -250,20 +267,26 @@ def run_batch_export(
             output_shape=plan.output_shape,
             dtype=None if plan.output_dtype is None else str(plan.output_dtype),
             output_bytes=plan.output_bytes,
-            source_read_bytes=plan.source_read_bytes,
+            source_read_bytes=(
+                plan.total_source_read_bytes if request.streaming else plan.source_read_bytes
+            ),
             estimated_peak_bytes=plan.estimated_peak_bytes,
             warnings=plan.warnings,
             needs_confirmation=plan.needs_confirmation,
             paths=(),
             dry_run=bool(dry_run),
             dataset_path=dataset_path,
+            streaming=bool(request.streaming),
+            chunk_shape=plan.chunk_shape if request.streaming else None,
+            chunk_count=plan.chunk_count if request.streaming else None,
+            estimated_chunk_peak_bytes=plan.estimated_peak_bytes if request.streaming else None,
         )
         _check_cancelled(cancellation_token)
         if dry_run:
             return result
         if plan.needs_confirmation and not request.allow_expensive:
             raise BatchExportNeedsConfirmation(result.summary)
-        exported = export_region(
+        exported = exporter(
             region_request,
             prepared=plan,
             cancellation_token=cancellation_token,

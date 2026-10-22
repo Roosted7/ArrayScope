@@ -33,6 +33,11 @@ def add_batch_arguments(parser):
         "--export", metavar="OUTPUT", help="Export exact scientific values to a .npy or .npz file"
     )
     group.add_argument(
+        "--stream",
+        action="store_true",
+        help="Write supported .npy exports in bounded chunks; reject unsupported plans before reading source values",
+    )
+    group.add_argument(
         "--recipe", metavar="RECIPE.json", help="Apply a built-in operation recipe before export"
     )
     group.add_argument(
@@ -112,11 +117,12 @@ def run_batch_cli(args, parser):
         or args.no_squeeze
         or args.dry_run
         or args.allow_expensive
+        or args.stream
     )
     if args.export is None:
         if batch_options:
             parser.error(
-                "--recipe, --range, --no-squeeze, --dry-run and --allow-expensive require --export"
+                "--recipe, --range, --no-squeeze, --dry-run, --allow-expensive and --stream require --export"
             )
         return None
     conflicts = [
@@ -147,6 +153,8 @@ def run_batch_cli(args, parser):
         parser.error("headless export requires a .npy input or an HDF5 input with --dataset")
     if Path(args.export).suffix.lower() not in {".npy", ".npz"}:
         parser.error("--export output must end in .npy or .npz")
+    if args.stream and Path(args.export).suffix.lower() != ".npy":
+        parser.error("--stream requires .npy output; omit --stream to export .npz")
     axes = tuple(axis for axis, _start, _stop in args.export_ranges)
     if len(set(axes)) != len(axes):
         parser.error("each --range axis may be specified only once")
@@ -170,6 +178,7 @@ def run_batch_cli(args, parser):
             squeeze=not args.no_squeeze,
             allow_expensive=args.allow_expensive,
             dataset_path=dataset_path,
+            streaming=args.stream,
         )
         with _cancel_on_interrupt(token):
             result = run_batch_export(
