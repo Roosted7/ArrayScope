@@ -1622,6 +1622,29 @@ def pytest_collection(session):
         config.arrayscope_since = report
 
 
+def _freeze_collection_seconds(config):
+    """Keep one immutable cost map for every worker in this run."""
+    snapshot = getattr(config, "_arrayscope_collection_seconds", None)
+    if snapshot is None:
+        snapshot = tuple(sorted(testmon_policy.file_seconds(config).items()))
+        config._arrayscope_collection_seconds = snapshot
+    return snapshot
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node):
+    """Give initial and crash-replacement workers the same pre-run timings."""
+    node.workerinput["arrayscope_file_seconds"] = _freeze_collection_seconds(node.config)
+
+
+def _collection_seconds(config):
+    if hasattr(config, "workerinput"):
+        # A missing payload still has a deterministic order; reading the live
+        # map here could differ from workers that have already started tests.
+        return dict(config.workerinput.get("arrayscope_file_seconds", ()))
+    return testmon_policy.file_seconds(config)
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_collection_modifyitems(config, items):
     """Order the run for wall time, then put coupled groups back together.
@@ -1646,7 +1669,7 @@ def pytest_collection_modifyitems(config, items):
     if not getattr(config, "testmon_config", None):
         return
     items[:] = testmon_policy.order_for_makespan(
-        items, testmon_policy.file_seconds(config), declaration_order
+        items, _collection_seconds(config), declaration_order
     )
     if groups:
         items[:] = testmon_policy.regroup_coupled_items(items, declaration_order, groups)
@@ -1664,6 +1687,7 @@ def _selection_is_narrowing(config):
     return bool(testmon_config) and bool(testmon_config.select)
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_sessionstart(session):
     """Open the red ledger, once testmon's map is readable and before any test.
 
@@ -1686,6 +1710,13 @@ def pytest_sessionstart(session):
     _flake_run_shape = {}
     _flake_load_start = None
     config = session.config
+    options = getattr(config, "option", None)
+    if not hasattr(config, "workerinput") and (
+        getattr(options, "numprocesses", 0) or getattr(options, "tx", ())
+    ):
+        # xdist starts workers in its trylast sessionstart. Capture before any
+        # worker can record durations, including runs using explicit --tx.
+        _freeze_collection_seconds(config)
     testmon_config = getattr(config, "testmon_config", None)
     # Both the controller and every worker delete from the map during their own
     # collection, so both need the scope guard — unlike the ledger below, which
