@@ -10,9 +10,16 @@ sources; ADR 0049).
 
 from __future__ import annotations
 
+from operator import index
+
 import numpy as np
 
-from arrayscope.core.array_source import DEFAULT_SOURCE_READ_BUDGET_BYTES, SourceReadRefused
+from arrayscope.core.array_source import (
+    DEFAULT_SOURCE_READ_BUDGET_BYTES,
+    CompositeArraySource,
+    LazySourceArray,
+    SourceReadRefused,
+)
 from arrayscope.core.memory_budget import format_bytes
 from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.operations.regions import (
@@ -46,6 +53,45 @@ def source_read_budget_bytes(evaluation_context) -> int:
     return max(int(budget), DEFAULT_SOURCE_READ_BUDGET_BYTES)
 
 
+def estimate_source_read_nbytes(base_data, region: RegionSpec) -> int | None:
+    """Estimate read working memory from metadata, never physical disk traffic.
+
+    A source may conservatively include decoded chunks and assembly buffers in
+    ``estimate_read_nbytes(index_spec)``. An advertised unknown estimate stays
+    unknown; legacy sources without the optional method use logical result
+    bytes. The declared estimate cannot undercut the result allocation.
+    """
+
+    logical = region_nbytes(np.shape(base_data), getattr(base_data, "dtype", None), region)
+    estimator = getattr(base_data, "estimate_read_nbytes", None)
+    if not callable(estimator):
+        if isinstance(base_data, LazySourceArray):
+            return estimate_source_read_nbytes(base_data.source, region)
+        if isinstance(base_data, CompositeArraySource):
+            left = estimate_source_read_nbytes(base_data.a, region)
+            right = estimate_source_read_nbytes(base_data.b, region)
+            left_result = region_nbytes(base_data.shape, base_data.a.dtype, region)
+            right_result = region_nbytes(base_data.shape, base_data.b.dtype, region)
+            if any(value is None for value in (left, right, left_result, right_result, logical)):
+                return None
+            # The left result survives the right read; both survive while the
+            # elementwise composite allocates its detached output.
+            return max(left, left_result + right, left_result + right_result + logical)
+        return logical
+    estimated = estimator(index_spec_from_region(region))
+    if estimated is None:
+        return None
+    try:
+        estimated = index(estimated)
+    except TypeError as exc:
+        raise ValueError(
+            "source read working estimate must be nonnegative integer bytes or None"
+        ) from exc
+    if estimated < 0:
+        raise ValueError("source read working estimate must be nonnegative integer bytes or None")
+    return max(estimated, logical or 0)
+
+
 def read_base_region(
     base_data,
     region: RegionSpec,
@@ -65,12 +111,19 @@ def read_base_region(
         if budget_bytes is not None
         else source_read_budget_bytes(evaluation_context)
     )
-    estimated = region_nbytes(np.shape(base_data), getattr(base_data, "dtype", None), region)
-    if estimated is not None and int(estimated) > budget:
+    estimated = estimate_source_read_nbytes(base_data, region)
+    if estimated is None:
         raise SourceReadRefused(
             f"refusing lazy source read of region {region_text(region)}: "
-            f"{format_bytes(int(estimated))} exceeds the {format_bytes(budget)} read budget",
-            requested_nbytes=int(estimated),
+            "its read working memory estimate is unknown",
+            budget_bytes=budget,
+        )
+    if estimated > budget:
+        raise SourceReadRefused(
+            f"refusing lazy source read of region {region_text(region)}: "
+            f"estimated read working memory {format_bytes(estimated)} exceeds the "
+            f"{format_bytes(budget)} read budget",
+            requested_nbytes=estimated,
             budget_bytes=budget,
         )
     data = reader(index_spec_from_region(region), cancellation_token=cancellation_token)
@@ -83,4 +136,4 @@ def _check_cancelled(token) -> None:
         raise EvaluationCancelled()
 
 
-__all__ = ["read_base_region", "source_read_budget_bytes"]
+__all__ = ["estimate_source_read_nbytes", "read_base_region", "source_read_budget_bytes"]

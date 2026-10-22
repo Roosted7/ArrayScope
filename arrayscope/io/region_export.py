@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from arrayscope.core.array_source import ArraySource, LazySourceArray
+from arrayscope.core.array_source import ArraySource, CompositeArraySource, LazySourceArray
 from arrayscope.core.compute_policy import ComputeLane, EvaluationContext
 from arrayscope.core.memory_budget import DEFAULT_VISIBLE_RENDER_BUDGET_BYTES, format_bytes
 from arrayscope.core.roi import RoiGeometry
@@ -145,8 +145,14 @@ def capture_export_sources(document):
     visited = set()
 
     def add(source):
-        if not any(source is existing for existing in sources):
-            sources.append(source)
+        if any(source is existing for existing in sources):
+            return
+        sources.append(source)
+        if isinstance(source, CompositeArraySource):
+            add(source.a)
+            add(source.b)
+        elif isinstance(source, LazySourceArray):
+            add(source.source)
 
     def visit(current):
         if id(current) in visited:
@@ -174,6 +180,7 @@ class RegionExportRequest:
     view_recipe_json: str | None = None
     sidecar: bool = False
     definitions: tuple | None = field(default=None, repr=False)
+    source_metadata_json: str | None = None
 
     def __post_init__(self):
         shape = tuple(self.document.current_shape)
@@ -188,6 +195,11 @@ class RegionExportRequest:
         object.__setattr__(self, "path", Path(self.path).expanduser().absolute())
         object.__setattr__(self, "ranges", ranges)
         object.__setattr__(self, "squeeze", bool(self.squeeze))
+        if self.source_metadata_json is not None:
+            source_metadata = json.loads(self.source_metadata_json)
+            if not isinstance(source_metadata, dict):
+                raise ValueError("export source metadata must be a JSON object")
+            object.__setattr__(self, "source_metadata_json", json.dumps(source_metadata))
         object.__setattr__(
             self,
             "definitions",
@@ -195,6 +207,7 @@ class RegionExportRequest:
             if self.definitions is None
             else tuple(self.definitions),
         )
+        _validate_export_sources(self.document)
 
     @property
     def selected_shape(self):
@@ -205,7 +218,28 @@ class RegionExportRequest:
         return tuple(size for size in self.selected_shape if not self.squeeze or size != 1)
 
 
+def _validate_export_sources(document):
+    validated = set()
+    for source in capture_export_sources(document):
+        validator = getattr(source, "validate_snapshot", None)
+        if callable(validator):
+            key = (
+                id(getattr(validator, "__self__", source)),
+                id(getattr(validator, "__func__", validator)),
+            )
+            if key in validated:
+                continue
+            validated.add(key)
+            try:
+                validator()
+            except Exception as exc:
+                raise RegionExportChanged(
+                    f"Export source changed or became unavailable; reload it before exporting: {exc}"
+                ) from exc
+
+
 def validate_region_export_snapshot(request: RegionExportRequest) -> None:
+    _validate_export_sources(request.document)
     for snapshot in request.definitions:
         if isinstance(snapshot, _DefinitionSnapshot):
             try:
@@ -338,25 +372,25 @@ def plan_region_export(request, *, cancellation_token=None, evaluation_context=N
 
 
 def _selection_json(request, data):
-    return json.dumps(
-        {
-            "format": "arrayscope-region-export",
-            "version": 1,
-            "document_revision": request.document.revision,
-            "derived_shape": request.document.current_shape,
-            "ranges": request.ranges,
-            "squeeze": request.squeeze,
-            "selected_shape": request.selected_shape,
-            "output_shape": tuple(data.shape),
-            "output_axes": [
-                axis
-                for axis, size in enumerate(request.selected_shape)
-                if not request.squeeze or size != 1
-            ],
-            "dtype": data.dtype.str,
-        },
-        indent=2,
-    )
+    selection = {
+        "format": "arrayscope-region-export",
+        "version": 1,
+        "document_revision": request.document.revision,
+        "derived_shape": request.document.current_shape,
+        "ranges": request.ranges,
+        "squeeze": request.squeeze,
+        "selected_shape": request.selected_shape,
+        "output_shape": tuple(data.shape),
+        "output_axes": [
+            axis
+            for axis, size in enumerate(request.selected_shape)
+            if not request.squeeze or size != 1
+        ],
+        "dtype": data.dtype.str,
+    }
+    if request.source_metadata_json is not None:
+        selection["source"] = json.loads(request.source_metadata_json)
+    return json.dumps(selection, indent=2)
 
 
 def export_region(

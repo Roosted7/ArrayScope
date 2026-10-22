@@ -29,6 +29,7 @@ from arrayscope.operations.regions import (
     region_nbytes,
     region_shape,
 )
+from arrayscope.operations.source_read import estimate_source_read_nbytes
 
 
 @dataclass(frozen=True)
@@ -220,7 +221,9 @@ def plan_output_region(document, final_region: RegionSpec, *, request_kind="regi
         transitions.append(transition)
         current_region = required
     transitions = tuple(reversed(transitions))
-    region_peak = estimate_region_plan_peak(base_shape, base_dtype, transitions, current_region)
+    region_peak = estimate_region_plan_peak(
+        base_shape, base_dtype, transitions, current_region, base_data=document.base_data
+    )
     return RegionPlan(
         request_kind=str(request_kind),
         final_region=final_region,
@@ -239,9 +242,13 @@ def plan_output_region(document, final_region: RegionSpec, *, request_kind="regi
 
 
 def estimate_region_plan_peak(
-    base_shape, base_dtype, transitions, required_input_region
+    base_shape, base_dtype, transitions, required_input_region, *, base_data=None
 ) -> int | None:
-    peak = region_nbytes(tuple(int(size) for size in base_shape), base_dtype, required_input_region)
+    peak = (
+        region_nbytes(tuple(int(size) for size in base_shape), base_dtype, required_input_region)
+        if base_data is None
+        else estimate_source_read_nbytes(base_data, required_input_region)
+    )
     dtype = None if base_dtype is None else np.dtype(base_dtype)
     for transition in tuple(transitions):
         input_dtype = dtype

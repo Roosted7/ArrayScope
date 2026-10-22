@@ -5,7 +5,10 @@ import numpy as np
 import pytest
 
 from arrayscope.core.array_source import (
+    DEFAULT_SOURCE_MATERIALIZE_BUDGET_BYTES,
     DEFAULT_SOURCE_READ_BUDGET_BYTES,
+    ArraySource,
+    CompositeArraySource,
     LazySourceArray,
     NdArraySource,
     SourceReadRefused,
@@ -47,6 +50,17 @@ class _CountingSource(NdArraySource):
         return super().read_region(index_spec, cancellation_token=cancellation_token)
 
 
+class _WorkingSource(_CountingSource):
+    def __init__(self, array, working_bytes):
+        super().__init__(array)
+        self.working_bytes = working_bytes
+        self.estimates = []
+
+    def estimate_read_nbytes(self, index_spec):
+        self.estimates.append(tuple(index_spec))
+        return self.working_bytes
+
+
 def _lazy(data):
     return LazySourceArray(_CountingSource(data))
 
@@ -80,6 +94,133 @@ def test_read_base_region_refuses_over_budget_reads():
     assert excinfo.value.requested_nbytes == data.nbytes
     assert excinfo.value.budget_bytes == 128
     assert lazy.source.read_specs == []
+
+
+def test_decoded_chunk_working_set_is_guarded_before_any_source_read():
+    source = _WorkingSource(np.zeros((8, 8), dtype=np.float32), working_bytes=4096)
+    lazy = LazySourceArray(source)
+    region = region_from_index_spec(lazy.shape, (slice(1, 2), slice(2, 3)))
+
+    with pytest.raises(SourceReadRefused) as refused:
+        read_base_region(lazy, region, budget_bytes=128)
+
+    assert refused.value.requested_nbytes == 4096
+    assert source.estimates == [(slice(1, 2, 1), slice(2, 3, 1))]
+    assert source.read_specs == []
+
+
+def test_unknown_advertised_working_set_is_refused_before_any_source_read():
+    source = _WorkingSource(np.zeros((8, 8), dtype=np.float32), working_bytes=None)
+    lazy = LazySourceArray(source)
+    region = region_from_index_spec(lazy.shape, (slice(1, 2), slice(2, 3)))
+
+    with pytest.raises(SourceReadRefused, match="unknown") as refused:
+        read_base_region(lazy, region, budget_bytes=128)
+
+    assert refused.value.requested_nbytes is None
+    assert source.read_specs == []
+
+
+def test_export_preflight_prices_source_working_set_without_changing_logical_bytes(tmp_path):
+    from arrayscope.io.region_export import RegionExportRequest, plan_region_export
+
+    source = _WorkingSource(np.zeros((8, 8), dtype=np.float32), working_bytes=4096)
+    request = RegionExportRequest(
+        ArrayDocument(LazySourceArray(source)), tmp_path / "selection.npy", ((1, 2), (2, 3))
+    )
+
+    plan = plan_region_export(request)
+
+    assert plan.source_read_bytes == 4
+    assert plan.output_bytes == 4
+    assert plan.estimated_peak_bytes == 4096
+    assert source.read_specs == []
+
+
+def test_legacy_source_protocol_and_logical_budget_fallback_stay_available():
+    source = _CountingSource(np.zeros((8, 8), dtype=np.float32))
+    lazy = LazySourceArray(source)
+    region = region_from_index_spec(lazy.shape, (slice(1, 2), slice(2, 3)))
+
+    assert isinstance(source, ArraySource)
+    assert not hasattr(lazy, "estimate_read_nbytes")
+    np.testing.assert_array_equal(read_base_region(lazy, region, budget_bytes=4), [[0]])
+    assert len(source.read_specs) == 1
+
+
+def test_composite_source_cannot_hide_unknown_or_oversized_child_working_sets():
+    left = _WorkingSource(np.zeros((8, 8), dtype=np.float32), working_bytes=4096)
+    right = _WorkingSource(np.ones((8, 8), dtype=np.float32), working_bytes=8192)
+    source = LazySourceArray(CompositeArraySource(LazySourceArray(left), LazySourceArray(right)))
+    region = region_from_index_spec(source.shape, (slice(1, 2), slice(2, 3)))
+
+    with pytest.raises(SourceReadRefused) as refused:
+        read_base_region(source, region, budget_bytes=8192)
+
+    assert refused.value.requested_nbytes == 8192 + 4
+    assert left.read_specs == right.read_specs == []
+    right.working_bytes = None
+    with pytest.raises(SourceReadRefused, match="unknown"):
+        read_base_region(source, region, budget_bytes=16384)
+    assert left.read_specs == right.read_specs == []
+
+
+def test_unknown_read_working_set_stays_unknown_through_transform_preflight(tmp_path):
+    from arrayscope.io.region_export import RegionExportRequest, plan_region_export
+
+    source = _WorkingSource(np.zeros((8, 8), dtype=np.float32), working_bytes=None)
+    request = RegionExportRequest(
+        ArrayDocument(LazySourceArray(source), operations=(CenteredFFT(1),)),
+        tmp_path / "unknown.npy",
+        ((1, 2), (2, 3)),
+    )
+
+    plan = plan_region_export(request)
+
+    assert plan.estimated_peak_bytes is None
+    assert plan.needs_confirmation
+    assert source.read_specs == []
+
+
+@pytest.mark.parametrize("working_bytes", [0, -1, 1.5])
+def test_source_estimate_cannot_undercut_result_bytes_or_report_invalid_counts(working_bytes):
+    source = _WorkingSource(np.zeros((8, 8), dtype=np.float32), working_bytes=working_bytes)
+    lazy = LazySourceArray(source)
+    region = region_from_index_spec(lazy.shape, (slice(1, 2), slice(2, 3)))
+
+    if working_bytes == 0:
+        with pytest.raises(SourceReadRefused) as refused:
+            read_base_region(lazy, region, budget_bytes=3)
+        assert refused.value.requested_nbytes == 4
+    else:
+        with pytest.raises(ValueError, match="nonnegative integer"):
+            read_base_region(lazy, region, budget_bytes=128)
+    assert source.read_specs == []
+
+
+@pytest.mark.parametrize("working_bytes", [None, DEFAULT_SOURCE_MATERIALIZE_BUDGET_BYTES + 1])
+def test_implicit_full_materialization_uses_source_working_guard_before_read(working_bytes):
+    source = _WorkingSource(np.zeros((2, 3), dtype=np.float32), working_bytes=working_bytes)
+    lazy = LazySourceArray(source)
+
+    with pytest.raises(SourceReadRefused):
+        np.asarray(lazy)
+
+    assert source.read_specs == []
+
+
+def test_full_materialization_preserves_convenience_cap_and_explicit_unlimited_semantics():
+    values = np.arange(6, dtype=np.float32).reshape(2, 3)
+    source = _WorkingSource(values, working_bytes=128)
+    lazy = LazySourceArray(source)
+
+    with pytest.raises(SourceReadRefused):
+        lazy.materialize(budget_bytes=64)
+    assert source.read_specs == []
+    np.testing.assert_array_equal(lazy.materialize(budget_bytes=128), values)
+    source.working_bytes = None
+    np.testing.assert_array_equal(lazy.materialize(budget_bytes=None), values)
+    assert len(source.read_specs) == 2
 
 
 def test_read_base_region_checks_cancellation_before_reading():

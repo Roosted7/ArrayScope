@@ -405,6 +405,16 @@ class LazySourceArray:
     def label(self) -> str:
         return self._source.label
 
+    @property
+    def estimate_read_nbytes(self):
+        """Forward optional working-set metadata without requiring it of sources."""
+        return self._source.estimate_read_nbytes
+
+    @property
+    def validate_snapshot(self):
+        """Forward optional metadata-only snapshot validation to its owner."""
+        return self._source.validate_snapshot
+
     def __len__(self) -> int:
         shape = self.shape
         if not shape:
@@ -429,6 +439,12 @@ class LazySourceArray:
                 requested_nbytes=self.nbytes,
                 budget_bytes=int(budget_bytes),
             )
+        if budget_bytes is not None:
+            from arrayscope.operations.regions import region_from_index_spec
+            from arrayscope.operations.source_read import read_base_region
+
+            region = region_from_index_spec(self.shape, tuple(slice(None) for _ in self.shape))
+            return read_base_region(self, region, budget_bytes=int(budget_bytes))
         return np.asarray(self.read_region(tuple(slice(None) for _ in self.shape)))
 
     def __array__(self, dtype=None):

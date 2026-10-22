@@ -9,7 +9,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from arrayscope.core.array_source import SourceReadRefused
+from arrayscope.core.array_source import (
+    CompositeArraySource,
+    LazySourceArray,
+    NdArraySource,
+    SourceReadRefused,
+)
 from arrayscope.core.roi import RoiGeometry
 from arrayscope.io.numpy_save import save_derived_array
 from arrayscope.io.region_export import (
@@ -450,6 +455,67 @@ def test_completion_observer_cannot_cancel_an_already_published_export(tmp_path,
 
     np.testing.assert_array_equal(np.load(result.paths[0], allow_pickle=False), np.arange(3))
     assert "Export committed, but its completion observer failed" in caplog.text
+
+
+@pytest.mark.parametrize("composite", [False, True])
+def test_source_snapshot_change_after_evaluation_withholds_publication(tmp_path, composite):
+    class VersionedSource(NdArraySource):
+        changed = False
+
+        def validate_snapshot(self):
+            if self.changed:
+                raise RuntimeError("file identity changed")
+
+    source = VersionedSource(np.arange(12, dtype=np.float32).reshape(3, 4))
+    lazy = LazySourceArray(source)
+    base = (
+        LazySourceArray(CompositeArraySource(lazy, np.ones((3, 4), dtype=np.float32)))
+        if composite
+        else lazy
+    )
+    request = RegionExportRequest(ArrayDocument(base), tmp_path / "previous.npy", ((0, 2), (0, 2)))
+    request.path.write_bytes(b"previous export")
+
+    def change_after_evaluation(progress):
+        if progress.phase == "writing":
+            source.changed = True
+
+    with pytest.raises(RegionExportChanged, match="reload"):
+        export_region(request, progress_callback=change_after_evaluation)
+
+    assert request.path.read_bytes() == b"previous export"
+    assert set(tmp_path.iterdir()) == {request.path}
+    with pytest.raises(RegionExportChanged):
+        plan_region_export(request)
+
+
+@pytest.mark.parametrize("mutable_text", [False, True])
+def test_archive_selection_provenance_includes_immutable_named_source_metadata(
+    tmp_path, mutable_text
+):
+    metadata = {"source_path": "/experiment.h5", "dataset_path": "/measurements"}
+    encoded = json.dumps(metadata)
+    if mutable_text:
+        encoded = bytearray(encoded.encode())
+    request = RegionExportRequest(
+        ArrayDocument(np.arange(6).reshape(2, 3)),
+        tmp_path / "named.npz",
+        ((0, 2), (1, 3)),
+        source_metadata_json=encoded,
+    )
+    metadata["dataset_path"] = "/edited-later"
+    if mutable_text:
+        encoded[:] = json.dumps(metadata).encode()
+
+    result = export_region(request)
+
+    with np.load(result.paths[0], allow_pickle=False) as archive:
+        manifest = json.loads(str(archive["selection_json"]))
+        assert manifest["source"] == {
+            "source_path": "/experiment.h5",
+            "dataset_path": "/measurements",
+        }
+        np.testing.assert_array_equal(archive["array"], np.arange(6).reshape(2, 3)[:, 1:3])
 
 
 @pytest.mark.parametrize("suffix", [".npy", ".npz"])

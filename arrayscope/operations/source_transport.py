@@ -81,6 +81,25 @@ class MemmapLeaf:
 
 
 @dataclass(frozen=True)
+class HDF5Leaf:
+    """An immutable named source, reconstructed without transporting a handle."""
+
+    path: str
+    dataset: object
+    file_identity: tuple
+
+    def reconstruct(self):
+        from arrayscope.io.hdf5_source import HDF5ArraySource
+
+        try:
+            return HDF5ArraySource(self.path, self.dataset, file_identity=self.file_identity)
+        except Exception as exc:
+            raise SourceTransportUnavailable(
+                f"HDF5 source {self.path} changed or cannot be reopened: {exc}"
+            ) from exc
+
+
+@dataclass(frozen=True)
 class SharedMemoryLeaf:
     """An eager array the GUI process copied into one shared segment once."""
 
@@ -209,6 +228,7 @@ def _describe(base_data, *, publish: bool):
         NdArraySource,
         ScaledArraySource,
     )
+    from arrayscope.io.hdf5_source import HDF5ArraySource
 
     if isinstance(base_data, LazySourceArray):
         child = _describe(base_data.source, publish=publish)
@@ -217,6 +237,12 @@ def _describe(base_data, *, publish: bool):
         return LazyArrayNode(
             child=child,
             materialize_budget_bytes=getattr(base_data, "_materialize_budget_bytes", None),
+        )
+    if isinstance(base_data, HDF5ArraySource):
+        return HDF5Leaf(
+            path=os.fspath(base_data.path),
+            dataset=base_data.descriptor,
+            file_identity=tuple(base_data.file_identity),
         )
     if isinstance(base_data, ScaledArraySource):
         child = _describe(base_data.backing, publish=publish)
@@ -490,6 +516,7 @@ __all__ = [
     "MAX_PUBLISHED_BYTES",
     "MAX_PUBLISHED_TOTAL_BYTES",
     "CompositeNode",
+    "HDF5Leaf",
     "LazyArrayNode",
     "MemmapLeaf",
     "NdSourceNode",

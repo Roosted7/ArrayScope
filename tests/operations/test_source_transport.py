@@ -10,7 +10,11 @@ picklability and agreement over a file.
 
 from __future__ import annotations
 
+import base64
+import json
 import pickle
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -24,6 +28,8 @@ from arrayscope.operations import source_transport
 from arrayscope.operations.evaluator import _document_key, stage_document_key
 from arrayscope.operations.pipeline import ArrayDocument, Crop
 from arrayscope.operations.source_transport import (
+    HDF5Leaf,
+    LazyArrayNode,
     MemmapLeaf,
     SharedMemoryLeaf,
     SourceTransportUnavailable,
@@ -196,3 +202,120 @@ def test_a_file_that_changed_refuses_to_rebuild(npy_path):
 
     with pytest.raises(SourceTransportUnavailable):
         leaf.reconstruct()
+
+
+@pytest.fixture
+def hdf5_sources(tmp_path):
+    import h5py
+
+    from arrayscope.io.hdf5_catalog import catalog_hdf5
+    from arrayscope.io.hdf5_source import HDF5ArraySource
+
+    path = tmp_path / "datasets.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset(
+            "first", data=np.arange(60, dtype=np.float32).reshape(3, 4, 5), chunks=(1, 2, 5)
+        )
+        handle.create_dataset("second", data=np.arange(60, dtype=np.float32).reshape(3, 4, 5))
+    catalog = catalog_hdf5(path)
+    sources = [HDF5ArraySource(path, catalog.dataset(key)) for key in ("first", "second")]
+    try:
+        yield path, catalog, sources
+    finally:
+        for source in sources:
+            source.close()
+
+
+def test_hdf5_descriptor_is_metadata_only_and_preserves_dataset_identity(hdf5_sources, monkeypatch):
+    import h5py
+
+    from arrayscope.io.hdf5_source import HDF5ArraySource
+
+    path, catalog, (source, other) = hdf5_sources
+
+    def fail_payload(*_args, **_kwargs):
+        raise AssertionError("description or reconstruction read HDF5 payload")
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", fail_payload)
+    monkeypatch.setattr(h5py.Dataset, "read_direct", fail_payload)
+    lazy = LazySourceArray(source, materialize_budget_bytes=77)
+    descriptor = describe_base_data(lazy)
+    payload = pickle.dumps(descriptor)
+    rebuilt = pickle.loads(payload).reconstruct()
+    twin = HDF5ArraySource(path, catalog.dataset("first"))
+    try:
+        assert isinstance(descriptor, LazyArrayNode)
+        assert isinstance(descriptor.child, HDF5Leaf)
+        assert rebuilt._materialize_budget_bytes == 77
+        assert len(payload) < 8192
+        assert base_data_token(source) == base_data_token(twin)
+        assert base_data_token(rebuilt) == base_data_token(lazy)
+        assert base_data_token(source) != base_data_token(other)
+    finally:
+        rebuilt.close()
+        twin.close()
+
+
+def test_hdf5_descriptor_keeps_open_identity_if_file_replaced_before_description(hdf5_sources):
+    import h5py
+
+    path, _catalog, (source, _other) = hdf5_sources
+    replacement = path.with_name("replacement.h5")
+    with h5py.File(replacement, "w") as handle:
+        handle.create_dataset("first", data=np.full((3, 4, 5), 99, dtype=np.float32))
+    replacement.replace(path)
+
+    descriptor = describe_base_data(source)
+
+    assert descriptor.file_identity == source.file_identity
+    with pytest.raises(SourceTransportUnavailable, match="changed"):
+        descriptor.reconstruct()
+
+
+def test_hdf5_reconstructed_source_revalidates_cached_file_on_each_read(hdf5_sources):
+    import h5py
+
+    from arrayscope.io.hdf5_catalog import HDF5SourceChanged
+
+    path, _catalog, (source, _other) = hdf5_sources
+    rebuilt = describe_base_data(source).reconstruct()
+    try:
+        expected = np.arange(60, dtype=np.float32).reshape(3, 4, 5)[1, 1:3, 2:4]
+        np.testing.assert_array_equal(rebuilt.read_region((1, slice(1, 3), slice(2, 4))), expected)
+        with h5py.File(path, "r+") as handle:
+            handle["first"][1, 1, 2] = 1000
+        with pytest.raises(HDF5SourceChanged, match="changed"):
+            rebuilt.read_region((1, slice(1, 3), slice(2, 4)))
+    finally:
+        rebuilt.close()
+
+
+def test_hdf5_descriptor_crosses_real_process_boundary_without_gui_or_payload_pickle(hdf5_sources):
+    _path, _catalog, (source, _other) = hdf5_sources
+    descriptor = describe_base_data(LazySourceArray(source))
+    code = """
+import base64, json, pickle, sys
+from arrayscope.operations.source_read import read_base_region
+from arrayscope.operations.regions import region_from_index_spec
+source = pickle.loads(base64.b64decode(sys.argv[1])).reconstruct()
+try:
+    region = region_from_index_spec(source.shape, (1, slice(1, 3), slice(2, 4)))
+    values = read_base_region(source, region)
+    assert not any(name.startswith(('PySide', 'PyQt', 'pyqtgraph')) for name in sys.modules)
+    print(json.dumps(values.tolist()))
+finally:
+    source.close()
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code, base64.b64encode(pickle.dumps(descriptor)).decode("ascii")],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    np.testing.assert_array_equal(
+        json.loads(completed.stdout), np.arange(60, dtype=np.float32).reshape(3, 4, 5)[1, 1:3, 2:4]
+    )
