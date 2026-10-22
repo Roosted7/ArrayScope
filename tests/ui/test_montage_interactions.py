@@ -86,7 +86,10 @@ def _assert_view_contains_applied_montage_plan(win):
     assert view_range[1][1] >= float(height)
 
 
-def _wait_for_committed_session_geometry(win, qtbot, *, expected_indices=None):
+def _wait_for_committed_session_geometry(
+    win, qtbot, *, expected_indices=None, expected_active_tiles=None
+):
+    expected_active = None if expected_active_tiles is None else frozenset(expected_active_tiles)
     try:
         settle_window(
             win,
@@ -97,6 +100,11 @@ def _wait_for_committed_session_geometry(win, qtbot, *, expected_indices=None):
                 and (
                     expected_indices is None
                     or win.renderer._frame_session.plan.geometry.indices == tuple(expected_indices)
+                )
+                and (
+                    expected_active is None
+                    or frozenset(win.renderer._frame_session.frame_plan.active_region_ids)
+                    == expected_active
                 )
             ),
         )
@@ -127,6 +135,40 @@ def _assert_committed_tile_value(win, tile, value):
     assert payload is not None
     expected = np.full((int(tile.height), int(tile.width)), value, dtype=np.float32)
     np.testing.assert_array_equal(np.asarray(payload.image), expected)
+
+
+def test_committed_geometry_wait_can_observe_the_deferred_viewport_demand(qtbot):
+    from pyqtgraph.Qt import QtCore
+
+    geometry = SimpleNamespace(indices=tuple(range(20)))
+    session = SimpleNamespace(
+        visible_plan_complete=lambda: True,
+        required_target_unsettled_tiles=lambda: (),
+        plan=SimpleNamespace(geometry=geometry),
+        frame_plan=SimpleNamespace(active_region_ids=tuple(range(20))),
+    )
+    timer = QtCore.QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(lambda: setattr(session.frame_plan, "active_region_ids", (0,)))
+    win = SimpleNamespace(
+        renderer=SimpleNamespace(_frame_session=session, _frame_viewport_update_timer=timer),
+        display_geometry=SimpleNamespace(montage=geometry),
+    )
+    timer.start(0)
+
+    # A committed layout can be complete before its queued camera-demand
+    # rescope. Geometry-only callers retain that intentionally weaker promise.
+    _wait_for_committed_session_geometry(win, qtbot, expected_indices=range(20))
+    assert timer.isActive()
+    assert session.frame_plan.active_region_ids == tuple(range(20))
+
+    observed = _wait_for_committed_session_geometry(
+        win, qtbot, expected_indices=range(20), expected_active_tiles=(0,)
+    )
+
+    assert not timer.isActive()
+    assert observed is session
+    assert observed.frame_plan.active_region_ids == (0,)
 
 
 def _reset_warm_tile_state(win):
@@ -335,7 +377,9 @@ def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qt
             win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":")
         )
         win.render(reason="test-montage-more-tiles")
-        session = _wait_for_committed_session_geometry(win, qtbot, expected_indices=range(20))
+        session = _wait_for_committed_session_geometry(
+            win, qtbot, expected_indices=range(20), expected_active_tiles=(0,)
+        )
 
         view_range = win.img_view.getView().viewRange()
         assert view_range[0] == pytest.approx(before[0], abs=0.03)
