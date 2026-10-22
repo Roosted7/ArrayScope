@@ -1,4 +1,4 @@
-"""Headless recipe replay over an exclusively owned, read-only NumPy source.
+"""Headless recipe replay over an exclusively owned, read-only array source.
 
 The first replay contract supports ArrayScope's built-in operations. Plugin
 lookup can load code, consult Qt settings, and execute characterization probes;
@@ -7,6 +7,7 @@ rejecting those IDs before lookup keeps dry-run and import policy explicit.
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from math import prod
@@ -32,6 +33,7 @@ class BatchExportRequest:
     ranges: tuple[tuple[int, int, int], ...] = ()
     squeeze: bool = True
     allow_expensive: bool = False
+    dataset_path: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "input_path", Path(self.input_path).expanduser().absolute())
@@ -39,6 +41,8 @@ class BatchExportRequest:
         if self.recipe_path is not None:
             object.__setattr__(self, "recipe_path", Path(self.recipe_path).expanduser().absolute())
         object.__setattr__(self, "ranges", tuple(tuple(bounds) for bounds in self.ranges))
+        if self.dataset_path is not None:
+            object.__setattr__(self, "dataset_path", str(self.dataset_path))
 
 
 @dataclass(frozen=True)
@@ -58,11 +62,12 @@ class BatchExportResult:
     needs_confirmation: bool
     paths: tuple[Path, ...]
     dry_run: bool
+    dataset_path: str | None = None
 
     @property
     def summary(self):
         """Return detached JSON values, never source arrays, documents, or plans."""
-        return {
+        summary = {
             "schema_version": 1,
             "input_path": str(self.input_path),
             "output_path": str(self.output_path),
@@ -80,6 +85,9 @@ class BatchExportResult:
             "paths": [str(path) for path in self.paths],
             "dry_run": self.dry_run,
         }
+        if self.dataset_path is not None:
+            summary["dataset_path"] = self.dataset_path
+        return summary
 
 
 class BatchExportNeedsConfirmation(RuntimeError):
@@ -114,6 +122,21 @@ def _owned_npy_source(path):
     try:
         if source.dtype.kind not in "biufc":
             raise ValueError(f"unsupported batch input dtype: {source.dtype}")
+        yield source
+    finally:
+        source.close()
+
+
+@contextmanager
+def _owned_replay_source(request):
+    if request.input_path.suffix.lower() == ".npy":
+        with _owned_npy_source(request.input_path) as source:
+            yield source
+        return
+    from arrayscope.io.hdf5_source import open_hdf5_source
+
+    source = open_hdf5_source(request.input_path, request.dataset_path)
+    try:
         yield source
     finally:
         source.close()
@@ -165,12 +188,19 @@ def run_batch_export(
     unique mapping; a successful result wins cancellation after publication.
     """
     _check_cancelled(cancellation_token)
-    if request.input_path.suffix.lower() != ".npy":
-        raise ValueError("headless replay input must be a .npy file")
+    suffix = request.input_path.suffix.lower()
+    if suffix == ".npy":
+        if request.dataset_path is not None:
+            raise ValueError("dataset_path is only supported for HDF5 input")
+    elif suffix in {".h5", ".hdf5"}:
+        if not request.dataset_path:
+            raise ValueError("headless HDF5 replay requires an explicit dataset_path")
+    else:
+        raise ValueError("headless replay input must be .npy or selected .h5/.hdf5 data")
     if request.output_path.suffix.lower() not in {".npy", ".npz"}:
         raise ValueError("headless replay output must end with .npy or .npz")
     if not S_ISREG(request.input_path.stat().st_mode):
-        raise ValueError("headless replay input must be a regular .npy file")
+        raise ValueError("headless replay input must be a regular array file")
     if request.recipe_path is not None and not S_ISREG(request.recipe_path.stat().st_mode):
         raise ValueError("the recipe must be a regular JSON file")
     for input_path in (request.input_path, request.recipe_path):
@@ -180,8 +210,11 @@ def run_batch_export(
         ):
             raise ValueError("input and output refer to the same file; choose a distinct output")
 
-    with _owned_npy_source(request.input_path) as source:
+    with _owned_replay_source(request) as source:
         _check_cancelled(cancellation_token)
+        dataset_path = None
+        if suffix in {".h5", ".hdf5"}:
+            dataset_path = source.source.descriptor.key
         steps = ()
         if request.recipe_path is not None:
             steps = recipes.loads_recipe_steps(
@@ -200,6 +233,11 @@ def run_batch_export(
             squeeze=request.squeeze,
             recipe_json=recipes.dumps_recipe(steps),
             sidecar=False,
+            source_metadata_json=(
+                json.dumps({"source_path": str(request.input_path), "dataset_path": dataset_path})
+                if dataset_path is not None
+                else None
+            ),
         )
         plan = plan_region_export(region_request, cancellation_token=cancellation_token)
         result = BatchExportResult(
@@ -218,6 +256,7 @@ def run_batch_export(
             needs_confirmation=plan.needs_confirmation,
             paths=(),
             dry_run=bool(dry_run),
+            dataset_path=dataset_path,
         )
         _check_cancelled(cancellation_token)
         if dry_run:

@@ -750,6 +750,7 @@ def load_path(
     progress=None,
     cancel=None,
     on_streaming_probe=None,
+    dataset_path=None,
 ):
     """Load a supported file into a LoadedPath.
 
@@ -766,6 +767,11 @@ def load_path(
       out-of-core :class:`LazySourceArray` proxies through the budgeted read
       seam (ADR 0049). ``"auto"`` maps files at or above a memory-based size
       threshold.
+
+    ``dataset_path`` explicitly selects a supported dataset in an HDF5 file.
+    HDF5 datasets open lazily without reading their values; ``lazy=False``
+    requests a bounded eager read. Selection never imports GUI selectors or
+    guesses spatial axes or a complex interpretation from the dataset name.
 
     Progressive-load hooks (all optional, GUI-agnostic; see
     :mod:`arrayscope.io.progressive`):
@@ -787,8 +793,9 @@ def load_path(
             progress(LoadProgress(stage=stage, fraction=fraction, message=message))
 
     filepath = Path(filepath)
-
     if filepath.is_dir():
+        if dataset_path is not None:
+            raise ValueError("dataset_path requires a regular HDF5 file")
         loader = DicomDirectoryLoader(filepath)
         emit("converting", message="Converting DICOM directory (dcm2niix)")
         data = loader.load()
@@ -797,8 +804,66 @@ def load_path(
             metadata=loader.metadata,
             axes=_axes_matching_shape(getattr(loader, "axes", None), data.shape),
         )
-
     suffix = data_file_suffix(filepath)
+    if dataset_path is not None and suffix not in {".h5", ".hdf5"}:
+        raise ValueError("dataset_path is only supported for .h5 or .hdf5 files")
+    if suffix in {".h5", ".hdf5"}:
+        if dataset_path is None or str(dataset_path) == "":
+            raise ValueError("opening HDF5 requires an explicit dataset_path")
+        if lazy not in (True, False, "auto"):
+            raise ValueError(f"lazy must be True, False, or 'auto', got {lazy!r}")
+        from arrayscope.io.hdf5_source import open_hdf5_source
+        from arrayscope.io.progressive import LoadCancelled
+
+        class LoadToken:
+            @property
+            def cancelled(self):
+                return cancel is not None and cancel.is_set()
+
+        token = LoadToken()
+        if token.cancelled:
+            raise LoadCancelled("file load cancelled")
+        emit("probing", message="Checking HDF5 dataset metadata")
+        source = open_hdf5_source(filepath, dataset_path)
+        try:
+            if token.cancelled:
+                raise LoadCancelled("file load cancelled")
+            descriptor = source.source.descriptor
+            metadata = {
+                "source_path": str(source.source.path),
+                "dataset_path": descriptor.key,
+                "selector_class_name": "H5DatasetSelector",
+                "detected_format": "HDF5",
+                "shape": tuple(source.shape),
+                "dtype": str(source.dtype),
+                "lazy": lazy is not False,
+            }
+            data = source
+            if lazy is False:
+                from arrayscope.core.array_source import DEFAULT_SOURCE_MATERIALIZE_BUDGET_BYTES
+                from arrayscope.operations.cancellation import EvaluationCancelled
+                from arrayscope.operations.regions import region_from_index_spec
+                from arrayscope.operations.source_read import read_base_region
+
+                emit("reading", message="Reading selected HDF5 dataset")
+                try:
+                    data = read_base_region(
+                        source,
+                        region_from_index_spec(
+                            source.shape, tuple(slice(None) for _ in source.shape)
+                        ),
+                        cancellation_token=token,
+                        budget_bytes=DEFAULT_SOURCE_MATERIALIZE_BUDGET_BYTES,
+                    )
+                except EvaluationCancelled as error:
+                    raise LoadCancelled("file load cancelled") from error
+                finally:
+                    source.close()
+            emit("finalizing", fraction=1.0, message="Opened HDF5 dataset")
+            return LoadedPath(data=data, metadata=metadata)
+        except BaseException:
+            source.close()
+            raise
 
     if not mmap:
         emit("probing", message="Checking file size")

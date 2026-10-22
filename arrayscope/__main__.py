@@ -18,14 +18,22 @@ def _run_cli_event_loop():
 
 
 def _open_file_async(
-    filepath: Path, *, mmap: bool = False, consume: bool = False, title: str | None = None
+    filepath: Path,
+    *,
+    mmap: bool = False,
+    consume: bool = False,
+    title: str | None = None,
+    dataset_path: str | None = None,
 ):
     """Open one path (data file, DICOM dir, or dataset container) without
     blocking: a loading window appears immediately, the viewer as soon as
     data starts being available."""
     from arrayscope.app.open_flow import open_any_path
 
-    return open_any_path(filepath, title=title, mmap=mmap, consume=consume)
+    options = {"title": title, "mmap": mmap, "consume": consume}
+    if dataset_path is not None:
+        options["dataset_path"] = dataset_path
+    return open_any_path(filepath, **options)
 
 
 def _show_launcher():
@@ -73,6 +81,7 @@ Examples:
   arrayscope --install-desktop             # Register with the desktop shell (menu entry, icons, file types)
   arrayscope data.npy --export result.npy --range 0=10:20
   arrayscope data.npy --export result.npz --recipe operations.json --dry-run
+  arrayscope scan.h5 --dataset acquisition/image
 
 Viewer files open asynchronously: a loading window shows progress, and for formats
 that support it the viewer opens while the file is still being read.
@@ -84,6 +93,9 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
         type=str,
         nargs="*",
         help="Path(s) to data files or DICOM directories (omit to open the launcher window)",
+    )
+    parser.add_argument(
+        "--dataset", metavar="PATH", help="Open an explicit dataset in one HDF5 input file"
     )
     parser.add_argument(
         "--title", type=str, default=None, help="Window title override for single-dataset files"
@@ -118,6 +130,19 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
 
     add_batch_arguments(parser)
     args = parser.parse_args(argv)
+    if args.dataset is not None:
+        if len(args.files) != 1:
+            parser.error("--dataset requires exactly one HDF5 input file")
+        if Path(args.files[0]).suffix.lower() not in {".h5", ".hdf5"}:
+            parser.error("--dataset requires a .h5 or .hdf5 input file")
+        if not args.dataset:
+            parser.error("--dataset requires a nonempty dataset path")
+        if args.consume:
+            parser.error(
+                "--dataset cannot be combined with --consume; lazy HDF5 reads need the source file"
+            )
+        if args.install_desktop or args.uninstall_desktop:
+            parser.error("--dataset cannot be combined with desktop integration")
 
     # Batch export uses no Qt event loop, display supervision, settings, or
     # accelerator prewarm. Keep it ahead of every interactive launch path.
@@ -183,17 +208,10 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
             continue
 
         try:
-            needs_event_loop = (
-                bool(
-                    _open_file_async(
-                        filepath,
-                        mmap=args.mmap,
-                        consume=args.consume,
-                        title=args.title,
-                    )
-                )
-                or needs_event_loop
-            )
+            options = {"mmap": args.mmap, "consume": args.consume, "title": args.title}
+            if args.dataset is not None:
+                options["dataset_path"] = args.dataset
+            needs_event_loop = bool(_open_file_async(filepath, **options)) or needs_event_loop
         except Exception as e:
             print(f"Error loading {filepath}: {e}")
             import traceback

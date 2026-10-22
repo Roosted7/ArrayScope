@@ -27,7 +27,7 @@ def _parse_range(value):
 def add_batch_arguments(parser):
     group = parser.add_argument_group(
         "Headless NumPy export",
-        "One .npy input and built-in operation recipes; no display required.",
+        "One .npy input or an explicitly selected HDF5 dataset; no display required.",
     )
     group.add_argument(
         "--export", metavar="OUTPUT", help="Export exact scientific values to a .npy or .npz file"
@@ -134,9 +134,17 @@ def run_batch_cli(args, parser):
     if conflicts:
         parser.error(f"--export cannot be combined with {', '.join(conflicts)}")
     if len(args.files) != 1:
-        parser.error("--export requires exactly one .npy input file")
-    if Path(args.files[0]).suffix.lower() != ".npy":
-        parser.error("headless export currently requires a .npy input file")
+        parser.error("--export requires exactly one .npy or HDF5 input file")
+    suffix = Path(args.files[0]).suffix.lower()
+    dataset_path = getattr(args, "dataset", None)
+    if suffix == ".npy":
+        if dataset_path is not None:
+            parser.error("--dataset is only supported for .h5 or .hdf5 input files")
+    elif suffix in {".h5", ".hdf5"}:
+        if not dataset_path:
+            parser.error("headless HDF5 export requires an explicit --dataset path")
+    else:
+        parser.error("headless export requires a .npy input or an HDF5 input with --dataset")
     if Path(args.export).suffix.lower() not in {".npy", ".npz"}:
         parser.error("--export output must end in .npy or .npz")
     axes = tuple(axis for axis, _start, _stop in args.export_ranges)
@@ -161,6 +169,7 @@ def run_batch_cli(args, parser):
             ranges=tuple(args.export_ranges),
             squeeze=not args.no_squeeze,
             allow_expensive=args.allow_expensive,
+            dataset_path=dataset_path,
         )
         with _cancel_on_interrupt(token):
             result = run_batch_export(
