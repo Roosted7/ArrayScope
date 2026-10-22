@@ -81,7 +81,21 @@ def region_from_index_spec(shape, spec) -> RegionSpec:
             axes.append(AxisRegion(AxisRegionKind.ALL))
         elif isinstance(item, slice):
             start, stop, step = item.indices(size)
-            axes.append(AxisRegion(AxisRegionKind.SLICE, (int(start), int(stop), int(step))))
+            if step < 0:
+                if start < 0:
+                    # The normalized -1 start marks an empty selection, not
+                    # Python's relative index for the last element.
+                    start, stop, step = 0, 0, 1
+                elif stop < 0:
+                    # Reusing the normalized -1 stop as a slice would make it
+                    # relative to size and lose the requested first element.
+                    stop = None
+            axes.append(
+                AxisRegion(
+                    AxisRegionKind.SLICE,
+                    (int(start), None if stop is None else int(stop), int(step)),
+                )
+            )
         else:
             raise TypeError(f"unsupported index item for axis {axis}: {item!r}")
     if len(axes) != len(shape):
