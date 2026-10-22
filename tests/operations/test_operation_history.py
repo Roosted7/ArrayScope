@@ -9,9 +9,22 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
+from arrayscope.core.array_source import (
+    CompositeArraySource,
+    LazySourceArray,
+    NdArraySource,
+    ScaledArraySource,
+)
 from arrayscope.operations.coordinator import OperationCoordinator
 from arrayscope.operations.input_slots import ResolvedSlot, SlotBinding
-from arrayscope.operations.pipeline import Crop, OperationStep, ReverseAxis, Scale, SplitAxis
+from arrayscope.operations.pipeline import (
+    ArrayDocument,
+    Crop,
+    OperationStep,
+    ReverseAxis,
+    Scale,
+    SplitAxis,
+)
 
 
 def test_every_operation_edit_restores_exact_steps_and_values_in_both_directions():
@@ -232,6 +245,109 @@ def test_small_array_view_cannot_hide_a_large_retained_buffer_owner(monkeypatch)
     coordinator.undo()
     assert not coordinator.can_redo
     assert "memory" in coordinator.history_reset_reason.lower()
+
+
+@pytest.mark.parametrize("adapter", ["ndarray", "lazy", "scaled", "composite"])
+def test_adapter_backed_tiny_view_cannot_hide_a_large_retained_buffer(monkeypatch, adapter):
+    from arrayscope.operations import coordinator as module
+
+    backing = np.ones(128)
+    reference = weakref.ref(backing)
+    source = NdArraySource(backing[:1])
+    if adapter == "lazy":
+        source = LazySourceArray(source)
+    elif adapter == "scaled":
+        source = ScaledArraySource(backing[:1])
+    elif adapter == "composite":
+        source = CompositeArraySource(source, NdArraySource(backing[1:2]))
+    auxiliary = ArrayDocument(LazySourceArray(source))
+    coordinator = OperationCoordinator(np.zeros((2, 2)))
+    monkeypatch.setattr(module, "HISTORY_EXTRA_INPUT_BUDGET_BYTES", 64)
+
+    def reject_read(*_args, **_kwargs):
+        pytest.fail("history accounting read or materialized an auxiliary source")
+
+    for source_type in (NdArraySource, ScaledArraySource, CompositeArraySource, LazySourceArray):
+        monkeypatch.setattr(source_type, "read_region", reject_read)
+    monkeypatch.setattr(np, "asarray", reject_read)
+    coordinator.append_created_operation(_bound(auxiliary, "wrapped-input"))
+    coordinator.undo()
+    del backing, source, auxiliary
+    gc.collect()
+
+    assert not coordinator.can_redo
+    assert reference() is None
+
+
+@pytest.mark.parametrize("shared", [True, False], ids=["shared-root", "distinct-roots"])
+def test_composite_views_count_each_retained_storage_owner_once(monkeypatch, shared):
+    from arrayscope.operations import coordinator as module
+
+    backing = np.ones(128)
+    other = backing if shared else np.ones(128)
+    source = CompositeArraySource(
+        LazySourceArray(NdArraySource(backing[:1])), ScaledArraySource(other[1:2])
+    )
+    monkeypatch.setattr(module, "HISTORY_EXTRA_INPUT_BUDGET_BYTES", backing.nbytes)
+    coordinator = OperationCoordinator(np.zeros((2, 2)))
+    coordinator.append_created_operation(_bound(source, "shared-input"))
+    coordinator.undo()
+
+    assert coordinator.can_redo is shared
+    if shared:
+        coordinator.redo()
+        assert len(coordinator.document.steps) == 1
+
+
+@pytest.mark.parametrize("retained_by", ["primary", "current-step"])
+def test_adapter_views_of_current_storage_do_not_consume_extra_history_budget(
+    monkeypatch, retained_by
+):
+    from arrayscope.operations import coordinator as module
+
+    backing = np.ones((2, 2))
+    coordinator = OperationCoordinator(backing if retained_by == "primary" else np.zeros((2, 2)))
+    monkeypatch.setattr(module, "HISTORY_EXTRA_INPUT_BUDGET_BYTES", 0)
+    if retained_by == "current-step":
+        coordinator.append_created_operation(
+            _bound(LazySourceArray(NdArraySource(backing[:1, :1])), "current-input")
+        )
+    coordinator.append_created_operation(
+        _bound(LazySourceArray(NdArraySource(backing[1:, 1:])), "historical-input")
+    )
+    coordinator.undo()
+
+    assert coordinator.can_redo
+    coordinator.redo()
+    assert len(coordinator.document.steps) == (1 if retained_by == "primary" else 2)
+
+
+def test_unknown_adapter_cannot_hide_owned_storage_behind_small_logical_bytes(monkeypatch):
+    from arrayscope.operations import coordinator as module
+
+    class Adapter:
+        shape = (1,)
+        dtype = np.dtype(float)
+        nbytes = 8
+
+        def __init__(self, backing):
+            self.backing = backing
+
+        def read_region(self, *_args, **_kwargs):
+            pytest.fail("history accounting read an unknown adapter")
+
+    backing = np.ones(128)
+    reference = weakref.ref(backing)
+    source = Adapter(backing)
+    monkeypatch.setattr(module, "HISTORY_EXTRA_INPUT_BUDGET_BYTES", 64)
+    coordinator = OperationCoordinator(np.zeros((2, 2)))
+    coordinator.append_created_operation(_bound(source, "unknown-adapter"))
+    coordinator.undo()
+    del backing, source
+    gc.collect()
+
+    assert not coordinator.can_redo
+    assert reference() is None
 
 
 def test_unknown_size_auxiliary_history_is_pruned_without_reading_lazy_pixels():

@@ -7,6 +7,12 @@ from mmap import mmap
 
 import numpy as np
 
+from arrayscope.core.array_source import (
+    CompositeArraySource,
+    LazySourceArray,
+    NdArraySource,
+    ScaledArraySource,
+)
 from arrayscope.core.memory_policy import input_nbytes_for
 from arrayscope.operations.cost import (
     operation_output_dtype,
@@ -354,9 +360,11 @@ def _same_steps(first, second):
 def _input_owners(steps, *, primary=None):
     """Metadata-only logical bytes of source owners referenced by input slots.
 
-    Follow ndarray bases so views count once and include nested document inputs.
-    File paths and ROI geometry do not retain eager array payloads. Never read a
-    lazy source or invoke ``asarray`` to discover a size.
+    Follow recognized source adapters and ndarray bases so shared storage counts
+    once, including nested document inputs. Logical adapter sizes cannot price
+    their retained backings; unknown owners remain unknown. File paths and ROI
+    geometry do not retain eager array payloads. Never read a lazy source or
+    invoke ``asarray`` to discover a size.
     """
     owners = {}
     visited = set()
@@ -371,17 +379,33 @@ def _input_owners(steps, *, primary=None):
             source_owner(source.base_data)
             step_owners(source.steps)
             return
-        while True:
-            if isinstance(source, np.ndarray) and source.base is not None:
-                source = source.base
-            elif isinstance(source, memoryview):
-                source = source.obj
-            else:
-                break
+        if isinstance(source, LazySourceArray):
+            source_owner(source.source)
+            return
+        if isinstance(source, CompositeArraySource):
+            source_owner(source.a)
+            source_owner(source.b)
+            return
+        if isinstance(source, NdArraySource):
+            source_owner(source._array)
+            return
+        if isinstance(source, ScaledArraySource):
+            source_owner(source.backing)
+            return
+        if isinstance(source, np.ndarray) and source.base is not None:
+            source_owner(source.base)
+            return
+        if isinstance(source, memoryview):
+            source_owner(source.obj)
+            return
         try:
-            size = input_nbytes_for(source)
-            if size is None and isinstance(source, (bytes, bytearray, mmap)):
-                size = len(source)
+            size = (
+                input_nbytes_for(source)
+                if isinstance(source, np.ndarray)
+                else len(source)
+                if isinstance(source, (bytes, bytearray, mmap))
+                else None
+            )
         except Exception:
             # A source may already be closed or expose failing metadata. An
             # edit must not fail after commit merely while pricing its past.
