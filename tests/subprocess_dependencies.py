@@ -24,6 +24,30 @@ all declared tests, including empty entries and declaration guards.
 #: mid-suite ``INTERNALERROR``; see
 #: :func:`install_extensionless_dependency_support`.
 OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "tests/app/test_streaming_cli.py": (
+        "arrayscope/__main__.py",
+        "arrayscope/app/batch_cli.py",
+        "arrayscope/io/recipe_replay.py",
+        "arrayscope/io/streaming_export.py",
+        "arrayscope/io/region_export.py",
+        "arrayscope/io/numpy_save.py",
+        "arrayscope/io/hdf5_catalog.py",
+        "arrayscope/io/hdf5_source.py",
+        "arrayscope/operations/pipeline.py",
+        "arrayscope/operations/planner.py",
+        "arrayscope/operations/source_read.py",
+    ),
+    # The same file's standalone child owns the real address-space limit and
+    # full-allocation control; its probe body is not executed in the parent.
+    "tests/io/test_streaming_export_resources.py": (
+        "tests/io/test_streaming_export_resources.py",
+        "arrayscope/io/streaming_export.py",
+        "arrayscope/io/numpy_save.py",
+        "arrayscope/io/region_export.py",
+        "arrayscope/io/hdf5_source.py",
+        "arrayscope/operations/pipeline.py",
+        "arrayscope/operations/source_read.py",
+    ),
     # A fresh interpreter reproduces Windows' missing Unix resource module
     # before importing the shared pytest diagnostics helper.
     "tests/app/test_load_report.py": ("tests/load_report.py",),
