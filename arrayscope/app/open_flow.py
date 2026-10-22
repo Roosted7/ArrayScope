@@ -307,6 +307,8 @@ class FileOpenSession(QtCore.QObject):
             from arrayscope.ui.toasts import show_status_message
 
             show_status_message(self.window, "File fully loaded")
+        if not self._consume:
+            _remember_opened_path(self.filepath)
         self._finish()
 
     def _on_cancelled(self):
@@ -391,8 +393,10 @@ def open_any_path(filepath, *, title=None, mmap=False, consume=False):
         }
         selector = selector_types[suffix](filepath)
         if not selector.requires_gui():
-            result = selector.get_single_data()
-            selector.close()
+            try:
+                result = selector.get_single_data()
+            finally:
+                selector.close()
             if not result:
                 import sys
 
@@ -409,12 +413,16 @@ def open_any_path(filepath, *, title=None, mmap=False, consume=False):
                 selector_class_name=selector.__class__.__name__,
             )
             _retain_window_reference(app, win)
+            if not consume:
+                _remember_opened_path(filepath)
             return win
         if not selector.view(block=False):
             import sys
 
             print(f"No compatible datasets found in {filepath}", file=sys.stderr)
             return False
+        if not consume:
+            _remember_opened_path(filepath)
         return True
     import sys
 
@@ -466,15 +474,42 @@ def _apply_app_icon(app):
     app.setProperty("_arrayscope_icon_applied", True)
 
 
+def _remember_opened_path(filepath):
+    from arrayscope.app.recent_files import remember_path
+
+    remember_path(QtCore.QSettings(), filepath)
+
+
+def open_sample(sample_id):
+    """Open a labelled, local example through the ordinary viewer pipeline."""
+    from arrayscope.app.launch import _create_window, _retain_window_reference
+    from arrayscope.app.sample_data import SAMPLES, make_sample
+    from arrayscope.ui.toasts import show_status_message
+
+    data, axes = make_sample(sample_id)
+    sample = next(sample for sample in SAMPLES if sample.id == sample_id)
+    app, win = _create_window(data, title=f"ArrayScope example — {sample.title}", axes=axes)
+    _retain_window_reference(app, win)
+    show_status_message(win, sample.hint, timeout=10000)
+    return win
+
+
 def show_launcher_window():
     """Open the empty-state launcher (no file arguments)."""
+    from arrayscope.app.recent_files import recent_paths
+    from arrayscope.app.sample_data import SAMPLES
+    from arrayscope.app.theme import ThemeChoice, apply_theme_to_qapplication
     from arrayscope.ui.launcher_window import LauncherWindow
 
     app = ensure_open_app()
+    apply_theme_to_qapplication(app, QtCore.QSettings().value("theme", ThemeChoice.SYSTEM.value))
     win = LauncherWindow(
         open_any_path,
         supported_suffixes=SUPPORTED_SUFFIXES,
         name_filter=file_dialog_name_filter(),
+        recent_paths=recent_paths(QtCore.QSettings()),
+        samples=SAMPLES,
+        sample_callback=open_sample,
     )
     win.show()
     from arrayscope.app.launch import _retain_window_reference

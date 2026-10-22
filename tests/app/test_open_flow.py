@@ -50,7 +50,7 @@ def _hermetic_backend_and_teardown():
         # Close windows and release the references retained for inline display.
         for widget in list(app.topLevelWidgets()):
             widget.close()
-        app.setProperty("_arrayscope_live_windows", None)
+        app._arrayscope_live_windows = []
         # Uninstall and delete the app-level file-open event filter installed by
         # ensure_open_app(). Leaving a Python QObject event filter attached to
         # the persistent QApplication segfaults the interpreter at shutdown
@@ -74,6 +74,38 @@ def open_app():
     from arrayscope.app.open_flow import ensure_open_app
 
     return ensure_open_app()
+
+
+@pytest.mark.parametrize("choice", ["dark", "light"])
+def test_launcher_restores_saved_theme_before_any_array_is_open(open_app, choice):
+    import pyqtgraph as pg
+
+    from arrayscope.app.open_flow import show_launcher_window
+    from arrayscope.app.theme import DARK_TOKENS, LIGHT_TOKENS
+
+    settings = QtCore.QSettings()
+    previous_choice = settings.value("theme")
+    previous_sheet = open_app.styleSheet()
+    previous_palette = open_app.palette()
+    previous_tokens = open_app.property("_arrayscope_theme_tokens")
+    previous_plot_colors = {name: pg.getConfigOption(name) for name in ("background", "foreground")}
+    try:
+        settings.setValue("theme", choice)
+        open_app.setStyleSheet("")
+        launcher = show_launcher_window()
+        expected = DARK_TOKENS if choice == "dark" else LIGHT_TOKENS
+        assert launcher.isVisible()
+        assert launcher.palette().window().color().name() == expected.window
+        assert expected.window in open_app.styleSheet()
+    finally:
+        if previous_choice is None:
+            settings.remove("theme")
+        else:
+            settings.setValue("theme", previous_choice)
+        open_app.setPalette(previous_palette)
+        open_app.setStyleSheet(previous_sheet)
+        open_app.setProperty("_arrayscope_theme_tokens", previous_tokens)
+        pg.setConfigOptions(**previous_plot_colors)
 
 
 def _session_progress(session):
@@ -123,6 +155,7 @@ def _run_session(app, session):
 
 def test_open_path_async_opens_viewer_with_loaded_data(open_app, tmp_path):
     from arrayscope.app.open_flow import open_path_async
+    from arrayscope.app.recent_files import recent_paths
 
     arr = np.random.default_rng(0).normal(size=(6, 8, 4)).astype(np.float32)
     path = tmp_path / "vol.npy"
@@ -134,6 +167,7 @@ def test_open_path_async_opens_viewer_with_loaded_data(open_app, tmp_path):
         assert session.loading_window is None
         np.testing.assert_array_equal(np.asarray(session.window.base_data), arr)
         assert session.window.windowTitle() == "vol.npy [numpy]"
+        assert recent_paths(QtCore.QSettings())[0] == path.resolve()
     finally:
         if session.window is not None:
             session.window.close()
@@ -142,16 +176,19 @@ def test_open_path_async_opens_viewer_with_loaded_data(open_app, tmp_path):
 
 def test_open_path_async_consume_removes_handoff_file(open_app, tmp_path):
     from arrayscope.app.open_flow import open_path_async
+    from arrayscope.app.recent_files import recent_paths
 
     arr = np.arange(12, dtype=np.float64).reshape(3, 4)
     path = tmp_path / "handoff.npy"
     np.save(path, arr)
+    previous_recent = recent_paths(QtCore.QSettings())
 
     session = _run_session(open_app, open_path_async(path, mmap=True, consume=True))
     try:
         assert session.window is not None
         assert not path.exists()
         np.testing.assert_array_equal(np.asarray(session.window.base_data), arr)
+        assert recent_paths(QtCore.QSettings()) == previous_recent
     finally:
         if session.window is not None:
             session.window.close()
@@ -160,15 +197,18 @@ def test_open_path_async_consume_removes_handoff_file(open_app, tmp_path):
 
 def test_open_path_async_failure_shows_error_state(open_app, tmp_path):
     from arrayscope.app.open_flow import open_path_async
+    from arrayscope.app.recent_files import recent_paths
 
     path = tmp_path / "broken.npy"
     path.write_bytes(b"not a numpy file at all")
+    previous_recent = recent_paths(QtCore.QSettings())
 
     session = _run_session(open_app, open_path_async(path))
     try:
         assert session.window is None
         assert session.loading_window is not None
         assert session.loading_window._cancel_btn.text() == "Close"
+        assert recent_paths(QtCore.QSettings()) == previous_recent
     finally:
         if session.loading_window is not None:
             session.loading_window.close_quietly()
@@ -177,10 +217,12 @@ def test_open_path_async_failure_shows_error_state(open_app, tmp_path):
 
 def test_open_path_async_cancel_before_read_closes_quietly(open_app, tmp_path):
     from arrayscope.app.open_flow import FileOpenSession
+    from arrayscope.app.recent_files import recent_paths
 
     arr = np.zeros((64, 64), dtype=np.float32)
     path = tmp_path / "vol.npy"
     np.save(path, arr)
+    previous_recent = recent_paths(QtCore.QSettings())
 
     session = FileOpenSession(path)
     session.cancel()
@@ -189,6 +231,73 @@ def test_open_path_async_cancel_before_read_closes_quietly(open_app, tmp_path):
 
     assert session.window is None
     assert session.loading_window is None
+    assert recent_paths(QtCore.QSettings()) == previous_recent
+
+
+@pytest.mark.parametrize("sample_id", ["time-series", "complex"])
+def test_examples_open_with_committed_values_and_cleanly_close(open_app, sample_id):
+    from shiboken6 import isValid
+
+    from arrayscope.app.open_flow import open_sample
+    from arrayscope.app.recent_files import recent_paths
+    from arrayscope.app.sample_data import SAMPLES, make_sample
+    from tests.settle import settle_window
+    from tests.ui.helpers import committed_value, frame_session_settled
+
+    expected, axes = make_sample(sample_id)
+    sample = next(item for item in SAMPLES if item.id == sample_id)
+    previous_recent = recent_paths(QtCore.QSettings())
+    win = open_sample(sample_id)
+    workers = tuple(win.kernel._backend._threads)
+    try:
+        settle_window(
+            win,
+            lambda: (
+                getattr(win, "_committed_display_frame", None) is not None
+                and frame_session_settled(win)
+            ),
+            label=f"{sample_id} example commits its first frame",
+        )
+        assert win.isVisible()
+        assert win.windowTitle() == f"ArrayScope example — {sample.title}"
+        assert win.document.current_axes == axes
+        np.testing.assert_array_equal(win.document.base_data, expected)
+        hint = win._arrayscope_status_message_widget
+        assert hint.isVisible()
+        assert hint.property("arrayscope_status_message_text") == sample.hint
+
+        if sample_id == "time-series":
+            win.widgets["spins"]["slice_indices"][2].setValue(11)
+            settle_window(
+                win,
+                lambda: (
+                    win._committed_display_frame.geometry.view_state.slice_indices[2] == 11
+                    and frame_session_settled(win)
+                ),
+                label="example time selection commits",
+            )
+            expected_value = expected[53, 37, 11]
+        else:
+            channel = win.display_toolbar.channel_combo
+            channel.setCurrentIndex(channel.findData("angle"))
+            settle_window(
+                win,
+                lambda: (
+                    win._committed_display_frame.geometry.view_state.channel.value == "angle"
+                    and frame_session_settled(win)
+                ),
+                label="example phase channel commits",
+            )
+            expected_value = np.angle(expected[53, 37])
+        assert committed_value(win, 37, 53) == pytest.approx(expected_value)
+        assert recent_paths(QtCore.QSettings()) == previous_recent
+    finally:
+        win.close()
+        open_app.processEvents()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    assert not isValid(win)
+    assert win not in getattr(open_app, "_arrayscope_live_windows", [])
+    assert not any(worker.is_alive() for worker in workers)
 
 
 def test_open_any_path_rejects_unknown_suffix(open_app, tmp_path, capsys):
@@ -199,6 +308,42 @@ def test_open_any_path_rejects_unknown_suffix(open_app, tmp_path, capsys):
 
     assert not open_any_path(path)
     assert "Unsupported file type" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("suffix", ["h5", "npz"])
+def test_single_dataset_read_failure_closes_its_container(open_app, monkeypatch, tmp_path, suffix):
+    import h5py
+
+    from arrayscope.app.open_flow import open_any_path
+    from arrayscope.io.selectors import H5DatasetSelector, NpzDatasetSelector
+
+    path = tmp_path / f"single.{suffix}"
+    if suffix == "h5":
+        with h5py.File(path, "w") as container:
+            container["image"] = np.arange(12).reshape(3, 4)
+        selector_type = H5DatasetSelector
+    else:
+        np.savez(path, image=np.arange(12).reshape(3, 4))
+        selector_type = NpzDatasetSelector
+    selectors = []
+
+    def fail_read(selector, _name):
+        # Hold the selector alive: destructor cleanup would mask a leak.
+        selectors.append(selector)
+        raise OSError("Dataset read failed")
+
+    monkeypatch.setattr(selector_type, "load_data", fail_read)
+    try:
+        with pytest.raises(OSError, match="Dataset read failed"):
+            open_any_path(path)
+        assert len(selectors) == 1
+        if suffix == "h5":
+            assert not selectors[0].h5_file.id.valid
+        else:
+            assert selectors[0].npz_file.zip is None
+    finally:
+        for selector in selectors:
+            selector.close()
 
 
 def test_closing_viewer_mid_load_cancels_reader(open_app, tmp_path, monkeypatch):
