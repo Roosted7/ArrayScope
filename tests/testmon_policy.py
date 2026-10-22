@@ -36,7 +36,10 @@ testmon traces Python lines executed **in the pytest process**. So:
 1. **Child processes.** A test that shells out gets nothing from the child.
    The tests that really do spawn one are declared in
    :data:`OUT_OF_PROCESS_DEPENDENCIES`, which puts the entry point back in the
-   map; the modules that entry point *imports* remain invisible.
+   map; the modules that entry point *imports* remain invisible. Declaration
+   data lives separately in ``tests/subprocess_dependencies.py`` and is
+   fingerprinted only for its declared consumers. Adding a child test must not
+   invalidate unrelated tests merely because every report uses this policy.
 2. **Non-Python inputs.** Icons and fixture arrays have no fingerprint.
 3. **Real rendering.** Rings 3–4 (``docs/testing/README.md``) prove things
    about pixels a compositor drew. Selection has nothing to say there and the
@@ -68,160 +71,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tests.subprocess_dependencies import OUT_OF_PROCESS_DEPENDENCIES
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: Recorded map, one per checkout (worktrees get their own). Gitignored.
 MAP_FILENAME = ".testmondata"
 
-#: Tests whose real work happens in a child process, mapped to the entry points
-#: that child runs. Coverage never sees those files, so they are re-attached to
-#: the test's recorded dependencies by hand (whole-file granularity) — which
-#: means these tests are selected *exactly* when their entry point changes, and
-#: skipped otherwise. That precision is the point: the set below costs ~46 s to
-#: run, far too much to attach to every iteration.
-#:
-#: Only genuine spawns belong here. A test that monkeypatches ``subprocess.run``
-#: (``test_qt_platform``, ``test_free_threading``, ``test_headless_display``,
-#: ``test_profile_montage_workflow``, ``test_bart_pack``,
-#: ``test_execution_environments``) runs entirely in-process and is already
-#: traced; adding it would only slow the loop down.
-#: ``tests/app/test_test_selection.py`` fails when a new real spawn appears
-#: without an entry here, when a declared path has moved, and when a declared
-#: path is one testmon cannot fingerprint — the last of which used to be a
-#: mid-suite ``INTERNALERROR``; see
-#: :func:`install_extensionless_dependency_support`.
-OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
-    # Named HDF5 replay is also exercised in a fresh interpreter that refuses
-    # Qt imports and payload reads during planning; the parent cannot trace it.
-    "tests/app/test_hdf5_cli.py": (
-        "arrayscope/__main__.py",
-        "arrayscope/app/batch_cli.py",
-        "arrayscope/io/recipe_replay.py",
-        "arrayscope/io/hdf5_catalog.py",
-        "arrayscope/io/hdf5_source.py",
-        "arrayscope/io/region_export.py",
-        "arrayscope/io/numpy_save.py",
-        "arrayscope/operations/recipes.py",
-        "arrayscope/operations/planner.py",
-        "arrayscope/operations/source_read.py",
-    ),
-    # The descriptor roundtrip reconstructs the actual HDF5 source in a child,
-    # rather than merely proving that its metadata can be pickled.
-    "tests/operations/test_source_transport.py": (
-        "arrayscope/core/array_source.py",
-        "arrayscope/io/hdf5_catalog.py",
-        "arrayscope/io/hdf5_source.py",
-        "arrayscope/operations/source_transport.py",
-        "arrayscope/operations/source_read.py",
-        "arrayscope/operations/regions.py",
-    ),
-    # Real terminal invocations exercise early headless dispatch, replay, and
-    # atomic publication outside the parent's trace, including SIGINT races.
-    "tests/app/test_batch_cli.py": (
-        "arrayscope/__main__.py",
-        "arrayscope/app/batch_cli.py",
-        "arrayscope/io/recipe_replay.py",
-        "arrayscope/io/region_export.py",
-        "arrayscope/io/numpy_save.py",
-        "arrayscope/operations/recipes.py",
-    ),
-    "tests/app/test_batch_process_integration.py": (
-        "arrayscope/__main__.py",
-        "arrayscope/app/batch_cli.py",
-        "arrayscope/io/recipe_replay.py",
-        "arrayscope/io/region_export.py",
-        "arrayscope/io/numpy_save.py",
-        "arrayscope/operations/recipes.py",
-    ),
-    # Fresh gw0-labeled interpreters exercise the import-time filesystem
-    # setup, which cannot be re-run inside the parent pytest process.
-    "tests/app/test_qsettings_isolation.py": (
-        "tests/conftest.py",
-        "tests/filesystem_isolation.py",
-    ),
-    # `python tools/demo_recorder.py --smoke ...`
-    "tests/app/test_demo_recorder_smoke.py": ("tools/demo_recorder.py",),
-    # `python tools/demo_inspector.py --strict ...`. The findings tests in the
-    # same file load the inspector in-process and trace normally; this covers
-    # what only the child reaches — argument handling, exit codes, and the
-    # ffmpeg decode of a real encoded file.
-    "tests/app/test_demo_inspector.py": ("tools/demo_inspector.py",),
-    # `python -c "import arrayscope, pyqtgraph.Qt as Qt"` — the binding
-    # preference has to hold on a *fresh* interpreter, which is the whole point
-    # of the test and the reason it cannot be traced.
-    "tests/app/test_qt_binding.py": (
-        "arrayscope/__init__.py",
-        "arrayscope/app/qt_binding.py",
-        "arrayscope/app/launch.py",
-    ),
-    # `python -c "... from arrayscope.app.launch import _prepare_qt_environment"`
-    # — the Qt logging-category rules are process-global mutable state, so the
-    # only honest place to assert on them is a fresh interpreter. Both files are
-    # named because both are only *half* covered in-process: the two in-process
-    # tests here call `install_wgpu_log_noise_filter`, but
-    # `apply_qt_logging_noise_rules` and the `_prepare_qt_environment` wiring
-    # that reaches it run nowhere except this child.
-    # wgpu_imageview2d joins them for the deferred-install tests: the hook's
-    # ordering contract against `import wgpu` is only reproducible in a fresh
-    # interpreter (the damage is done at first import), so the child is the
-    # ONLY place that guard runs.
-    "tests/app/test_log_noise.py": (
-        "arrayscope/app/launch.py",
-        "arrayscope/app/log_noise.py",
-        "arrayscope/display/wgpu_imageview2d.py",
-    ),
-    # `python experiments/wgpu_gate_b/probe_native_x11.py <out>` — the tier-0
-    # native-child probe needs its own Qt + wgpu instance, so it cannot share
-    # this interpreter. The probe is the thing under test; nothing in-process
-    # covers it.
-    "tests/gpu_interaction/test_wgpu_native_x11_pin.py": (
-        "experiments/wgpu_gate_b/probe_native_x11.py",
-    ),
-    # `git commit` / `git merge` / `git worktree add` in throwaway repos, which
-    # run the hooks as shell scripts. They are the subject, they are not Python,
-    # and nothing in-process executes them — so editing a hook has to select
-    # this file or the hook ships unguarded.
-    "tests/app/test_git_hooks.py": (
-        ".githooks/pre-commit",
-        ".githooks/post-merge",
-        ".githooks/post-checkout",
-    ),
-    # `bash tools/load_fragility ...` in throwaway sandboxes. The script is the
-    # subject, it is not Python, and the two tests that read its text read it as
-    # data — which testmon does not record — so only this declaration ties the
-    # co-operation rules to the file that implements them.
-    "tests/tools/test_load_fragility.py": ("tools/load_fragility",),
-    # `python -c "import arrayscope.io.numpy_save"` (asserts pyqtgraph stays out
-    # of sys.modules).
-    "tests/io/test_numpy_save.py": ("arrayscope/io/numpy_save.py",),
-    # `python -m arrayscope.tools.profile_montage_workflow ...` (ring 3).
-    "tests/stress/test_synthetic_stress_matrix.py": (
-        "arrayscope/tools/profile_montage_workflow.py",
-    ),
-    # One opt-in test in this file runs the profiler under py-spy
-    # (ARRAYSCOPE_RUN_PY_SPY_SMOKE=1); every other subprocess here is
-    # monkeypatched and traced normally.
-    "tests/app/test_profile_montage_workflow.py": ("arrayscope/tools/profile_montage_workflow.py",),
-    # Spawns, but the child is a client script generated from a template inside
-    # this same test file, and the compositor launcher it drives runs
-    # in-process. Nothing to re-attach — declared so the guard stays honest
-    # rather than silent.
-    "tests/gpu_interaction/test_headless_exact_window.py": (),
-    # `python experiments/wgpu_gate_b/probe_native_wayland.py` (ring 4).
-    "tests/gpu_interaction/test_wgpu_native_wayland_pin.py": (
-        "experiments/wgpu_gate_b/probe_native_wayland.py",
-    ),
-    # The per-test-batch and skipped-record oracles run a real pytest+testmon
-    # session over files generated in tmp_path: a second live testmon inside
-    # this process would fight the one recording the oracle itself.
-    # `tests/testmon_policy.py` needs no entry — the tests here already execute
-    # it in-process. `tests/skip_ledger.py` does: the child's conftest is the
-    # only thing that ever calls `SkipLedger.observe` and `save`, and the
-    # in-process half of these tests reaches no further than `read_skips`. A
-    # change to the outcome rule would otherwise not select the oracle that
-    # exists to check it — which is this file's own failure mode, one level in.
-    "tests/app/test_test_selection.py": ("tests/skip_ledger.py",),
-}
+# Declaration data is fingerprinted only for its consumers; putting the table
+# here changes this widely recorded module checksum for every added child test.
+_DECLARATIONS_FILE = "tests/subprocess_dependencies.py"
 
 #: Command-line flags that mean "the developer already chose"; the default
 #: policy never overrides them.
@@ -1158,7 +1017,10 @@ def declared_whole_file_paths() -> frozenset[str]:
     proves it.
     """
 
-    return frozenset(path for paths in OUT_OF_PROCESS_DEPENDENCIES.values() for path in paths)
+    return frozenset(
+        {_DECLARATIONS_FILE}
+        | {path for paths in OUT_OF_PROCESS_DEPENDENCIES.values() for path in paths}
+    )
 
 
 def forgivable_checksums(
@@ -1717,7 +1579,9 @@ def inject_out_of_process_dependencies(report, rootdir: os.PathLike[str] | str) 
     so the declaration lands in the map as an ordinary dependency and every
     later run compares it the same way testmon compares everything else. No
     forcing, no always-run list: these tests are selected when their entry point
-    changes and stay out of the way otherwise.
+    or declaration data changes and stay out of the way otherwise. Empty
+    declarations also depend on the data, so adding their first external
+    dependency cannot leave a stale record behind.
     """
 
     nodes_files_lines = getattr(report, "nodes_files_lines", None)
@@ -1725,9 +1589,11 @@ def inject_out_of_process_dependencies(report, rootdir: os.PathLike[str] | str) 
         return
     for test_name, files_lines in nodes_files_lines.items():
         declared = OUT_OF_PROCESS_DEPENDENCIES.get(test_name.split("::", 1)[0])
-        if not declared:
+        if declared is None:
             continue
-        for relative in declared:
+        # Empty entries also depend on the declarations: adding their first
+        # external dependency must select them and refresh their records.
+        for relative in (*declared, _DECLARATIONS_FILE):
             lines = _whole_file_lines(rootdir, relative)
             if lines:
                 files_lines[relative] = set(lines)

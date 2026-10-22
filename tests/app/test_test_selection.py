@@ -244,6 +244,96 @@ def test_injection_leaves_undeclared_tests_alone():
     }
 
 
+def _recorded_declaration_fingerprints(test_file):
+    """Use the actual injector and testmon's fingerprint format, without Qt."""
+    from testmon.process_code import create_fingerprint
+
+    policy_path = Path(testmon_policy.__file__)
+    relative_policy = policy_path.relative_to(REPO_ROOT).as_posix()
+    _, policy_line = inspect.getsourcelines(testmon_policy.inject_out_of_process_dependencies)
+    node_id = f"{test_file}::test_declaration_dependency"
+    report = SimpleNamespace(nodes_files_lines={node_id: {relative_policy: {policy_line + 1}}})
+    testmon_policy.inject_out_of_process_dependencies(report, REPO_ROOT)
+    source_tree = _source_tree()
+    return {
+        relative: create_fingerprint(source_tree.get_file(relative), covered)
+        for relative, covered in report.nodes_files_lines[node_id].items()
+    }
+
+
+def _edited_declarations(test_file, value):
+    """Edit only declaration data, preserving every executable policy body."""
+    from testmon.process_code import Module
+
+    data_path = REPO_ROOT / "tests/subprocess_dependencies.py"
+    if not data_path.exists():
+        data_path = Path(testmon_policy.__file__)
+    tree = ast.parse(data_path.read_text(encoding="utf-8"))
+    declaration = next(
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "OUT_OF_PROCESS_DEPENDENCIES"
+    )
+    position = next(
+        (index for index, key in enumerate(declaration.keys) if key.value == test_file),
+        None,
+    )
+    if position is not None:
+        del declaration.keys[position]
+        del declaration.values[position]
+    if value is not None:
+        declaration.keys.append(ast.Constant(value=test_file))
+        declaration.values.append(ast.Tuple(elts=[ast.Constant(value=item) for item in value]))
+    ast.fix_missing_locations(tree)
+    return data_path.relative_to(REPO_ROOT).as_posix(), Module(
+        source_code=ast.unparse(tree), ext="py"
+    )
+
+
+def test_adding_a_child_declaration_does_not_invalidate_unrelated_tests():
+    from testmon.process_code import match_fingerprint
+
+    fingerprints = _recorded_declaration_fingerprints("tests/core/test_nothing.py")
+    data_path, edited = _edited_declarations(
+        "tests/app/test_future_child.py", ("arrayscope/io/region_export.py",)
+    )
+    if data_path in fingerprints:
+        assert match_fingerprint(edited, fingerprints[data_path]), (
+            "a data-only child declaration invalidated an unrelated test's policy dependency"
+        )
+
+
+@pytest.mark.parametrize("replacement", [None, ()])
+def test_removing_or_emptying_a_child_declaration_invalidates_its_record(replacement):
+    from testmon.process_code import match_fingerprint
+
+    test_file = next(
+        name
+        for name, dependencies in testmon_policy.OUT_OF_PROCESS_DEPENDENCIES.items()
+        if dependencies
+    )
+    fingerprints = _recorded_declaration_fingerprints(test_file)
+    data_path, edited = _edited_declarations(test_file, replacement)
+    assert data_path in fingerprints
+    assert not match_fingerprint(edited, fingerprints[data_path])
+
+
+def test_an_empty_child_declaration_is_invalidated_when_dependencies_are_added():
+    from testmon.process_code import match_fingerprint
+
+    test_file = next(
+        name
+        for name, dependencies in testmon_policy.OUT_OF_PROCESS_DEPENDENCIES.items()
+        if not dependencies
+    )
+    fingerprints = _recorded_declaration_fingerprints(test_file)
+    data_path, edited = _edited_declarations(test_file, ("arrayscope/io/region_export.py",))
+    assert data_path in fingerprints
+    assert not match_fingerprint(edited, fingerprints[data_path])
+
+
 def _config(**options):
     return SimpleNamespace(option=SimpleNamespace(**options), args=[])
 
