@@ -53,10 +53,10 @@ def _run_desktop_integration(args) -> int:
     return 0 if report.ok else 1
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="arrayscope",
-        description="Interactive N-dimensional array viewer",
+        description="Inspect N-dimensional arrays interactively or export exact NumPy regions headlessly",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -71,8 +71,10 @@ Examples:
   arrayscope data.txt                      # View text file with numeric data
   arrayscope --mmap --consume handoff.npy  # Language-wrapper handoff (Julia/MATLAB)
   arrayscope --install-desktop             # Register with the desktop shell (menu entry, icons, file types)
+  arrayscope data.npy --export result.npy --range 0=10:20
+  arrayscope data.npy --export result.npz --recipe operations.json --dry-run
 
-Files open asynchronously: a loading window shows progress, and for formats
+Viewer files open asynchronously: a loading window shows progress, and for formats
 that support it the viewer opens while the file is still being read.
 For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatically appear.
         """,
@@ -112,7 +114,16 @@ For files with multiple datasets (HDF5, NPZ, MAT), a GUI selector will automatic
         help="Remove the desktop shell integration, then exit",
     )
 
-    args = parser.parse_args()
+    from arrayscope.app.batch_cli import add_batch_arguments, run_batch_cli
+
+    add_batch_arguments(parser)
+    args = parser.parse_args(argv)
+
+    # Batch export uses no Qt event loop, display supervision, settings, or
+    # accelerator prewarm. Keep it ahead of every interactive launch path.
+    batch_code = run_batch_cli(args, parser)
+    if batch_code is not None:
+        raise SystemExit(batch_code)
 
     # Desktop (un)registration is a plain filesystem operation: run it before
     # the supervisors below so no GUI child process is spawned.
