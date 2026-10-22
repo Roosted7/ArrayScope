@@ -11,6 +11,7 @@ This module is Qt-free and must stay importable without the GUI stack.
 
 from __future__ import annotations
 
+from math import prod
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -100,7 +101,7 @@ class NdArraySource:
 
     @property
     def nbytes(self) -> int:
-        return int(np.prod(self.shape, dtype=np.int64)) * self.dtype.itemsize
+        return prod(self.shape) * self.dtype.itemsize
 
     @property
     def chunk_shape(self) -> tuple[int, ...] | None:
@@ -177,7 +178,7 @@ class ScaledArraySource:
 
     @property
     def nbytes(self) -> int:
-        return int(np.prod(self.shape, dtype=np.int64)) * self._out_dtype.itemsize
+        return prod(self.shape) * self._out_dtype.itemsize
 
     @property
     def chunk_shape(self) -> tuple[int, ...] | None:
@@ -320,7 +321,7 @@ class CompositeArraySource:
 
     @property
     def nbytes(self) -> int:
-        return int(np.prod(self._shape, dtype=np.int64)) * self._dtype.itemsize
+        return prod(self._shape) * self._dtype.itemsize
 
     @property
     def chunk_shape(self) -> tuple[int, ...] | None:
@@ -390,7 +391,7 @@ class LazySourceArray:
 
     @property
     def size(self) -> int:
-        return int(np.prod(self.shape, dtype=np.int64))
+        return prod(self.shape)
 
     @property
     def nbytes(self) -> int:

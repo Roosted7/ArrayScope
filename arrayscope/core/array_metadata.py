@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import prod
 
 import numpy as np
 
@@ -18,7 +19,7 @@ class DerivedArrayInfo:
 
     @property
     def size(self) -> int:
-        return int(np.prod(self.shape, dtype=np.int64))
+        return prod(map(int, self.shape))
 
     @property
     def nbytes(self) -> int:
