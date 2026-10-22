@@ -124,11 +124,15 @@ Qt. Inspect the planned work, then export the exact scientific result:
 arrayscope input.npy --recipe steps.json --export result.npz --dry-run
 arrayscope input.npy --recipe steps.json --export result.npz --range 0=10:30
 arrayscope measurement.h5 --dataset scan/image --export selected.npz --range 0=2:6
+arrayscope input.npy --recipe steps.json --export result.npy --stream --dry-run
 ```
 
 [Recipe replay](docs/recipe-replay.md) explains half-open output-space ranges,
 cost consent, JSON results, supported operations, and cancellation. NPZ output
 keeps the original processing recipe and selection manifest beside the values.
+For eligible large selections, [incremental NPY export](docs/streaming-export.md)
+uses bounded chunks with `--stream`; GUI and NPZ export retain their existing
+evaluation path.
 
 <picture>
   <source srcset="docs/media/operations.avif" type="image/avif">

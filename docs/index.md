@@ -9,13 +9,16 @@ Organized by the question you're asking. Stop at the first useful level.
   doc is stale.
 - [Roadmap](roadmap.md) — why this order: Now / Next / Later / explicitly
   not now.
+- [Development handoff](development-handoff.md) — the 2026-10-22 checkpoint,
+  verification limits, preserved WIP branches, and ideas to revisit.
 - [Mission](mission.md) — who ArrayScope serves, the product promise, and
   what it will not become.
 
 ## "How do we work here?"
 
-- [Ground rules](ground-rules.md) — standing law: pixels are the gate, one
-  owner per decision, no silent fallbacks, repro-first.
+- [Ground rules](ground-rules.md) — engineering guidance: one owner per
+  decision, visible failures, reproduction, and validation appropriate to the
+  behavior being changed. Current user direction takes precedence.
 - [Agent briefing](agent-briefing.md) — failure modes that survive the ground
   rules, recorded from delegated bundles: defaults silently retired by your own
   change, tolerances that hide the defect they test for, edge cases the
@@ -40,6 +43,8 @@ Organized by the question you're asking. Stop at the first useful level.
   [scheduling and memory](architecture/scheduling-and-memory.md),
   [interaction and UI](architecture/interaction-and-ui.md).
 - [Invocation](invocation.md) — launch routes and wrappers.
+- [Recipe replay](recipe-replay.md), [incremental export](streaming-export.md),
+  and [HDF5 data](hdf5-data.md) — scientific processing without a display.
 - [Packaging](../packaging/README.md) — standalone installers (AppImage,
   Windows setup, macOS DMG) and the release workflow that builds them.
 - [Desktop integration](desktop-integration.md) — async/progressive file

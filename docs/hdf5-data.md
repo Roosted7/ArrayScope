@@ -169,3 +169,7 @@ Identity checks are not cryptographic content hashes or snapshot isolation.
 Keep inputs unchanged during an inspection or export; external writers can
 still race a read. The source is read-only, and closing a selector does not
 invalidate the independently opened selected source.
+
+Eligible terminal exports can use [incremental NPY output](streaming-export.md)
+with `--stream`. Chunk planning includes HDF5 decoded-chunk working costs and
+keeps the same source identity and per-read budget checks.

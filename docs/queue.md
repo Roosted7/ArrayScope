@@ -30,15 +30,22 @@ export, command supervision, shared-memory rollback, ROI statistics, launcher
 accessibility, application window ownership, guided examples/recent files,
 clipboard recipes, bounded operation Undo/Redo, Qt-free recipe replay, and
 shared lazy HDF5 datasets across viewing, Python, and terminal export.
+Eligible terminal NPY exports now stream with bounded estimated working chunks
+and disjoint source reads. Test selection/scheduling and CI reporting have
+also been repaired; unresolved GPU/GUI failures remain visible.
 Validation and remaining limits are recorded
 in the [Done ledger](queue-done.md). Working guidance now chooses validation by
 behavior rather than directory and permits evidence-backed redesigns.
+The [development handoff](development-handoff.md) records the bedtime checkpoint,
+preserved WIP branches, measured results, and unstarted ideas. It supplements
+this queue without creating another ordered backlog.
 
 | Next | Work | Acceptance |
 |---|---|---|
-| 1 | Export eligible large selections incrementally without allocating the whole output. | Prove bounded memory in a constrained subprocess, exact global shape/dtype/squeeze semantics, linear source work, honest rejection of unsupported plans, and cancellation/atomic publication through the existing writer. A prototype is evidence, not a shipped streaming path. |
-| 2 | Recheck maintained-backend interaction and callback bars on real hardware after correctness work. | Physical-pixel and compositor evidence with a representative dataset, both WGPU and PyQtGraph; offscreen runs do not count as GPU performance evidence. |
-| 3 | Evaluate a batched native planning boundary only after a fresh profile shows sufficient cost. | Immutable bulk input, no per-tile Python/native calls, exact state semantics, packaging proof, and a timing improvement beyond same-code spread plus pixel regression checks. Current measured candidate costs total about 6% of the workflow, so a whole-app rewrite is not justified. |
+| 1 | Read the new CI results, then resolve reproduced GPU pixel/BC5 errors and GUI scrolling/order/pacing failures. Start from the pushed WIP notes linked in the handoff. | Independent pixel/histogram oracles, fixture cleanup even after failures, and visible current-tile/order/progress checks. Preserve useful assertions and interaction deadlines. Record actual new Windows/Python matrix results; local scoped checks are not a whole-CI verdict. |
+| 2 | Measure the revised test loop and expand useful reuse/consolidation where evidence supports it. | Compare actual scoped and exhaustive wall time, preserve subprocess dependency soundness and collection identity, and remove only demonstrated redundant work. Existing profile and invalidation improvements do not prove a full-suite speedup. |
+| 3 | Recheck maintained-backend interaction and callback bars on real hardware after correctness work. | Physical-pixel and compositor evidence with a representative dataset, both WGPU and PyQtGraph; offscreen/software Vulkan runs do not count as hardware GPU performance evidence. |
+| 4 | Evaluate wider incremental export support and a batched native planning boundary when measurements justify each. | NPZ/GUI streaming and additional operations must retain bounded planning, linear source work, exact values, provenance, and atomic cancellation. Native work needs immutable bulk inputs, correct semantics, practical packaging, and gains beyond same-code spread. The historical native candidate is about 6% of the workflow, not grounds for a whole-app rewrite. |
 
 ## Engine and platform backlog (2026-08 evidence)
 

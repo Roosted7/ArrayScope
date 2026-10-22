@@ -152,6 +152,12 @@ Ctrl+C before publication preserves previous output. See the
 [complete replay guide](recipe-replay.md) for range/squeeze semantics, FFT
 conventions, embedded provenance, examples, and exit codes.
 
+Add `--stream` when writing an eligible plan to `.npy` to evaluate and publish
+in bounded chunks. It is an explicit terminal option; unsupported operations,
+NPZ destinations, and plans requiring repeated full-source reads are refused.
+Use `--stream --dry-run` to inspect eligibility and chunk costs without reading
+values. See [incremental export](streaming-export.md) for examples and limits.
+
 ## Julia and MATLAB wrappers
 
 The wrappers live in [`wrappers/julia`](../wrappers/julia/ArrayScope.jl) and

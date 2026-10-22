@@ -205,6 +205,12 @@ different file from the input; paths that alias the input are rejected.
 
 ## Cancellation and exit codes
 
+For eligible plans, `--stream` writes `.npy` output incrementally instead of
+allocating the complete result. It preserves the cancellation/publication
+contract below. See [incremental export](streaming-export.md) for supported
+operations, disjoint-read requirements, and chunk cost reporting. This option
+does not support NPZ output.
+
 Press Ctrl+C to cancel. Before publication, cancellation or failure preserves
 an existing destination and removes staged output. Once publication has
 committed, a late interrupt cannot undo the saved result and success is
