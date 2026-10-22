@@ -24,6 +24,9 @@ all declared tests, including empty entries and declaration guards.
 #: mid-suite ``INTERNALERROR``; see
 #: :func:`install_extensionless_dependency_support`.
 OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    # A fresh interpreter reproduces Windows' missing Unix resource module
+    # before importing the shared pytest diagnostics helper.
+    "tests/app/test_load_report.py": ("tests/load_report.py",),
     # Named HDF5 replay is also exercised in a fresh interpreter that refuses
     # Qt imports and payload reads during planning; the parent cannot trace it.
     "tests/app/test_hdf5_cli.py": (

@@ -22,9 +22,13 @@ itself and would otherwise always look like contention.
 from __future__ import annotations
 
 import os
-import resource
 import time
 from dataclasses import dataclass
+
+try:
+    import resource
+except ImportError:  # Windows has no Unix process-tree accounting.
+    resource = None
 
 #: A machine is "busy" once other work occupies this share of the cores. Below
 #: it, xdist's own oversubscription is the dominant effect and a warning would
@@ -65,6 +69,10 @@ class LoadWindow:
 
     @classmethod
     def sample(cls) -> LoadWindow:
+        if resource is None:
+            # Without child CPU accounting, subtracting only our own CPU would
+            # mislabel this run's workers as foreign load. Omit that estimate.
+            return cls(load=None, wall=time.monotonic(), cpu_seconds=time.process_time())
         children = resource.getrusage(resource.RUSAGE_CHILDREN)
         own = resource.getrusage(resource.RUSAGE_SELF)
         return cls(
