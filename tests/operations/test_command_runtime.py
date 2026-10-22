@@ -323,8 +323,24 @@ def test_command_supervision_continues_after_leader_exits(tmp_path, interrupt):
         assert isinstance(outcome.get("error"), expected)
         if interrupt == "timeout":
             assert "timed out" in str(outcome["error"])
-        with suppress(psutil.NoSuchProcess):
-            assert psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE
+        # SIGKILL delivery is asynchronous. A returned supervisor proves it
+        # sent cleanup, but the scheduler may not have published the child's
+        # terminal state yet. Observe that state rather than one immediate read.
+        deadline = time.monotonic() + INTERACTION_SETTLE_HARD_LIMIT_S
+        while True:
+            try:
+                if child_process is None:
+                    child_process = psutil.Process(child_pid)
+                if not child_process.is_running() or child_process.status() in {
+                    psutil.STATUS_ZOMBIE,
+                    psutil.STATUS_DEAD,
+                }:
+                    break
+            except psutil.NoSuchProcess:
+                break
+            if time.monotonic() >= deadline:
+                pytest.fail("the command descendant survived supervisor cleanup")
+            time.sleep(0.005)
     finally:
         if child_pid is None and marker.exists() and marker.read_text():
             _leader_pid, child_pid = json.loads(marker.read_text())
