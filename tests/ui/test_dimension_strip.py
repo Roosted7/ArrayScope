@@ -173,10 +173,11 @@ def test_chip_labels_show_axis_metadata_when_available(qt_app):
 
     strip.update_state((4, 5, 6), state, profile_axes=(2,), axes=axes)
 
-    assert strip.chip(0).axis_label.text() == "Readout · 4"
+    assert strip.chip(0).axis_label.accessibleName() == "Readout, 4 elements"
+    assert strip.chip(0).axis_label.text().splitlines()[-1] == "4"
     # Positional fallback names collapse to the size; the badge shows the index.
     assert strip.chip(1).axis_label.text() == "5"
-    assert strip.chip(2).axis_label.text() == "Slice · 6"
+    assert strip.chip(2).axis_label.accessibleName() == "Slice, 6 elements"
     assert strip.chip(0).index_badge.text() == "0"
     assert strip.chip(2).index_badge.text() == "2"
     assert "spacing: 1.5 mm" in strip.chip(0).axis_label.toolTip()
@@ -207,11 +208,73 @@ def test_chip_ignores_axes_that_do_not_match_shape(qt_app):
     strip.close()
 
 
-def test_long_axis_labels_are_elided(qt_app):
-    from arrayscope.ui.dimension_strip import _elide
+def test_named_axis_labels_fit_the_compact_chip_without_clipping(qt_app):
+    from pyqtgraph.Qt import QtGui
 
-    assert _elide("Slice") == "Slice"
-    assert _elide("A Very Long Axis Label") == "A Very Long…"
+    from arrayscope.core.axis_info import AxisInfo
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.ui.dimension_strip import DimensionStrip
+
+    strip = DimensionStrip(3)
+    state = ViewState.from_shape((128, 128, 24))
+    axes = (
+        AxisInfo("y", "Y", 128),
+        AxisInfo("x", "X", 128),
+        AxisInfo("slice", "Slice", 24),
+    )
+    try:
+        strip.resize(800, 80)
+        strip.update_state(state.shape, state, axes=axes)
+        strip.show()
+        qt_app.processEvents()
+        strip._relayout()
+        qt_app.processEvents()
+        label = strip.chip(2).axis_label
+        assert "Slice" in label.text()
+        assert "24" in label.text()
+        assert all(
+            QtGui.QFontMetricsF(label.font()).horizontalAdvance(line)
+            <= label.contentsRect().width()
+            for line in label.text().splitlines()
+        )
+        assert "Slice" in label.accessibleName()
+        assert "24" in label.accessibleName()
+        assert strip.chip(2).width() <= strip.MAX_CHIP_WIDTH
+    finally:
+        strip.close()
+
+
+def test_long_names_elide_at_the_actual_width_and_keep_full_metadata(qt_app):
+    from pyqtgraph.Qt import QtGui
+
+    from arrayscope.core.axis_info import AxisInfo
+    from arrayscope.core.view_state import ViewState
+    from arrayscope.ui.dimension_strip import DimensionStrip
+
+    name = "Acquisition time after contrast injection"
+    strip = DimensionStrip(2)
+    state = ViewState.from_shape((128, 24))
+    axes = (AxisInfo("x", "X", 128), AxisInfo("time", name, 24, unit="s"))
+    try:
+        strip.resize(460, 70)
+        strip.update_state(state.shape, state, axes=axes)
+        strip.show()
+        qt_app.processEvents()
+        label = strip.chip(1).axis_label
+        for width in (label.maximumWidth(), label.minimumWidth()):
+            label.setFixedWidth(width)
+            qt_app.processEvents()
+            assert "…" in label.text()
+            assert all(
+                QtGui.QFontMetricsF(label.font()).horizontalAdvance(line)
+                <= label.contentsRect().width()
+                for line in label.text().splitlines()
+            )
+            assert name in label.toolTip()
+            assert name in label.accessibleName()
+            assert "unit: s" in label.toolTip()
+    finally:
+        strip.close()
 
 
 def test_slice_selection_validator_rejects_unsupported_characters(qt_app):

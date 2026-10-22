@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from math import ceil
 
 import pyqtgraph.Qt as Qt
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
@@ -70,6 +71,50 @@ class SliceIndexEdit(QtWidgets.QAbstractSpinBox):
         event.accept()
 
 
+class _DimensionAxisLabel(QtWidgets.QLabel):
+    """Keep the axis name and extent readable inside the compact label slot."""
+
+    def __init__(self):
+        super().__init__()
+        self._lines = ()
+        self.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+
+    def set_axis_text(self, name, size):
+        lines = (str(size),) if name is None else (str(name), str(size))
+        if lines != self._lines:
+            self._lines = lines
+            self._refresh_text()
+        self.setAccessibleName(f"{size} elements" if name is None else f"{name}, {size} elements")
+
+    def _refresh_text(self):
+        width = max(0, self.contentsRect().width())
+        metrics = self.fontMetrics()
+        text = "\n".join(
+            metrics.elidedText(line, QtCore.Qt.TextElideMode.ElideRight, width)
+            for line in self._lines
+        )
+        _set_text_if_changed(self, text)
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        # Layout must measure the unelided content. Measuring the already
+        # shortened label would keep a once-narrow label narrow forever.
+        if self._lines:
+            metrics = QtGui.QFontMetricsF(self.font())
+            width = ceil(max(metrics.horizontalAdvance(line) for line in self._lines))
+            hint.setWidth(min(self.maximumWidth(), width))
+        return hint
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_text()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.Type.FontChange:
+            self._refresh_text()
+
+
 class DimensionChip(QtWidgets.QFrame):
     roleChanged = Qt.QtCore.Signal(str, int)
     sliceChanged = Qt.QtCore.Signal(int, int)
@@ -108,7 +153,7 @@ class DimensionChip(QtWidgets.QFrame):
         metrics = self.fontMetrics()
         char = max(6, metrics.averageCharWidth())
 
-        self.axis_label = QtWidgets.QLabel()
+        self.axis_label = _DimensionAxisLabel()
         self.axis_label.setAlignment(Qt.QtCore.Qt.AlignmentFlag.AlignCenter)
         # Size text: 5 characters by default, may shrink to 3 under pressure.
         self.axis_label.setMinimumWidth(3 * char)
@@ -158,11 +203,13 @@ class DimensionChip(QtWidgets.QFrame):
         size = int(shape[self.axis])
         self._axis_size = size
         axis_info = _axis_info_for(axes, shape, self.axis)
-        display_name = _elide(axis_display_name(axis_info, self.axis))
+        display_name = axis_display_name(axis_info, self.axis)
         # The chip badge already shows the dimension index; the label carries
-        # the size (plus the metadata name when one exists).
-        label_text = str(size) if display_name == str(self.axis) else f"{display_name} · {size}"
-        _set_text_if_changed(self.axis_label, label_text)
+        # the extent. A metadata name gets its own line, so adding it cannot
+        # silently clip the extent or the beginning of a centered label.
+        self.axis_label.set_axis_text(
+            None if display_name == str(self.axis) else display_name, size
+        )
         _set_tooltip_if_changed(
             self.axis_label,
             f"{size} elements" if axis_info is None else axis_metadata_summary(axis_info),
@@ -582,10 +629,6 @@ def _axis_info_for(axes, shape, axis):
     if axes is None or len(axes) != len(shape) or axis >= len(axes):
         return None
     return axes[axis]
-
-
-def _elide(name: str, limit: int = 12) -> str:
-    return name if len(name) <= limit else name[: limit - 1] + "…"
 
 
 def _set_text_if_changed(widget, text: str) -> None:
