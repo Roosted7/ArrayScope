@@ -204,6 +204,49 @@ class Ctx:
 # --------------------------------------------------------------------------
 
 
+@scenario("launcher")
+def s_launcher(ctx: Ctx):
+    import numpy as np
+
+    from arrayscope.app.open_flow import SUPPORTED_SUFFIXES, file_dialog_name_filter
+    from arrayscope.app.sample_data import SAMPLES
+    from arrayscope.app.theme import apply_theme_to_qapplication
+    from arrayscope.ui.launcher_window import LauncherWindow
+
+    apply_theme_to_qapplication(ctx.app, ctx.theme)
+    recent_dir = ctx.out_dir / "Example study"
+    recent_dir.mkdir(exist_ok=True)
+    first = recent_dir / "coil-combination.npy"
+    second = recent_dir / "dynamic-series.npz"
+    np.save(first, np.zeros((8, 8)))
+    np.savez(second, data=np.zeros((8, 8, 3)))
+    for state, recents in (
+        ("first_run", ()),
+        ("returning", (first, second, recent_dir / "moved-study.h5")),
+    ):
+        win = LauncherWindow(
+            lambda _path: False,
+            supported_suffixes=SUPPORTED_SUFFIXES,
+            name_filter=file_dialog_name_filter(),
+            samples=SAMPLES,
+            sample_callback=lambda _sample_id: False,
+            recent_paths=recents,
+        )
+        try:
+            win.show()
+            for label, size in (("default_640x600", (640, 600)), ("minimum_520x480", (520, 480))):
+                win.resize(*size)
+                ctx.shot(win, f"{state}_{label}")
+                if label.startswith("minimum"):
+                    from pyqtgraph.Qt import QtWidgets
+
+                    scroll = win.findChild(QtWidgets.QScrollArea, "launcherBody")
+                    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+                    ctx.shot(win, f"{state}_{label}_scrolled")
+        finally:
+            win.close()
+
+
 @scenario("2d_default", themes=("dark", "light", "system"))
 def s_2d_default(ctx: Ctx):
     win = ctx.window(_phantom2d(), size=(960, 720))
@@ -491,6 +534,40 @@ def s_first_run_hints(ctx: Ctx):
     win = ctx.window(_phantom2d(192), size=(1000, 700))
     ctx.pump(8)
     ctx.shot(win, "hints_overlay")
+
+
+@scenario("recipe_clipboard")
+def s_recipe_clipboard(ctx: Ctx):
+    from arrayscope.operations.pipeline import Crop, OperationStep, ReverseAxis
+    from arrayscope.operations.recipes import recipe_from_steps
+
+    steps = (OperationStep(Crop(1, 4, 40)), OperationStep(ReverseAxis(0), enabled=False))
+    win = ctx.window(_volume3d(48, 48, 8), size=(1000, 740), steps=steps)
+    if not win.copy_operation_recipe():
+        raise RuntimeError("recipe copy failed")
+    win.clear_operations()
+    ctx.settle()
+    if not win.paste_operation_recipe() or recipe_from_steps(
+        win.document.steps
+    ) != recipe_from_steps(steps):
+        raise RuntimeError(
+            f"clipboard recipe did not preserve its editable steps: {win.document.steps!r} != {steps!r}"
+        )
+    win._set_operation_dock_visible_from_user(True)
+    ctx.settle()
+    ctx.shot(win, "pasted_recipe")
+
+    menu = win.operation_dock.more_button.menu()
+    menu.popup(
+        win.operation_dock.more_button.mapToGlobal(win.operation_dock.more_button.rect().topLeft())
+    )
+    _shot_menu(ctx, menu, "recipe_menu")
+    menu.hide()
+    palette = win._build_command_palette_dialog()
+    palette.search.setText("recipe")
+    palette.show()
+    ctx.shot(palette, "recipe_commands")
+    palette.close()
 
 
 @scenario("operation_command_palette")
@@ -974,6 +1051,67 @@ def s_operation_chip_menu(ctx: Ctx):
     if submenu is not None:
         _shot_menu(ctx, submenu, "chip_menu_more")
     _shot_menu(ctx, menu, "chip_menu")
+
+
+@scenario("dataset_selector")
+def s_dataset_selector(ctx: Ctx):
+    import tempfile
+
+    import h5py
+    import numpy as np
+    from scipy.io import savemat
+
+    from arrayscope.app.theme import apply_theme_to_qapplication
+    from arrayscope.io.selectors import H5DatasetSelector, MatDatasetSelector, NpzDatasetSelector
+
+    apply_theme_to_qapplication(ctx.app, ctx.theme)
+    with tempfile.TemporaryDirectory(prefix="arrayscope-gallery-datasets-") as directory:
+        h5_path = Path(directory) / "scan.h5"
+        encoded = np.zeros((48, 48), dtype=[("realdata", "f4"), ("imagdata", "f4")])
+        with h5py.File(h5_path, "w") as output:
+            output.create_dataset("acquisition/complex_image", data=encoded)
+            output.create_dataset("acquisition/reference", data=np.ones((48, 48)))
+            output.create_dataset("measurements", (8,), dtype=[("samples", "f4", (4, 6))])
+        npz_path = Path(directory) / "results.npz"
+        np.savez_compressed(
+            npz_path,
+            image=np.ones((48, 48)),
+            **{"session/volume": np.ones((24, 32, 16)), "description": np.array("metadata")},
+        )
+        mat_path = Path(directory) / "reconstruction.mat"
+        records = np.empty((1, 2), dtype=[("id", object)])
+        records["id"][0, 0] = 1
+        records["id"][0, 1] = 2
+        savemat(
+            mat_path,
+            {
+                "scan": {"image": np.ones((48, 48)), "derived": {"phase": np.ones((24, 32))}},
+                "description": "Reconstruction metadata",
+                "records": records,
+            },
+        )
+        queries = {
+            H5DatasetSelector: "acquisition/complex",
+            NpzDatasetSelector: "session/volume",
+            MatDatasetSelector: "scan/derived/phase",
+        }
+
+        for selector_class, path, label in (
+            (H5DatasetSelector, h5_path, "hdf5_groups_complex_and_records"),
+            (NpzDatasetSelector, npz_path, "npz_numeric_datasets"),
+            (MatDatasetSelector, mat_path, "mat_structs_and_metadata"),
+        ):
+            with contextlib.closing(selector_class(path)) as selector:
+                dialog = selector._create_dialog()
+                try:
+                    dialog.show()
+                    ctx.shot(dialog, label)
+                    selector.filter_edit.setText(queries[selector_class])
+                    ctx.shot(dialog, f"{label}_filtered")
+                    selector.filter_edit.setText("missing")
+                    ctx.shot(dialog, f"{label}_no_matches")
+                finally:
+                    dialog.close()
 
 
 # --------------------------------------------------------------------------

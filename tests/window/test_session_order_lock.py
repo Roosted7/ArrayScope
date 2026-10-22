@@ -122,12 +122,31 @@ def test_the_commit_body_runs_holding_the_order_lock(montage_window, monkeypatch
 # --- claim 2: request_presentation off the GUI thread ------------------------
 
 
+def _trace_marker() -> int:
+    events = TRACE.snapshot()
+    return int(events[-1]["sequence"]) if events else 0
+
+
 def _presentation_gate_actions(since: int) -> list[str]:
     return [
         str(event.get("action", ""))
-        for event in TRACE.snapshot()[since:]
-        if event.get("kind") == "presentation_gate"
+        for event in TRACE.snapshot()
+        if int(event["sequence"]) > since and event.get("kind") == "presentation_gate"
     ]
+
+
+def test_presentation_gate_observer_survives_a_full_trace_ring(monkeypatch):
+    from arrayscope.core.trace import TraceBus
+
+    trace = TraceBus()
+    trace.configure(ring_events=3)
+    monkeypatch.setitem(globals(), "TRACE", trace)
+    for _ in range(3):
+        trace.emit("older-event")
+    marker = _trace_marker()
+    trace.emit("presentation_gate", action="armed-post")
+
+    assert _presentation_gate_actions(marker) == ["armed-post"]
 
 
 def _disarm_gate(renderer) -> None:
@@ -152,7 +171,7 @@ def test_request_presentation_off_the_gui_thread_posts_the_gate(montage_window):
     # timer branch, which every attempt checks unconditionally.
     for _ in range(50):
         _disarm_gate(renderer)
-        marker = len(TRACE.snapshot())
+        marker = _trace_marker()
         thread = threading.Thread(target=effects.request_presentation, name="not-the-gui-thread")
         thread.start()
         thread.join(timeout=5.0)
@@ -188,7 +207,7 @@ def test_the_gui_thread_still_coalesces_a_cpu_windowed_commit_on_its_timer(monta
     # branch, proven by any attempt whose arm was ours.
     for _ in range(50):
         _disarm_gate(renderer)
-        marker = len(TRACE.snapshot())
+        marker = _trace_marker()
         session.pipeline.effects.request_presentation()
         if "armed-timer" in _presentation_gate_actions(marker):
             break

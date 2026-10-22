@@ -101,7 +101,10 @@ def test_main_window_interactions_create_useful_artifacts(qt_app):
         _process_events(qt_app)
         assert win.view_state.image_axes == (2, 0)
         _grab_widget(
-            win.dimension_strip, "arrayscope_dimension_controls.png", min_width=150, min_height=30
+            win.dimension_strip,
+            "arrayscope_dimension_controls.png",
+            min_width=150,
+            min_height=win.dimension_strip.minimumSizeHint().height(),
         )
 
         win._append_operation("mean", dim=1)
