@@ -91,6 +91,24 @@ MAP_FILENAME = ".testmondata"
 #: mid-suite ``INTERNALERROR``; see
 #: :func:`install_extensionless_dependency_support`.
 OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    # Real terminal invocations exercise early headless dispatch, replay, and
+    # atomic publication outside the parent's trace, including SIGINT races.
+    "tests/app/test_batch_cli.py": (
+        "arrayscope/__main__.py",
+        "arrayscope/app/batch_cli.py",
+        "arrayscope/io/recipe_replay.py",
+        "arrayscope/io/region_export.py",
+        "arrayscope/io/numpy_save.py",
+        "arrayscope/operations/recipes.py",
+    ),
+    "tests/app/test_batch_process_integration.py": (
+        "arrayscope/__main__.py",
+        "arrayscope/app/batch_cli.py",
+        "arrayscope/io/recipe_replay.py",
+        "arrayscope/io/region_export.py",
+        "arrayscope/io/numpy_save.py",
+        "arrayscope/operations/recipes.py",
+    ),
     # Fresh gw0-labeled interpreters exercise the import-time filesystem
     # setup, which cannot be re-run inside the parent pytest process.
     "tests/app/test_qsettings_isolation.py": (
