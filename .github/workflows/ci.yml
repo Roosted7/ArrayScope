@@ -3,15 +3,38 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      seed_gui_map:
+        description: "Record the complete GUI selection map (replaces the coverage sweep for this run)"
+        type: boolean
+        default: false
+      hardware_gpu:
+        description: "Also run the real-compositor lane on an available self-hosted arrayscope-gpu runner"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  QT_QPA_PLATFORM: offscreen
+  PYQTGRAPH_QT_LIB: PySide6
+  PYTHONUNBUFFERED: "1"
+
 jobs:
   lint:
     name: Lint (ruff + dead code)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -19,20 +42,17 @@ jobs:
           python-version: "3.12"
       - name: Install ruff
         run: python -m pip install ruff==0.15.22
-      - name: Ruff lint
-        run: ruff check --output-format github .
-      - name: Ruff format check
-        run: ruff format --check .
-      # Pure stdlib AST, nothing to install: the same gate .githooks/pre-commit
-      # runs, repeated here as late confirmation for the branches CI does see.
-      - name: Dead code
-        run: python tools/dead_code.py
+      - run: ruff check --output-format github .
+      - run: ruff format --check .
+      - run: python tools/dead_code.py
 
   python-compat:
     name: Python compatibility ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
@@ -40,166 +60,224 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: pyproject.toml
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
           sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
-      - name: Install package
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,wgpu]"
+      - name: Install locked compatibility environment
+        run: uv sync --frozen --no-default-groups --extra dev --extra wgpu --python ${{ matrix.python-version }}
       - name: Run Python compatibility tests
         run: |
-          pytest -q \
-            tests/core \
-            tests/operations \
+          uv run --no-sync python tools/ci_report.py pytest \
+            --name "Python ${{ matrix.python-version }} compatibility" \
+            --output tests/artifacts/ci/compatibility --timeout 600 -- -q \
+            tests/core tests/operations \
+            tests/kernel/test_process_backend.py tests/kernel/test_shm_slots.py \
             tests/app/test_architecture_guards.py \
-            tests/app/test_operation_benchmarks.py \
-            tests/app/test_public_api.py
-
-  # Change-driven selection (docs/testing/test-selection.md) turns itself off
-  # whenever `CI` is set, which Actions always sets. Every job below therefore
-  # runs the whole suite it names, and no map — stale, absent, or restored from
-  # another branch — can narrow a gate. The one job that opts back in does so
-  # with an explicit `--testmon`, which wins over the `CI` refusal, and it is
-  # allowed to because it is a strict subset of the exhaustive `coverage` job
-  # running beside it.
-  affected-gui-tests:
-    name: Affected GUI tests (fast signal)
-    runs-on: ubuntu-latest
-    env:
-      QT_QPA_PLATFORM: offscreen
-      PYQTGRAPH_QT_LIB: PySide6
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      # The map is content-addressed and path-relative, so any earlier run's
-      # copy is a valid starting point: whatever differs from this checkout is
-      # invalidated and re-run. The key is per-commit so each run saves its own;
-      # the restore-keys prefix falls back to the newest map recorded against
-      # the same interpreter and dependency set. A different package set makes
-      # testmon discard the map by itself (it is part of the environment key),
-      # which is why hashFiles(pyproject.toml) is enough to keep this honest.
-      - name: Restore test-selection map
-        uses: actions/cache@v4
-        with:
-          path: .testmondata
-          key: testmon-ubuntu-py312-${{ hashFiles('pyproject.toml') }}-${{ github.sha }}
-          restore-keys: |
-            testmon-ubuntu-py312-${{ hashFiles('pyproject.toml') }}-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
-      - name: Install package
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,wgpu]"
-      - name: Run affected GUI and integration tests
-        # First run on a new dependency set records the map instead of using
-        # one; every later run is proportional to the diff.
-        # `--testmon` is explicit, so it overrides the CI-sets-everything rule.
-        # --rerun-reds: a cached map recorded from a failing run would otherwise
-        # keep reporting this job green while the test stayed broken.
-        run: pytest -q --testmon --rerun-reds tests/display tests/window tests/ui tests/app
-
-  coverage:
-    name: Coverage Python 3.12
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      QT_QPA_PLATFORM: offscreen
-      PYQTGRAPH_QT_LIB: PySide6
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
-      - name: Install package
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,wgpu]"
-      - name: Run full suite with coverage
-        run: |
-          pytest tests/ -q \
-            --cov=arrayscope \
-            --cov-report=term-missing:skip-covered \
-            --cov-report=xml
-      - name: Upload coverage artifact
+            tests/app/test_operation_benchmarks.py tests/app/test_public_api.py
+      - name: Summarize tests
         if: always()
-        uses: actions/upload-artifact@v4
+        run: python tools/ci_report.py summarize tests/artifacts/ci --title "Python ${{ matrix.python-version }} compatibility" --artifact compatibility-${{ matrix.python-version }}
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: coverage-xml
-          path: coverage.xml
+          name: compatibility-${{ matrix.python-version }}
+          path: tests/artifacts/ci/
           if-no-files-found: warn
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          use_oidc: true
-          files: coverage.xml
-          flags: full-suite
-          name: linux-py312-full-suite
-          fail_ci_if_error: true
 
-  strict-ui:
-    name: Strict UI tests
+  # No cold-cache duplicate GUI sweep: a smoke is explicitly labelled as such.
+  # A full map is seeded only by workflow_dispatch, which replaces coverage.
+  # Valid maps are saved on test failures as well as successes, including their
+  # red/skip ledgers and attribution metadata. CI disables implicit selection;
+  # the cached path deliberately opts in with --testmon --rerun-reds.
+  affected-gui-tests:
+    name: ${{ inputs.seed_gui_map && 'Seed complete GUI selection map' || 'GUI fast signal (cached selection or smoke)' }}
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.seed_gui_map && 40 || 15 }}
     env:
-      QT_QPA_PLATFORM: offscreen
-      PYQTGRAPH_QT_LIB: PySide6
       ARRAYSCOPE_STRICT_UI: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Restore a fully seeded GUI map
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .testmondata*
+            .ci-gui-map.json
+          key: gui-map-v2-py312-strict-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
+          restore-keys: |
+            gui-map-v2-py312-strict-${{ hashFiles('uv.lock', 'pyproject.toml') }}-
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
           sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
-      - name: Install package
+      - name: Install locked environment
+        run: uv sync --frozen --no-default-groups --extra dev --extra wgpu --python 3.12
+      - name: Run GUI fast signal or explicit map seed
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,wgpu]"
-      - name: Run strict UI tests
-        run: pytest tests/ui -q
+          scope=smoke
+          mkdir -p tests/artifacts/ci
+          if [ "${{ inputs.seed_gui_map }}" = "true" ]; then
+            scope=seed
+          elif [ -f .ci-gui-map.json ]; then
+            # A broad change belongs to the exhaustive owner, not a second
+            # full GUI run. The recorded cost is a lower bound, not a deadline.
+            if uv run --no-sync python tools/test_selection.py impact --json > tests/artifacts/ci/selection-impact.json; then
+              scope=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          impact = json.loads(Path("tests/artifacts/ci/selection-impact.json").read_text())
+          gui = ("tests/display/", "tests/window/", "tests/ui/", "tests/app/")
+          unknown = [path for path in impact["unmapped_test_files"] if path.startswith(gui)]
+          affected = [name for name in impact["affected_tests"] if name.startswith(gui)]
+          print("affected" if not unknown and len(affected) <= 200 and impact["affected_seconds"] <= 120 else "smoke")
+          PY
+              )
+            fi
+          fi
+          echo "GUI fast-signal scope: $scope (coverage owns exhaustive correctness)"
+          if [ "$scope" = seed ]; then
+            uv run --no-sync python tools/ci_report.py pytest \
+              --name "Complete strict GUI map seed" \
+              --output tests/artifacts/ci/gui --timeout 1800 -- -q \
+              --testmon-noselect tests/display tests/window tests/ui tests/app
+          elif [ "$scope" = affected ]; then
+            uv run --no-sync python tools/ci_report.py pytest \
+              --name "Affected strict GUI tests" --allow-empty \
+              --output tests/artifacts/ci/gui --timeout 600 -- -q \
+              --testmon --rerun-reds tests/display tests/window tests/ui tests/app
+          else
+            uv run --no-sync python tools/ci_report.py pytest \
+              --name "Strict GUI smoke (cold map or broad impact)" \
+              --output tests/artifacts/ci/gui --timeout 180 -- -q \
+              --testmon-noselect tests/ui/test_launcher_window.py \
+              tests/ui/test_command_palette.py tests/app/test_open_flow.py
+          fi
+      - name: Check whether the complete map can be saved
+        id: map
+        if: always()
+        env:
+          SEED_REQUESTED: ${{ inputs.seed_gui_map && '1' || '0' }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = Path("tests/artifacts/ci/gui/status.json")
+          if report.is_file():
+              status = json.loads(report.read_text())
+              completed = status["exit_code"] in (0, 1) and not status["timed_out"]
+              stamp = Path(".ci-gui-map.json")
+              if completed and status["junit_present"] and os.environ["SEED_REQUESTED"] == "1":
+                  stamp.write_text(json.dumps({"scope": ["tests/display", "tests/window", "tests/ui", "tests/app"], "environment": "offscreen+strict-ui", "complete": True}) + "\n")
+              if completed and stamp.is_file():
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                      output.write("save=true\n")
+          PY
+      - name: Save GUI map even when tests fail
+        if: always() && steps.map.outputs.save == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .testmondata*
+            .ci-gui-map.json
+          key: gui-map-v2-py312-strict-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
+      - name: Summarize tests
+        if: always()
+        run: python tools/ci_report.py summarize tests/artifacts/ci --title "GUI fast signal / explicit seed" --artifact gui-test-report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui-test-report
+          path: tests/artifacts/ci/
+          if-no-files-found: warn
 
-  build-package:
-    name: Build package
+  coverage:
+    name: Exhaustive strict coverage Python 3.12
+    if: ${{ !inputs.seed_gui_map }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARRAYSCOPE_STRICT_UI: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install build tools
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install system dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install build twine
-      - name: Build package
-        run: python -m build
-      - name: Check package
-        run: python -m twine check dist/*
-      - name: Upload package artifacts
+          sudo apt-get update -q
+          sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
+      - name: Install locked maintained development environment
+        run: uv sync --frozen --python 3.12
+      - name: Run exhaustive suite with strict UI and coverage
+        # CI turns selection off. Keep GPU correctness assertions enabled:
+        # hosted software adapters are useful correctness smoke, not hardware
+        # timing/presentation acceptance. Do not weaken assertions for a green.
+        run: |
+          uv run --no-sync python tools/ci_report.py pytest \
+            --name "Exhaustive strict suite with coverage" \
+            --output tests/artifacts/ci/coverage --timeout 1800 -- tests/ -q \
+            --cov=arrayscope --cov-report=term-missing:skip-covered --cov-report=xml
+      - name: Summarize tests
+        if: always()
+        run: python tools/ci_report.py summarize tests/artifacts/ci --title "Exhaustive strict coverage" --artifact exhaustive-coverage-report
+      - name: Upload test and coverage artifacts
+        if: always()
         uses: actions/upload-artifact@v4
+        with:
+          name: exhaustive-coverage-report
+          include-hidden-files: true
+          path: |
+            tests/artifacts/
+            coverage.xml
+            .coverage*
+          if-no-files-found: warn
+      - name: Upload coverage to Codecov
+        if: always() && hashFiles('coverage.xml') != ''
+        uses: codecov/codecov-action@v5
+        with:
+          use_oidc: true
+          files: coverage.xml
+          flags: full-suite
+          name: linux-py312-strict-full-suite
+          fail_ci_if_error: true
+
+  build-package:
+    name: Build package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen --no-default-groups --extra dev --python 3.12
+      - run: uv run --no-sync python -m build
+      - run: uv run --no-sync python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/*
@@ -209,199 +287,184 @@ jobs:
     name: Platform validation (${{ matrix.os }})
     needs: build-package
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     env:
-      PYQTGRAPH_QT_LIB: PySide6
+      QT_QPA_PLATFORM: ${{ matrix.os == 'ubuntu-latest' && 'offscreen' || '' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
-      - name: Install package
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest pytest-qt pytest-xdist hypothesis "wgpu>=0.31,<0.32" "rendercanvas>=2.7"
-      - name: Download package artifacts
-        uses: actions/download-artifact@v4
+      - name: Install locked test dependencies without the project
+        run: uv sync --frozen --no-default-groups --extra dev --extra wgpu --no-install-project --python 3.12
+      - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist
-      - name: Install wheel and verify versions
-        shell: bash
+      - name: Install wheel and verify its import outside the checkout
         run: |
-          python -m pip install dist/*.whl
+          uv pip install --python .venv --no-deps dist/*.whl
+          interpreter=$(uv run --no-sync python -c 'import sys; print(sys.executable)')
           cd "$RUNNER_TEMP"
-          python - <<'PY'
+          "$interpreter" - <<'PY'
           from importlib.metadata import metadata, version
           import arrayscope
-
-          package_name = metadata("ArrayScope")["Name"]
-          metadata_version = version("ArrayScope")
-          runtime_version = arrayscope.__version__
-          assert package_name == "ArrayScope", package_name
-          assert runtime_version == metadata_version, (runtime_version, metadata_version)
+          assert metadata("ArrayScope")["Name"] == "ArrayScope"
+          assert arrayscope.__version__ == version("ArrayScope")
+          print("Wheel import:", arrayscope.__file__, arrayscope.__version__)
           PY
-          python -m arrayscope --help
+          "$interpreter" -m arrayscope --help
       - name: Run screenshot smoke tests
-        id: screenshots
-        continue-on-error: true
-        env:
-          QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
-        # Serial (-n 0): this step must write PNGs to the canonical
-        # tests/artifacts/ that a later step uploads; under xdist workers each
-        # worker redirects that directory to a private temp path.
-        run: pytest tests/ui/test_qt_smoke_artifacts.py -q -n 0
-      - name: Run PyQtGraph rendering benchmark smoke
-        id: benchmarks
-        continue-on-error: true
-        shell: bash
-        env:
-          QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
+        if: ${{ !cancelled() }}
         run: |
-          set -o pipefail
-          mkdir -p tests/artifacts
-          python -m arrayscope.display.rendering_benchmarks \
-            --runs 1 \
-            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-pyqtgraph-${{ matrix.os }}.jsonl \
-            2>&1 | tee tests/artifacts/v0.8.0-rendering-benchmark-pyqtgraph-${{ matrix.os }}.log
+          uv run --no-sync python tools/ci_report.py pytest \
+            --name "Native platform screenshot smoke" \
+            --output tests/artifacts/ci/screenshots --timeout 180 -- \
+            tests/ui/test_qt_smoke_artifacts.py -q -n 0
+      - name: Run PyQtGraph benchmark smoke
+        if: ${{ !cancelled() }}
+        run: |
+          uv run --no-sync python tools/ci_report.py run \
+            --name "PyQtGraph platform benchmark smoke" \
+            --output tests/artifacts/ci/benchmark --timeout 180 -- \
+            python -m arrayscope.display.rendering_benchmarks --runs 1 \
+            --jsonl tests/artifacts/rendering-benchmark-pyqtgraph-${{ matrix.os }}.jsonl
       - name: Run platform display/window tests
-        id: platform-tests
-        continue-on-error: true
-        env:
-          QT_QPA_PLATFORM: ${{ runner.os == 'Linux' && 'offscreen' || '' }}
-        # Serial (-n 0): runs on macOS/Windows too, where the per-worker
-        # XDG_CONFIG_HOME QSettings isolation (Linux-only) does not apply.
-        run: pytest -q tests/display tests/window tests/app/test_public_api.py -n 0
-      - name: Upload platform artifacts
+        if: ${{ !cancelled() }}
+        run: |
+          uv run --no-sync python tools/ci_report.py pytest \
+            --name "Platform display/window correctness" \
+            --output tests/artifacts/ci/platform --timeout 600 -- -q \
+            tests/display tests/window tests/app/test_public_api.py -n 0
+      - name: Summarize platform tests
         if: always()
-        uses: actions/upload-artifact@v4
+        run: python tools/ci_report.py summarize tests/artifacts/ci --title "Platform validation (${{ matrix.os }})" --artifact platform-artifacts-${{ matrix.os }}
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: platform-artifacts-${{ matrix.os }}
-          path: |
-            tests/artifacts/*.png
-            tests/artifacts/*.jsonl
-            tests/artifacts/*.log
+          path: tests/artifacts/
           if-no-files-found: warn
-      - name: Summarize platform artifacts
-        if: always()
-        shell: bash
-        run: |
-          {
-            echo "### Platform validation artifacts (${{ matrix.os }})"
-            echo
-            echo "Download \`platform-artifacts-${{ matrix.os }}\` from this run's Artifacts section."
-            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo
-            echo "Outcomes:"
-            echo "- Screenshots: ${{ steps.screenshots.outcome }}"
-            echo "- Rendering benchmark: ${{ steps.benchmarks.outcome }}"
-            echo "- Display/window tests: ${{ steps.platform-tests.outcome }}"
-            echo
-            echo "Files:"
-            if [ -d tests/artifacts ]; then
-              find tests/artifacts -maxdepth 1 -type f | sort | sed 's#^#- `#; s#$#`#'
-            else
-              echo "- No platform artifact directory was created."
-            fi
-            benchmark_log="tests/artifacts/v0.8.0-rendering-benchmark-pyqtgraph-${{ matrix.os }}.log"
-            if [ -f "$benchmark_log" ] && grep -Eiq "WARNING|ERROR" "$benchmark_log"; then
-              echo
-              echo "Benchmark log contains runtime warnings; inspect the log before treating this run as rendering evidence."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Check platform validation results
-        if: always()
-        shell: bash
-        run: |
-          failed=0
-          if [ "${{ steps.screenshots.outcome }}" != "success" ]; then
-            echo "Screenshot outcome: ${{ steps.screenshots.outcome }}"
-            failed=1
-          fi
-          if [ "${{ steps.benchmarks.outcome }}" != "success" ]; then
-            echo "Benchmark outcome: ${{ steps.benchmarks.outcome }}"
-            failed=1
-          fi
-          if [ "${{ steps.platform-tests.outcome }}" != "success" ]; then
-            echo "Platform tests outcome: ${{ steps.platform-tests.outcome }}"
-            failed=1
-          fi
-          exit "$failed"
 
   rc-artifacts:
-    name: RC diagnostics and benchmark artifacts
+    name: Hosted software-rendering diagnostics (not hardware acceptance)
     runs-on: ubuntu-latest
-    env:
-      QT_QPA_PLATFORM: offscreen
-      PYQTGRAPH_QT_LIB: PySide6
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
           sudo apt-get install -y libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
-      - name: Install package
+      - run: uv sync --frozen --no-default-groups --extra dev --extra wgpu --python 3.12
+      - name: Generate PyQtGraph diagnostics
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,wgpu]"
-      - name: Generate RC diagnostics trace
+          uv run --no-sync python tools/ci_report.py run \
+            --name "PyQtGraph diagnostics" --output tests/artifacts/ci/diagnostics-pyqtgraph --timeout 120 -- \
+            python -m arrayscope.tools.release_diagnostics --backend pyqtgraph \
+            --jsonl tests/artifacts/diagnostics-pyqtgraph.jsonl
+      - name: Generate WGPU software-adapter diagnostics
+        if: ${{ !cancelled() }}
         run: |
-          mkdir -p tests/artifacts
-          python -m arrayscope.tools.release_diagnostics \
-            --jsonl tests/artifacts/v0.8.0-diagnostics-pyqtgraph.jsonl \
-            --backend pyqtgraph
-          python -m arrayscope.core.diagnostics_trace \
-            tests/artifacts/v0.8.0-diagnostics-pyqtgraph.jsonl \
-            > tests/artifacts/v0.8.0-diagnostics-pyqtgraph-summary.md
-          python -m arrayscope.tools.release_diagnostics \
-            --jsonl tests/artifacts/v0.8.0-diagnostics-wgpu.jsonl \
-            --backend wgpu
-          python -m arrayscope.core.diagnostics_trace \
-            tests/artifacts/v0.8.0-diagnostics-wgpu.jsonl \
-            > tests/artifacts/v0.8.0-diagnostics-wgpu-summary.md
-      - name: Generate PyQtGraph performance-baseline artifact
-        # Without --tile-counts this is the PyQtGraph display-update harness,
-        # not a smaller WGPU run. ADR 0061 keeps PyQtGraph first-class for
-        # correctness, so an RC that ships only the WGPU row below has no
-        # baseline for the CPU/headless/remote backend.
+          uv run --no-sync python tools/ci_report.py run \
+            --name "WGPU software-adapter diagnostics" --output tests/artifacts/ci/diagnostics-wgpu --timeout 120 -- \
+            python -m arrayscope.tools.release_diagnostics --backend wgpu \
+            --jsonl tests/artifacts/diagnostics-wgpu.jsonl
+      - name: Generate PyQtGraph benchmark artifact
+        if: ${{ !cancelled() }}
         run: |
-          python -m arrayscope.display.rendering_benchmarks \
-            --runs 1 \
-            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-pyqtgraph-linux.jsonl
-      - name: Generate WGPU performance-baseline artifact
+          uv run --no-sync python tools/ci_report.py run \
+            --name "PyQtGraph benchmark" --output tests/artifacts/ci/benchmark-pyqtgraph --timeout 120 -- \
+            python -m arrayscope.display.rendering_benchmarks --runs 1 \
+            --jsonl tests/artifacts/rendering-benchmark-pyqtgraph-linux.jsonl
+      - name: Generate WGPU software-adapter benchmark artifact
+        if: ${{ !cancelled() }}
         run: |
-          python -m arrayscope.display.rendering_benchmarks \
-            --tile-counts 1,16,64 \
-            --pan-steps 8 \
-            --pan-tile-edge 64 \
-            --pan-present-method bitmap \
-            --jsonl tests/artifacts/v0.8.0-rendering-benchmark-wgpu-linux.jsonl
-      - name: Generate screenshot smoke artifacts
-        # Serial (-n 0): this step must write PNGs to the canonical
-        # tests/artifacts/ that a later step uploads; under xdist workers each
-        # worker redirects that directory to a private temp path.
-        run: pytest tests/ui/test_qt_smoke_artifacts.py -q -n 0
-      - name: Upload RC artifacts
-        uses: actions/upload-artifact@v4
+          uv run --no-sync python tools/ci_report.py run \
+            --name "WGPU software-adapter benchmark" --output tests/artifacts/ci/benchmark-wgpu --timeout 120 -- \
+            python -m arrayscope.display.rendering_benchmarks --tile-counts 1,16,64 \
+            --pan-steps 8 --pan-tile-edge 64 --pan-present-method bitmap \
+            --jsonl tests/artifacts/rendering-benchmark-wgpu-linux.jsonl
+      - name: Summarize diagnostics
+        if: always()
+        run: python tools/ci_report.py summarize tests/artifacts/ci --title "Hosted diagnostics; hardware acceptance not established" --artifact rc-artifacts-linux
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: rc-artifacts-linux
-          path: |
-            tests/artifacts/*.png
-            tests/artifacts/*.jsonl
-            tests/artifacts/*.md
-          if-no-files-found: error
+          path: tests/artifacts/
+          if-no-files-found: warn
+
+  # Requires an explicitly provisioned runner with real GPU access and Weston.
+  # This is opt-in, never satisfied by a green hosted software-rendering smoke.
+  hardware-gpu:
+    name: Real GPU / compositor interaction (explicit opt-in)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_gpu }}
+    runs-on: [self-hosted, linux, x64, arrayscope-gpu]
+    timeout-minutes: 25
+    env:
+      ARRAYSCOPE_GPU_TESTS: "1"
+      ARRAYSCOPE_STRICT_UI: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen --python 3.12
+      - name: Verify a hardware adapter is available
+        run: |
+          uv run --no-sync python - <<'PY'
+          import json
+          from pathlib import Path
+          import wgpu
+          adapter = wgpu.gpu.request_adapter_sync(power_preference="low-power")
+          info = dict(adapter.info)
+          Path("tests/artifacts").mkdir(parents=True, exist_ok=True)
+          Path("tests/artifacts/hardware-adapter.json").write_text(json.dumps(info, indent=2))
+          assert str(info.get("adapter_type", "")).lower() in {"integratedgpu", "discretegpu"}, info
+          print(json.dumps(info))
+          PY
+      - name: Run real-compositor interactions
+        run: |
+          uv run --no-sync python tools/ci_report.py run \
+            --name "Real GPU compositor interactions" \
+            --output tests/artifacts/ci/hardware --timeout 900 -- \
+            python -m arrayscope.tools.headless_display --log-dir tests/artifacts/compositor -- \
+            python tools/ci_report.py pytest \
+              --name "Real GPU interaction assertions" \
+              --output tests/artifacts/ci/gpu-interaction --timeout 840 -- \
+              tests/gpu_interaction -q -n 0
+      - name: Summarize hardware lane
+        if: always()
+        run: python tools/ci_report.py summarize tests/artifacts/ci --title "Explicit real-GPU/compositor lane" --artifact hardware-gpu-report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hardware-gpu-report
+          path: tests/artifacts/
+          if-no-files-found: warn

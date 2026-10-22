@@ -9,7 +9,8 @@ Front page for test policy. Deep dives:
 [release-candidate.md](release-candidate.md),
 [performance-baselines.md](performance-baselines.md) (the frozen v0.8.0 numbers
 behind the ±10% bar, plus the journey-matrix acceptance ledger — distilled from
-the deleted `tests/artifacts/` tree).
+the deleted `tests/artifacts/` tree), and [ci.md](ci.md) (job ownership, failure
+reports and artifacts, GUI map maintenance, and the explicit hardware lane).
 
 ## The laws (why recurring defects recur, and what stops them)
 
@@ -56,10 +57,11 @@ pytest --since         # before merging, after a rebase, in a borrowed checkout
 pytest --rerun-reds    # when the red you are fixing is one you inherited
 ```
 
-`--no-testmon` is not the gate and is not a routine sweep. Nor is CI: it has run
-seven times in this repository's life and nothing requires it, so the occasional
-`pytest --testmon-noselect` is what covers what selection cannot see — the run
-asks for one when the last is over three weeks or forty commits old.
+`--no-testmon` is not the gate and is not a routine sweep. CI runs one exhaustive
+strict offscreen coverage job on pushes and pull requests; its fast GUI signal
+may be a smaller cached selection or an explicitly labelled smoke. Locally,
+`pytest --testmon-noselect` also covers what selection cannot see — the run asks
+for one when the last is over three weeks or forty commits old.
 The rules, and the reasoning behind them, are in
 [test-selection.md](test-selection.md) — which also names what selection cannot
 see. Read it before trusting a green selected run.
