@@ -260,7 +260,15 @@ def wrap_payload(value, pool: SlotPool | None, *, owner: int = 0, depth: int = 4
     leases: list[SlotLease] = []
     if pool is None:
         return value, ()
-    return _wrap(value, pool, owner, depth, leases), tuple(leases)
+    try:
+        rewritten = _wrap(value, pool, owner, depth, leases)
+    except BaseException:
+        # No payload is published to the consumer on failure, so none of its
+        # descriptors can release these leases later.
+        for lease in leases:
+            lease.release()
+        raise
+    return rewritten, tuple(leases)
 
 
 def unwrap_payload(value, pool: SlotPool | None, *, copy: bool = False):
@@ -322,13 +330,24 @@ def _wrap_dataclass(value, pool: SlotPool, owner: int, depth: int, leases: list[
     names = _rewritable_dataclass_fields(value)
     if names is None:
         return value
+    first_lease = len(leases)
     changed = {}
     for name in names:
         item = getattr(value, name)
         rewritten = _wrap(item, pool, owner, depth - 1, leases)
         if rewritten is not item:
             changed[name] = rewritten
-    return _replace_or_original(value, changed)
+    rewritten = _replace_or_original(value, changed)
+    if rewritten is value and len(leases) > first_lease:
+        # A validating __post_init__ refused the descriptors. The original
+        # value will be pickled, so its newly allocated slots have no reader.
+        # Keep leases owned by enclosing payloads and roll back only this
+        # dataclass (including any successfully rewritten nested fields).
+        for lease in leases[first_lease:]:
+            lease.release()
+        del leases[first_lease:]
+        pool.count_fallback()
+    return rewritten
 
 
 def _unwrap_dataclass(value, pool: SlotPool, copy: bool, taken: list[int]):

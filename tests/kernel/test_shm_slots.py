@@ -9,6 +9,7 @@ silent one would hand two producers the same bytes.
 from __future__ import annotations
 
 import multiprocessing
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
@@ -173,3 +174,101 @@ def test_a_payload_over_the_slot_size_stays_pickled(pool):
     # payload pickles.
     assert pool.fallbacks == 1
     assert all(state == 0 for state in pool._states)
+
+
+@dataclass(frozen=True)
+class _ValidatedArray:
+    data: np.ndarray
+
+    def __post_init__(self):
+        if not isinstance(self.data, np.ndarray):
+            raise TypeError("data must be an ndarray")
+
+
+@dataclass(frozen=True)
+class _Payload:
+    data: object
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_a_dataclass_fallback_releases_only_its_own_slots(pool, nested):
+    # The earlier payload and an unrelated writer must retain their leases;
+    # a rejected nested value must not exhaust the remaining slots either.
+    held = pool.lease(owner=7)
+    rejected = _ValidatedArray(big_array())
+    if nested:
+        rejected = _Payload(rejected)
+    payload = (big_array(), rejected)
+    try:
+        wrapped, leases = wrap_payload(payload, pool, owner=1)
+
+        assert len(leases) == 1
+        assert wrapped[1] is rejected
+        assert pool.fallbacks == 1
+        assert sorted(pool._states) == [0, 0, 1, 2]
+        restored, taken = unwrap_payload(wrapped, pool, copy=True)
+        assert np.array_equal(restored[0], payload[0])
+        for index in taken:
+            pool.release(index)
+        for lease in leases:
+            lease.release()
+        # Releasing the returned leases cannot reach the unrelated writer.
+        assert pool._states[held.index] == 1
+    finally:
+        held.release()
+
+
+def test_a_rejected_outer_dataclass_releases_its_successful_nested_fields(pool):
+    # _ValidatedArray accepts only an ndarray; its annotation does not enforce
+    # the runtime type. Build a holder that permits the original nested object
+    # but rejects the rewritten one, after its two children each took a slot.
+    @dataclass(frozen=True)
+    class _ValidatedPayload:
+        first: object
+        second: object
+
+        def __post_init__(self):
+            if not isinstance(self.second, np.ndarray):
+                raise TypeError("second must be an ndarray")
+
+    payload = _ValidatedPayload(_Payload(big_array()), big_array())
+
+    wrapped, leases = wrap_payload(payload, pool)
+
+    assert wrapped is payload
+    assert leases == ()
+    assert all(state == 0 for state in pool._states)
+    assert pool.fallbacks == 1
+
+
+def test_a_failed_wrap_releases_every_lease_it_acquired(pool):
+    class _BrokenPayload(dict):
+        def items(self):
+            raise RuntimeError("payload traversal failed")
+
+    with pytest.raises(RuntimeError, match="payload traversal failed"):
+        wrap_payload((big_array(), _BrokenPayload()), pool)
+
+    assert all(state == 0 for state in pool._states)
+    assert pool.fallbacks == 0
+
+
+def test_a_child_result_fallback_keeps_slots_available(pool, monkeypatch):
+    from arrayscope.kernel.process_backend import _run_child_job
+
+    payload = _ValidatedArray(big_array())
+    monkeypatch.setattr(
+        "arrayscope.kernel.process_backend.resolve_entry", lambda _entry: lambda _request: payload
+    )
+
+    # A child deliberately hands its result leases to the parent by descriptor,
+    # rather than releasing them itself. Pickled fallbacks have no descriptors
+    # for the parent to take, so rollback must happen before the reply is sent.
+    for _ in range(pool.slots + 1):
+        reply = _run_child_job(("entry", None, False), None, pool, owner=1)
+        restored, taken = unwrap_payload(reply[1], pool, copy=True)
+        assert reply[0] == "ok"
+        assert np.array_equal(restored.data, payload.data)
+        assert taken == ()
+        assert all(state == 0 for state in pool._states)
+    assert pool.fallbacks == pool.slots + 1
