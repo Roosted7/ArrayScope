@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -76,6 +77,47 @@ def _visible_backend_acknowledgements(win, backend):
     }
 
 
+def _camera_targets_presented(win, backend, expected_tiles):
+    from arrayscope.display.model.tile_identity import acknowledged_identity_satisfies_target
+    from arrayscope.display.montage import viewport_tiles
+    from arrayscope.presentation import quality_lod_satisfies_target
+
+    session = win.renderer._frame_session
+    for name in ("_frame_viewport_update_timer", "_interactive_montage_viewport_timer"):
+        timer = getattr(win.renderer, name, None)
+        if timer is not None and timer.isActive():
+            return False
+    view_range = win.img_view.getView().viewRange()
+    camera = {
+        int(tile.montage_index): tile
+        for tile in viewport_tiles(session.plan, view_range=view_range, margin_tiles=0)
+    }
+    if set(camera) != set(expected_tiles) or not set(camera) <= set(
+        session.required_tile_numbers()
+    ):
+        return False
+    demand = session.viewport_invariant_key(
+        session.plan, view_range, win._current_image_viewport_shape()
+    )
+    if demand is None:
+        return False
+    acknowledged = _visible_backend_acknowledgements(win, backend)
+    for tile_number, tile in camera.items():
+        identity = acknowledged.get(tile_number)
+        record = session.lifecycle.peek(tile_number)
+        if record is None or record.target is None:
+            return False
+        if not acknowledged_identity_satisfies_target(identity, record.target.identity):
+            return False
+        if identity.source_index != int(tile.source_index):
+            return False
+        if not quality_lod_satisfies_target(
+            identity.quality, identity.lod.level, demand.desired_level
+        ):
+            return False
+    return bool(camera)
+
+
 def _assert_view_contains_applied_montage_plan(win):
     plan = win.renderer._frame_session.plan
     height, width = tuple(int(value) for value in plan.display_shape[:2])
@@ -87,9 +129,8 @@ def _assert_view_contains_applied_montage_plan(win):
 
 
 def _wait_for_committed_session_geometry(
-    win, qtbot, *, expected_indices=None, expected_active_tiles=None
+    win, qtbot, *, expected_indices=None, expected_camera_tiles=None, backend=None
 ):
-    expected_active = None if expected_active_tiles is None else frozenset(expected_active_tiles)
     try:
         settle_window(
             win,
@@ -102,9 +143,8 @@ def _wait_for_committed_session_geometry(
                     or win.renderer._frame_session.plan.geometry.indices == tuple(expected_indices)
                 )
                 and (
-                    expected_active is None
-                    or frozenset(win.renderer._frame_session.frame_plan.active_region_ids)
-                    == expected_active
+                    expected_camera_tiles is None
+                    or _camera_targets_presented(win, backend, expected_camera_tiles)
                 )
             ),
         )
@@ -115,7 +155,8 @@ def _wait_for_committed_session_geometry(
             "committed session geometry did not converge: "
             f"active={session.frame_plan.active_region_ids!r}, "
             f"unsettled={session.required_target_unsettled_tiles()!r}, "
-            f"backend_ack={session.lifecycle.backend_presented_identities!r}, "
+            f"backend_ack_tiles={tuple(sorted(session.lifecycle.backend_presented_identities))!r}, "
+            f"camera={win.img_view.getView().viewRange()!r}, "
             f"geometry_matches={win.display_geometry.montage == session.plan.geometry!r}, "
             f"committed_indices={win.display_geometry.montage.indices!r}, "
             f"plan_indices={session.plan.geometry.indices!r}, "
@@ -137,38 +178,83 @@ def _assert_committed_tile_value(win, tile, value):
     np.testing.assert_array_equal(np.asarray(payload.image), expected)
 
 
-def test_committed_geometry_wait_can_observe_the_deferred_viewport_demand(qtbot):
+def test_camera_settlement_allows_a_resident_published_scope_superset(qtbot, monkeypatch):
+    """A camera inside a fully resident scope need not republish a smaller one."""
+    _clear_arrayscope_settings()
+    _select_image_backend("pyqtgraph")
     from pyqtgraph.Qt import QtCore
 
-    geometry = SimpleNamespace(indices=tuple(range(20)))
-    session = SimpleNamespace(
-        visible_plan_complete=lambda: True,
-        required_target_unsettled_tiles=lambda: (),
-        plan=SimpleNamespace(geometry=geometry),
-        frame_plan=SimpleNamespace(active_region_ids=tuple(range(20))),
-    )
-    timer = QtCore.QTimer()
-    timer.setSingleShot(True)
-    timer.timeout.connect(lambda: setattr(session.frame_plan, "active_region_ids", (0,)))
-    win = SimpleNamespace(
-        renderer=SimpleNamespace(_frame_session=session, _frame_viewport_update_timer=timer),
-        display_geometry=SimpleNamespace(montage=geometry),
-    )
-    timer.start(0)
+    from arrayscope.display.model.tile_identity import TileLodIdentity
+    from arrayscope.window import ArrayScopeWindow
 
-    # A committed layout can be complete before its queued camera-demand
-    # rescope. Geometry-only callers retain that intentionally weaker promise.
-    _wait_for_committed_session_geometry(win, qtbot, expected_indices=range(20))
-    assert timer.isActive()
-    assert session.frame_plan.active_region_ids == tuple(range(20))
+    win = ArrayScopeWindow(np.arange(48 * 80 * 20, dtype=np.float32).reshape(48, 80, 20))
+    win.resize(1200, 820)
+    win.show()
+    qtbot.addWidget(win)
+    try:
+        win._set_view_state(
+            win.view_state.with_montage_axis(2, columns=5, indices=tuple(range(20)), text=":")
+        )
+        win.render(reason="test-resident-montage-scope")
+        session = _wait_for_committed_session_geometry(win, qtbot, expected_indices=range(20))
+        settle_window(
+            win,
+            lambda: set(_visible_backend_acknowledgements(win, "pyqtgraph")) == set(range(20)),
+        )
+        before = int(getattr(win.renderer, "_montage_viewport_retargets_suppressed", 0) or 0)
+        win.img_view.getView().setRange(xRange=(0, 40), yRange=(0, 48), padding=0)
+        win.renderer.apply_montage_viewport_retarget()
 
-    observed = _wait_for_committed_session_geometry(
-        win, qtbot, expected_indices=range(20), expected_active_tiles=(0,)
-    )
+        # The actual production suppression path keeps a covering superset.
+        # Requiring its internal active scope to equal the camera is stronger
+        # than the pixel/camera contract and cannot ever settle on this path.
+        assert win.renderer._frame_session is session
+        assert int(getattr(win.renderer, "_montage_viewport_retargets_suppressed", 0) or 0) > before
+        assert set(session.frame_plan.active_region_ids) == set(range(20))
+        observed = _wait_for_committed_session_geometry(
+            win, qtbot, expected_indices=range(20), expected_camera_tiles=(0,), backend="pyqtgraph"
+        )
+        assert observed is session
 
-    assert not timer.isActive()
-    assert observed is session
-    assert observed.frame_plan.active_region_ids == (0,)
+        win.renderer._schedule_frame_viewport_update(delay_ms=0)
+        assert win.renderer._frame_viewport_update_timer.isActive()
+        assert not _camera_targets_presented(win, "pyqtgraph", (0,))
+        _wait_for_committed_session_geometry(
+            win, qtbot, expected_indices=range(20), expected_camera_tiles=(0,), backend="pyqtgraph"
+        )
+        assert not win.renderer._frame_viewport_update_timer.isActive()
+
+        state = win.img_view._montage_tile_layer.states[0]
+        identity = state.acknowledged_identity
+        for changed in (
+            None,
+            replace(identity, source_index=1),
+            replace(identity, lod=TileLodIdentity(level=1, factor=2), quality="fallback"),
+        ):
+            with monkeypatch.context() as mutation:
+                mutation.setattr(state, "acknowledged_identity", changed)
+                assert not _camera_targets_presented(win, "pyqtgraph", (0,))
+        with monkeypatch.context() as mutation:
+            mutation.setattr(session, "required_tile_numbers", lambda: ())
+            assert not _camera_targets_presented(win, "pyqtgraph", (0,))
+        assert not _camera_targets_presented(win, "pyqtgraph", (1,))
+
+        # Physical visibility is independent of the lifecycle's settled record.
+        # Restore it through a queued callback and prove the observer waits for
+        # that callback rather than returning on already-committed geometry.
+        state.item.hide()
+        assert not _camera_targets_presented(win, "pyqtgraph", (0,))
+        timer = QtCore.QTimer(win)
+        timer.setSingleShot(True)
+        timer.timeout.connect(state.item.show)
+        timer.start(0)
+        _wait_for_committed_session_geometry(
+            win, qtbot, expected_indices=range(20), expected_camera_tiles=(0,), backend="pyqtgraph"
+        )
+        assert not timer.isActive()
+        assert state.item.isVisible()
+    finally:
+        win.close()
 
 
 def _reset_warm_tile_state(win):
@@ -378,7 +464,7 @@ def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qt
         )
         win.render(reason="test-montage-more-tiles")
         session = _wait_for_committed_session_geometry(
-            win, qtbot, expected_indices=range(20), expected_active_tiles=(0,)
+            win, qtbot, expected_indices=range(20), expected_camera_tiles=(0,), backend=backend
         )
 
         view_range = win.img_view.getView().viewRange()
@@ -388,10 +474,12 @@ def test_montage_tile_count_increase_preserves_manual_zoom_when_not_near_auto(qt
         # side-work contract covered by test_semantic_level_evidence. It must
         # not be a prerequisite for validating camera continuity and physical
         # target acknowledgement here.
-        active = {int(tile) for tile in session.frame_plan.active_region_ids}
-        assert active == {0}
+        # A resident published scope can conservatively retain extra tiles.
+        # The camera must still cover tile 0 and physically acknowledge it at
+        # its current demand; exact scope shrinkage is not a product contract.
+        assert _camera_targets_presented(win, backend, (0,))
         backend_visible = _visible_backend_acknowledgements(win, backend)
-        assert active <= set(backend_visible)
+        assert 0 in backend_visible
         for tile_number, identity in backend_visible.items():
             lifecycle = session.lifecycle.peek(int(tile_number))
             assert lifecycle is not None
