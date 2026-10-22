@@ -72,11 +72,43 @@ def test_roi_statistics_uses_complex_magnitude_without_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error", np.exceptions.ComplexWarning)
         accumulator.add_values(values)
+        direct = roi.roi_statistics(values)
+
+    for stats in (direct, accumulator.result()):
+        assert stats.minimum == pytest.approx(5.0)
+        assert stats.maximum == pytest.approx(13.0)
+        assert stats.mean == pytest.approx(9.0)
+        assert stats.std == pytest.approx(4.0)
+
+
+@pytest.mark.parametrize("chunk_count", [1, 13, 1000])
+def test_streaming_roi_variance_preserves_small_differences_at_large_offsets(chunk_count):
+    # E[x²] - E[x]² loses all useful digits here. Exercise both the chunk
+    # reduction and the merge without retaining samples for an exact fallback.
+    values = 1e12 + np.arange(1000, dtype=np.float64)
+    accumulator = roi.RoiStatsAccumulator(exact_limit=0)
+    accumulator.add_values([np.nan, np.inf])
+    for chunk in np.array_split(values, chunk_count):
+        accumulator.add_values(chunk)
 
     stats = accumulator.result()
-    assert stats.minimum == pytest.approx(5.0)
-    assert stats.maximum == pytest.approx(13.0)
-    assert stats.mean == pytest.approx(9.0)
+    assert stats.count == 1002
+    assert stats.finite_count == 1000
+    assert stats.mean == np.mean(values)
+    assert stats.std == pytest.approx(np.std(values), rel=1e-12)
+    assert stats.median is None
+
+
+@pytest.mark.parametrize("tail", [[], [1.0]])
+def test_streaming_roi_mean_handles_opposite_finite_extremes(tail):
+    values = np.array([1e308, -1e308, *tail])
+    accumulator = roi.RoiStatsAccumulator(exact_limit=0)
+    with np.errstate(over="ignore"):
+        for value in values:
+            accumulator.add_values([value])
+    stats = accumulator.result()
+    assert stats.mean == np.mean(values)
+    assert stats.std == np.inf
 
 
 def test_roi_stats_accumulator_matches_exact_small_statistics():

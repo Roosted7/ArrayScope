@@ -78,6 +78,8 @@ class RoiStatsAccumulator:
         self.maximum = None
         self.sum = 0.0
         self.sumsq = 0.0
+        self._mean = 0.0
+        self._m2 = 0.0
         self._exact_values: list[np.ndarray] | None = []
 
     def add_values(self, values) -> None:
@@ -89,7 +91,26 @@ class RoiStatsAccumulator:
         if np.iscomplexobj(finite):
             finite = np.abs(finite)
         finite = finite.astype(float, copy=False)
-        self.finite_count += int(finite.size)
+        previous_count = self.finite_count
+        chunk_count = int(finite.size)
+        self.finite_count += chunk_count
+        chunk_mean = float(np.mean(finite))
+        chunk_m2 = float(np.var(finite)) * chunk_count
+        if previous_count == 0:
+            self._mean = chunk_mean
+            self._m2 = chunk_m2
+        else:
+            # Merge centered moments (Chan's formula). Subtracting E[x]²
+            # from E[x²] erases the variance of large-offset scientific data.
+            delta = chunk_mean - self._mean
+            weight = chunk_count / self.finite_count
+            if np.isfinite(delta):
+                self._mean += delta * weight
+            else:
+                # Opposite-sign finite extremes can overflow their difference
+                # even when their weighted mean is representable.
+                self._mean = (previous_count / self.finite_count) * self._mean + weight * chunk_mean
+            self._m2 += chunk_m2 + delta * delta * previous_count * weight
         chunk_min = float(np.min(finite))
         chunk_max = float(np.max(finite))
         self.minimum = chunk_min if self.minimum is None else min(float(self.minimum), chunk_min)
@@ -97,8 +118,7 @@ class RoiStatsAccumulator:
         self.sum += float(np.sum(finite))
         self.sumsq += float(np.sum(np.abs(finite) ** 2))
         if self._exact_values is not None:
-            retained = sum(int(chunk.size) for chunk in self._exact_values)
-            if retained + int(finite.size) <= self.exact_limit:
+            if self.finite_count <= self.exact_limit:
                 self._exact_values.append(finite.copy())
             else:
                 self._exact_values = None
@@ -118,8 +138,7 @@ class RoiStatsAccumulator:
                 p05=None,
                 p95=None,
             )
-        mean = float(self.sum / self.finite_count)
-        variance = max(0.0, float(self.sumsq / self.finite_count) - mean**2)
+        variance = max(0.0, self._m2 / self.finite_count)
         exact = None
         if self._exact_values is not None and self._exact_values:
             exact = np.concatenate(self._exact_values)
@@ -128,7 +147,7 @@ class RoiStatsAccumulator:
             finite_count=int(self.finite_count),
             minimum=None if self.minimum is None else float(self.minimum),
             maximum=None if self.maximum is None else float(self.maximum),
-            mean=mean,
+            mean=float(self._mean),
             median=None if exact is None else float(np.median(exact)),
             std=float(np.sqrt(variance)),
             sum=float(self.sum),
@@ -377,6 +396,8 @@ def roi_statistics(values):
             p05=None,
             p95=None,
         )
+    if np.iscomplexobj(finite):
+        finite = np.abs(finite)
     finite = finite.astype(float, copy=False)
     return RoiStatistics(
         count=int(flat.size),
