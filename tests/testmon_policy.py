@@ -91,6 +91,30 @@ MAP_FILENAME = ".testmondata"
 #: mid-suite ``INTERNALERROR``; see
 #: :func:`install_extensionless_dependency_support`.
 OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    # Named HDF5 replay is also exercised in a fresh interpreter that refuses
+    # Qt imports and payload reads during planning; the parent cannot trace it.
+    "tests/app/test_hdf5_cli.py": (
+        "arrayscope/__main__.py",
+        "arrayscope/app/batch_cli.py",
+        "arrayscope/io/recipe_replay.py",
+        "arrayscope/io/hdf5_catalog.py",
+        "arrayscope/io/hdf5_source.py",
+        "arrayscope/io/region_export.py",
+        "arrayscope/io/numpy_save.py",
+        "arrayscope/operations/recipes.py",
+        "arrayscope/operations/planner.py",
+        "arrayscope/operations/source_read.py",
+    ),
+    # The descriptor roundtrip reconstructs the actual HDF5 source in a child,
+    # rather than merely proving that its metadata can be pickled.
+    "tests/operations/test_source_transport.py": (
+        "arrayscope/core/array_source.py",
+        "arrayscope/io/hdf5_catalog.py",
+        "arrayscope/io/hdf5_source.py",
+        "arrayscope/operations/source_transport.py",
+        "arrayscope/operations/source_read.py",
+        "arrayscope/operations/regions.py",
+    ),
     # Real terminal invocations exercise early headless dispatch, replay, and
     # atomic publication outside the parent's trace, including SIGINT races.
     "tests/app/test_batch_cli.py": (
