@@ -333,56 +333,8 @@ def test_restored_file_session_uses_viewport_shape_authority(qtbot, monkeypatch)
 
     window = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(window)
-    qtbot.wait(20)
 
-    assert calls
-    assert calls[0] == ("viewport", (222, 333))
-    assert "settings" not in calls
-
-
-def test_restored_file_session_uses_viewport_shape_without_general_settings(qtbot, monkeypatch):
-    from arrayscope.core.view_session import ViewportSession
-    from arrayscope.window.layout_controller import WindowLayoutManager
-    from arrayscope.window.main import ArrayScopeWindow
-
-    calls = []
-
-    def restore_session(self):
-        self._viewport_continuity = _restore_transaction(
-            viewport=ViewportSession(
-                mode="user",
-                view_range=((0.0, 1.0), (0.0, 1.0)),
-                viewport_shape=(222, 333),
-            )
-        )
-        return True
-
-    monkeypatch.setattr(
-        ArrayScopeWindow, "_restore_file_view_session_if_available", restore_session
-    )
-    monkeypatch.setattr(
-        ArrayScopeWindow, "_pending_display_levels_for_render", lambda self: (0.0, 1.0)
-    )
-    monkeypatch.setattr(
-        ArrayScopeWindow,
-        "render",
-        lambda self, *, reason=None, force_autolevel=False, defer_side_panels=False: None,
-    )
-    monkeypatch.setattr(
-        WindowLayoutManager,
-        "_saved_viewport_session",
-        lambda self: calls.append("settings") or None,
-    )
-    monkeypatch.setattr(
-        WindowLayoutManager,
-        "resize_to_dockless_viewport_shape",
-        lambda self, shape: calls.append(("viewport", tuple(shape))) or True,
-    )
-
-    window = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
-    qtbot.addWidget(window)
-    qtbot.wait(20)
-
+    qtbot.waitUntil(lambda: bool(calls), timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     assert calls
     assert calls[0] == ("viewport", (222, 333))
     assert "settings" not in calls

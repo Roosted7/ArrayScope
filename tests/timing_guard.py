@@ -752,7 +752,7 @@ def scan_source(text: str, path: str = "tests/ui/test_probe.py") -> list[Finding
 #: The one thing it cannot do is notice a commit that converts one site and adds
 #: another in the same breath. That is why the refusal prints the inventory and
 #: not the number.
-UNJUSTIFIED_PAUSE_BACKLOG = 55
+UNJUSTIFIED_PAUSE_BACKLOG = 53
 
 
 def problems(root: Path = REPO_ROOT) -> list[str]:
