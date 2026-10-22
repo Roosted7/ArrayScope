@@ -1840,10 +1840,27 @@ def evaluate(base_data, operations, *, evaluation_context=None):
         np.shape(base_data), getattr(base_data, "dtype", None), operations
     )
     data = base_data
+    if callable(getattr(base_data, "read_region", None)):
+        from arrayscope.operations.source_read import read_base_region
+
+        # Full evaluation is explicit about reading the complete input. Keep
+        # lazy transport, working-memory admission and cancellation at the
+        # same source owner used by region evaluation; never ask NumPy to
+        # implicitly materialize a proxy inside an operation.
+        data = read_base_region(
+            base_data,
+            RegionSpec(tuple(AxisRegion(AxisRegionKind.ALL) for _ in np.shape(base_data))),
+            cancellation_token=cancellation_token,
+            evaluation_context=evaluation_context,
+        )
     for operation in optimized.operations:
+        if cancellation_token is not None and getattr(cancellation_token, "cancelled", False):
+            raise EvaluationCancelled()
         # Whole-array evaluation is the path an out-of-process operation
         # actually takes, so it is the path its cancellation token has to reach.
         data = apply_with_evaluation_context(operation, data, evaluation_context)
+    if cancellation_token is not None and getattr(cancellation_token, "cancelled", False):
+        raise EvaluationCancelled()
     return data
 
 
