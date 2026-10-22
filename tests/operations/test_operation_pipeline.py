@@ -259,22 +259,6 @@ def test_real_complex_axis_operations_wrap_existing_dim_ops():
     np.testing.assert_array_equal(split_document.materialize(), data)
 
 
-def test_document_is_undoable_by_removing_operations():
-    data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
-    document = (
-        ArrayDocument(data)
-        .with_operation(Crop(axis=2, start=1, stop=4))
-        .with_operation(Mean(axis=0))
-    )
-
-    undone = document.without_last_operation()
-
-    assert document.current_shape == (3, 3)
-    assert undone.current_shape == (2, 3, 3)
-    assert undone.operations == (Crop(axis=2, start=1, stop=4),)
-    np.testing.assert_array_equal(undone.materialize(), data[:, :, 1:4])
-
-
 def test_operation_steps_can_be_disabled_and_reenabled():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
     document = (

@@ -271,13 +271,15 @@ class OperationActionsMixin:
             self.operation_coordinator.append_created_operation(operation)
             if dim is not None:
                 self._last_operation_axis = int(dim)
-            self._set_document(self.operation_coordinator.document)
+            target = self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(
                 self, "Operation Error", f"Failed to apply operation:\n{e}"
             )
             return None
 
+        if target is not None:
+            return target
         self.render(reason="operation", force_autolevel=True)
         return True
 
@@ -344,6 +346,10 @@ class OperationActionsMixin:
         steps = (*self.document.steps, OperationStep(operation))
         try:
             sibling = type(self)(self.base_data, axes=self.document.base_axes, steps=steps)
+            sibling.operation_coordinator.inherit_history_from(
+                self.operation_coordinator, description="Add operation"
+            )
+            sibling._set_document(sibling.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(
                 self, "Operation Error", f"Failed to apply operation:\n{e}"
@@ -419,6 +425,20 @@ class OperationActionsMixin:
             for entry in operation_entries
         ]
         commands.extend(self._colormap_palette_commands())
+        coordinator = getattr(self, "operation_coordinator", None)
+        for direction in ("undo", "redo"):
+            description = getattr(coordinator, f"{direction}_description", "")
+            commands.append(
+                PaletteCommand(
+                    f"{direction}_operation",
+                    f"{direction.title()} operation edit"
+                    + (f" — {description}" if description else ""),
+                    icon=direction,
+                    enabled=bool(getattr(coordinator, f"can_{direction}", False)),
+                    unavailable_reason=getattr(coordinator, "history_reset_reason", "")
+                    or "No operation edits to restore",
+                )
+            )
         commands.extend(
             [
                 PaletteCommand("fit", "Fit image to viewport", icon="fit_screen"),
@@ -431,7 +451,7 @@ class OperationActionsMixin:
                 PaletteCommand("roi_rectangle", "Rectangle ROI tool", icon="crop"),
                 PaletteCommand("roi_polyline", "Draw polyline ROI", icon="waves"),
                 PaletteCommand("roi_freehand", "Draw freehand ROI", icon="edit"),
-                PaletteCommand("export_derived", "Export derived array", icon="download"),
+                PaletteCommand("export_derived", "Export full derived array", icon="download"),
                 PaletteCommand("save_recipe", "Save operation recipe", icon="save"),
                 PaletteCommand("load_recipe", "Load operation recipe", icon="folder_open"),
                 PaletteCommand(
@@ -512,6 +532,8 @@ class OperationActionsMixin:
             "paste_recipe": self.paste_operation_recipe,
             "save_view_recipe": self.save_view_recipe,
             "load_view_recipe": self.load_view_recipe,
+            "undo_operation": self.undo_last_operation,
+            "redo_operation": self.redo_last_operation,
         }
         action = actions.get(command_id)
         if action is not None:
@@ -575,19 +597,58 @@ class OperationActionsMixin:
         return None
 
     def undo_last_operation(self):
-        self.operation_coordinator.undo()
-        self._set_document(self.operation_coordinator.document)
-        self.render(reason="operation-undo", force_autolevel=True)
+        return self._restore_operation_history("undo")
+
+    def redo_last_operation(self):
+        return self._restore_operation_history("redo")
+
+    def _restore_operation_history(self, direction):
+        coordinator = self.operation_coordinator
+        if not getattr(coordinator, f"can_{direction}"):
+            return False
+        try:
+            getattr(coordinator, direction)()
+            target = self._set_document(coordinator.document)
+        except Exception as error:
+            QtWidgets.QMessageBox.warning(
+                self, "Operation Error", f"Cannot {direction} operation edit:\n{error}"
+            )
+            return False
+        if target is not None:
+            return target
+        self.render(reason=f"operation-{direction}", force_autolevel=True)
+        return True
+
+    def _sync_operation_history_actions(self):
+        coordinator = self.operation_coordinator
+        for direction in ("undo", "redo"):
+            action = getattr(self, f"{direction}_operation_action", None)
+            if action is None:
+                continue
+            description = getattr(coordinator, f"{direction}_description")
+            action.setText(
+                f"{direction.title()}: {description}"
+                if description
+                else f"{direction.title()} Operation Edit"
+            )
+            action.setEnabled(getattr(coordinator, f"can_{direction}"))
+            action.setToolTip(
+                f"{direction.title()} the last operation edit. View changes are separate."
+                if description
+                else coordinator.history_reset_reason or "No operation edits to restore"
+            )
 
     def delete_selected_operation(self, index):
         if index is None:
             return
         try:
             self.operation_coordinator.delete(index)
-            self._set_document(self.operation_coordinator.document)
+            target = self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot delete operation:\n{e}")
             return
+        if target is not None:
+            return target
         self.render(reason="operation-delete", force_autolevel=True)
 
     def move_selected_operation(self, index, direction):
@@ -595,30 +656,36 @@ class OperationActionsMixin:
             return
         try:
             self.operation_coordinator.move(index, direction)
-            self._set_document(self.operation_coordinator.document)
+            target = self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(
                 self, "Operation Error", f"Cannot reorder operation:\n{e}"
             )
             return
+        if target is not None:
+            return target
         self.render(reason="operation-move", force_autolevel=True)
 
     def reorder_operations(self, order):
         try:
             self.operation_coordinator.reorder(order)
-            self._set_document(self.operation_coordinator.document)
+            target = self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(
                 self, "Operation Error", f"Cannot reorder operation stack:\n{e}"
             )
             self._update_operation_dock()
             return False
+        if target is not None:
+            return True
         self.render(reason="operation-reorder", force_autolevel=True)
         return True
 
     def clear_operations(self):
         self.operation_coordinator.clear()
-        self._set_document(self.operation_coordinator.document)
+        target = self._set_document(self.operation_coordinator.document)
+        if target is not None:
+            return target
         self.render(reason="operation-clear", force_autolevel=True)
 
     RECENT_RECIPES_KEY = "recent_recipes"
@@ -775,10 +842,12 @@ class OperationActionsMixin:
             return
         try:
             self.operation_coordinator.set_enabled(index, enabled)
-            self._set_document(self.operation_coordinator.document)
+            target = self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot update operation:\n{e}")
             return
+        if target is not None:
+            return target
         self.render(reason="operation-enabled", force_autolevel=True)
 
     def edit_operation(self, index, anchor=None):
@@ -830,10 +899,12 @@ class OperationActionsMixin:
                     slot_bindings=bindings,
                     slot_resolver=self._resolve_operation_slot,
                 )
-                self._set_document(self.operation_coordinator.document)
+                target = self._set_document(self.operation_coordinator.document)
             except Exception as e:
                 show_status_message(self, f"Cannot edit operation: {e}", timeout=4000)
                 return
+            if target is not None:
+                return target
             self.render(reason="operation-edit", force_autolevel=True)
 
         popup = OperationParamsPopup(entry, form, _apply, parent=self)
@@ -868,16 +939,18 @@ class OperationActionsMixin:
                 slot_bindings=dict(getattr(operation, "slot_bindings", ()) or ()),
                 slot_resolver=self._resolve_operation_slot,
             )
-            self._set_document(self.operation_coordinator.document)
+            target = self._set_document(self.operation_coordinator.document)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Operation Error", f"Cannot change dimension:\n{e}")
             return
+        if target is not None:
+            return target
         self.render(reason="operation-axis", force_autolevel=True)
 
     def export_derived_array(self):
         file_path, _ = get_save_file_name(
             self,
-            "Export derived array",
+            "Export full derived array",
             "arrayscope-derived.npz",
             "NumPy archive (*.npz);;NumPy array (*.npy)",
         )

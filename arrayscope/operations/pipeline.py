@@ -1799,13 +1799,6 @@ class ArrayDocument:
             axes=self.base_axes,
         )
 
-    def without_last_operation(self) -> ArrayDocument:
-        if not self.steps:
-            return self
-        return ArrayDocument(
-            self.base_data, steps=self.steps[:-1], revision=self.revision, axes=self.base_axes
-        )
-
     def mark_base_data_changed(self) -> ArrayDocument:
         return ArrayDocument(
             self.base_data, steps=self.steps, revision=self.revision + 1, axes=self.base_axes

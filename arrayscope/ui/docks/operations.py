@@ -122,6 +122,7 @@ class OperationStackDock(StandardDockWidget):
         on_manage_operations=None,
         on_copy_recipe=None,
         on_paste_recipe=None,
+        on_redo=None,
     ):
         super().__init__("Operations", parent)
         self.setObjectName("OperationsDock")
@@ -207,10 +208,14 @@ class OperationStackDock(StandardDockWidget):
         # Frequent actions get a compact row; recipe/view/export management is
         # tucked into a single "More" menu so rare actions don't crowd the dock.
         self.undo_button = QtWidgets.QToolButton()
+        self.redo_button = QtWidgets.QToolButton()
         self.delete_button = QtWidgets.QToolButton()
         self.clear_button = QtWidgets.QToolButton()
         self.materialize_button = QtWidgets.QPushButton("Materialize")
-        set_button_icon(self.undo_button, "undo", tooltip="Undo last operation")
+        set_button_icon(self.undo_button, "undo", tooltip="Undo operation edit")
+        set_button_icon(self.redo_button, "redo", tooltip="Redo operation edit")
+        self.undo_button.setAccessibleName("Undo operation edit")
+        self.redo_button.setAccessibleName("Redo operation edit")
         set_button_icon(self.delete_button, "delete", tooltip="Delete selected operation")
         set_button_icon(self.clear_button, "delete_sweep", tooltip="Clear all operations")
         set_button_icon(self.materialize_button, "inventory_2")
@@ -227,7 +232,7 @@ class OperationStackDock(StandardDockWidget):
         # kept the whole window graph resident for the life of the process.
         self.save_button = QtWidgets.QPushButton("Save Recipe", body)
         self.load_button = QtWidgets.QPushButton("Load Recipe", body)
-        self.export_button = QtWidgets.QPushButton("Export Derived", body)
+        self.export_button = QtWidgets.QPushButton("Export Full Derived", body)
         self.save_view_button = QtWidgets.QPushButton("Save View", body)
         self.load_view_button = QtWidgets.QPushButton("Load View", body)
         for button in (
@@ -251,7 +256,7 @@ class OperationStackDock(StandardDockWidget):
             ("Save View Recipe…", "view_quilt", self.save_view_button),
             ("Load View Recipe…", "folder_open", self.load_view_button),
             None,
-            ("Export Derived Array…", "download", self.export_button),
+            ("Export Full Derived Array…", "download", self.export_button),
         ):
             if entry is None:
                 more_menu.addSeparator()
@@ -278,6 +283,7 @@ class OperationStackDock(StandardDockWidget):
         button_layout = QtWidgets.QHBoxLayout()
         button_layout.setSpacing(4)
         button_layout.addWidget(self.undo_button)
+        button_layout.addWidget(self.redo_button)
         button_layout.addWidget(self.delete_button)
         button_layout.addWidget(self.clear_button)
         button_layout.addStretch(1)
@@ -290,6 +296,7 @@ class OperationStackDock(StandardDockWidget):
         self.setWidget(body)
 
         self.undo_button.clicked.connect(self._on_undo)
+        self.redo_button.clicked.connect(lambda: on_redo() if on_redo is not None else None)
         self.clear_button.clicked.connect(self._on_clear)
         self.save_button.clicked.connect(self._on_save_recipe)
         self.load_button.clicked.connect(self._on_load_recipe)
@@ -363,6 +370,11 @@ class OperationStackDock(StandardDockWidget):
         operation_shapes=None,
         steps=None,
         operation_dtypes=None,
+        can_undo=False,
+        can_redo=False,
+        undo_description="",
+        redo_description="",
+        history_reset_reason="",
     ):
         operations = tuple(operations)
         steps = tuple(steps or ())
@@ -418,7 +430,19 @@ class OperationStackDock(StandardDockWidget):
         self._row_snapshot_key = row_snapshot_key
 
         has_operations = bool(row_count)
-        self.undo_button.setEnabled(has_operations)
+        for direction, enabled, description in (
+            ("undo", can_undo, undo_description),
+            ("redo", can_redo, redo_description),
+        ):
+            button = getattr(self, f"{direction}_button")
+            button.setEnabled(enabled)
+            explanation = (
+                f"{direction.title()}: {description}"
+                if description
+                else f"No operation edits to {direction}. {history_reset_reason}".strip()
+            )
+            button.setToolTip(explanation)
+            button.setAccessibleDescription(explanation)
         self.clear_button.setEnabled(has_operations)
         self.save_button.setEnabled(has_operations)
         self.export_button.setEnabled(True)

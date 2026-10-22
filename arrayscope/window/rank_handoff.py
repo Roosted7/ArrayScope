@@ -19,7 +19,9 @@ recipe that contains one.
 **What the handoff carries.** The base data, the operation steps and the base
 axis metadata (so the new window shows the same derived array through the same,
 still editable, stack), the window title, and the file identity (path, dataset
-key, selector class) so the new window keeps watching the same file.
+key, selector class) so the new window keeps watching the same file. Operation
+rank changes also carry operation Undo/Redo and the source-content epoch. File
+replacement/reload starts a fresh history.
 
 **What it drops, deliberately.** The view state (image/line/montage axis choice,
 slice positions, per-axis flips, per-axis ranges), the display settings (levels,
@@ -58,7 +60,9 @@ class WindowRankHandoffMixin:
         capacity = self.per_dimension_widget_capacity()
         return capacity is None or int(ndim) <= int(capacity)
 
-    def open_window_at_new_rank(self, data, *, steps=None, axes=None, title=None):
+    def open_window_at_new_rank(
+        self, data, *, steps=None, axes=None, title=None, operation_document=None
+    ):
         """Open a fresh window over ``data``/``steps`` and close this one.
 
         Returns the new window. See the module docstring for what survives.
@@ -72,6 +76,22 @@ class WindowRankHandoffMixin:
             axes=axes,
             steps=steps,
         )
+        if operation_document is not None:
+            previous = self.operation_coordinator.document
+            if (
+                operation_document.base_data is previous.base_data
+                and operation_document.revision == previous.revision
+                and operation_document.base_axes == previous.base_axes
+            ):
+                window.operation_coordinator.inherit_history_from(
+                    self.operation_coordinator, description="Replace operation stack"
+                )
+            else:
+                # External adoption can change source content and rank in one
+                # transition. Preserve that incoming epoch, never the old
+                # source's undo records or the constructor's initial epoch.
+                window.operation_coordinator.set_document(operation_document)
+            window._set_document(window.operation_coordinator.document)
         window.setWindowTitle(self.windowTitle() if title is None else str(title))
         _retain_window(window)
         window.show()
@@ -88,6 +108,7 @@ class WindowRankHandoffMixin:
             steps=document.steps,
             axes=document.base_axes,
             title=self.windowTitle(),
+            operation_document=document,
         )
         show_status_message(
             window,

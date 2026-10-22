@@ -96,6 +96,16 @@ class WindowMenuMixin:
 
     def _setup_menus(self):
         file_menu = self.menuBar().addMenu("File")
+        export_selected_action = QtGui.QAction("Export Selected Array…", self)
+        export_selected_action.setObjectName("ExportSelectedArrayAction")
+        export_selected_action.setShortcuts(
+            QtGui.QKeySequence.keyBindings(QtGui.QKeySequence.StandardKey.Save)
+        )
+        export_selected_action.setToolTip("Export the selected exact array values as a NumPy file")
+        set_action_icon(export_selected_action, "save")
+        export_selected_action.triggered.connect(self._save_current_numpy_file)
+        file_menu.addAction(export_selected_action)
+        file_menu.addSeparator()
         save_recipe_action = QtGui.QAction("Save Operation Recipe", self)
         set_action_icon(save_recipe_action, "save")
         save_recipe_action.triggered.connect(self.save_operation_recipe)
@@ -119,7 +129,8 @@ class WindowMenuMixin:
         load_view_action = QtGui.QAction("Load View Recipe", self)
         set_action_icon(load_view_action, "folder_open")
         load_view_action.triggered.connect(self.load_view_recipe)
-        export_derived_action = QtGui.QAction("Export Derived Array", self)
+        export_derived_action = QtGui.QAction("Export Full Derived Array…", self)
+        export_derived_action.setObjectName("ExportFullDerivedArrayAction")
         set_action_icon(export_derived_action, "download")
         export_derived_action.triggered.connect(self.export_derived_array)
         for action in (
@@ -138,6 +149,20 @@ class WindowMenuMixin:
         recent_menu.aboutToShow.connect(
             lambda menu=recent_menu: self.populate_recent_recipes_menu(menu)
         )
+
+        self.operation_edit_menu = self.menuBar().addMenu("Edit")
+        for direction, shortcut, callback in (
+            ("undo", QtGui.QKeySequence.StandardKey.Undo, self.undo_last_operation),
+            ("redo", QtGui.QKeySequence.StandardKey.Redo, self.redo_last_operation),
+        ):
+            action = QtGui.QAction(self)
+            action.setObjectName(f"{direction.title()}OperationAction")
+            action.setShortcuts(QtGui.QKeySequence.keyBindings(shortcut))
+            set_action_icon(action, direction)
+            action.triggered.connect(callback)
+            self.operation_edit_menu.addAction(action)
+            setattr(self, f"{direction}_operation_action", action)
+        self._sync_operation_history_actions()
 
         view_menu = self.menuBar().addMenu("View")
         operation_action = self.layout_manager.make_managed_dock_action(

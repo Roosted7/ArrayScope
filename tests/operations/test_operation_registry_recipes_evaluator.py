@@ -291,7 +291,7 @@ def test_invalid_recipe_validation_reports_clear_error():
         _operations_from_recipe(operation_recipes, invalid_axis_after_reduction, base_shape=(2, 3))
 
 
-def test_document_undo_clear_and_all_operation_shape_changes():
+def test_document_all_operation_shape_changes():
     data = np.arange(2 * 3 * 4).reshape(2, 3, 4)
     document = ArrayDocument(data)
     expected_shapes = {
@@ -318,7 +318,6 @@ def test_document_undo_clear_and_all_operation_shape_changes():
 
     document = document.with_operation(Crop(axis=2, start=1, stop=4)).with_operation(Mean(axis=0))
     assert document.current_shape == (3, 3)
-    assert document.without_last_operation().current_shape == (2, 3, 3)
     assert ArrayDocument(data).current_shape == data.shape
 
 

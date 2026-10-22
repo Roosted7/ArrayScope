@@ -421,8 +421,6 @@ class DisplayControlBuildMixin:
             w.valueChanged.connect(lambda value, i=i: self._on_slice_index_changed(i, value))
 
         self._setup_export_context_menus()
-        self._save_shortcut = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Save, self)
-        self._save_shortcut.activated.connect(self._save_current_numpy_file)
         self.dimension_strip = DimensionStrip(data.ndim)
         self.dimension_strip.roleChanged.connect(self.set_dimension_role)
         self.dimension_strip.sliceChanged.connect(self._on_slice_index_changed)
@@ -907,6 +905,7 @@ class DisplayControlBuildMixin:
         self.operation_dock = OperationStackDock(
             self,
             on_undo=self.undo_last_operation,
+            on_redo=self.redo_last_operation,
             on_clear=self.clear_operations,
             on_save_recipe=self.save_operation_recipe,
             on_load_recipe=self.load_operation_recipe,

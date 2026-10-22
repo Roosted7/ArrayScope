@@ -570,6 +570,35 @@ def s_recipe_clipboard(ctx: Ctx):
     palette.close()
 
 
+@scenario("operation_history")
+def s_operation_history(ctx: Ctx):
+    win = ctx.window(_phantom2d(128), size=(1000, 740))
+    win._commit_operation("crop", 1, {"start": 4, "stop": 120})
+    win.operation_coordinator.replace_operation(
+        0, "crop", axis=1, parameters={"start": 12, "stop": 108}
+    )
+    win._set_document(win.operation_coordinator.document)
+    win._commit_operation("reverse", 0)
+    win.undo_last_operation()
+    win._set_operation_dock_visible_from_user(True)
+    ctx.settle()
+    if not (win.operation_coordinator.can_undo and win.operation_coordinator.can_redo):
+        raise RuntimeError("operation history did not retain both directions")
+    ctx.shot(win, "undo_redo_dock")
+
+    edit_menu = win.operation_edit_menu
+    edit_menu.popup(
+        win.menuBar().mapToGlobal(win.menuBar().actionGeometry(edit_menu.menuAction()).bottomLeft())
+    )
+    _shot_menu(ctx, edit_menu, "edit_menu")
+    edit_menu.hide()
+    palette = win._build_command_palette_dialog()
+    palette.search.setText("operation edit")
+    palette.show()
+    ctx.shot(palette, "history_commands")
+    palette.close()
+
+
 @scenario("operation_command_palette")
 def s_palette(ctx: Ctx):
     from pyqtgraph.Qt import QtCore

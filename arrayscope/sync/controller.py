@@ -285,7 +285,8 @@ class WindowSyncController(Qt.QtCore.QObject):
         if tuple(steps) == tuple(win.document.steps):
             return
         win.operation_coordinator.load_steps(steps)
-        win._set_document(win.operation_coordinator.document)
+        if win._set_document(win.operation_coordinator.document) is not None:
+            return
         win.render(reason="sync-operations", force_autolevel=True)
 
     def _apply_rois(self, payload) -> None:

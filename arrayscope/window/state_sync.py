@@ -398,8 +398,14 @@ class StateSyncMixin:
                 operation_shapes=self._operation_shapes(),
                 steps=self.document.steps,
                 operation_dtypes=self._operation_dtypes(),
+                can_undo=self.operation_coordinator.can_undo,
+                can_redo=self.operation_coordinator.can_redo,
+                undo_description=self.operation_coordinator.undo_description,
+                redo_description=self.operation_coordinator.redo_description,
+                history_reset_reason=self.operation_coordinator.history_reset_reason,
             )
             self._sync_progressive_docks()
+        self._sync_operation_history_actions()
         self._last_operation_dock_ms = (perf_counter() - start) * 1000.0
 
     def _operation_shapes(self):
