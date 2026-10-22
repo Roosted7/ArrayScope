@@ -33,9 +33,11 @@ behavior rather than directory and permits evidence-backed redesigns.
 
 | Next | Work | Acceptance |
 |---|---|---|
-| 1 | Selection-first, cancellable region export. Ask for ranges and destination before evaluating data, then use existing exact region/evaluator owners in a worker. Opaque operations retain their explicit whole-stage cost warning. | Canceling the dialogs does zero evaluation; small-region exports avoid whole-array materialization where capabilities allow it; exact values/shape/recipes round-trip and cancellation preserves previous files. |
-| 2 | Recheck maintained-backend interaction and callback bars on real hardware after correctness work. | Physical-pixel and compositor evidence with a representative dataset, both WGPU and PyQtGraph; offscreen runs do not count as GPU performance evidence. |
-| 3 | Evaluate a batched native planning boundary only after a fresh profile shows sufficient cost. | Immutable bulk input, no per-tile Python/native calls, exact state semantics, packaging proof, and a timing improvement beyond same-code spread plus pixel regression checks. Current measured candidate costs total about 6% of the workflow, so a whole-app rewrite is not justified. |
+| 1 | Recover operation edits with bounded Undo/Redo history. | Exact restoration after parameter, order, enabled-state, delete, clear, and recipe edits; text fields keep local shortcuts; same-source rank handoffs and live operation sync stay usable; extra historical input ownership is bounded. |
+| 2 | Replay supported scientific recipes from the terminal without Qt. | Read-only lazy NPY input, exact region output, zero-read dry-run, explicit expensive-work consent, strict recipe compatibility, atomic cancellation, and deterministic source cleanup. |
+| 3 | Share a named-dataset lazy HDF5 source between GUI and headless workflows. | Metadata-only discovery; bounded exact region reads, file ownership and change detection, complex/compound compatibility, and reload/cancellation coverage. |
+| 4 | Recheck maintained-backend interaction and callback bars on real hardware after correctness work. | Physical-pixel and compositor evidence with a representative dataset, both WGPU and PyQtGraph; offscreen runs do not count as GPU performance evidence. |
+| 5 | Evaluate a batched native planning boundary only after a fresh profile shows sufficient cost. | Immutable bulk input, no per-tile Python/native calls, exact state semantics, packaging proof, and a timing improvement beyond same-code spread plus pixel regression checks. Current measured candidate costs total about 6% of the workflow, so a whole-app rewrite is not justified. |
 
 ## Engine and platform backlog (2026-08 evidence)
 

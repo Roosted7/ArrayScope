@@ -143,6 +143,14 @@ plan (token unification, backend de-duplication, hardware evidence) is in the
 
 ### Export and load data
 
+Press **Ctrl+S** (**Cmd+S** on macOS) to choose an exact array region before
+processing it. The selection dialog previews shape, dtype, and payload size;
+evaluation and writing run in a worker with progress and cancellation. Export
+uses scientific values in array axis order, including complex values, rather
+than display colors or scaling. Small selections read only the required source
+region when the operations support it; FFTs and other whole-stage operations
+show their larger processing cost before execution.
+
 Video/PNG-frame export is available from a dimension action.
 
 <picture>

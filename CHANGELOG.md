@@ -15,6 +15,10 @@ This file records user-visible release changes. Detailed development history and
 - Copy/paste operation recipes through File, Operations → More, and the
   command palette, preserving parameters and disabled steps while sharing
   existing import compatibility and command-review behavior.
+- Selection-first NumPy export with shape/dtype/byte previews, exact large
+  indices, worker preflight, progress, and cancellation. Region-capable
+  operations avoid materializing unrelated source data; expensive or unknown
+  work requires confirmation before execution.
 
 - Coverage numbers now come out of the change-selection map for free:
   `python tools/test_selection.py coverage` reports which functions in
@@ -51,6 +55,9 @@ This file records user-visible release changes. Detailed development history and
 
 ### Fixed
 
+- Lazy-source and derived-array size accounting no longer wraps at 64 bits.
+  Empty axes retain their shape in scientific metadata and exports; negative
+  sizes remain invalid. FFT region estimates include expanded transform output.
 - Nested HDF5 data, compound-array shapes, encoded complex fields, and MAT
   numeric fields beside metadata now open consistently. Selectors close file
   handles on cancellation and read errors.

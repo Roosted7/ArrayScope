@@ -62,12 +62,35 @@ matches names and full paths; the tree shows shape, type, and estimated memory.
 Press Enter or use Open to load the selected array. Canceling a selector or
 encountering a read failure closes its container.
 
+Press **Ctrl+S** (**Cmd+S** on macOS) to export a selected array as `.npy`.
+Choose inclusive start/end indices, optional singleton squeezing, and a
+destination before any export evaluation. The preview reports output shape,
+dtype, and array bytes, with exact integer entry even for very large axes. The
+selection uses derived array coordinates and native scientific values, including
+complex values; display channels, colors, scaling, and flips are not applied.
+
+Preflight, evaluation, and writing run on the window's execution kernel. Small
+selections avoid full materialization when operation capabilities permit it;
+FFTs, opaque stages, and unknown auxiliary-input costs require explicit
+confirmation. Cancel keeps feedback visible until cooperative work stops, so a
+single native/plugin operation may finish before cancellation takes effect.
+Actively streaming loads must finish or stop before export starts.
+
+An accepted export retains its document and source references through later
+operation edits or source replacement. Notified mutations of shared primary or
+auxiliary sources cancel the export. References do not copy source pixels:
+unnotified external writes cannot provide snapshot isolation. Changed linked
+definitions and file inputs are checked again before publication.
+
 NumPy exports stage complete files beside their destinations before replacing
-them. Preparation failures preserve previous exports, and uppercase `.NPY` or
-`.NPZ` names are used exactly as entered. Replacement is atomic per file; use
-an NPZ export to keep data and embedded recipes in a single file. Separate NPY
-recipe sidecars do not form a multi-file transaction. On Windows, replacing an
-open memory-mapped source may be refused while leaving the original intact.
+them. Failures and cancellation before publication preserve previous exports,
+and uppercase `.NPY` or `.NPZ` names are used exactly as entered. Once atomic
+publication completes, a late cancellation still reports success. Replacement
+is atomic per file; a full-derived NPZ export keeps data and embedded recipes
+in one file. Separate NPY recipe sidecars do not form a multi-file transaction.
+On Windows, replacing an open memory-mapped source may be refused while
+leaving the original intact. The existing full-derived recipe export remains
+separate from the selected-region `.npy` workflow.
 
 Operation recipes can also travel through the clipboard: choose **Copy
 Operation Recipe to Clipboard** or **Paste Operation Recipe (Replace Stack)**
