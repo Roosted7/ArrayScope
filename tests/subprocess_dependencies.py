@@ -24,6 +24,8 @@ all declared tests, including empty entries and declaration guards.
 #: mid-suite ``INTERNALERROR``; see
 #: :func:`install_extensionless_dependency_support`.
 OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    # Timeout and JUnit/reporting checks execute the real command wrapper.
+    "tests/app/test_ci_report.py": ("tools/ci_report.py",),
     "tests/app/test_streaming_cli.py": (
         "arrayscope/__main__.py",
         "arrayscope/app/batch_cli.py",
