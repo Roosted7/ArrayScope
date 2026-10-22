@@ -83,7 +83,7 @@ def compare_windows(qtbot):
     # deleteLater below can actually destroy them (test_open_flow.py does the
     # same in its teardown).
     if app is not None:
-        app.setProperty("_arrayscope_live_windows", None)
+        app._arrayscope_live_windows = []
     for win in tracked:
         win.deleteLater()
     qtbot.waitUntil(lambda: all(destroyed.values()), timeout=_DISPOSE_TIMEOUT_MS)

@@ -866,10 +866,19 @@ def test_frame_control_plane_has_no_legacy_module_shims():
 
 
 def test_qtimers_are_explicitly_allowlisted_by_category():
-    """R4 guard: new timers must be justified as UI cosmetic or anti-hang."""
+    """Timers need an explicit purpose, including safe QObject lifecycle edges."""
 
     allowed = Counter(
         {
+            # A Close event filter runs before acceptance/rejection. This
+            # window-owned one-shot checks the result after dispatch, and a
+            # Show cancels it. It schedules no array/render work.
+            (
+                "arrayscope/app/launch.py",
+                "_WindowReferenceKeeper.__init__",
+                "QTimer",
+                "resource lifecycle",
+            ): 1,
             (
                 "arrayscope/display/histogram_controller.py",
                 "HistogramLevelPreviewController.__init__",

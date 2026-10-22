@@ -71,7 +71,7 @@ def _dispose(qtbot, windows):
     for win in windows:
         win.close()
     if app is not None:
-        app.setProperty("_arrayscope_live_windows", None)
+        app._arrayscope_live_windows = []
     for win in windows:
         win.deleteLater()
     qtbot.waitUntil(lambda: all(destroyed.values()), timeout=_DISPOSE_TIMEOUT_MS)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import warnings
+import weakref
 
 import numpy as np
 
@@ -12,10 +13,8 @@ from arrayscope.app.qt_binding import pin_wayland_appearance, prefer_pyside6
 
 prefer_pyside6()
 
-import contextlib
-
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from arrayscope.window import ArrayScopeWindow
 
@@ -100,24 +99,74 @@ def _enable_ipython_qt_event_loop():
     return active_eventloop in {"qt", "qt5", "qt6"}
 
 
-def _retain_window_reference(app, win):
-    """Keep inline windows alive for as long as they are open."""
-    live_windows = app.property("_arrayscope_live_windows")
-    if not isinstance(live_windows, list):
-        live_windows = []
+class _WindowReferenceKeeper(QtCore.QObject):
+    """Let the application own visible windows without owning closed ones.
 
-    live_windows.append(win)
-    app.setProperty("_arrayscope_live_windows", live_windows)
+    A close can be rejected, so release only after Qt has dispatched it. The
+    window owns the single-shot timer; destroying it cancels that callback.
+    Weak references avoid a signal closure pinning the window after release.
+    """
 
-    def _release_reference(_=None, w=win, qapp=app):
-        refs = qapp.property("_arrayscope_live_windows")
-        if not isinstance(refs, list):
+    def __init__(self, app, win):
+        super().__init__(win)
+        self._app = weakref.ref(app)
+        self._window = weakref.ref(win)
+        self._close_check = QtCore.QTimer(self)
+        self._close_check.setSingleShot(True)
+        self._close_check.timeout.connect(self._release_if_hidden)
+        win.installEventFilter(self)
+        # A child QObject receiver is disconnected when its parent starts
+        # destruction. Keep this callback receiver-free, and capture weak
+        # references only, so destruction itself can release app ownership.
+        app_ref, window_ref = self._app, self._window
+
+        def release_destroyed_window(*_):
+            app, window = app_ref(), window_ref()
+            if app is not None:
+                refs = getattr(app, "_arrayscope_live_windows", [])
+                app._arrayscope_live_windows = [ref for ref in refs if ref is not window]
+
+        win.destroyed.connect(release_destroyed_window)
+
+    def retain(self):
+        app, win = self._app(), self._window()
+        if app is None or win is None:
             return
-        with contextlib.suppress(ValueError):
-            refs.remove(w)
-        qapp.setProperty("_arrayscope_live_windows", refs)
+        refs = getattr(app, "_arrayscope_live_windows", None)
+        refs = list(refs) if isinstance(refs, list) else []
+        if not any(ref is win for ref in refs):
+            refs.append(win)
+            app._arrayscope_live_windows = refs
 
-    win.destroyed.connect(_release_reference)
+    def _release(self, *_):
+        app, win = self._app(), self._window()
+        if app is None:
+            return
+        refs = getattr(app, "_arrayscope_live_windows", None)
+        if isinstance(refs, list):
+            app._arrayscope_live_windows = [ref for ref in refs if ref is not win]
+
+    def _release_if_hidden(self):
+        win = self._window()
+        if win is not None and not win.isVisible():
+            self._release()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Type.Close:
+            self._close_check.start(0)
+        elif event.type() == QtCore.QEvent.Type.Show:
+            self._close_check.stop()
+            self.retain()
+        return super().eventFilter(obj, event)
+
+
+def _retain_window_reference(app, win):
+    """Keep an inline window alive while open, without taking caller ownership."""
+    keeper = getattr(win, "_arrayscope_reference_keeper", None)
+    if keeper is None:
+        keeper = _WindowReferenceKeeper(app, win)
+        win._arrayscope_reference_keeper = keeper
+    keeper.retain()
 
 
 def _create_window(
@@ -145,6 +194,10 @@ def _create_window(
         selector_class_name=selector_class_name,
         axes=axes,
     )
+    # Closing a launched viewer is terminal: closeEvent shuts down its
+    # workers and renderer. Delete the Qt tree as well so signal closures
+    # cannot retain its document and source in a long-lived notebook/CLI app.
+    win.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
     win.setWindowTitle(title)
     win.show()
 
