@@ -1,54 +1,54 @@
 # Current state
 
-**Snapshot: `main`, 2026-07-27.** One line of development. WGPU and
-PyQtGraph are the maintained rendering backends: WGPU is the GPU/rendering
-certification path and PyQtGraph is the CPU/headless/remote path. The legacy
-VisPy renderer was retired after its engine mechanisms moved behind the
-backend-neutral command, residency, and presentation contracts
-([ADR 0061](decisions/0061-retire-vispy-rendering-backend.md)). Keep this
-file a *short* snapshot —
-history belongs to the archives, direction to [`queue.md`](queue.md).
-Update by replacement, not by layering dated correction blocks.
+**Snapshot: `dev`, 2026-10-22.** ArrayScope is a Python/Qt scientific array
+viewer with maintained WGPU and PyQtGraph backends. WGPU serves GPU rendering;
+PyQtGraph serves CPU and remote workflows. Historical hardware measurements
+remain evidence for their named revisions, not certification of this branch.
 
-## Architecture (what stands)
+## Product capabilities
 
-- One execution kernel (`arrayscope/kernel/`), one render pipeline
-  (`arrayscope/render/`), one tile lifecycle machine (ADR 0051);
-  orchestration on `RenderOrchestrator` (ADR 0045); **one
-  scheduling-phase owner** (`render/progressive_scheduling.py`).
-- The GPU engine (ADR 0055/0056, G1–G6): Qt-free `arrayscope/gpu/` chunk
-  keys/grid, page table, chunk store; the ADR 0057 renderer command
-  protocol with the WGPU backend — native GPU
-  overlays incl. glyph text, GPU histogram/LOD compute, screen
-  presentation opt-in.
-- Visible-truth machinery: schema-v1 trace bus; `trace_verify`
-  invariants; the 12-cell maintained-backend journey matrix (six journeys
-  across WGPU and PyQtGraph); framebuffer-to-CPU pixel oracles on both backends
-  with fault injection.
+- A home screen offers recent files, DICOM folders, and locally generated
+  labelled examples. Searchable HDF5/NPZ/MAT browsing reads metadata before
+  selecting an array.
+- The scientific core supports n-dimensional slicing, montage views, complex
+  values, ROI/profile inspection, linked windows, and ordered operations.
+  Recipes travel through files and the clipboard. Bounded operation Undo/Redo
+  restores edits on the current source, including compatible rank handoffs.
+- Selected-array export chooses ranges before evaluation, reports planned
+  costs, runs on the window kernel, and supports progress/cancellation with
+  atomic publication. NPY keeps exact values; NPZ can keep the original recipe
+  and separate selection/source provenance.
+- [Terminal recipe replay](recipe-replay.md) runs built-in operations without
+  Qt, over read-only NPY or explicitly selected HDF5 data. Dry-run reads
+  metadata rather than array values and prints a versioned JSON plan.
+- [HDF5 loading](hdf5-data.md) shares immutable metadata and lazy region sources
+  between GUI, Python, and terminal workflows, with per-read file ownership,
+  working-memory estimates, change detection, and process transport.
 
-## Known open work
+## Architecture
 
-Direction and exit gates: [`queue.md`](queue.md). Headlines: WGPU
-field evidence (callback bars, dogfood hours, the FFT-scroll
-headline), retention truth, then the product turn (compare,
-plugin ops/sigpy/BART, ingestion — queue rows 5–10). Standing lane:
-demand-freshness unit fixture, offscreen cold-tail stall, bounded process
-exit, R8 continuity-gate adjudication.
+One execution kernel owns tasks and completion. The staged operation planner,
+region evaluator, source reader, and atomic writer are shared across interfaces.
+Rendering uses the backend-neutral frame/presentation contracts; caches and
+physical backend storage retain separate budgets and identities.
 
-## Material risks
+## Current limits and next work
 
-1. **Complexity debt**, still: `FrameSession` ~100 fields;
-   residency/visibility facts retain multiple owners. Every fix should
-   reduce owner count; the "presentation clock" close-out (Program A)
-   is the structural answer.
-2. **Acceptance is machine-bound.** Rings 3–4 and the journey matrix run
-   only on this machine by hand; CI is offscreen and cannot certify physical
-   WGPU/Vulkan presentation. Whoever
-   changes a display/render/kernel/window lane runs them
-   ([testing/README.md](testing/README.md)).
+Direction and acceptance gates live in [the queue](queue.md). The next large-data
+slice is bounded incremental export: current selected export still allocates
+its selected result, and FFT/opaque stages can require larger intermediates.
+Estimated peak memory is not a process-RSS cap. Plugin replay, indirect HDF5
+storage, and lazy compound subarray decoding are outside the terminal contract.
+File identity checks detect ordinary replacement and changes; they do not
+provide cryptographic provenance or snapshot isolation against external writers.
 
-## What is working well
+Current validation includes numerical/resource tests, real subprocesses, and
+offscreen Qt interactions with inspected dark/light artifacts. This environment
+has no physical GPU device; it cannot establish compositor/pixel acceptance or
+new GPU performance claims. Python 3.13 is available here; the wider declared
+Python/platform matrix requires its corresponding CI/runtime environments.
 
-- The Qt-free semantic core, operations pipeline, slicing, profiles, ROI,
-  linked-window sync; suite ~2,490 tests in ~2 min parallel, with
-  doc-to-test traceability and trajectory-level oracles.
+The rendering pipeline remains complex, and historical callback/interaction
+performance targets require fresh hardware measurements. Native code should
+address a measured boundary with correct semantics and viable packaging; a
+whole-application rewrite has no demonstrated performance justification.

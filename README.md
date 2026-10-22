@@ -23,7 +23,11 @@ or explore a built-in volume, time series, or complex field. Examples are
 generated locally, include named dimensions and hints, and need no download.
 
 HDF5, NPZ, and MAT containers have a searchable dataset browser with shape,
-type, and memory estimates. To transfer a processing workflow between arrays,
+type, and memory estimates. Supported HDF5 datasets open lazily, so inspecting
+a slice does not require loading the entire array. Open a known dataset with
+`arrayscope measurement.h5 --dataset scan/image`; the [HDF5 guide](docs/hdf5-data.md)
+covers loading, reload, encodings, and memory limits.
+To transfer a processing workflow between arrays,
 use **Copy Operation Recipe to Clipboard** and **Paste Operation Recipe
 (Replace Stack)** from File, Operations → More, or the `Ctrl+K` palette.
 
@@ -119,6 +123,7 @@ Qt. Inspect the planned work, then export the exact scientific result:
 ```bash
 arrayscope input.npy --recipe steps.json --export result.npz --dry-run
 arrayscope input.npy --recipe steps.json --export result.npz --range 0=10:30
+arrayscope measurement.h5 --dataset scan/image --export selected.npz --range 0=2:6
 ```
 
 [Recipe replay](docs/recipe-replay.md) explains half-open output-space ranges,
@@ -171,6 +176,8 @@ region when the operations support it; FFTs and other whole-stage operations
 show their larger processing cost before execution.
 **Export Full Derived Array…** remains available for the complete processed
 array with embedded recipes in NPZ or separate NPY recipe files.
+Selected-region export also offers NPZ, keeping the original operation recipe
+and separate selection/source metadata beside the exact values.
 
 Video/PNG-frame export is available from a dimension action.
 

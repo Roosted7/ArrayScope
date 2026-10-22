@@ -29,6 +29,12 @@ This file records user-visible release changes. Detailed development history and
   ranges, zero-payload-read `--dry-run`, explicit cost consent, versioned JSON
   results, and cancellation. Read-only NPY inputs and recipe files are
   protected from output aliases; NPZ keeps recipe and selection provenance.
+- Shared lazy HDF5 loading for the viewer, Python, and terminal export, with
+  explicit `--dataset`, detached exact region reads, compressed-chunk working
+  estimates, metadata-only process transport, and reload/change detection.
+  The browser explains lazy access and explicit compound-subarray eager loads.
+- Selected-region NPZ export from the viewer, carrying the original operation
+  recipe, selected output axes/ranges, and captured source/dataset metadata.
 
 - Coverage numbers now come out of the change-selection map for free:
   `python tools/test_selection.py coverage` reports which functions in
@@ -65,6 +71,11 @@ This file records user-visible release changes. Detailed development history and
 
 ### Fixed
 
+- Reverse slices preserve their first element and empty-selection semantics.
+  Full lazy-document evaluation uses the same budget and cancellation owner
+  as region reads, including when optimization removes every operation.
+- HDF5 eager fallback rejects stale selections and unsupported indirect
+  storage before payload access, then rechecks identity before returning.
 - Recipe imports reject non-boolean enabled flags and noninteger versions
   instead of silently changing authored processing intent. Noninteractive
   replay refuses unavailable enabled operations before execution.

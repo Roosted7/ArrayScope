@@ -46,6 +46,7 @@ arrayscope a.npy b.h5 c.mat               # several files: one shared event loop
 arrayscope --title "kspace" data.npy      # window title override
 arrayscope --mmap data.npy                # memory-map instead of eager read
 arrayscope --mmap --consume handoff.npy   # wrapper handoff (see below)
+arrayscope measurement.h5 --dataset scan/image  # an explicit lazy HDF5 dataset
 ```
 
 `--mmap` opens `.npy` files copy-on-write (`numpy` `mmap_mode='c'`): reads are
@@ -54,8 +55,12 @@ viewer process without writing back to the file. `--consume` deletes the input
 file once it is loaded (or mapped) — meant for temporary handoff files, best
 effort on Windows where a mapped file cannot be unlinked.
 
-HDF5 selectors support datasets inside nested groups and numeric compound
-array fields. NPZ selectors inspect array headers to list available datasets;
+HDF5 selectors browse metadata and open supported datasets lazily, including
+nested numeric/complex arrays. Compound subarray fields use an explicitly
+labeled **Load all** fallback. `--dataset` selects an exact supported HDF5 key
+without a browser; that source needs its file for later reads and cannot use
+`--consume`. See [HDF5 loading](hdf5-data.md) for encoding and identity limits.
+NPZ selectors inspect array headers to list available datasets;
 they load the chosen array only, and ignore object metadata without unpickling
 it. MAT selectors discover nested numeric fields alongside metadata. Search
 matches names and full paths; the tree shows shape, type, and estimated memory.
@@ -63,7 +68,7 @@ Press Enter or use Open to load the selected array. Canceling a selector or
 encountering a read failure closes its container.
 
 Choose **File → Export Selected Array…**, or press **Ctrl+S** (**Cmd+S** on macOS),
-to export a selected array as `.npy`.
+to export a selected array as `.npy` or `.npz`.
 Choose inclusive start/end indices, optional singleton squeezing, and a
 destination before any export evaluation. The preview reports output shape,
 dtype, and array bytes, with exact integer entry even for very large axes. The
@@ -91,7 +96,9 @@ is atomic per file; a full-derived NPZ export keeps data and embedded recipes
 in one file. Separate NPY recipe sidecars do not form a multi-file transaction.
 On Windows, replacing an open memory-mapped source may be refused while
 leaving the original intact. The existing full-derived recipe export remains
-separate from the selected-region `.npy` workflow.
+separate from the selected-region workflow. Selected NPZ export embeds the
+original operation recipe and a separate selection/source manifest; applying
+that recipe to the exported derived values would process them a second time.
 
 Operation recipes can also travel through the clipboard: choose **Copy
 Operation Recipe to Clipboard** or **Paste Operation Recipe (Replace Stack)**
@@ -126,9 +133,11 @@ linked-window sync, with each received stack recorded as one edit.
 ```bash
 arrayscope input.npy --export result.npz --recipe steps.json --dry-run
 arrayscope input.npy --export result.npz --recipe steps.json --range 0=10:30
+arrayscope measurement.h5 --dataset scan/image --export selected.npz --dry-run
 ```
 
-Batch export opens one regular `.npy` input read-only, preserves its raw shape,
+Batch export opens one regular `.npy` input or an explicit HDF5 dataset
+read-only, preserves its raw shape,
 and reuses the exact region planner, evaluator, and atomic writer. It runs
 before Qt startup, viewer supervision, or accelerator prewarming. Supported
 built-in recipes retain authored disabled steps; unsupported plugin/user/command

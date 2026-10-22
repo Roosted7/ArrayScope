@@ -28,14 +28,15 @@ historical engine-only restriction. Existing measurements below remain evidence.
 Completed slices improve dataset browsing/loading, atomic selected-region
 export, command supervision, shared-memory rollback, ROI statistics, launcher
 accessibility, application window ownership, guided examples/recent files,
-clipboard recipes, bounded operation Undo/Redo, and Qt-free recipe replay.
+clipboard recipes, bounded operation Undo/Redo, Qt-free recipe replay, and
+shared lazy HDF5 datasets across viewing, Python, and terminal export.
 Validation and remaining limits are recorded
 in the [Done ledger](queue-done.md). Working guidance now chooses validation by
 behavior rather than directory and permits evidence-backed redesigns.
 
 | Next | Work | Acceptance |
 |---|---|---|
-| 1 | Share a named-dataset lazy HDF5 source between GUI and headless workflows. | Metadata-only discovery; bounded exact region reads, file ownership and change detection, complex/compound compatibility, compressed-chunk working estimates, transport, and reload/cancellation coverage. |
+| 1 | Export eligible large selections incrementally without allocating the whole output. | Prove bounded memory in a constrained subprocess, exact global shape/dtype/squeeze semantics, linear source work, honest rejection of unsupported plans, and cancellation/atomic publication through the existing writer. A prototype is evidence, not a shipped streaming path. |
 | 2 | Recheck maintained-backend interaction and callback bars on real hardware after correctness work. | Physical-pixel and compositor evidence with a representative dataset, both WGPU and PyQtGraph; offscreen runs do not count as GPU performance evidence. |
 | 3 | Evaluate a batched native planning boundary only after a fresh profile shows sufficient cost. | Immutable bulk input, no per-tile Python/native calls, exact state semantics, packaging proof, and a timing improvement beyond same-code spread plus pixel regression checks. Current measured candidate costs total about 6% of the workflow, so a whole-app rewrite is not justified. |
 
