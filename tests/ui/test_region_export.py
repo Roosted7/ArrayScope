@@ -167,6 +167,10 @@ def test_selected_export_runs_off_gui_and_keeps_its_document_snapshot(
     session = win._save_current_numpy_file()
     qtbot.waitUntil(source.entered.is_set, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
     assert session.is_running
+    # Reopening Save while a job is running reveals the same owned job,
+    # rather than submitting a competing export of the source.
+    assert win._save_current_numpy_file() is session
+    assert session.progress_dialog.isVisible()
     assert not path.exists()
     assert source.reads
     assert all(_is_selection_read(spec) for spec, _thread_id in source.reads)

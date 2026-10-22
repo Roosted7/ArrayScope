@@ -191,10 +191,11 @@ def test_source_watch_matches_buffer_aliases_only_while_collecting_options():
     assert len(changes) == 1
 
 
-def test_nested_auxiliary_source_change_cancels_running_export(
-    export_window, qtbot, tmp_path, monkeypatch
+@pytest.mark.parametrize("changed", ["source", "definition"])
+def test_nested_auxiliary_source_or_definition_change_cancels_running_export(
+    export_window, qtbot, tmp_path, monkeypatch, changed
 ):
-    from arrayscope.operations import plugins
+    from arrayscope.operations import library, plugins
     from arrayscope.operations.cancellation import EvaluationCancelled
     from arrayscope.operations.input_slots import OperationInputSlot, ResolvedSlot, SlotBinding
     from arrayscope.operations.plugins import PluginOperation, PluginOperationSpec
@@ -222,11 +223,13 @@ def test_nested_auxiliary_source_change_cancels_running_export(
         loader="document",
         source=auxiliary_document,
     )
+    revision = [1]
     spec = PluginOperationSpec(
         id="export:nested-source-watch",
         label="Add reference",
         build=lambda _axis, _params, slots: lambda data: data + slots["reference"],
         input_slots=(OperationInputSlot("reference", "Reference"),),
+        source_identity=lambda: revision[0],
     )
     monkeypatch.setitem(plugins._SPEC_CACHE, spec.id, spec)
     document = ArrayDocument(
@@ -247,7 +250,11 @@ def test_nested_auxiliary_source_change_cancels_running_export(
     session.start()
     qtbot.waitUntil(source.entered.is_set, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
-    notify_export_source_changed(auxiliary.view())
+    if changed == "source":
+        notify_export_source_changed(auxiliary.view())
+    else:
+        revision[0] += 1
+        library._notify()
     qtbot.waitUntil(lambda: not session.is_running, timeout=INTERACTION_SETTLE_HARD_LIMIT_MS)
 
     assert path.read_bytes() == b"previous export"
