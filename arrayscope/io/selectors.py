@@ -3,7 +3,6 @@ arrayscope GUI for choosing datasets from multi-dataset files.
 Handles mat, h5, and npz files.
 """
 
-import logging
 from contextlib import closing
 from math import prod
 
@@ -12,7 +11,16 @@ import numpy as np
 from arrayscope.app.qt_binding import prefer_pyside6
 from arrayscope.core.memory_budget import format_bytes
 
-_LOGGER = logging.getLogger(__name__)
+
+def _prepare_selector_app():
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.app.open_flow import ensure_open_app
+    from arrayscope.app.theme import apply_theme_to_qapplication
+
+    app = ensure_open_app()
+    apply_theme_to_qapplication(app, QtCore.QSettings().value("theme", "system"))
+    return app
 
 
 def _show_selector(filepath, selector_class_name, interpret_as_complex):
@@ -36,24 +44,30 @@ def _show_selector(filepath, selector_class_name, interpret_as_complex):
     else:
         return
 
-    # Create QApplication
-    import pyqtgraph as pg
-
-    pg.mkQApp()
+    _prepare_selector_app()
 
     # Create selector
     selector = selector_class(filepath)
-    selector.interpret_as_complex = interpret_as_complex
+    if interpret_as_complex is not None:
+        selector.interpret_as_complex = interpret_as_complex
 
     with closing(selector):
-        selected_path = selector.show()
-        data = selector.load_data(selected_path) if selected_path is not None else None
-    if selected_path is not None:
+        if not selector.requires_gui():
+            result = selector.get_single_data()
+        else:
+            selected_path = selector.show()
+            result = (
+                (selected_path, selector.load_selected(selected_path))
+                if selected_path is not None
+                else None
+            )
+    if result is not None:
+        selected_path, data = result
         arrayscope(
             data=data,
             title=f"{filepath.name} - {selected_path}",
             block=True,
-            complex_dim=interpret_as_complex,
+            complex_dim=selector.interpret_as_complex,
             filepath=filepath,
             dataset_path=selected_path,
             selector_class_name=selector_class_name,
@@ -91,6 +105,10 @@ class DatasetSelector:
         """Load data for a given dataset path/name. Returns numpy array."""
         raise NotImplementedError("Subclasses must implement load_data()")
 
+    def load_selected(self, path):
+        """Open a selected dataset for viewing; subclasses may return a lazy source."""
+        return self.load_data(path)
+
     def close(self):
         """Close any open file handles. Subclasses override if needed."""
 
@@ -119,31 +137,20 @@ class DatasetSelector:
 
         # The container belongs to this selection attempt, including cancel,
         # no-compatible-data, and read/process-launch failure paths. Loaded
-        # arrays are detached before the viewer opens.
+        # arrays and lazy descriptors remain valid after the selector closes.
         with closing(self):
             if not self.requires_gui():
                 result = self.get_single_data()
             elif block:
-                import pyqtgraph as pg
-
-                pg.mkQApp()
+                _prepare_selector_app()
                 selected_path = self.show()
                 result = (
-                    (selected_path, self.load_data(selected_path))
+                    (selected_path, self.load_selected(selected_path))
                     if selected_path is not None
                     else None
                 )
             else:
-                import multiprocessing as mp
-                import multiprocessing.process as _mp_process
-
-                p = mp.Process(
-                    target=_show_selector,
-                    args=(self.filepath, self.__class__.__name__, self.interpret_as_complex),
-                )
-                p.start()
-                _mp_process._children.discard(p)
-                return True
+                return self._start_selector_process()
 
         if result is None:
             return False
@@ -157,6 +164,18 @@ class DatasetSelector:
             dataset_path=name,
             selector_class_name=self.__class__.__name__,
         )
+        return True
+
+    def _start_selector_process(self):
+        import multiprocessing as mp
+        import multiprocessing.process as _mp_process
+
+        process = mp.Process(
+            target=_show_selector,
+            args=(self.filepath, self.__class__.__name__, self.interpret_as_complex),
+        )
+        process.start()
+        _mp_process._children.discard(process)
         return True
 
     def _create_dialog(self):
@@ -197,6 +216,13 @@ class DatasetSelector:
         self._build_tree()
 
         layout.addWidget(self.tree, 1)
+
+        self.selection_hint = self.QtWidgets.QLabel()
+        self.selection_hint.setObjectName("DatasetAccessHint")
+        self.selection_hint.setTextFormat(self.QtCore.Qt.TextFormat.PlainText)
+        self.selection_hint.setWordWrap(True)
+        self.selection_hint.hide()
+        layout.addWidget(self.selection_hint)
 
         self.empty_state = self.QtWidgets.QLabel()
         self.empty_state.setWordWrap(True)
@@ -249,6 +275,13 @@ class DatasetSelector:
             and not item.isHidden()
             and bool(item.data(0, self.QtCore.Qt.ItemDataRole.UserRole + 1))
         )
+        description = self._selection_description(item)
+        self.selection_hint.setText(description)
+        self.selection_hint.setVisible(bool(description))
+        self.open_button.setAccessibleDescription(description)
+
+    def _selection_description(self, item):
+        return ""
 
     def _filter_dataset_tree(self, text):
         query = text.strip().casefold()
@@ -381,240 +414,238 @@ class DatasetSelector:
 
 
 class H5DatasetSelector(DatasetSelector):
+    """Metadata-only HDF5 browser with independently owned selected sources."""
+
     def __init__(self, filepath):
-        try:
-            import h5py as h5
-        except ImportError as err:
-            raise ImportError(
-                "h5py is required to read HDF5 files. Install it with: pip install h5py"
-            ) from err
+        from arrayscope.io.hdf5_catalog import catalog_hdf5
 
-        self.h5 = h5
-        self.h5_file = h5.File(filepath, "r")
-        try:
-            self.compatible_datasets = self._find_compatible_datasets()
-            self.compatible_paths = {path for path, _ in self.compatible_datasets}
-            super().__init__(filepath, self.compatible_datasets)
-            self._detect_complex_interpretation()
-        except BaseException:
-            self.close()
-            raise
+        self.catalog = catalog_hdf5(filepath)
+        self.descriptors = {descriptor.key: descriptor for descriptor in self.catalog.datasets}
+        self.compatible_paths = {
+            key for key, descriptor in self.descriptors.items() if self._can_view(descriptor)
+        }
+        # A recognized real/imag record is one logical array. Its component
+        # fields remain addressable by the catalog but do not duplicate GUI rows.
+        complex_paths = {
+            key for key in self.compatible_paths if self.descriptors[key].encoding == "complex"
+        }
+        self.compatible_paths = {
+            key
+            for key in self.compatible_paths
+            if not any(key.startswith(parent + "/") for parent in complex_paths)
+        }
+        compatible = [(key, self.descriptors[key].shape) for key in sorted(self.compatible_paths)]
+        super().__init__(self.catalog.path, compatible)
+        self._detect_complex_interpretation()
 
-    def __del__(self):
-        if hasattr(self, "h5_file") and self.h5_file:
-            self.h5_file.close()
-
-    def close(self):
-        if hasattr(self, "h5_file") and self.h5_file:
-            self.h5_file.close()
+    @staticmethod
+    def _can_view(descriptor):
+        shape = descriptor.shape
+        if (
+            shape is None
+            or len(shape) < 1
+            or prod(shape) <= 1
+            or not np.issubdtype(descriptor.dtype, np.number)
+            or not (descriptor.lazy_supported or descriptor.eager_supported)
+        ):
+            return False
+        if descriptor.encoding == "field":
+            # Preserve the viewer's compound-field policy: array fields are
+            # scientific arrays; scalar record fields remain metadata rows.
+            field_dtype = descriptor.storage_dtype.fields[descriptor.field_name][0]
+            return field_dtype.subdtype is not None
+        return True
 
     def _detect_complex_interpretation(self):
-        """
-        If there's a single compatible dataset with 'complex' in name and a size-2 dimension,
-        auto-set interpret_as_complex to that dimension.
-        This is how ISMRMD stores complex data.
-        """
+        # This historical viewer convenience is deliberately absent from the
+        # Qt-free loader and batch API, where raw shape/value semantics win.
         if len(self.compatible_datasets) != 1:
             return
-
-        dataset_path, shape = self.compatible_datasets[0]
-
-        if "complex" not in dataset_path.lower():
+        key, shape = self.compatible_datasets[0]
+        descriptor = self.descriptors[key]
+        if "complex" not in key.lower() or descriptor.dtype.kind == "c":
             return
-
-        dataset, field_name = self._dataset_and_field(dataset_path)
-        dtype = (
-            dataset.dtype
-            if field_name is None
-            else self._get_compound_field_info(dataset, field_name)[1]
-        )
-        # Native complex arrays and real/imag record encodings already carry
-        # both components. Their size-two image axis is still an image axis.
-        if dtype.kind == "c" or dtype.names:
-            return
-
-        # Find first dimension with size 2
-        for dim_idx, size in enumerate(shape):
+        for axis, size in enumerate(shape):
             if size == 2:
-                self.interpret_as_complex = dim_idx
-                _LOGGER.info(
-                    "Auto-detected complex interpretation: dimension %s of '%s' (shape %s)",
-                    dim_idx,
-                    dataset_path,
-                    shape,
-                )
+                self.interpret_as_complex = axis
                 break
 
-    def _is_compound_dataset(self, dataset):
-        """Check if dataset is compound type with array fields."""
-        return hasattr(dataset, "dtype") and dataset.dtype.names is not None
+    def close(self):
+        # Catalog construction and each read own their own short-lived file.
+        # The browser retains immutable descriptors, never h5py objects.
+        pass
 
-    def _get_compound_field_info(self, dataset, field_name):
-        """Get shape and dtype for a compound field. Returns (shape, dtype, is_array)."""
-        field_dtype = dataset.dtype.fields[field_name][0]
-        if dataset.shape is None:
-            return (None, field_dtype.base, False)
-
-        # Check if field has subdtype (array within compound)
-        if hasattr(field_dtype, "subdtype") and field_dtype.subdtype is not None:
-            base_dtype, shape = field_dtype.subdtype
-            is_array = (
-                isinstance(shape, tuple)
-                and len(shape) >= 1
-                and np.issubdtype(base_dtype, np.number)
-            )
-            # load_data removes a single record axis for the common ISMRMRD
-            # encoding; multiple records remain part of the returned array.
-            record_shape = () if dataset.shape == (1,) else dataset.shape
-            return (record_shape + shape, base_dtype, is_array)
-        # Scalar field
-        return (dataset.shape, field_dtype, False)
-
-    def _complex_encoding_info(self, dataset):
-        """Return real/imag field names and actual result metadata, without reads."""
-        if dataset.shape is None:
-            return None
-        names = dataset.dtype.names or ()
-        real_name = next((name for name in ("real", "realdata", "r") if name in names), None)
-        imag_name = next((name for name in ("imag", "imagdata", "i") if name in names), None)
-        if real_name is None or imag_name is None:
-            return None
-        real_dtype = dataset.dtype.fields[real_name][0]
-        imag_dtype = dataset.dtype.fields[imag_name][0]
-        if not all(np.issubdtype(dtype.base, np.number) for dtype in (real_dtype, imag_dtype)):
-            return None
-        try:
-            result_shape = np.broadcast_shapes(
-                dataset.shape + real_dtype.shape, dataset.shape + imag_dtype.shape
-            )
-        except ValueError:
-            return None
-        # A zero-length array models NumPy's Python-scalar promotion for
-        # 1j * imag; it never samples source values.
-        imag_complex_dtype = np.result_type(np.empty((0,), dtype=imag_dtype.base), 1j)
-        result_dtype = np.result_type(real_dtype.base, imag_complex_dtype)
-        return real_name, imag_name, result_shape, result_dtype
-
-    def _find_compatible_datasets(self):
-        """Find all compatible datasets and compound array fields."""
-        import h5py as h5
-
-        compatible = []
-
-        def visit_func(name, obj):
-            if isinstance(obj, h5.Dataset):
-                if obj.shape is None:
-                    return
-                # Only include numeric arrays with more than 1 element (strings are always incompatible)
-                is_compatible = (
-                    obj.ndim >= 1 and np.issubdtype(obj.dtype, np.number) and np.prod(obj.shape) > 1
-                )
-
-                if self._is_compound_dataset(obj):
-                    complex_info = self._complex_encoding_info(obj)
-                    if complex_info is not None and prod(complex_info[2]) > 1:
-                        compatible.append((name, complex_info[2]))
-                    else:
-                        # Still allow array fields (e.g. for ISMRMRD style)
-                        for field_name in obj.dtype.names:
-                            shape, _dtype, is_array = self._get_compound_field_info(obj, field_name)
-                            if is_array and np.prod(shape) > 1:
-                                field_path = f"{name}/{field_name}"
-                                compatible.append((field_path, shape))
-                elif is_compatible:
-                    compatible.append((name, obj.shape))
-
-        self.h5_file.visititems(visit_func)
-        return compatible
+    def requires_gui(self):
+        # A legacy eager fallback needs its visible size/access explanation,
+        # including when it is the only compatible array in the container.
+        return super().requires_gui() or any(
+            not self.descriptors[key].lazy_supported for key in self.compatible_paths
+        )
 
     def get_single_data(self):
         if len(self.compatible_datasets) == 1:
-            path = self.compatible_datasets[0][0]
-            data = self.load_data(path)
-            return (path, data)
+            key = self.compatible_datasets[0][0]
+            return key, self.load_selected(key)
         return None
 
-    def _dataset_and_field(self, path):
-        # A slash usually separates HDF5 groups, not a compound field.
-        # Resolve the actual object first; only a dataset parent can own a
-        # field, at any group depth.
-        dataset_path, separator, field_name = path.rpartition("/")
-        parent = self.h5_file.get(dataset_path) if separator else None
-        if isinstance(parent, self.h5.Dataset) and field_name in (parent.dtype.names or ()):
-            return parent, field_name
-        return self.h5_file[path], None
+    def load_selected(self, path):
+        descriptor = self.catalog.dataset(path)
+        if descriptor.lazy_supported:
+            from arrayscope.io.hdf5_source import open_hdf5_source
+
+            return open_hdf5_source(self.filepath, descriptor)
+        if descriptor.eager_supported:
+            return self.load_data(path)
+        raise ValueError(descriptor.unsupported_reason or f"Unsupported HDF5 dataset: {path}")
 
     def load_data(self, path):
-        dset, field_name = self._dataset_and_field(path)
-        if field_name is not None:
-            field_data = dset[field_name]
-            # Remove singleton dataset dimension if present
-            if dset.shape == (1,):
-                field_data = field_data[0]
-            return np.array(field_data)
+        """Preserve the explicit eager API, detached from a selector lifetime."""
+        import h5py
 
-        # Handle native complex arrays
-        if np.iscomplexobj(dset):
-            return np.array(dset)
+        from arrayscope.io.hdf5_catalog import (
+            HDF5SourceChanged,
+            _resolve_selection,
+            dataset_identity,
+            file_identity,
+        )
 
-        if complex_info := self._complex_encoding_info(dset):
-            real_name, imag_name, _shape, _dtype = complex_info
-            return dset[real_name] + 1j * dset[imag_name]
+        descriptor = self.catalog.dataset(path)
+        if not descriptor.eager_supported:
+            raise ValueError(descriptor.unsupported_reason or "Unsupported HDF5 dataset")
 
-        return np.array(dset)
+        def check_file():
+            try:
+                unchanged = file_identity(self.filepath) == descriptor.file_identity
+            except (OSError, ValueError) as exc:
+                raise HDF5SourceChanged("HDF5 source is unavailable; open it again") from exc
+            if not unchanged:
+                raise HDF5SourceChanged("HDF5 source changed; open the dataset browser again")
+
+        check_file()
+        with h5py.File(self.filepath, "r") as container:
+            check_file()
+            try:
+                dataset, _key, field = _resolve_selection(container, descriptor.dataset_path)
+                if field is not None or dataset_identity(dataset) != descriptor.dataset_identity:
+                    raise HDF5SourceChanged("HDF5 dataset metadata changed; open it again")
+            except (KeyError, ValueError) as exc:
+                raise HDF5SourceChanged("HDF5 dataset is unavailable; open it again") from exc
+            if descriptor.field_name is not None:
+                data = dataset[descriptor.field_name]
+                if dataset.shape == (1,):
+                    data = data[0]
+                data = np.array(data)
+            elif descriptor.real_field is not None and descriptor.imag_field is not None:
+                data = dataset[descriptor.real_field] + 1j * dataset[descriptor.imag_field]
+            else:
+                data = np.array(dataset)
+        check_file()
+        return data
+
+    def view(self, block=False):
+        if not block:
+            # Pass a file/key intent to a child, not a live adapter or its lock.
+            if not self.compatible_datasets:
+                return False
+            return self._start_selector_process()
+        return super().view(block=True)
+
+    def _selection_description(self, item):
+        if item is None:
+            return ""
+        key = item.data(0, self.QtCore.Qt.ItemDataRole.UserRole)
+        descriptor = self.descriptors.get(key)
+        if descriptor is None:
+            return ""
+        if key not in self.compatible_paths:
+            if descriptor.lazy_supported or descriptor.eager_supported:
+                return (
+                    "This entry is metadata in the browser. Explicit dataset loading can read "
+                    "supported scalar, empty, boolean, or scalar-record arrays."
+                )
+            return descriptor.unsupported_reason or "This dataset cannot be displayed as an array."
+        if descriptor.lazy_supported:
+            return "Opens lazily: only requested array regions are read. The array size is not a RAM allocation."
+        if descriptor.eager_supported and key in self.compatible_paths:
+            size = prod(descriptor.shape) * descriptor.dtype.itemsize
+            return (
+                f"Loads the entire selected array ({format_bytes(size)} of values), "
+                "plus decoding buffers. "
+                "Compound array fields do not yet support lazy reads."
+            )
+        return descriptor.unsupported_reason
+
+    def _create_dialog(self):
+        dialog = super()._create_dialog()
+        preferred = next(
+            (key for key in sorted(self.compatible_paths) if self.descriptors[key].lazy_supported),
+            None,
+        )
+        if preferred is not None:
+            self.tree.setCurrentItem(self._dataset_items[preferred])
+        if missing := getattr(self, "missing_dataset_path", None):
+            notice = self.QtWidgets.QLabel(
+                f"The previous dataset '{missing}' is no longer available. "
+                "Choose a replacement, or cancel to keep the current view."
+            )
+            notice.setTextFormat(self.QtCore.Qt.TextFormat.PlainText)
+            notice.setWordWrap(True)
+            notice.setObjectName("MissingHDF5DatasetNotice")
+            dialog.layout().insertWidget(0, notice)
+        return dialog
 
     def _build_tree(self):
+        self._dataset_items = {}
+        self.tree.setHeaderLabels(["Name", "Shape", "Type", "Array size", "Access"])
+        self.tree.headerItem().setToolTip(
+            3, "Logical uncompressed array bytes, not current RAM use or compressed file size."
+        )
+        self.tree.setColumnWidth(0, 230)
+        self.tree.setColumnWidth(1, 150)
+        self.tree.setColumnWidth(2, 100)
+        self.tree.setColumnWidth(3, 100)
+        self.tree.setColumnWidth(4, 85)
+        nodes = dict.fromkeys(self.catalog.groups)
+        hidden_parents = {
+            key for key in self.compatible_paths if self.descriptors[key].encoding == "complex"
+        }
+        for key, descriptor in self.descriptors.items():
+            if not any(key.startswith(parent + "/") for parent in hidden_parents):
+                nodes[key] = descriptor
+        children = {}
+        for key in nodes:
+            parent, _separator, _name = key.rpartition("/")
+            children.setdefault(parent, []).append(key)
 
-        def add_items(parent_item, h5_group, parent_path=""):
-            for key in h5_group:
-                item = h5_group[key]
-                full_path = f"{parent_path}/{key}" if parent_path else key
-
-                if isinstance(item, self.h5.Group):
-                    group_item = self._add_group(parent_item, key, full_path, "Group")
-                    add_items(group_item, item, full_path)
-
-                elif isinstance(item, self.h5.Dataset):
-                    is_compatible = full_path in self.compatible_paths
-
-                    # Add compound datasets as groups (like MATLAB structs)
-                    if self._is_compound_dataset(item) and not is_compatible:
-                        dataset_item = self._add_group(parent_item, key, full_path, "Compound")
-                        dataset_item.setExpanded(True)
-
-                        # Add all compound fields as children
-                        for field_name in item.dtype.names:
-                            field_path = f"{full_path}/{field_name}"
-                            shape, dtype, _is_array = self._get_compound_field_info(
-                                item, field_name
-                            )
-                            field_compatible = field_path in self.compatible_paths
-
-                            # Show all fields (arrays as enabled, scalars as disabled)
-                            self._add_item(
-                                dataset_item,
-                                field_name,
-                                shape,
-                                dtype,
-                                field_path,
-                                field_compatible,
-                                data=None,
-                            )
+        def add_children(parent_item, parent_key):
+            for key in sorted(children.get(parent_key, ())):
+                descriptor = nodes[key]
+                name = key.rsplit("/", 1)[-1]
+                if descriptor is None:
+                    item = self._add_group(parent_item, name, key, "Group")
+                elif descriptor.dtype.names and key not in self.compatible_paths:
+                    item = self._add_group(parent_item, name, key, "Compound")
+                else:
+                    item = self._add_item(
+                        parent_item,
+                        name,
+                        descriptor.shape,
+                        descriptor.dtype,
+                        key,
+                        key in self.compatible_paths,
+                    )
+                    if key in self.compatible_paths:
+                        access = "Lazy" if descriptor.lazy_supported else "Load all"
+                    elif descriptor.lazy_supported or descriptor.eager_supported:
+                        access = "Metadata"
                     else:
-                        complex_info = self._complex_encoding_info(item)
-                        shape = item.shape if complex_info is None else complex_info[2]
-                        dtype = item.dtype if complex_info is None else complex_info[3]
-                        self._add_item(
-                            parent_item,
-                            key,
-                            shape,
-                            dtype,
-                            full_path,
-                            is_compatible,
-                            data=None,
-                        )
+                        access = "Unsupported"
+                    item.setText(4, access)
+                    item.setToolTip(4, self._selection_description(item))
+                    self._dataset_items[key] = item
+                add_children(item, key)
 
-        add_items(self.tree, self.h5_file)
+        add_children(self.tree, "")
 
 
 class NpzDatasetSelector(DatasetSelector):

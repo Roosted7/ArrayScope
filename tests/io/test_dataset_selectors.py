@@ -443,6 +443,7 @@ def test_dataset_selection_closes_the_container_on_cancel_or_error(
     tmp_path, qapp, monkeypatch, kind, outcome
 ):
     path = tmp_path / f"archive.{kind}"
+    hdf5_handles = h5py.h5f.get_obj_count(types=h5py.h5f.OBJ_FILE)
     if kind == "h5":
         with h5py.File(path, "w") as output:
             output.create_dataset("a", data=np.ones((2, 3)))
@@ -460,10 +461,10 @@ def test_dataset_selection_closes_the_container_on_cancel_or_error(
         def fail_read(_path):
             raise OSError("container read failed")
 
-        monkeypatch.setattr(selector, "load_data", fail_read)
+        monkeypatch.setattr(selector, "load_selected", fail_read)
         with pytest.raises(OSError, match="container read failed"):
             selector.view(block=True)
     if kind == "h5":
-        assert not selector.h5_file.id.valid
+        assert h5py.h5f.get_obj_count(types=h5py.h5f.OBJ_FILE) == hdf5_handles
     else:
         assert selector.npz_file.zip is None

@@ -317,6 +317,7 @@ def test_single_dataset_read_failure_closes_its_container(open_app, monkeypatch,
     from arrayscope.app.open_flow import open_any_path
     from arrayscope.io.selectors import H5DatasetSelector, NpzDatasetSelector
 
+    hdf5_handles = h5py.h5f.get_obj_count(types=h5py.h5f.OBJ_FILE)
     path = tmp_path / f"single.{suffix}"
     if suffix == "h5":
         with h5py.File(path, "w") as container:
@@ -332,18 +333,168 @@ def test_single_dataset_read_failure_closes_its_container(open_app, monkeypatch,
         selectors.append(selector)
         raise OSError("Dataset read failed")
 
-    monkeypatch.setattr(selector_type, "load_data", fail_read)
+    method = "load_selected" if suffix == "h5" else "load_data"
+    monkeypatch.setattr(selector_type, method, fail_read)
     try:
         with pytest.raises(OSError, match="Dataset read failed"):
             open_any_path(path)
         assert len(selectors) == 1
         if suffix == "h5":
-            assert not selectors[0].h5_file.id.valid
+            assert h5py.h5f.get_obj_count(types=h5py.h5f.OBJ_FILE) == hdf5_handles
         else:
             assert selectors[0].npz_file.zip is None
     finally:
         for selector in selectors:
             selector.close()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_hdf5_viewer_opens_and_reloads_the_same_dataset_lazily(
+    open_app, qtbot, monkeypatch, tmp_path, explicit
+):
+    import h5py
+
+    from arrayscope.app.open_flow import open_any_path
+    from arrayscope.core.array_source import LazySourceArray
+    from arrayscope.io.hdf5_catalog import HDF5SourceChanged
+    from arrayscope.io.selectors import H5DatasetSelector
+    from tests.settle import settle_window
+    from tests.ui.helpers import frame_session_settled
+
+    path = tmp_path / "volume.h5"
+    values = np.arange(8 * 9 * 3, dtype=np.float32).reshape(8, 9, 3)
+    with h5py.File(path, "w") as output:
+        output.create_dataset("scan/volume", data=values, chunks=(4, 3, 1), compression="gzip")
+
+    def no_eager_load(*_args, **_kwargs):
+        pytest.fail("Actual HDF5 viewing and reload must use the selected-source seam")
+
+    monkeypatch.setattr(H5DatasetSelector, "load_data", no_eager_load)
+    if explicit:
+        session = open_any_path(path, dataset_path="scan/volume")
+        qtbot.waitUntil(lambda: session._terminal)
+        assert session.window is not None
+        win = session.window
+    else:
+        win = open_any_path(path)
+    settle_window(win, lambda: frame_session_settled(win), label="HDF5 initial viewer settles")
+    assert isinstance(win.base_data, LazySourceArray)
+    assert win._dataset_path == "scan/volume"
+    assert win._selector_class_name == "H5DatasetSelector"
+    np.testing.assert_array_equal(win.base_data.read_region((2, slice(None), 1)), values[2, :, 1])
+    old_source = win.base_data
+    win.request_operation("reverse", 0)
+    settle_window(win, lambda: frame_session_settled(win), label="HDF5 operation settles")
+
+    replacement = tmp_path / "replacement.h5"
+    with h5py.File(replacement, "w") as output:
+        output.create_dataset("scan/volume", data=values + 100, chunks=(4, 3, 1))
+    replacement.replace(path)
+    win._reload_file()
+    settle_window(win, lambda: frame_session_settled(win), label="HDF5 reloaded viewer settles")
+
+    assert isinstance(win.base_data, LazySourceArray)
+    assert win.base_data is not old_source
+    assert win._dataset_path == "scan/volume"
+    assert len(win.document.steps) == 1
+    np.testing.assert_array_equal(win.document.materialize(), (values + 100)[::-1])
+    win._on_file_changed(str(path))
+    assert win._reload_btn.toolTip() == "Reload file"
+    with pytest.raises(HDF5SourceChanged):
+        old_source.read_region((slice(None), 0, 0))
+
+
+def test_explicit_hdf5_open_cannot_consume_its_lazily_read_source(open_app, tmp_path):
+    import h5py
+
+    from arrayscope.app.open_flow import FileOpenSession, open_any_path
+
+    path = tmp_path / "scan.h5"
+    with h5py.File(path, "w") as output:
+        output.create_dataset("image", data=np.ones((3, 4)))
+    with pytest.raises(ValueError, match="requires the source file"):
+        FileOpenSession(path, dataset_path="image", consume=True)
+    with pytest.raises(ValueError, match="requires the source file"):
+        open_any_path(path, dataset_path="image", consume=True)
+    assert path.exists()
+
+
+def test_hdf5_reload_does_not_silently_switch_to_the_only_other_dataset(
+    open_app, monkeypatch, tmp_path
+):
+    import h5py
+
+    from arrayscope.app.open_flow import open_any_path
+    from arrayscope.io.selectors import H5DatasetSelector
+    from tests.settle import settle_window
+    from tests.ui.helpers import frame_session_settled
+
+    path = tmp_path / "scan.h5"
+    with h5py.File(path, "w") as output:
+        output.create_dataset("original", data=np.ones((6, 7)))
+    win = open_any_path(path)
+    settle_window(win, lambda: frame_session_settled(win), label="original HDF5 view settles")
+    original_source = win.base_data
+    replacement = tmp_path / "replacement.h5"
+    with h5py.File(replacement, "w") as output:
+        output.create_dataset("different", data=np.zeros((6, 7)))
+    replacement.replace(path)
+    choices = []
+
+    def cancel_choice(selector):
+        choices.append(selector.missing_dataset_path)
+        return None
+
+    monkeypatch.setattr(H5DatasetSelector, "show", cancel_choice)
+    win._reload_file()
+
+    assert choices == ["original"]
+    assert win._dataset_path == "original"
+    assert win.base_data is original_source
+
+
+@pytest.mark.parametrize("choice", ["dark", "light"])
+def test_standalone_hdf5_selector_applies_saved_theme_before_selection(
+    open_app, monkeypatch, tmp_path, choice
+):
+    import h5py
+    import pyqtgraph as pg
+
+    from arrayscope.io.selectors import H5DatasetSelector, _show_selector
+
+    path = tmp_path / "scan.h5"
+    with h5py.File(path, "w") as output:
+        output.create_dataset("first", data=np.ones((3, 4)))
+        output.create_dataset("second", data=np.ones((3, 4)))
+    settings = QtCore.QSettings()
+    previous_choice = settings.value("theme")
+    previous_sheet = open_app.styleSheet()
+    previous_palette = open_app.palette()
+    previous_tokens = open_app.property("_arrayscope_theme_tokens")
+    previous_plot_colors = {name: pg.getConfigOption(name) for name in ("background", "foreground")}
+    observed = []
+
+    def cancel_selector(_selector):
+        observed.append(open_app.property("_arrayscope_theme_tokens").name)
+        return None
+
+    monkeypatch.setattr(H5DatasetSelector, "show", cancel_selector)
+    try:
+        settings.setValue("theme", choice)
+        open_app.setStyleSheet("")
+        open_app.setProperty("_arrayscope_theme_tokens", None)
+        _show_selector(path, "H5DatasetSelector", None)
+        assert observed == [choice]
+        assert open_app.styleSheet()
+    finally:
+        if previous_choice is None:
+            settings.remove("theme")
+        else:
+            settings.setValue("theme", previous_choice)
+        open_app.setPalette(previous_palette)
+        open_app.setStyleSheet(previous_sheet)
+        open_app.setProperty("_arrayscope_theme_tokens", previous_tokens)
+        pg.setConfigOptions(**previous_plot_colors)
 
 
 def test_closing_viewer_mid_load_cancels_reader(open_app, tmp_path, monkeypatch):

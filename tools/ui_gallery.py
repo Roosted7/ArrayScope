@@ -1183,6 +1183,70 @@ def s_array_export(ctx: Ctx):
     progress.close_quietly()
 
 
+@scenario("hdf5_lazy", themes=("dark", "light"))
+def hdf5_lazy(ctx):
+    """Browse metadata, activate a lazy array, scrub, and reload its identity."""
+    import tempfile
+
+    import h5py
+    import numpy as np
+    from pyqtgraph.Qt import QtCore
+    from PySide6.QtTest import QTest
+
+    from arrayscope.core.array_source import LazySourceArray
+    from arrayscope.io.selectors import H5DatasetSelector
+
+    with tempfile.TemporaryDirectory(prefix=f"arrayscope-hdf5-{ctx.theme}-") as temporary:
+        path = Path(temporary) / "measurement.h5"
+        image = _phantom2d(96).astype(np.float32)
+        volume = np.stack((image * 0.7, image, np.flip(image, axis=0)), axis=2)
+        with h5py.File(path, "w") as output:
+            output.create_dataset("scan/image", data=volume, chunks=(24, 24, 1), compression="gzip")
+            output.create_dataset("reference", data=image[::2, ::2])
+            output.create_dataset("records", (1,), dtype=[("samples", "f4", (24, 32))])
+        selector = H5DatasetSelector(path)
+        dialog = selector._create_dialog()
+        dialog.show()
+        ctx.shot(dialog, "metadata_catalog")
+        selector.filter_edit.setText("records/samples")
+        ctx.shot(dialog, "eager_field_explanation")
+        selector.filter_edit.setText("scan/image")
+        ctx.shot(dialog, "selected_lazy_dataset")
+        QTest.keyClick(selector.filter_edit, QtCore.Qt.Key.Key_Return)
+        assert selector.selected_dataset == "scan/image"
+        source = selector.load_selected(selector.selected_dataset)
+        selector.close()
+        assert isinstance(source, LazySourceArray)
+        win = ctx.window(
+            source,
+            filepath=path,
+            dataset_path="scan/image",
+            selector_class_name="H5DatasetSelector",
+        )
+        win.setWindowTitle("measurement.h5 — scan/image (lazy)")
+        ctx.shot(win, "opened_lazy_dataset")
+        spin = win.widgets["spins"]["slice_indices"][2]
+        spin.setFocus()
+        QTest.keyClick(spin, QtCore.Qt.Key.Key_Up)
+        ctx.settle()
+        assert win.view_state.slice_indices[2] == 2
+        ctx.shot(win, "another_slice")
+        replacement = Path(temporary) / "replacement.h5"
+        with h5py.File(replacement, "w") as output:
+            output.create_dataset("scan/image", data=volume * 0.75, chunks=(24, 24, 1))
+        replacement.replace(path)
+        win._reload_file()
+        ctx.settle()
+        assert isinstance(win.base_data, LazySourceArray)
+        assert win._dataset_path == "scan/image"
+        np.testing.assert_array_equal(
+            win.base_data.read_region((slice(None), slice(None), 2)), volume[:, :, 2] * 0.75
+        )
+        ctx.shot(win, "reloaded_same_dataset")
+        win.close()
+        ctx.windows.remove(win)
+
+
 # --------------------------------------------------------------------------
 # Child runner
 # --------------------------------------------------------------------------
@@ -1194,6 +1258,15 @@ def run_child(name: str, theme: str, out_root: Path) -> None:
     import pyqtgraph as pg
     from pyqtgraph.Qt import QtCore
 
+    settings_dir = out_root / ".settings" / f"{name}.{theme}"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    for settings_format in (
+        QtCore.QSettings.Format.NativeFormat,
+        QtCore.QSettings.Format.IniFormat,
+    ):
+        QtCore.QSettings.setPath(
+            settings_format, QtCore.QSettings.Scope.UserScope, str(settings_dir.resolve())
+        )
     app = pg.mkQApp()
     app.setOrganizationName("ArrayScope")
     # Unique per scenario+theme: children run concurrently and must not share
@@ -1209,6 +1282,9 @@ def run_child(name: str, theme: str, out_root: Path) -> None:
     # re-enables them explicitly.
     settings.setValue("first_run_hints_dismissed", True)
     settings.sync()
+    from arrayscope.app.theme import apply_theme_to_qapplication
+
+    apply_theme_to_qapplication(app, theme)
 
     out_dir = out_root / name
     out_dir.mkdir(parents=True, exist_ok=True)

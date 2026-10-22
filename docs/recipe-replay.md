@@ -2,7 +2,7 @@
 
 Use ArrayScope to explore an array, save its operation recipe, and then apply
 the same built-in operations from a terminal or script. Batch export opens a
-single NumPy `.npy` input read-only and writes scientific array values to
+single NumPy `.npy` input or an explicitly named HDF5 dataset read-only and writes scientific array values to
 `.npy` or `.npz`. It does not start Qt or apply display colors, display scaling,
 or window levels.
 
@@ -184,8 +184,20 @@ original input when you need to rerun the calculation; the export does not
 embed a copy of that input or provide a durable content hash for it.
 An `.npy` output contains the values alone, without recipe sidecars.
 
-Batch input currently accepts one regular `.npy` file. Containers such as
-HDF5, MAT, and NPZ are output or viewer workflows, not batch input selectors.
+Batch input accepts one regular `.npy` file, or a supported dataset in an
+`.h5`/`.hdf5` file selected explicitly with `--dataset`:
+
+```bash
+arrayscope measurement.h5 --dataset scan/image --recipe steps.json \
+  --export selected.npz --range 0=1:4 --dry-run
+```
+
+HDF5 input requires an exact dataset key and preserves raw dataset semantics.
+Metadata-only planning accounts for decoded chunks and assembly buffers;
+unsupported encodings fail clearly. NPZ source metadata records the input
+file and canonical dataset key. See [HDF5 data](hdf5-data.md) for supported
+encodings, direct Python reads, GUI browsing, and reload behavior.
+MAT and NPZ input remain viewer workflows rather than batch input selectors.
 Object arrays requiring pickle are not supported. Keep input files unchanged
 while an export runs: a read-only mapping prevents this process from writing
 them, but does not freeze writes by other processes. The output must be a

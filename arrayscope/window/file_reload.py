@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import closing
+
 import numpy as np
 from pyqtgraph.Qt import QtWidgets
 
@@ -58,6 +60,18 @@ class FileReloadMixin:
 
     def _on_file_changed(self, path):
         """Called by QFileSystemWatcher when the source file changes on disk."""
+        from arrayscope.io.hdf5_catalog import file_identity
+        from arrayscope.io.hdf5_source import HDF5ArraySource
+
+        source = getattr(getattr(self, "base_data", None), "source", None)
+        if isinstance(source, HDF5ArraySource):
+            try:
+                if file_identity(path) == source.file_identity:
+                    # A queued notification can outlive the reload that
+                    # already captured this exact version of the source.
+                    return
+            except (OSError, ValueError):
+                pass
         set_button_icon(self._reload_btn, "warning", tooltip="File changed - click to reload")
         self._reload_btn.setToolTip("File changed — click to reload")
         # Re-add the path: handles atomic replacement where the original inode disappears
@@ -91,25 +105,27 @@ class FileReloadMixin:
                 selector_cls = selector_map.get(self._selector_class_name)
                 if selector_cls is None:
                     return
-                selector = selector_cls(self._filepath)
-                compatible_keys = {d[0] for d in selector.compatible_datasets}
-                if self._dataset_path is not None and self._dataset_path in compatible_keys:
-                    new_data = selector.load_data(self._dataset_path)
-                    selector.close()
-                elif selector.requires_gui():
-                    selected = selector.show()
-                    if selected is None:
-                        selector.close()
-                        return  # User cancelled; keep the file-changed indicator visible.
-                    new_data = selector.load_data(selected)
-                    new_dataset_path = selected
-                    selector.close()
-                else:
-                    result = selector.get_single_data()
-                    selector.close()
-                    if result is None:
-                        return
-                    new_dataset_path, new_data = result
+                # Recapture metadata on every reload. The old descriptor must
+                # not quietly read bytes from a newly replaced source file.
+                with closing(selector_cls(self._filepath)) as selector:
+                    compatible_keys = {d[0] for d in selector.compatible_datasets}
+                    if self._dataset_path is not None and self._dataset_path in compatible_keys:
+                        new_data = selector.load_selected(self._dataset_path)
+                    elif selector.requires_gui() or (
+                        isinstance(selector, H5DatasetSelector) and self._dataset_path is not None
+                    ):
+                        if isinstance(selector, H5DatasetSelector):
+                            selector.missing_dataset_path = self._dataset_path
+                        selected = selector.show()
+                        if selected is None:
+                            return  # Keep the file-changed indicator visible.
+                        new_data = selector.load_selected(selected)
+                        new_dataset_path = selected
+                    else:
+                        result = selector.get_single_data()
+                        if result is None:
+                            return
+                        new_dataset_path, new_data = result
 
             if new_data is None:
                 return

@@ -81,8 +81,11 @@ class FileOpenSession(QtCore.QObject):
         mmap=False,
         consume=False,
         show_loading_window=True,
+        dataset_path=None,
         parent=None,
     ):
+        if dataset_path is not None and consume:
+            raise ValueError("HDF5 lazy loading requires the source file; consume is not supported")
         super().__init__(parent)
         self.filepath = Path(filepath)
         self.window = None
@@ -91,6 +94,7 @@ class FileOpenSession(QtCore.QObject):
         self._mmap = mmap
         self._consume = consume
         self._show_loading_window = show_loading_window
+        self._dataset_path = dataset_path
         self._cancel = threading.Event()
         self._probe = None
         self._window_closed = False
@@ -165,12 +169,16 @@ class FileOpenSession(QtCore.QObject):
         from arrayscope.io.progressive import LoadCancelled
 
         try:
+            dataset_options = (
+                {} if self._dataset_path is None else {"dataset_path": self._dataset_path}
+            )
             loaded = load_path(
                 self.filepath,
                 mmap=self._mmap,
                 progress=self._bridge.progressed.emit,
                 cancel=self._cancel,
                 on_streaming_probe=self._bridge.probed.emit,
+                **dataset_options,
             )
         except LoadCancelled:
             self._bridge.cancelled.emit()
@@ -188,6 +196,8 @@ class FileOpenSession(QtCore.QObject):
         if self._title_override is not None:
             return self._title_override
         title = self.filepath.name or str(self.filepath)
+        if dataset_path := (metadata or {}).get("dataset_path"):
+            title = f"{title} — {dataset_path}"
         detected_format = (metadata or {}).get("detected_format")
         if detected_format:
             qualifiers = [detected_format]
@@ -201,11 +211,17 @@ class FileOpenSession(QtCore.QObject):
     def _open_viewer(self, data, *, axes, metadata, loading):
         from arrayscope.app.launch import _create_window, _retain_window_reference
 
+        dataset_options = {
+            key: metadata[key]
+            for key in ("dataset_path", "selector_class_name")
+            if metadata and metadata.get(key) is not None
+        }
         app, win = _create_window(
             data,
             title=self._display_title(metadata, loading=loading),
             filepath=self.filepath,
             axes=axes,
+            **dataset_options,
         )
         _retain_window_reference(app, win)
         self.window = win
@@ -348,7 +364,9 @@ class FileOpenSession(QtCore.QObject):
         self._finish()
 
 
-def open_path_async(filepath, *, title=None, mmap=False, consume=False, show_loading_window=True):
+def open_path_async(
+    filepath, *, title=None, mmap=False, consume=False, show_loading_window=True, dataset_path=None
+):
     """Open one single-dataset file (or DICOM directory) asynchronously."""
     ensure_open_app()
     # Start the GPU backend warming now so its ~2 s device init overlaps the
@@ -362,11 +380,12 @@ def open_path_async(filepath, *, title=None, mmap=False, consume=False, show_loa
         mmap=mmap,
         consume=consume,
         show_loading_window=show_loading_window,
+        dataset_path=dataset_path,
     )
     return session.start()
 
 
-def open_any_path(filepath, *, title=None, mmap=False, consume=False):
+def open_any_path(filepath, *, title=None, mmap=False, consume=False, dataset_path=None):
     """Open any supported path: async load, or a dataset selector for
     multi-dataset containers. Returns truthy when something opened."""
     filepath = Path(filepath)
@@ -376,6 +395,12 @@ def open_any_path(filepath, *, title=None, mmap=False, consume=False):
         print(f"Error: File not found: {filepath}", file=sys.stderr)
         return False
     suffix = data_file_suffix(filepath)
+    if dataset_path is not None:
+        if suffix not in {".h5", ".hdf5"}:
+            raise ValueError("An explicit dataset path requires an HDF5 file")
+        return open_path_async(
+            filepath, title=title, mmap=mmap, consume=consume, dataset_path=dataset_path
+        )
     if filepath.is_dir() or suffix in SINGLE_DATASET_SUFFIXES:
         return open_path_async(filepath, title=title, mmap=mmap, consume=consume)
     if suffix in SELECTOR_SUFFIXES:
@@ -411,6 +436,7 @@ def open_any_path(filepath, *, title=None, mmap=False, consume=False):
                 filepath=filepath,
                 dataset_path=name,
                 selector_class_name=selector.__class__.__name__,
+                complex_dim=selector.interpret_as_complex,
             )
             _retain_window_reference(app, win)
             if not consume:
