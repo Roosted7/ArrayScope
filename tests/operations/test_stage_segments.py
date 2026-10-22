@@ -12,11 +12,11 @@ them.
 from __future__ import annotations
 
 import gc
-from multiprocessing import shared_memory
 
 import numpy as np
 import pytest
 
+from arrayscope.core.shared_memory import attach_shared_memory
 from arrayscope.core.view_state import ViewState
 from arrayscope.kernel.process_backend import ProcessPool
 from arrayscope.kernel.remote_call import RemoteCall
@@ -85,7 +85,7 @@ def _stage_a_value(document, *, cache=None):
 
 def _segment_exists(name: str) -> bool:
     try:
-        segment = shared_memory.SharedMemory(name=name, track=False)
+        segment = attach_shared_memory(name)
     except FileNotFoundError:
         return False
     segment.close()

@@ -32,6 +32,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from arrayscope.core.shared_memory import attach_shared_memory
 from arrayscope.operations.regions import RegionSpec, region_contains
 from arrayscope.operations.source_transport import shared_publication_enabled
 
@@ -321,22 +322,10 @@ def attach_stage_array(descriptor: StageSegment):
         cached = _attached.get(descriptor.name)
         if cached is not None:
             return cached[1]
-    from multiprocessing import shared_memory
-
     try:
-        # ``track=False`` is the attacher's half of ADR 0064's ownership rule:
-        # without it this process' resource tracker adopts the name and unlinks
-        # it at exit, which is the publisher's job and nobody else's. (Python
-        # 3.13+; on an older one the attacher falls back to the tracked form,
-        # which is what ``source_transport`` still does for base arrays.)
-        segment = shared_memory.SharedMemory(name=descriptor.name, track=False)
+        segment = attach_shared_memory(descriptor.name)
     except FileNotFoundError as exc:
         raise SegmentUnavailable(f"stage segment {descriptor.name} is gone") from exc
-    except TypeError:  # pragma: no cover - Python without an untracked attach
-        try:
-            segment = shared_memory.SharedMemory(name=descriptor.name)
-        except FileNotFoundError as exc:
-            raise SegmentUnavailable(f"stage segment {descriptor.name} is gone") from exc
     view = np.ndarray(
         tuple(descriptor.shape),
         dtype=np.dtype(descriptor.dtype),

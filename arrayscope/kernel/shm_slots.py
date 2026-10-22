@@ -22,6 +22,8 @@ from typing import Any
 
 import numpy as np
 
+from arrayscope.core.shared_memory import attach_shared_memory
+
 DEFAULT_SLOT_BYTES = 1 << 20
 DEFAULT_SLOT_COUNT = 64
 # Below this an ndarray is cheaper to pickle than to lease, write, describe,
@@ -127,7 +129,7 @@ class SlotPool:
         pool = cls.__new__(cls)
         pool.slot_bytes = int(handle.slot_bytes)
         pool.slots = int(handle.slots)
-        pool._memory = shared_memory.SharedMemory(name=handle.name, create=False, track=False)
+        pool._memory = attach_shared_memory(handle.name)
         pool._states = handle.states
         pool._owners = handle.owners
         pool._fallbacks = handle.fallbacks

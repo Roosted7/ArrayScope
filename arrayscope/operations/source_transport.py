@@ -29,6 +29,8 @@ from uuid import uuid4
 
 import numpy as np
 
+from arrayscope.core.shared_memory import attach_shared_memory
+
 #: One eager array larger than this is not worth a private copy in shared
 #: memory; the family that would have shipped it keeps running in-process.
 MAX_PUBLISHED_BYTES = 1024 * 1024 * 1024
@@ -400,10 +402,8 @@ def _attach_shared_memory(leaf: SharedMemoryLeaf):
         cached = _attached.get(leaf.name)
         if cached is not None:
             return cached[1]
-    from multiprocessing import shared_memory
-
     try:
-        segment = shared_memory.SharedMemory(name=leaf.name)
+        segment = attach_shared_memory(leaf.name)
     except FileNotFoundError as exc:
         raise SourceTransportUnavailable(f"shared segment {leaf.name} is gone") from exc
     view = np.ndarray(

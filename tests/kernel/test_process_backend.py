@@ -16,12 +16,12 @@ import signal
 import threading
 import time
 from functools import partial
-from multiprocessing import shared_memory
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from arrayscope.core.shared_memory import attach_shared_memory
 from arrayscope.kernel import Kernel, Lane, Priority, TaskOutcome, TaskSpec
 from arrayscope.kernel.process_backend import (
     CHILD_ENVIRONMENT,
@@ -299,7 +299,7 @@ def test_shutdown_leaves_no_worker_and_no_segment(timeout):
 
     assert not [child for child in multiprocessing.active_children() if child.pid in pids]
     with pytest.raises(FileNotFoundError):
-        shared_memory.SharedMemory(name=segment, create=False, track=False)
+        attach_shared_memory(segment)
 
 
 @pytest.mark.parametrize("timeout", [4.0, 0.0, -1.0])
@@ -487,7 +487,7 @@ def test_shutdown_keeps_slots_alive_until_an_active_result_is_detached(monkeypat
         assert "error" not in outcome
         assert np.array_equal(outcome["value"], source * 2)
         with pytest.raises(FileNotFoundError):
-            shared_memory.SharedMemory(name=segment, create=False, track=False)
+            attach_shared_memory(segment)
     finally:
         resume.set()
         pool.close(timeout=0.0)

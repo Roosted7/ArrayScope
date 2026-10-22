@@ -27,6 +27,15 @@ OUT_OF_PROCESS_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     # A fresh interpreter reproduces Windows' missing Unix resource module
     # before importing the shared pytest diagnostics helper.
     "tests/app/test_load_report.py": ("tests/load_report.py",),
+    # A fresh interpreter spawns real attachers for all three transports, then
+    # exits so resource-tracker cleanup and stderr belong to the oracle too.
+    "tests/core/test_shared_memory_compat.py": (
+        "arrayscope/core/shared_memory.py",
+        "arrayscope/kernel/shm_slots.py",
+        "arrayscope/operations/source_transport.py",
+        "arrayscope/operations/stage_segments.py",
+        "arrayscope/operations/regions.py",
+    ),
     # Named HDF5 replay is also exercised in a fresh interpreter that refuses
     # Qt imports and payload reads during planning; the parent cannot trace it.
     "tests/app/test_hdf5_cli.py": (
