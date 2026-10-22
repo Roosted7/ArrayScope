@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import numpy as np
 from pyqtgraph.Qt import QtWidgets
 
-from arrayscope.io.numpy_save import default_numpy_filename, selected_numpy_data
+from arrayscope.io.numpy_save import default_numpy_filename, save_derived_array, selected_numpy_data
 from arrayscope.ui.dialogs import SaveRangeDialog
 from arrayscope.ui.file_dialogs import get_save_file_name
 
@@ -33,5 +32,5 @@ def save_current_numpy_file(parent, data, source_filepath=None):
     if not file_path.lower().endswith(".npy"):
         file_path += ".npy"
 
-    np.save(file_path, output_data)
+    save_derived_array(file_path, output_data, sidecar=False)
     return file_path, output_data.shape
