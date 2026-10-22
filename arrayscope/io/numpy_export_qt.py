@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import weakref
 from dataclasses import replace
+from threading import Lock
 from uuid import uuid4
 
 import numpy as np
@@ -21,6 +22,7 @@ from arrayscope.io.region_export import (
 )
 from arrayscope.kernel.task import CancellationToken, Lane, Priority, TaskSpec
 from arrayscope.operations import library
+from arrayscope.operations.cancellation import EvaluationCancelled
 from arrayscope.ui.export_progress import ExportProgressDialog
 from arrayscope.ui.toasts import show_status_message
 
@@ -95,14 +97,51 @@ class _ExportToken:
 
 
 class _ProgressRelay(QtCore.QObject):
-    """Outlive a closing receiver while its worker finishes cooperative cleanup."""
+    """Keep GUI ownership until a pending or active worker releases its lease.
+
+    A completed task can remain the worker's last local reference after the
+    GUI has dispatched its completion. The application parent prevents that
+    worker from destroying this GUI-affine QObject when it takes another task.
+    The lease also cleans unstarted tasks when a closing bridge cannot deliver
+    their completion, without deleting a relay still emitting from a worker.
+    """
 
     progressed = QtCore.Signal(int, object)
-    worker_finished = QtCore.Signal()
 
     def __init__(self):
-        super().__init__()
-        self.worker_finished.connect(self.deleteLater, QtCore.Qt.ConnectionType.QueuedConnection)
+        application = QtCore.QCoreApplication.instance()
+        if application is None:
+            raise RuntimeError("Export progress requires a running Qt application.")
+        if QtCore.QThread.currentThread() != application.thread():
+            raise RuntimeError("Export progress must be created on the Qt application thread.")
+        super().__init__(application)
+        self._lease_lock = Lock()
+        self._lease_state = "pending"
+
+    def begin_work(self):
+        with self._lease_lock:
+            if self._lease_state != "pending":
+                return False
+            self._lease_state = "running"
+            return True
+
+    def cancel_pending(self):
+        with self._lease_lock:
+            if self._lease_state != "pending":
+                return
+            self._lease_state = "released"
+        # QObject.deleteLater is thread-safe. The application retains native
+        # ownership until the GUI processes this deferred deletion.
+        self.deleteLater()
+
+    def finish_work(self):
+        with self._lease_lock:
+            if self._lease_state != "running":
+                return
+            self._lease_state = "released"
+        # All signal emissions have returned before relinquishing the lease.
+        # No worker touches this QObject again after requesting deletion.
+        self.deleteLater()
 
 
 class _ProgressEmitter:
@@ -130,9 +169,11 @@ def _export_worker(stage, request, prepared, context, user_token, relay, generat
     emit_progress = None if relay is None else _ProgressEmitter(relay, generation)
 
     def run(task_token):
-        token = _ExportToken(user_token, task_token)
-        evaluation_context = replace(context, cancellation_token=token)
+        if relay is not None and not relay.begin_work():
+            raise EvaluationCancelled()
         try:
+            token = _ExportToken(user_token, task_token)
+            evaluation_context = replace(context, cancellation_token=token)
             if stage == "planning":
                 return plan_region_export(
                     request, cancellation_token=token, evaluation_context=evaluation_context
@@ -146,7 +187,7 @@ def _export_worker(stage, request, prepared, context, user_token, relay, generat
             )
         finally:
             if relay is not None:
-                relay.worker_finished.emit()
+                relay.finish_work()
 
     return run
 
@@ -169,6 +210,7 @@ class ArrayExportSession(QtCore.QObject):
         self._context = evaluation_context
         self._token = CancellationToken()
         self._task_handle = None
+        self._progress_relay = None
         self._prepared = None
         self._generation = 0
         self._scope = f"numpy-export:{uuid4().hex}"
@@ -208,6 +250,8 @@ class ArrayExportSession(QtCore.QObject):
             return
         self._cancel_reason = reason or "Export cancelled."
         self._token.cancel()
+        if self._progress_relay is not None:
+            self._progress_relay.cancel_pending()
         if self._task_handle is not None:
             self._task_handle.cancel()
         if not self._closed and self.progress_dialog is not None:
@@ -234,6 +278,7 @@ class ArrayExportSession(QtCore.QObject):
         relay = None
         if stage == "evaluating":
             relay = _ProgressRelay()
+            self._progress_relay = relay
             relay.progressed.connect(self._on_progress, QtCore.Qt.ConnectionType.QueuedConnection)
         worker = _export_worker(
             stage,
@@ -284,13 +329,16 @@ class ArrayExportSession(QtCore.QObject):
         )
         if self._task_handle is None:
             if relay is not None:
-                relay.deleteLater()
+                relay.cancel_pending()
             self._finish(error="The viewer is shutting down; export could not start.")
 
     def _done(self, generation, value):
         if not self._running or self._closed or generation != self._generation:
             return
         self._task_handle = None
+        if self._progress_relay is not None:
+            self._progress_relay.cancel_pending()
+            self._progress_relay = None
         if self._stage == "planning":
             self._prepared = value
             if self._token.cancelled:
@@ -388,6 +436,9 @@ class ArrayExportSession(QtCore.QObject):
                 show_status_message(window, self._cancel_reason or "Export cancelled.")
         self._task_handle = None
         self.request = None
+        if self._progress_relay is not None:
+            self._progress_relay.cancel_pending()
+            self._progress_relay = None
         self._prepared = None
         self._context = None
         self._kernel = None
