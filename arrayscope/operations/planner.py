@@ -27,6 +27,7 @@ from arrayscope.operations.regions import (
     expand_region_axes,
     region_from_index_spec,
     region_nbytes,
+    region_shape,
 )
 
 
@@ -151,6 +152,33 @@ def candidate_stage_cache_points_from_transitions(
 
 
 def plan_region_request(document, request) -> RegionPlan:
+    return plan_output_region(
+        document,
+        final_region_for_request(document.current_shape, request),
+        request_kind=str(request.kind),
+    )
+
+
+def plan_output_region(document, final_region: RegionSpec, *, request_kind="region") -> RegionPlan:
+    """Plan exact output-space demand without constructing display state.
+
+    Regions use the canonical coordinate conventions from
+    :func:`region_from_index_spec`. Shape/rank and malformed demand are
+    refused before any operation's cost or shape characterization runs.
+    """
+
+    shape = tuple(int(size) for size in document.current_shape)
+    if len(final_region.axes) != len(shape):
+        raise ValueError("output region rank must match the derived array rank")
+    for size, axis in zip(shape, final_region.axes, strict=True):
+        kind = axis_region_kind(axis.kind)
+        if kind == AxisRegionKind.POINT and not 0 <= int(axis.value) < size:
+            raise IndexError("output point is outside the derived array")
+        if kind == AxisRegionKind.INDICES and any(
+            not 0 <= int(index) < size for index in axis.value
+        ):
+            raise IndexError("output indices are outside the derived array")
+    region_shape(shape, final_region)
     original_operations = tuple(document.enabled_operations)
     base_shape = tuple(int(size) for size in np.shape(document.base_data))
     base_dtype = getattr(document.base_data, "dtype", None)
@@ -162,7 +190,7 @@ def plan_region_request(document, request) -> RegionPlan:
     operations = optimized.operations
     stages = build_operation_stages(base_shape, base_dtype, operations)
     pipeline = estimate_pipeline_cost(base_shape, base_dtype, operations, optimize=False)
-    current_region = final_region_for_request(document.current_shape, request)
+    current_region = final_region
     transitions = []
     warnings = list(pipeline.warnings)
     for stage in reversed(stages[1:]):
@@ -194,8 +222,8 @@ def plan_region_request(document, request) -> RegionPlan:
     transitions = tuple(reversed(transitions))
     region_peak = estimate_region_plan_peak(base_shape, base_dtype, transitions, current_region)
     return RegionPlan(
-        request_kind=str(request.kind),
-        final_region=final_region_for_request(document.current_shape, request),
+        request_kind=str(request_kind),
+        final_region=final_region,
         required_input_region=current_region,
         stages=stages,
         transitions=transitions,
@@ -232,6 +260,11 @@ def estimate_region_plan_peak(
         elif capabilities.kind == OperationKind.VIEW:
             stage_peak = output_bytes
         elif capabilities.kind == OperationKind.TRANSFORM:
+            # A transform allocates its expanded result before trimming it
+            # to demand. Tiny output windows must not hide a whole FFT or
+            # opaque stage's temporary/result allocation.
+            expanded_region = expand_region_axes(transition.output_region, transition.expanded_axes)
+            output_bytes = region_nbytes(transition.output_shape, output_dtype, expanded_region)
             stage_peak = (
                 None if output_bytes is None else int(output_bytes * capabilities.temp_multiplier)
             )

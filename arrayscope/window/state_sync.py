@@ -443,6 +443,9 @@ class StateSyncMixin:
         self._update_operation_dock()
 
     def notify_data_changed(self, *, force_autolevel=False):
+        from arrayscope.io.numpy_export_qt import notify_export_source_changed
+
+        notify_export_source_changed(self.base_data)
         self.operation_coordinator.mark_base_data_changed()
         self.base_data = self.operation_coordinator.base_data
         self.document = self.operation_coordinator.document

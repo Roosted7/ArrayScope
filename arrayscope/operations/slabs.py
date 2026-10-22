@@ -121,7 +121,27 @@ def evaluate_slab_from_plan(
     cancellation_token=None,
     evaluation_context=None,
 ):
-    region_plan = plan.region_plan
+    return evaluate_region_plan(
+        document,
+        plan.region_plan,
+        stage_cache=stage_cache,
+        document_key=document_key,
+        cancellation_token=cancellation_token,
+        evaluation_context=evaluation_context,
+    )
+
+
+def evaluate_region_plan(
+    document: ArrayDocument,
+    region_plan,
+    *,
+    stage_cache=None,
+    document_key=None,
+    cancellation_token=None,
+    evaluation_context=None,
+):
+    """Evaluate exact planned data without applying display transformations."""
+
     _check_cancelled(cancellation_token)
     if stage_cache is not None and region_plan.cache_candidates:
         return _evaluate_slab_with_stage_cache(

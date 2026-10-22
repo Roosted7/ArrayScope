@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from math import prod
 from typing import Any
 
 import numpy as np
@@ -179,7 +180,7 @@ def region_is_full(region: RegionSpec) -> bool:
 def region_nbytes(shape, dtype, region: RegionSpec) -> int | None:
     if dtype is None:
         return None
-    return int(np.prod(region_shape(shape, region), dtype=np.int64)) * np.dtype(dtype).itemsize
+    return prod(region_shape(shape, region)) * np.dtype(dtype).itemsize
 
 
 def region_contains(container: RegionSpec, contained: RegionSpec, shape) -> bool:

@@ -1,15 +1,19 @@
 import numpy as np
 
 from arrayscope.io import numpy_save_qt
+from arrayscope.operations.pipeline import ArrayDocument
 
 
-def test_current_array_save_preserves_selected_uppercase_path_and_range(tmp_path, monkeypatch):
+def test_collecting_export_preserves_uppercase_path_and_ranges_without_writing(
+    tmp_path, monkeypatch
+):
     path = tmp_path / "selection.NPY"
-    data = np.arange(12).reshape(3, 4)
+    document = ArrayDocument(np.arange(12).reshape(3, 4))
 
     class RangeDialog:
-        def __init__(self, _parent, _shape):
-            pass
+        def __init__(self, _parent, shape, **kwargs):
+            assert tuple(shape) == (3, 4)
+            assert kwargs["action_text"] == "Next…"
 
         def exec(self):
             return numpy_save_qt.QtWidgets.QDialog.DialogCode.Accepted
@@ -23,8 +27,10 @@ def test_current_array_save_preserves_selected_uppercase_path_and_range(tmp_path
     monkeypatch.setattr(numpy_save_qt, "SaveRangeDialog", RangeDialog)
     monkeypatch.setattr(numpy_save_qt, "get_save_file_name", lambda *_args: (str(path), ""))
 
-    result = numpy_save_qt.save_current_numpy_file(None, data)
+    result = numpy_save_qt.collect_numpy_save_request(None, document)
 
-    assert result == (str(path), (3,))
-    np.testing.assert_array_equal(np.load(path), data[1, 1:4])
-    assert set(tmp_path.iterdir()) == {path}
+    assert result.path == path
+    assert result.document is document
+    assert result.ranges == ((1, 2), (1, 4))
+    assert result.output_shape == (3,)
+    assert not tuple(tmp_path.iterdir())

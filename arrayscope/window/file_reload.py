@@ -3,22 +3,58 @@ from __future__ import annotations
 import numpy as np
 from pyqtgraph.Qt import QtWidgets
 
-from arrayscope.io.numpy_save_qt import save_current_numpy_file
+from arrayscope.core.compute_policy import ComputeLane
+from arrayscope.io.numpy_export_qt import ArrayExportSession, ExportSourceWatch
+from arrayscope.io.numpy_save_qt import collect_numpy_save_request
+from arrayscope.io.region_export import validate_region_export_snapshot
 from arrayscope.ui.icons import set_button_icon
-from arrayscope.ui.toasts import show_status_message
 from arrayscope.window.domain import Domain
 
 
 class FileReloadMixin:
     def _save_current_numpy_file(self):
-        """Save the currently displayed array state to a NumPy .npy file."""
+        """Choose an exact selection, then export it without blocking the GUI."""
+        active = getattr(self, "_numpy_export_session", None)
+        if active is not None and active.is_running:
+            active.show_progress()
+            return active
+        from arrayscope.app.open_flow import _ACTIVE_SESSIONS
+
+        if any(session.window is self and not session._terminal for session in _ACTIVE_SESSIONS):
+            QtWidgets.QMessageBox.information(
+                self,
+                "File is still loading",
+                "Wait for loading to finish, or stop loading, before exporting this array.",
+            )
+            return None
+        document = self.document
+        dtype = self.data.dtype
         try:
-            result = save_current_numpy_file(self, self.document.materialize(), self._filepath)
-            if result is not None:
-                file_path, output_shape = result
-                show_status_message(self, f"Saved array {list(output_shape)} to {file_path}")
+            with ExportSourceWatch(document) as source_watch:
+                request = collect_numpy_save_request(self, document, self._filepath, dtype=dtype)
+            if request is None or getattr(self, "_closing", False):
+                return None
+            if source_watch.changed:
+                raise ValueError(source_watch.reason)
+            if (
+                self.document.base_data is document.base_data
+                and self.document.revision != document.revision
+            ):
+                raise ValueError(
+                    "The source changed while choosing export options. Try exporting again."
+                )
+            validate_region_export_snapshot(request)
+            session = ArrayExportSession(
+                self,
+                request,
+                evaluation_context=self._evaluation_context(ComputeLane.STAGE),
+                dtype=dtype,
+            )
+            self._numpy_export_session = session
+            return session.start()
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Save Error", f"Failed to save NumPy file:\n{e}")
+            return None
 
     def _on_file_changed(self, path):
         """Called by QFileSystemWatcher when the source file changes on disk."""

@@ -1114,6 +1114,46 @@ def s_dataset_selector(ctx: Ctx):
                     dialog.close()
 
 
+@scenario("array_export")
+def s_array_export(ctx: Ctx):
+    from pyqtgraph.Qt import QtCore
+
+    from arrayscope.core.axis_info import AxisInfo
+    from arrayscope.io.region_export import RegionExportProgress
+    from arrayscope.ui.dialogs import SaveRangeDialog
+    from arrayscope.ui.export_progress import ExportProgressDialog
+
+    win = ctx.window(_volume3d(), size=(960, 720))
+    selection = SaveRangeDialog(
+        win,
+        (96, 96, 40),
+        dtype="complex64",
+        axes=(
+            AxisInfo("x", "X", 96),
+            AxisInfo("y", "Y", 96),
+            AxisInfo("time", "Time", 40),
+        ),
+        action_text="Next…",
+    )
+    selection.show()
+    ctx.shot(selection, "selection_before_evaluation")
+    selection.close()
+
+    progress = ExportProgressDialog(win, Path("measurement-crop.npy"), (64, 64, 20))
+    progress.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+    progress.set_output_summary((64, 64, 20), "complex64")
+    progress.show()
+    progress.apply_progress(
+        RegionExportProgress("writing", "Writing selected scientific values…", 229376, 655360)
+    )
+    ctx.shot(progress, "writing")
+    progress.set_cancelling("The source array changed. Retry export with the updated data.")
+    ctx.shot(progress, "cancelling")
+    progress.set_error("The destination is read-only. Choose a writable location and try again.")
+    ctx.shot(progress, "failure")
+    progress.close_quietly()
+
+
 # --------------------------------------------------------------------------
 # Child runner
 # --------------------------------------------------------------------------
