@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from arrayscope.core.axis_info import (
     AxisInfo,
@@ -28,6 +29,22 @@ def test_default_axes_have_stable_ids_labels_and_sizes():
     assert tuple(axis.id for axis in axes) == ("axis-0", "axis-1")
     assert tuple(axis.label for axis in axes) == ("Dim 0", "Dim 1")
     assert tuple(axis.size for axis in axes) == (3, 4)
+
+
+def test_empty_scientific_array_axes_and_document_keep_zero_extent():
+    axes = default_axes((0, 2))
+    document = ArrayDocument(np.empty((0, 2), dtype=np.complex128), axes=axes)
+
+    assert tuple(axis.size for axis in axes) == (0, 2)
+    assert document.current_shape == (0, 2)
+    assert document.current_axes == axes
+    assert document.materialize().shape == (0, 2)
+    assert document.materialize().dtype == np.dtype("complex128")
+
+
+def test_axis_metadata_rejects_negative_extent():
+    with pytest.raises(ValueError, match="axis size"):
+        AxisInfo("invalid", "Invalid", -1)
 
 
 def test_axis_info_crop_updates_size_and_preserves_identity():

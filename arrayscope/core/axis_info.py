@@ -20,8 +20,10 @@ class AxisInfo:
         object.__setattr__(self, "id", str(self.id))
         object.__setattr__(self, "label", str(self.label))
         object.__setattr__(self, "size", int(self.size))
-        if self.size < 1:
-            raise ValueError("axis size must be at least 1")
+        # A valid scientific array can retain an axis with no samples.  Metadata
+        # describes its shape independently of whether a viewer can display it.
+        if self.size < 0:
+            raise ValueError("axis size must be nonnegative")
         if self.unit is not None:
             object.__setattr__(self, "unit", str(self.unit))
         if self.coordinate is not None:
