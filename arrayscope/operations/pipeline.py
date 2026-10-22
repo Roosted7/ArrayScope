@@ -1959,9 +1959,31 @@ def _axis_region_indices(axis_region: AxisRegion, size: int):
         indices = np.asarray(axis_region.value, dtype=np.int64)
         return np.where(indices < 0, indices + size, indices)
     start, stop, step = axis_region.value
-    return np.arange(size, dtype=np.int64)[
-        slice(int(start), None if stop is None else int(stop), int(step))
-    ]
+    bounds = slice(int(start), None if stop is None else int(stop), int(step)).indices(size)
+    return np.arange(*bounds, dtype=np.int64)
+
+
+def _axis_region_range(axis_region: AxisRegion, size: int) -> range | None:
+    kind = axis_region_kind(axis_region.kind)
+    if kind == AxisRegionKind.ALL:
+        return range(int(size))
+    if kind == AxisRegionKind.SLICE:
+        start, stop, step = axis_region.value
+        return range(
+            *slice(int(start), None if stop is None else int(stop), int(step)).indices(size)
+        )
+    return None
+
+
+def _axis_region_from_range(values: range) -> AxisRegion:
+    if not values:
+        return AxisRegion(AxisRegionKind.SLICE, (0, 0, 1))
+    start = values[0]
+    if len(values) == 1:
+        return AxisRegion(AxisRegionKind.SLICE, (start, start + 1, 1))
+    step = values.step
+    stop = values[-1] + step
+    return AxisRegion(AxisRegionKind.SLICE, (start, None if step < 0 and stop < 0 else stop, step))
 
 
 def _axis_region_from_indices(indices) -> AxisRegion:
@@ -1999,8 +2021,9 @@ def _region_axis_count(axis_region: AxisRegion, size: int) -> int:
     kind = axis_region_kind(axis_region.kind)
     if kind == AxisRegionKind.POINT:
         return 1
-    if kind == AxisRegionKind.ALL:
-        return int(size)
+    values = _axis_region_range(axis_region, int(size))
+    if values is not None:
+        return len(values)
     return int(np.size(_axis_region_indices(axis_region, int(size))))
 
 
@@ -2020,6 +2043,17 @@ def _split_input_axis_region(
         and axis_region_kind(step_region.kind) == AxisRegionKind.ALL
     ):
         return AxisRegion(AxisRegionKind.ALL)
+    block_range = _axis_region_range(block_region, blocks)
+    step_range = _axis_region_range(step_region, factor)
+    if step_range == range(factor) and block_range is not None and block_range.step == 1:
+        return _axis_region_from_range(range(block_range.start * factor, block_range.stop * factor))
+    if axis_region_kind(block_region.kind) == AxisRegionKind.POINT and step_range is not None:
+        block = _axis_region_indices(block_region, blocks)
+        return _axis_region_from_range(
+            range(
+                block * factor + step_range.start, block * factor + step_range.stop, step_range.step
+            )
+        )
     block_indices = np.atleast_1d(_axis_region_indices(block_region, int(blocks)))
     step_indices = np.atleast_1d(_axis_region_indices(step_region, int(factor)))
     indices = (block_indices[:, None] * int(factor) + step_indices[None, :]).reshape(-1)
@@ -2033,6 +2067,11 @@ def _crop_axis_region(axis_region: AxisRegion, start: int, stop: int) -> AxisReg
     output_size = stop - start
     if kind == AxisRegionKind.ALL:
         return AxisRegion(AxisRegionKind.SLICE, (start, stop, 1))
+    values = _axis_region_range(axis_region, output_size)
+    if values is not None:
+        return _axis_region_from_range(
+            range(start + values.start, start + values.stop, values.step)
+        )
     indices = _axis_region_indices(axis_region, output_size)
     if isinstance(indices, (int, np.integer)):
         return AxisRegion(AxisRegionKind.POINT, start + int(indices))
@@ -2040,6 +2079,13 @@ def _crop_axis_region(axis_region: AxisRegion, start: int, stop: int) -> AxisReg
 
 
 def _reverse_axis_region(axis_region: AxisRegion, size: int) -> AxisRegion:
+    values = _axis_region_range(axis_region, int(size))
+    if values is not None:
+        if not values:
+            return _axis_region_from_range(range(0))
+        return _axis_region_from_range(
+            range(int(size) - 1 - values.start, int(size) - 1 - values.stop, -values.step)
+        )
     indices = _axis_region_indices(axis_region, int(size))
     if isinstance(indices, (int, np.integer)):
         return AxisRegion(AxisRegionKind.POINT, int(size) - 1 - int(indices))
