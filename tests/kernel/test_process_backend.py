@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import queue
+import signal
 import threading
 import time
+from functools import partial
 from multiprocessing import shared_memory
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -238,6 +242,7 @@ def test_the_kernel_splits_remote_calls_from_closures(pool):
 
     assert seen["remote"] != os.getpid()
     assert seen["closure"] == os.getpid()
+    assert not pool.closed, "a backend must not close its caller-owned pool"
 
 
 def test_a_remote_call_nested_in_a_closure_routes_to_a_child(pool):
@@ -283,17 +288,244 @@ def test_the_child_observes_the_kernels_cancellation(pool):
     kernel.shutdown()
 
 
-def test_shutdown_leaves_no_worker_and_no_segment():
+@pytest.mark.parametrize("timeout", [5.0, 0.0, -1.0])
+def test_shutdown_leaves_no_worker_and_no_segment(timeout):
     pool = ProcessPool(processes=1).acquire()
     segment = pool._slots.handle().name
     pids = {worker.process.pid for worker in pool._workers}
     assert pool.run(RemoteCall(OWN_PID, None)) in pids
 
-    pool.release()
+    pool.release(timeout=timeout)
 
     assert not [child for child in multiprocessing.active_children() if child.pid in pids]
     with pytest.raises(FileNotFoundError):
         shared_memory.SharedMemory(name=segment, create=False, track=False)
+
+
+@pytest.mark.parametrize("timeout", [4.0, 0.0, -1.0])
+def test_backend_shutdown_shares_one_wait_budget_with_its_pool(monkeypatch, timeout):
+    clock = SimpleNamespace(now=10.0)
+    released = []
+    joined = []
+
+    class _Pool:
+        def release(self, timeout=5.0):
+            released.append(timeout)
+            clock.now += min(3.0, timeout)
+
+    class _Thread:
+        name = "still-running"
+
+        def join(self, timeout):
+            joined.append(timeout)
+            clock.now += timeout
+
+        def is_alive(self):
+            return True
+
+    backend = ProcessWorkerBackend(workers=1)
+    backend._pool = _Pool()
+    backend._threads = [_Thread()]
+    monkeypatch.setattr("arrayscope.kernel.process_backend.monotonic", lambda: clock.now)
+
+    assert backend.shutdown(timeout=timeout) == ("still-running",)
+    assert released == [max(0.0, timeout)]
+    assert joined == ([1.0] if timeout > 0 else [])
+    assert clock.now == 10.0 + max(0.0, timeout)
+
+
+def test_pool_shutdown_does_not_add_per_worker_waits_or_leave_term_ignoring_children(monkeypatch):
+    clock = SimpleNamespace(now=10.0)
+    events = []
+
+    class _Process:
+        def __init__(self, index):
+            self.index = index
+            self.alive = True
+
+        def join(self, timeout=None):
+            events.append(("join", self.index, timeout))
+            if self.alive:
+                assert timeout is not None, "a live process cannot be reaped before hard-stop"
+                clock.now += timeout
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            # User code can install a handler that ignores SIGTERM.
+            events.append(("terminate", self.index))
+
+        def kill(self):
+            events.append(("kill", self.index))
+            self.alive = False
+
+    workers = [
+        SimpleNamespace(
+            index=index,
+            process=_Process(index),
+            conn=SimpleNamespace(send=lambda _value: None, close=lambda: None),
+        )
+        for index in range(3)
+    ]
+    pool = ProcessPool.__new__(ProcessPool)
+    pool._lock = threading.Lock()
+    pool._closed = False
+    pool._references = 1
+    pool._workers = list(workers)
+    pool._idle = queue.Queue()
+    pool._active = set()
+    pool._slots_close_pending = False
+    pool._control = [0] * len(workers)
+    pool._owns_slots = True
+    closed = []
+    pool._slots = SimpleNamespace(close=lambda: closed.append(True))
+    monkeypatch.setattr("arrayscope.kernel.process_backend.monotonic", lambda: clock.now)
+
+    pool.close(timeout=5.0)
+
+    assert clock.now == 15.0
+    assert not any(worker.process.is_alive() for worker in workers)
+    assert pool._control == [1, 1, 1]
+    assert closed == [True]
+    assert events == [
+        ("join", 0, 5.0),
+        ("join", 1, 0.0),
+        ("join", 2, 0.0),
+        ("kill", 0),
+        ("kill", 1),
+        ("kill", 2),
+        ("join", 0, None),
+        ("join", 1, None),
+        ("join", 2, None),
+    ]
+
+
+def test_releasing_one_shared_borrower_keeps_the_others_pool_alive(pool):
+    pool.acquire()
+    pool.release(timeout=0.0)
+
+    assert not pool.closed
+    assert pool.run(RemoteCall(OWN_PID, None)) != os.getpid()
+
+
+def test_shutdown_hard_stops_an_uncooperative_call_and_releases_its_waiter(monkeypatch):
+    pool = ProcessPool(processes=1).acquire()
+    worker = pool._workers[0]
+    assert pool.run(RemoteCall(OWN_PID, None)) == worker.process.pid
+    sent = threading.Event()
+    errors = []
+    closed_by = []
+    send = worker.conn.send
+    close = worker.conn.close
+    # Remote entries must be Python module-level functions; the called helper
+    # can invoke this picklable standard-library sleeper without a token.
+    call = RemoteCall("tests.kernel.remote_entries:called", partial(time.sleep, 60.0))
+
+    def note_sent(message):
+        send(message)
+        sent.set()
+
+    def note_closed():
+        closed_by.append(threading.get_ident())
+        close()
+
+    def run():
+        try:
+            pool.run(call)
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(worker.conn, "send", note_sent)
+    monkeypatch.setattr(worker.conn, "close", note_closed)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        assert sent.wait(PROCESS_START_LIMIT_S), "the request never reached the transport"
+        pool.close(timeout=0.01)
+        thread.join(timeout=2.0)
+
+        assert not thread.is_alive()
+        assert not worker.process.is_alive()
+        assert errors, "closing an in-flight call must terminate its waiter"
+        assert closed_by == [thread.ident], "active transport must close its own file descriptor"
+    finally:
+        pool.close(timeout=0.0)
+        thread.join(timeout=2.0)
+
+
+def test_shutdown_keeps_slots_alive_until_an_active_result_is_detached(monkeypatch):
+    pool = ProcessPool(processes=1).acquire()
+    segment = pool._slots.handle().name
+    source = np.arange(100_000, dtype=np.float32)
+    entered = threading.Event()
+    resume = threading.Event()
+    outcome = {}
+    decode = pool._value
+
+    def pause_decoding(reply):
+        entered.set()
+        assert resume.wait(PROCESS_START_LIMIT_S), "the decoder was never released"
+        return decode(reply)
+
+    def run():
+        try:
+            outcome["value"] = pool.run(RemoteCall(DOUBLED, source))
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    monkeypatch.setattr(pool, "_value", pause_decoding)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(PROCESS_START_LIMIT_S), "the result never reached its decoder"
+        pool.close(timeout=0.0)
+        resume.set()
+        thread.join(timeout=2.0)
+
+        assert not thread.is_alive()
+        assert "error" not in outcome
+        assert np.array_equal(outcome["value"], source * 2)
+        with pytest.raises(FileNotFoundError):
+            shared_memory.SharedMemory(name=segment, create=False, track=False)
+    finally:
+        resume.set()
+        pool.close(timeout=0.0)
+        thread.join(timeout=2.0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGTERM handlers are a POSIX process concern")
+def test_transport_failure_reaps_a_term_ignoring_worker_before_replacing_it(monkeypatch):
+    pool = ProcessPool(processes=1).acquire()
+    worker = pool._workers[0]
+    try:
+        pool.run(
+            RemoteCall(
+                "tests.kernel.remote_entries:called",
+                partial(signal.signal, signal.SIGTERM, signal.SIG_IGN),
+            )
+        )
+
+        def fail_reply(_worker, _token):
+            # The request has already been sent, so it runs before the child
+            # next observes EOF. Its installed handler survives between jobs.
+            raise OSError("reply transport failed")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(pool, "_await_reply", fail_reply)
+            with pytest.raises(OSError, match="reply transport failed"):
+                pool.run(
+                    RemoteCall("tests.kernel.remote_entries:called", partial(time.sleep, 60.0))
+                )
+
+        assert not worker.process.is_alive()
+        assert pool.run(RemoteCall(OWN_PID, None)) != worker.process.pid
+    finally:
+        pool.close(timeout=0.0)
+        # Red-first runs must also clean up the worker the old code lost.
+        if worker.process.is_alive():
+            worker.process.kill()
+            worker.process.join()
 
 
 def test_shutdown_with_a_task_in_flight_releases_its_thread():

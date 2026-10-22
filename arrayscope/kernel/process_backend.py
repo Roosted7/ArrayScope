@@ -214,9 +214,13 @@ class ProcessPool:
         self._closed = False
         self._noted_fallbacks = 0
         self._workers = []
+        self._active: set[_PoolWorker] = set()
+        self._slots_close_pending = False
         try:
             for index in range(self.processes):
-                self._workers.append(self._spawn(index))
+                worker = self._spawn(index)
+                self._workers.append(worker)
+                self._idle.put(worker)
         except BaseException:
             # A half-built pool owns a segment and possibly live children, and
             # nobody else has a reference to close it. `spawn` refuses outright
@@ -224,8 +228,6 @@ class ProcessPool:
             # commonest way to arrive here.
             self.close()
             raise
-        for worker in self._workers:
-            self._idle.put(worker)
 
     @property
     def closed(self) -> bool:
@@ -238,12 +240,15 @@ class ProcessPool:
             self._references += 1
         return self
 
-    def release(self) -> None:
+    def release(self, timeout: float = 5.0) -> None:
+        deadline = monotonic() + max(0.0, float(timeout))
         with self._lock:
             self._references = max(0, self._references - 1)
             if self._references > 0:
                 return
-        self.close()
+            workers = self._detach_workers_locked()
+        if workers is not None:
+            self._close_workers(workers, deadline)
 
     def run(self, call: RemoteCall, token=None, *, pass_token: bool = False):
         """Execute one ``RemoteCall`` on a worker process and return its value."""
@@ -260,7 +265,6 @@ class ProcessPool:
                 # a saturated pool does not turn the trace into its own load.
                 self._noted_fallbacks = fallbacks
                 emit_trace("compute_slot_fallback", entry=call.entry, fallbacks=int(fallbacks))
-            self._control[worker.index] = 0
             try:
                 worker.conn.send((call.entry, payload, bool(pass_token)))
             except (pickle.PicklingError, TypeError, AttributeError) as exc:
@@ -270,7 +274,7 @@ class ProcessPool:
                 # other transport fallback.
                 self._slots.count_fallback()
                 emit_trace("compute_pickle_fallback", entry=call.entry, error=repr(exc))
-                self._idle.put(worker)
+                self._return_worker(worker)
                 worker = None
                 return call.invoke(token if pass_token else None)
             reply = self._await_reply(worker, token)
@@ -283,31 +287,87 @@ class ProcessPool:
         finally:
             for lease in leases:
                 lease.release()
-        self._idle.put(worker)
-        return self._value(reply)
+        try:
+            return self._value(reply)
+        finally:
+            self._return_worker(worker)
+
+    def _return_worker(self, worker: _PoolWorker) -> None:
+        with self._lock:
+            self._active.discard(worker)
+            if self._closed:
+                # This thread has finished its pipe I/O. Closing an active
+                # pipe from the shutdown thread could race a read/write on a
+                # file descriptor the OS then reuses.
+                with suppress(OSError):
+                    worker.conn.close()
+                self._close_slots_if_unused_locked()
+            else:
+                self._idle.put(worker)
+
+    def _close_slots_if_unused_locked(self) -> None:
+        if self._slots_close_pending and not self._active:
+            self._slots_close_pending = False
+            self._slots.close()
 
     def close(self, timeout: float = 5.0) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._references = 0
-            workers = tuple(self._workers)
-            self._workers = []
-        for worker in workers:
-            with suppress(BrokenPipeError, OSError, ValueError):
-                worker.conn.send(None)
+        """Allow one total graceful wait, then hard-stop and reap survivors.
+
+        A zero or negative timeout skips graceful waiting. Hard-stop/reap
+        still pays the OS scheduling latency required to leave no children.
+        """
+
         deadline = monotonic() + max(0.0, float(timeout))
-        for worker in workers:
-            worker.process.join(timeout=max(0.0, deadline - monotonic()))
-        for worker in workers:
-            if worker.process.is_alive():
-                worker.process.terminate()
-                worker.process.join(timeout=1.0)
-            with suppress(OSError):
-                worker.conn.close()
-        if self._owns_slots:
-            self._slots.close()
+        with self._lock:
+            workers = self._detach_workers_locked()
+        if workers is not None:
+            self._close_workers(workers, deadline)
+
+    def _detach_workers_locked(self):
+        # The last release claims closure under the same lock as acquire;
+        # another borrower cannot acquire between reference count zero and
+        # the closed flag becoming visible.
+        if self._closed:
+            return None
+        self._closed = True
+        self._references = 0
+        workers = tuple(self._workers)
+        self._workers = []
+        return workers
+
+    def _close_workers(self, workers, deadline: float) -> None:
+        try:
+            for worker in workers:
+                self._control[worker.index] = 1
+            # EOF wakes idle children. Active calls close their own pipes
+            # after transport unwinds; neither a blocking sentinel write nor
+            # a cross-thread close can interrupt an active pipe operation.
+            with self._lock:
+                while True:
+                    try:
+                        idle = self._idle.get_nowait()
+                    except queue.Empty:
+                        break
+                    with suppress(OSError):
+                        idle.conn.close()
+            for worker in workers:
+                worker.process.join(timeout=max(0.0, deadline - monotonic()))
+            survivors = [worker for worker in workers if worker.process.is_alive()]
+            for worker in survivors:
+                # SIGTERM can be ignored by user code. Grace has expired, so
+                # stop every survivor before reaping any of them; do not
+                # grant each child another independent timeout.
+                with suppress(ProcessLookupError):
+                    worker.process.kill()
+            for worker in survivors:
+                worker.process.join()
+        finally:
+            with self._lock:
+                # Reaping a child does not finish the parent's transport: a
+                # thread can still be copying a request or decoding an
+                # already-received result. Its borrow keeps the map alive.
+                self._slots_close_pending = self._owns_slots
+                self._close_slots_if_unused_locked()
 
     def _spawn(self, index: int) -> _PoolWorker:
         parent_conn, child_conn = self._context.Pipe(duplex=True)
@@ -326,9 +386,17 @@ class ProcessPool:
             if self._closed:
                 raise RemoteWorkerError("compute pool is shut down")
             try:
-                return self._idle.get(timeout=0.1)
+                worker = self._idle.get(timeout=0.1)
             except queue.Empty:
                 continue
+            with self._lock:
+                if self._closed:
+                    with suppress(OSError):
+                        worker.conn.close()
+                    raise RemoteWorkerError("compute pool is shut down")
+                self._control[worker.index] = 0
+                self._active.add(worker)
+                return worker
 
     def _await_reply(self, worker: _PoolWorker, token):
         while True:
@@ -360,19 +428,37 @@ class ProcessPool:
         )
 
     def _retire(self, worker: _PoolWorker) -> None:
+        with self._lock:
+            if self._closed:
+                # Pool shutdown owns all children and their storage now. A
+                # reply waiter must not add its own retirement wait or spawn
+                # a replacement while that teardown is in progress.
+                with suppress(OSError):
+                    worker.conn.close()
+                self._active.discard(worker)
+                self._close_slots_if_unused_locked()
+                return
         with suppress(OSError):
             worker.conn.close()
         if worker.process.is_alive():
             worker.process.terminate()
         worker.process.join(timeout=1.0)
+        if worker.process.is_alive():
+            # A broken transport does not imply cooperative user code. Do
+            # not reclaim slots or lose the handle while an old writer lives.
+            with suppress(ProcessLookupError):
+                worker.process.kill()
+            worker.process.join()
         self._slots.reclaim(worker.index + 1)
-        self._control[worker.index] = 0
         with self._lock:
+            self._active.discard(worker)
             if self._closed:
+                self._close_slots_if_unused_locked()
                 return
+            self._control[worker.index] = 0
             replacement = self._spawn(worker.index)
             self._workers[worker.index] = replacement
-        self._idle.put(replacement)
+            self._idle.put(replacement)
 
     def _value(self, reply):
         from arrayscope.kernel.shm_slots import unwrap_payload
@@ -489,15 +575,15 @@ class ProcessWorkerBackend:
             kernel._notify_workers()
 
     def shutdown(self, timeout: float = 5.0) -> tuple[str, ...]:
+        deadline = monotonic() + max(0.0, float(timeout))
         self._stop.set()
         pool, self._pool = self._pool, None
         if pool is not None and self._borrowed_pool:
             # Releasing first is what unblocks a thread parked on a reply.
-            pool.release()
+            pool.release(timeout=max(0.0, deadline - monotonic()))
         kernel = self._kernel
         if kernel is not None:
             kernel._notify_workers(all_workers=True)
-        deadline = monotonic() + max(0.0, float(timeout))
         for thread in self._threads:
             remaining = deadline - monotonic()
             if remaining <= 0:
