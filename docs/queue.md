@@ -25,18 +25,19 @@ code if measurements justify it. Reliability, accessible entry points, correct
 scientific measurements, and unnecessary data work take priority over the
 historical engine-only restriction. Existing measurements below remain evidence.
 
-This pass improves dataset browsing/loading, atomic NumPy export, command
-supervision, shared-memory rollback, ROI statistics, launcher accessibility,
-application window ownership, guided examples/recent files, and clipboard recipes. Validation and remaining limits are recorded
+Completed slices improve dataset browsing/loading, atomic selected-region
+export, command supervision, shared-memory rollback, ROI statistics, launcher
+accessibility, application window ownership, guided examples/recent files,
+clipboard recipes, bounded operation Undo/Redo, and Qt-free recipe replay.
+Validation and remaining limits are recorded
 in the [Done ledger](queue-done.md). Working guidance now chooses validation by
 behavior rather than directory and permits evidence-backed redesigns.
 
 | Next | Work | Acceptance |
 |---|---|---|
-| 1 | Replay supported scientific recipes from the terminal without Qt. | Read-only lazy NPY input, exact region output, zero-read dry-run, explicit expensive-work consent, strict recipe compatibility, atomic cancellation, and deterministic source cleanup. |
-| 2 | Share a named-dataset lazy HDF5 source between GUI and headless workflows. | Metadata-only discovery; bounded exact region reads, file ownership and change detection, complex/compound compatibility, and reload/cancellation coverage. |
-| 3 | Recheck maintained-backend interaction and callback bars on real hardware after correctness work. | Physical-pixel and compositor evidence with a representative dataset, both WGPU and PyQtGraph; offscreen runs do not count as GPU performance evidence. |
-| 4 | Evaluate a batched native planning boundary only after a fresh profile shows sufficient cost. | Immutable bulk input, no per-tile Python/native calls, exact state semantics, packaging proof, and a timing improvement beyond same-code spread plus pixel regression checks. Current measured candidate costs total about 6% of the workflow, so a whole-app rewrite is not justified. |
+| 1 | Share a named-dataset lazy HDF5 source between GUI and headless workflows. | Metadata-only discovery; bounded exact region reads, file ownership and change detection, complex/compound compatibility, compressed-chunk working estimates, transport, and reload/cancellation coverage. |
+| 2 | Recheck maintained-backend interaction and callback bars on real hardware after correctness work. | Physical-pixel and compositor evidence with a representative dataset, both WGPU and PyQtGraph; offscreen runs do not count as GPU performance evidence. |
+| 3 | Evaluate a batched native planning boundary only after a fresh profile shows sufficient cost. | Immutable bulk input, no per-tile Python/native calls, exact state semantics, packaging proof, and a timing improvement beyond same-code spread plus pixel regression checks. Current measured candidate costs total about 6% of the workflow, so a whole-app rewrite is not justified. |
 
 ## Engine and platform backlog (2026-08 evidence)
 

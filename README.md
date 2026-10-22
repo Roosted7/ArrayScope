@@ -113,6 +113,18 @@ limit on extra input arrays retained only for recovery.
 The operation manager browses the same shared library and keeps New, Duplicate,
 runtime selection, parameters, and implementation settings in one editor.
 
+Saved built-in operation recipes also run from the terminal without starting
+Qt. Inspect the planned work, then export the exact scientific result:
+
+```bash
+arrayscope input.npy --recipe steps.json --export result.npz --dry-run
+arrayscope input.npy --recipe steps.json --export result.npz --range 0=10:30
+```
+
+[Recipe replay](docs/recipe-replay.md) explains half-open output-space ranges,
+cost consent, JSON results, supported operations, and cancellation. NPZ output
+keeps the original processing recipe and selection manifest beside the values.
+
 <picture>
   <source srcset="docs/media/operations.avif" type="image/avif">
   <img src="docs/media/operations.gif" alt="Opening the operation manager from the View menu and browsing its shared-library authoring controls" width="880">

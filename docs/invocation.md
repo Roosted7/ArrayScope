@@ -121,6 +121,28 @@ comparison, and linked-window sync participation; enable sync again in the new
 window when needed. Same-rank operation Undo/Redo publishes through ordinary
 linked-window sync, with each received stack recorded as one edit.
 
+## Replay recipes without a display
+
+```bash
+arrayscope input.npy --export result.npz --recipe steps.json --dry-run
+arrayscope input.npy --export result.npz --recipe steps.json --range 0=10:30
+```
+
+Batch export opens one regular `.npy` input read-only, preserves its raw shape,
+and reuses the exact region planner, evaluator, and atomic writer. It runs
+before Qt startup, viewer supervision, or accelerator prewarming. Supported
+built-in recipes retain authored disabled steps; unsupported plugin/user/command
+IDs are rejected before lookup, and malformed enabled/version fields fail
+clearly. Inputs and recipe files cannot alias the output.
+
+`--dry-run` prints a versioned JSON plan without reading array payloads or
+writing output. Actual exports print one JSON result to stdout and bounded
+progress/errors to stderr. `--allow-expensive` accepts estimated-cost warnings;
+it does not override hard source-read limits or impose a general peak-RAM cap.
+Ctrl+C before publication preserves previous output. See the
+[complete replay guide](recipe-replay.md) for range/squeeze semantics, FFT
+conventions, embedded provenance, examples, and exit codes.
+
 ## Julia and MATLAB wrappers
 
 The wrappers live in [`wrappers/julia`](../wrappers/julia/ArrayScope.jl) and

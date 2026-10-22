@@ -25,6 +25,10 @@ This file records user-visible release changes. Detailed development history and
   rank handoffs, integrates with linked-window operation sync, and bounds
   retained historical auxiliary inputs.
 - Distinct File actions for selected-region and full-derived array export.
+- Qt-free terminal recipe replay with `--export`, selected output-space
+  ranges, zero-payload-read `--dry-run`, explicit cost consent, versioned JSON
+  results, and cancellation. Read-only NPY inputs and recipe files are
+  protected from output aliases; NPZ keeps recipe and selection provenance.
 
 - Coverage numbers now come out of the change-selection map for free:
   `python tools/test_selection.py coverage` reports which functions in
@@ -61,6 +65,9 @@ This file records user-visible release changes. Detailed development history and
 
 ### Fixed
 
+- Recipe imports reject non-boolean enabled flags and noninteger versions
+  instead of silently changing authored processing intent. Noninteractive
+  replay refuses unavailable enabled operations before execution.
 - Lazy-source and derived-array size accounting no longer wraps at 64 bits.
   Empty axes retain their shape in scientific metadata and exports; negative
   sizes remain invalid. FFT region estimates include expanded transform output.
