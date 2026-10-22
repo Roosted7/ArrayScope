@@ -62,7 +62,8 @@ matches names and full paths; the tree shows shape, type, and estimated memory.
 Press Enter or use Open to load the selected array. Canceling a selector or
 encountering a read failure closes its container.
 
-Press **Ctrl+S** (**Cmd+S** on macOS) to export a selected array as `.npy`.
+Choose **File → Export Selected Array…**, or press **Ctrl+S** (**Cmd+S** on macOS),
+to export a selected array as `.npy`.
 Choose inclusive start/end indices, optional singleton squeezing, and a
 destination before any export evaluation. The preview reports output shape,
 dtype, and array bytes, with exact integer entry even for very large axes. The
@@ -98,6 +99,27 @@ from File, Operations → More, or the `Ctrl+K` command palette. JSON preserves
 operation parameters and enabled/disabled state. Paste replaces the current
 stack and uses the same shape, input-slot, and imported-command review rules
 as loading a recipe file. Both installations need the referenced plugins.
+
+**Edit → Undo/Redo**, the Operations dock buttons, and the command palette
+restore operation edits: additions, deletions, parameter and axis changes,
+ordering, enabled state, clearing, and recipe replacement. Text editors keep
+local Undo/Redo shortcuts. Camera, display, ROI, and external file contents
+are outside operation history.
+
+The coordinator keeps up to 64 transitions for the current source. Replacing,
+reloading, notifying an in-place source change, or materializing starts fresh
+history. Extra auxiliary inputs retained solely by past/future edits have a
+512 MiB logical-byte budget, counted by shared buffer owners without reading
+data; unknown sizes are treated conservatively. History may be shortened, and
+an oversized input's Undo can release its Redo snapshot. Disabled controls
+explain memory pruning. This budget estimates retained input ownership, not
+physical process RSS.
+
+Same-source rank changes preserve operation history and source epoch in the
+successor window. The existing rank handoff still resets view state, ROIs,
+comparison, and linked-window sync participation; enable sync again in the new
+window when needed. Same-rank operation Undo/Redo publishes through ordinary
+linked-window sync, with each received stack recorded as one edit.
 
 ## Julia and MATLAB wrappers
 

@@ -104,6 +104,12 @@ See [Invocation](docs/invocation.md) for all routes and the handoff efficiency c
 
 The operation stack supports reversible, ordered steps such as crop, reverse, reductions, centered FFT/IFFT, FFT shift, and complex-axis conversion. The document keeps the source array and operation history separate; runtime optimization does not rewrite the visible operation stack.
 
+**Edit → Undo/Redo** restores additions, removals, parameters, ordering,
+enabled state, and recipe replacements. Standard platform shortcuts and the
+Operations dock use the same history; text fields retain their own editing
+shortcuts. History keeps up to 64 edits on the current source, with a separate
+limit on extra input arrays retained only for recovery.
+
 The operation manager browses the same shared library and keeps New, Duplicate,
 runtime selection, parameters, and implementation settings in one editor.
 
@@ -143,13 +149,16 @@ plan (token unification, backend de-duplication, hardware evidence) is in the
 
 ### Export and load data
 
-Press **Ctrl+S** (**Cmd+S** on macOS) to choose an exact array region before
+Choose **File → Export Selected Array…**, or press **Ctrl+S** (**Cmd+S** on macOS),
+to choose an exact array region before
 processing it. The selection dialog previews shape, dtype, and payload size;
 evaluation and writing run in a worker with progress and cancellation. Export
 uses scientific values in array axis order, including complex values, rather
 than display colors or scaling. Small selections read only the required source
 region when the operations support it; FFTs and other whole-stage operations
 show their larger processing cost before execution.
+**Export Full Derived Array…** remains available for the complete processed
+array with embedded recipes in NPZ or separate NPY recipe files.
 
 Video/PNG-frame export is available from a dimension action.
 

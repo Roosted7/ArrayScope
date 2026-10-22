@@ -19,6 +19,12 @@ This file records user-visible release changes. Detailed development history and
   indices, worker preflight, progress, and cancellation. Region-capable
   operations avoid materializing unrelated source data; expensive or unknown
   work requires confirmation before execution.
+- True operation Undo/Redo for parameters, order, enabled state, deletes,
+  clears, and recipe replacement, available through Edit, platform shortcuts,
+  the Operations dock, and the command palette. Recovery follows same-source
+  rank handoffs, integrates with linked-window operation sync, and bounds
+  retained historical auxiliary inputs.
+- Distinct File actions for selected-region and full-derived array export.
 
 - Coverage numbers now come out of the change-selection map for free:
   `python tools/test_selection.py coverage` reports which functions in
