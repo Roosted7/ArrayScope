@@ -2,12 +2,16 @@
 
 Distilled from the 2026-07 course reset
 ([retro](redesign/retro-2026-07.md)) and the GPU-port sessions. These are
-standing law for all lanes, not redesign-era process. AGENTS.md points here.
+engineering guidance distilled from measured failures. Current user goals take
+precedence, and these rules should improve as the project does. See
+[AGENTS.md](../AGENTS.md) for the current working and validation guidance.
 
-1. **Pixels are the gate.** A claim of "fixed" requires the relevant
+1. **Pixels are the rendering gate.** A rendering/scheduling/LOD claim requires the relevant
    scenario green on real hardware ([testing/README.md](testing/README.md),
    rings 3–4). An offscreen or unit pass is never acceptance for rendering,
-   scheduling, or LOD behavior.
+   scheduling, or LOD behavior. Numerical, I/O, subprocess, and allocator fixes
+   use direct correctness/resource tests; their directory does not by itself
+   make hardware evidence necessary.
 2. **Fix by deleting a duplicate owner, not by adding a gate.** If a fix
    adds a predicate, a generation, or a new set, it is probably wrong. One
    owner per decision: one ranker, one visible set, one completion
@@ -79,7 +83,8 @@ standing law for all lanes, not redesign-era process. AGENTS.md points here.
 9. **Bounded sessions.** End every working session with the app visibly
    better or the change reverted. Update [`queue.md`](queue.md); a reverted
    experiment gets a [`graveyard.md`](graveyard.md) row. New process
-   documents require Thomas's explicit ask.
+   documents should be concise and earn their maintenance cost; current user
+   authorization governs scope, including improvements to these guidelines.
 10. **Maintained backends are first-class for correctness.** WGPU and
    PyQtGraph run the same stages and user-visible correctness gates. WGPU is
    the GPU/rendering certification path; PyQtGraph targets GPU-headless and
