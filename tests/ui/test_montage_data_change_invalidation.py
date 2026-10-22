@@ -44,6 +44,7 @@ green result resting on a test that cannot fail:
 from __future__ import annotations
 
 import contextlib
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -422,7 +423,9 @@ def _atlas_boxes(win, members):
     def box(col0, row0):
         return (col0 * tile_w, (col0 + 3) * tile_w, row0 * tile_h, (row0 + 3) * tile_h)
 
-    blocks = [(col0, row0) for row0 in range(0, rows - 2, 3) for col0 in range(0, columns - 2, 3)]
+    # The final atlas member can occupy any edge tile. Non-overlapping starts
+    # omitted the right two columns and bottom row of this 17x16 fixture.
+    blocks = [(col0, row0) for row0 in range(rows - 2) for col0 in range(columns - 2)]
     away_col, away_row = max(blocks, key=lambda b: len(members & block(*b)))
     away_tiles = block(away_col, away_row)
     # Home is the block furthest from away, so the away members are firmly
@@ -432,6 +435,22 @@ def _atlas_boxes(win, members):
         key=lambda b: abs(b[0] - away_col) + abs(b[1] - away_row),
     )
     return box(home_col, home_row), box(away_col, away_row), members & away_tiles
+
+
+def test_atlas_comparison_boxes_cover_every_possible_remaining_member():
+    sources, columns, rows = ATLAS
+    win = SimpleNamespace(
+        _test_montage_grid=ATLAS,
+        renderer=SimpleNamespace(
+            _frame_session=SimpleNamespace(
+                plan=SimpleNamespace(display_shape=(rows * ATLAS_TILE, columns * ATLAS_TILE))
+            )
+        ),
+    )
+    for tile in range(sources):
+        home, away, members = _atlas_boxes(win, {tile})
+        assert members == {tile}, f"comparison box omitted atlas tile {tile}"
+        assert home[1] <= away[0] or away[1] <= home[0] or home[3] <= away[2] or away[3] <= home[2]
 
 
 def _grab(win) -> np.ndarray:

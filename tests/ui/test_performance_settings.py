@@ -374,18 +374,23 @@ def test_texture_codec_menu_switches_and_persists(qtbot):
         win.close()
 
 
-def test_host_cache_compression_menu_switches_and_persists(qtbot):
+def test_host_cache_compression_menu_switches_and_persists(qtbot, monkeypatch):
     """Performance → Host Cache Compression: RAW/ZFP/Blosc2 radio group persists."""
     _clear_arrayscope_settings()
     from arrayscope.app.settings_state import ChunkTransportCodecChoice
+    from arrayscope.gpu import chunk_codec
     from arrayscope.window import ArrayScopeWindow
 
+    # This exercises menu intent and persistence, not optional codec binaries.
+    # Disabled choices intentionally ignore trigger(); absence is tested below.
+    monkeypatch.setattr(chunk_codec, "available_codec_names", lambda: ("raw", "zfp"))
     win = ArrayScopeWindow(np.zeros((4, 5), dtype=np.float32))
     qtbot.addWidget(win)
     try:
         _settle_idle(win)
         assert win.app_settings.chunk_transport_codec == ChunkTransportCodecChoice.RAW
         zfp = _submenu_action(win, "Performance", "Host Cache Compression", "ZFP (lossless)")
+        assert zfp.isEnabled()
         zfp.trigger()
         # A fixed number of event-loop turns is how this went red under load: the
         # codec switch tears down and rebuilds cache owners, and eighty
